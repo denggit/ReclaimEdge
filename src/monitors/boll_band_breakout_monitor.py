@@ -1,0 +1,250 @@
+from __future__ import annotations
+
+import asyncio
+import inspect
+import logging
+import math
+import os
+import time
+from dataclasses import dataclass
+from statistics import mean, pstdev
+from typing import Awaitable, Callable, Literal, Optional
+
+import aiohttp
+
+logger = logging.getLogger(__name__)
+
+PriceZone = Literal["INSIDE", "ABOVE", "BELOW", "UNKNOWN"]
+BreakoutDirection = Literal["BREAK_UPPER", "BREAK_LOWER"]
+
+
+@dataclass(frozen=True)
+class BollBandBreakoutMonitorConfig:
+    inst_id: str = "ETH-USDT-SWAP"
+    bar: str = "15m"
+    boll_window: int = 20
+    boll_std_multiplier: float = 2.0
+    band_distance_threshold_pct: float = 0.005
+    alert_freeze_seconds: int = 3600
+    candle_poll_seconds: int = 10
+    candle_limit: int = 100
+    rest_base_url: str = "https://www.okx.com"
+    ws_public_url: str = "wss://ws.okx.com:8443/ws/v5/public"
+
+    @classmethod
+    def from_env(cls) -> "BollBandBreakoutMonitorConfig":
+        return cls(
+            inst_id=os.getenv("OKX_INST_ID", "ETH-USDT-SWAP"),
+            bar=os.getenv("OKX_BAR", "15m"),
+            boll_window=int(os.getenv("BOLL_WINDOW", "20")),
+            boll_std_multiplier=float(os.getenv("BOLL_STD_MULTIPLIER", "2.0")),
+            band_distance_threshold_pct=float(os.getenv("BOLL_DISTANCE_THRESHOLD_PCT", "0.005")),
+            alert_freeze_seconds=int(os.getenv("ALERT_FREEZE_SECONDS", "3600")),
+            candle_poll_seconds=int(os.getenv("CANDLE_POLL_SECONDS", "10")),
+            candle_limit=int(os.getenv("CANDLE_LIMIT", "100")),
+        )
+
+
+@dataclass(frozen=True)
+class Candle:
+    ts_ms: int
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float
+    confirmed: bool
+
+
+@dataclass(frozen=True)
+class BollSnapshot:
+    inst_id: str
+    candle_ts_ms: int
+    close: float
+    middle: float
+    upper: float
+    lower: float
+    upper_distance_pct: float
+    lower_distance_pct: float
+    alert_switch_on: bool
+
+
+@dataclass(frozen=True)
+class BreakoutSignal:
+    inst_id: str
+    direction: BreakoutDirection
+    price: float
+    previous_price: float
+    tick_ts_ms: int
+    candle_ts_ms: int
+    middle: float
+    upper: float
+    lower: float
+    upper_distance_pct: float
+    lower_distance_pct: float
+    freeze_seconds: int
+
+
+SignalHandler = Callable[[BreakoutSignal], Awaitable[None] | None]
+
+
+class BollCalculator:
+    @staticmethod
+    def calculate(closes: list[float], window: int, std_multiplier: float) -> tuple[float, float, float]:
+        if len(closes) < window:
+            raise ValueError(f"Not enough closes: {len(closes)} < {window}")
+        recent = closes[-window:]
+        middle = mean(recent)
+        std = pstdev(recent)
+        return middle, middle + std_multiplier * std, middle - std_multiplier * std
+
+
+class OkxPublicMarketClient:
+    def __init__(self, config: BollBandBreakoutMonitorConfig):
+        self.config = config
+
+    async def fetch_confirmed_candles(self) -> list[Candle]:
+        url = f"{self.config.rest_base_url}/api/v5/market/candles"
+        params = {"instId": self.config.inst_id, "bar": self.config.bar, "limit": str(self.config.candle_limit)}
+        timeout = aiohttp.ClientTimeout(total=10)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url, params=params) as resp:
+                payload = await resp.json()
+        if payload.get("code") != "0":
+            raise RuntimeError(f"OKX candle API error: {payload}")
+        candles: list[Candle] = []
+        for row in payload.get("data", []):
+            if len(row) < 6:
+                continue
+            confirmed = row[8] == "1" if len(row) >= 9 else True
+            if not confirmed:
+                continue
+            candles.append(Candle(int(row[0]), float(row[1]), float(row[2]), float(row[3]), float(row[4]), float(row[5]), confirmed))
+        candles.sort(key=lambda item: item.ts_ms)
+        return candles
+
+
+class BollBandBreakoutMonitor:
+    def __init__(self, config: BollBandBreakoutMonitorConfig, handlers: Optional[list[SignalHandler]] = None):
+        self.config = config
+        self.client = OkxPublicMarketClient(config)
+        self.handlers = handlers or []
+        self._snapshot: Optional[BollSnapshot] = None
+        self._latest_candle_ts_ms: Optional[int] = None
+        self._previous_price: Optional[float] = None
+        self._previous_zone: PriceZone = "UNKNOWN"
+        self._freeze_until_ts: float = 0.0
+        self._running = False
+
+    def add_handler(self, handler: SignalHandler) -> None:
+        self.handlers.append(handler)
+
+    async def run_forever(self) -> None:
+        self._running = True
+        await asyncio.gather(self._candle_loop(), self._tick_loop())
+
+    async def _candle_loop(self) -> None:
+        while self._running:
+            try:
+                await self._refresh_boll_snapshot()
+            except Exception:
+                logger.exception("Failed to refresh BOLL snapshot")
+            await asyncio.sleep(self.config.candle_poll_seconds)
+
+    async def _refresh_boll_snapshot(self) -> None:
+        candles = await self.client.fetch_confirmed_candles()
+        if len(candles) < self.config.boll_window:
+            logger.warning("Not enough confirmed candles for BOLL: %s < %s", len(candles), self.config.boll_window)
+            return
+        latest = candles[-1]
+        is_new_candle = latest.ts_ms != self._latest_candle_ts_ms
+        closes = [item.close for item in candles]
+        middle, upper, lower = BollCalculator.calculate(closes, self.config.boll_window, self.config.boll_std_multiplier)
+        upper_distance_pct = abs(upper - middle) / middle
+        lower_distance_pct = abs(middle - lower) / middle
+        alert_switch_on = upper_distance_pct >= self.config.band_distance_threshold_pct or lower_distance_pct >= self.config.band_distance_threshold_pct
+        self._snapshot = BollSnapshot(self.config.inst_id, latest.ts_ms, latest.close, middle, upper, lower, upper_distance_pct, lower_distance_pct, alert_switch_on)
+        self._latest_candle_ts_ms = latest.ts_ms
+        if self._previous_price is not None:
+            self._previous_zone = self._classify_price_zone(self._previous_price)
+        if is_new_candle:
+            logger.info("BOLL updated | inst=%s candle_ts=%s close=%.4f middle=%.4f upper=%.4f lower=%.4f upper_dist=%.4f%% lower_dist=%.4f%% switch=%s", self.config.inst_id, latest.ts_ms, latest.close, middle, upper, lower, upper_distance_pct * 100, lower_distance_pct * 100, alert_switch_on)
+
+    async def _tick_loop(self) -> None:
+        while self._running:
+            try:
+                await self._connect_tick_ws()
+            except Exception:
+                logger.exception("Tick websocket disconnected, retrying in 3 seconds")
+                await asyncio.sleep(3)
+
+    async def _connect_tick_ws(self) -> None:
+        payload = {"op": "subscribe", "args": [{"channel": "trades", "instId": self.config.inst_id}]}
+        timeout = aiohttp.ClientTimeout(total=None)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.ws_connect(self.config.ws_public_url, heartbeat=20, autoping=True) as ws:
+                await ws.send_json(payload)
+                logger.info("Subscribed OKX trades channel: %s", self.config.inst_id)
+                async for msg in ws:
+                    if msg.type == aiohttp.WSMsgType.TEXT:
+                        await self._handle_ws_payload(msg.json())
+                    elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                        break
+
+    async def _handle_ws_payload(self, payload: dict) -> None:
+        if "event" in payload:
+            logger.info("OKX websocket event: %s", payload)
+            return
+        if payload.get("arg", {}).get("channel") != "trades":
+            return
+        for item in payload.get("data", []):
+            try:
+                await self._process_tick(float(item["px"]), int(item["ts"]))
+            except Exception:
+                logger.warning("Invalid trade tick payload: %s", item)
+
+    async def _process_tick(self, price: float, tick_ts_ms: int) -> None:
+        snapshot = self._snapshot
+        if snapshot is None:
+            self._previous_price = price
+            self._previous_zone = "UNKNOWN"
+            return
+        current_zone = self._classify_price_zone(price)
+        previous_price = self._previous_price
+        previous_zone = self._previous_zone
+        self._previous_price = price
+        self._previous_zone = current_zone
+        if previous_price is None or not snapshot.alert_switch_on:
+            return
+        now = time.time()
+        if now < self._freeze_until_ts or previous_zone != "INSIDE":
+            return
+        signal = None
+        if current_zone == "ABOVE":
+            signal = self._build_signal("BREAK_UPPER", price, previous_price, tick_ts_ms, snapshot)
+        elif current_zone == "BELOW":
+            signal = self._build_signal("BREAK_LOWER", price, previous_price, tick_ts_ms, snapshot)
+        if signal is None:
+            return
+        self._freeze_until_ts = now + self.config.alert_freeze_seconds
+        logger.warning("BOLL breakout signal | inst=%s direction=%s prev=%.4f price=%.4f upper=%.4f middle=%.4f lower=%.4f freeze=%ss", signal.inst_id, signal.direction, signal.previous_price, signal.price, signal.upper, signal.middle, signal.lower, signal.freeze_seconds)
+        await self._emit(signal)
+
+    def _build_signal(self, direction: BreakoutDirection, price: float, previous_price: float, tick_ts_ms: int, snapshot: BollSnapshot) -> BreakoutSignal:
+        return BreakoutSignal(self.config.inst_id, direction, price, previous_price, tick_ts_ms, snapshot.candle_ts_ms, snapshot.middle, snapshot.upper, snapshot.lower, snapshot.upper_distance_pct, snapshot.lower_distance_pct, self.config.alert_freeze_seconds)
+
+    def _classify_price_zone(self, price: float) -> PriceZone:
+        snapshot = self._snapshot
+        if snapshot is None or math.isnan(price):
+            return "UNKNOWN"
+        if price > snapshot.upper:
+            return "ABOVE"
+        if price < snapshot.lower:
+            return "BELOW"
+        return "INSIDE"
+
+    async def _emit(self, signal: BreakoutSignal) -> None:
+        for handler in self.handlers:
+            result = handler(signal)
+            if inspect.isawaitable(result):
+                await result
