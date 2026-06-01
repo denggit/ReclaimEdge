@@ -30,6 +30,7 @@ from src.risk.simple_position_sizer import (  # noqa: E402
 from src.strategies.boll_cvd_reclaim_strategy import (  # noqa: E402
     BollCvdReclaimStrategy,
     BollCvdReclaimStrategyConfig,
+    StrategyPositionState,
     TradeIntent,
 )
 from src.utils.email_sender import EmailSender  # noqa: E402
@@ -74,13 +75,16 @@ def build_live_success_email(intent: TradeIntent, result: LiveTradeResult) -> tu
     return subject, content
 
 
-def build_live_failure_email(intent: TradeIntent, error: Exception) -> tuple[str, str]:
+def build_live_failure_email(intent: TradeIntent, error: Exception, rolled_back: bool, halted: bool) -> tuple[str, str]:
     subject = f"LIVE order failed | ETH-USDT-SWAP | {intent.intent_type} | layer {intent.layer_index}"
     event_time = format_ts_ms(intent.ts_ms)
+    state_text = "Strategy state has been rolled back." if rolled_back else "Entry may be live. Strategy state was NOT rolled back."
+    halt_text = "Trading has been halted. Please check OKX manually." if halted else "Trading is not halted."
     content = f"""
 <div style="font-family: Arial, Helvetica, sans-serif; line-height: 1.55; color: #222; max-width: 760px;">
   <h2>LIVE order failed</h2>
-  <p><strong>Strategy state has been rolled back.</strong></p>
+  <p><strong>{html.escape(state_text)}</strong></p>
+  <p><strong>{html.escape(halt_text)}</strong></p>
   <table style="width: 100%; border-collapse: collapse; font-size: 14px;">
     <tr><td style="padding: 8px; border-bottom: 1px solid #eee;">intent_type</td><td style="padding: 8px; border-bottom: 1px solid #eee; text-align: right;">{html.escape(intent.intent_type)}</td></tr>
     <tr><td style="padding: 8px; border-bottom: 1px solid #eee;">side</td><td style="padding: 8px; border-bottom: 1px solid #eee; text-align: right;">{html.escape(intent.side)}</td></tr>
@@ -114,56 +118,104 @@ async def main() -> None:
     trader = Trader()
     await trader.initialize()
 
+    trade_lock = asyncio.Lock()
+    trading_halted = False
+
+    async def position_sync_loop() -> None:
+        nonlocal trading_halted
+        while True:
+            try:
+                await asyncio.sleep(5)
+                async with trade_lock:
+                    contracts = await trader.fetch_position_contracts()
+                    if contracts <= 0 and strategy.state.layers > 0:
+                        logger.warning("Position is flat on OKX. Resetting strategy and trader state.")
+                        strategy.state = StrategyPositionState()
+                        trader.mark_flat()
+                        trading_halted = False
+                    elif contracts > 0:
+                        trader.position_contracts = contracts
+            except Exception:
+                logger.exception("Position sync loop failed")
+
     async def on_market_tick(event: MarketTickEvent) -> None:
+        nonlocal trading_halted
         if event.boll is None:
             return
-        cvd_snapshot = cvd.update(
-            side=event.tick.side,
-            size=event.tick.size,
-            price=event.tick.price,
-            ts_ms=event.tick.ts_ms,
-        )
-        backup_state = copy.deepcopy(strategy.state)
-        intents = strategy.on_tick(
-            price=event.tick.price,
-            ts_ms=event.tick.ts_ms,
-            boll=event.boll,
-            cvd=cvd_snapshot,
-        )
-        for intent in intents:
-            try:
-                result = await trader.execute_intent(intent)
-                if not result.ok:
-                    raise RuntimeError(result.message)
-                logger.warning(
-                    "LIVE execution success | intent_type=%s side=%s layer=%s price=%.4f contracts=%s tp_price=%s order_id=%s tp_order_id=%s",
-                    intent.intent_type,
-                    intent.side,
-                    intent.layer_index,
-                    intent.price,
-                    result.contracts,
-                    result.tp_price,
-                    result.order_id,
-                    result.tp_order_id,
-                )
-                subject, content = build_live_success_email(intent, result)
-                ok = await email_sender.send_email_async(subject, content, content_type="html")
-                if not ok:
-                    logger.error("Failed to send live execution success email")
-            except Exception as exc:
-                strategy.state = backup_state
-                logger.exception("LIVE execution failed; strategy state has been rolled back")
-                subject, content = build_live_failure_email(intent, exc)
-                ok = await email_sender.send_email_async(subject, content, content_type="html")
-                if not ok:
-                    logger.error("Failed to send live execution failure email")
-                break
+
+        async with trade_lock:
+            cvd_snapshot = cvd.update(
+                side=event.tick.side,
+                size=event.tick.size,
+                price=event.tick.price,
+                ts_ms=event.tick.ts_ms,
+            )
+            if trading_halted:
+                return
+
+            intents = strategy.on_tick(
+                price=event.tick.price,
+                ts_ms=event.tick.ts_ms,
+                boll=event.boll,
+                cvd=cvd_snapshot,
+            )
+            for intent in intents:
+                backup_state = copy.deepcopy(strategy.state)
+                try:
+                    result = await trader.execute_intent(intent)
+                    if not result.ok:
+                        if result.entry_filled:
+                            trading_halted = True
+                            raise RuntimeError(result.message)
+                        strategy.state = backup_state
+                        raise RuntimeError(result.message)
+
+                    logger.warning(
+                        "LIVE execution success | intent_type=%s side=%s layer=%s price=%.4f contracts=%s tp_price=%s order_id=%s tp_order_id=%s",
+                        intent.intent_type,
+                        intent.side,
+                        intent.layer_index,
+                        intent.price,
+                        result.contracts,
+                        result.tp_price,
+                        result.order_id,
+                        result.tp_order_id,
+                    )
+                    subject, content = build_live_success_email(intent, result)
+                    ok = await email_sender.send_email_async(subject, content, content_type="html")
+                    if not ok:
+                        logger.error("Failed to send live execution success email")
+                except Exception as exc:
+                    try:
+                        contracts = await trader.fetch_position_contracts()
+                    except Exception:
+                        contracts = trader.position_contracts
+
+                    entry_may_be_live = contracts > 0
+                    rolled_back = False
+                    if entry_may_be_live:
+                        trading_halted = True
+                        trader.position_contracts = contracts
+                        logger.exception("LIVE execution failed after/possibly after entry. Trading halted; strategy state NOT rolled back.")
+                    else:
+                        strategy.state = backup_state
+                        rolled_back = True
+                        logger.exception("LIVE execution failed before entry; strategy state has been rolled back")
+
+                    subject, content = build_live_failure_email(intent, exc, rolled_back=rolled_back, halted=trading_halted)
+                    ok = await email_sender.send_email_async(subject, content, content_type="html")
+                    if not ok:
+                        logger.error("Failed to send live execution failure email")
+                    break
 
     monitor = BollBandBreakoutMonitor(
         config=monitor_config,
         tick_handlers=[on_market_tick],
     )
-    await monitor.run_forever()
+    await asyncio.gather(
+        position_sync_loop(),
+        monitor.run_forever(),
+    )
 
 
 if __name__ == "__main__":
