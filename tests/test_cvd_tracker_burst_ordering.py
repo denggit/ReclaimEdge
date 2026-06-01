@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 from collections import deque
+from unittest.mock import patch
 
 from src.indicators.cvd_tracker import CvdTracker, CvdTrackerConfig
 
@@ -70,6 +71,19 @@ class CvdTrackerBurstOrderingTest(unittest.TestCase):
         window = tracker._events_since(start_ts + 63_000, 3)
         self.assertTrue(all(item[0] <= start_ts + 63_000 for item in window))
         self.assertEqual([item[0] for item in window], sorted(item[0] for item in window))
+
+    def test_out_of_order_log_throttle_uses_monotonic_not_tick_timestamp(self) -> None:
+        tracker = CvdTracker(config())
+        tracker.update("buy", 1.0, 100.0, 10_000)
+
+        with patch("src.indicators.cvd_tracker.time.monotonic", side_effect=[100.0, 101.0, 106.1]):
+            with self.assertLogs("src.indicators.cvd_tracker", level="WARNING") as logs:
+                tracker.update("sell", 1.0, 99.9, 9_900)
+                tracker.update("sell", 1.0, 99.8, 9_800)
+                tracker.update("sell", 1.0, 99.7, 9_700)
+
+        output = "\n".join(logs.output)
+        self.assertEqual(output.count("CVD_TICK_OUT_OF_ORDER"), 2)
 
     def test_baseline_elapsed_uses_sorted_events_when_baseline_is_out_of_order(self) -> None:
         tracker = CvdTracker(config())

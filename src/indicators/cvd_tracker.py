@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import os
 import logging
+import os
+import time
 from collections import deque
 from dataclasses import dataclass
 from statistics import mean
@@ -84,12 +85,13 @@ class CvdTracker:
         self._total_cvd: float = 0.0
         self._last_fast_cvd: float = 0.0
         self._last_tick_ts_ms: int | None = None
-        self._last_out_of_order_log_ts_ms: int = 0
+        self._last_out_of_order_log_monotonic: float = 0.0
 
     def update(self, side: str, size: float, price: float, ts_ms: int) -> CvdSnapshot:
         normalized_side = self._normalize_side(side)
         if self._last_tick_ts_ms is not None and ts_ms < self._last_tick_ts_ms:
-            if self._last_out_of_order_log_ts_ms == 0 or ts_ms - self._last_out_of_order_log_ts_ms >= 5000:
+            now_monotonic = time.monotonic()
+            if self._last_out_of_order_log_monotonic == 0.0 or now_monotonic - self._last_out_of_order_log_monotonic >= 5:
                 logger.warning(
                     "CVD_TICK_OUT_OF_ORDER | last_ts_ms=%s current_ts_ms=%s price=%.4f side=%s size=%.8f",
                     self._last_tick_ts_ms,
@@ -98,7 +100,7 @@ class CvdTracker:
                     normalized_side,
                     size,
                 )
-                self._last_out_of_order_log_ts_ms = ts_ms
+                self._last_out_of_order_log_monotonic = now_monotonic
         else:
             self._last_tick_ts_ms = ts_ms
 
