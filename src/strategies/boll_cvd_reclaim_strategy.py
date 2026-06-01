@@ -79,6 +79,7 @@ class StrategyPositionState:
     tp_price: Optional[float] = None
     last_order_ts_ms: int = 0
     last_tp_update_ts_ms: int = 0
+    last_tp_update_candle_ts_ms: int = 0
     lower_armed: bool = False
     upper_armed: bool = False
     lower_extreme_price: Optional[float] = None
@@ -112,7 +113,8 @@ class BollCvdReclaimStrategy:
 
         self._update_armed_state(price, ts_ms, boll)
 
-        # TP maintenance should continue even if the BOLL width switch later turns off.
+        # TP maintenance is driven by BOLL candle timestamp. This avoids the old
+        # problem where a restart/manual TP update delayed the next 15m update.
         tp_intent = self._maybe_update_tp(price, ts_ms, boll, cvd)
         if tp_intent is not None:
             intents.append(tp_intent)
@@ -295,12 +297,14 @@ class BollCvdReclaimStrategy:
         self.state.tp_mode = tp_mode
         self.state.last_order_ts_ms = ts_ms
         self.state.last_tp_update_ts_ms = ts_ms
+        self.state.last_tp_update_candle_ts_ms = boll.candle_ts_ms
         logger.info(
-            "TP_SELECTED | side=%s mode=%s avg_entry=%.4f breakeven=%.4f middle=%.4f upper=%.4f lower=%.4f tp=%.4f",
+            "TP_SELECTED | reason=entry side=%s mode=%s avg_entry=%.4f breakeven=%.4f candle_ts=%s middle=%.4f upper=%.4f lower=%.4f tp=%.4f",
             side,
             tp_mode,
             self.state.avg_entry_price,
             self.state.breakeven_price,
+            boll.candle_ts_ms,
             boll.middle,
             boll.upper,
             boll.lower,
@@ -311,28 +315,42 @@ class BollCvdReclaimStrategy:
     def _maybe_update_tp(self, price: float, ts_ms: int, boll: BollSnapshot, cvd: CvdSnapshot) -> TradeIntent | None:
         if self.state.side is None or self.state.layers <= 0:
             return None
-        if ts_ms - self.state.last_tp_update_ts_ms < self.config.tp_update_interval_seconds * 1000:
+        if self.state.last_tp_update_candle_ts_ms == boll.candle_ts_ms:
             return None
+
         tp_price, tp_mode = self._select_tp_price(self.state.side, boll)
+        self.state.last_tp_update_ts_ms = ts_ms
+        self.state.last_tp_update_candle_ts_ms = boll.candle_ts_ms
+
         if self.state.tp_price is not None and abs(self.state.tp_price - tp_price) / tp_price < 0.0001:
-            self.state.last_tp_update_ts_ms = ts_ms
+            logger.info(
+                "TP_UPDATE_SKIPPED | reason=price_unchanged side=%s mode=%s candle_ts=%s current_tp=%.4f target_tp=%.4f avg_entry=%.4f breakeven=%.4f",
+                self.state.side,
+                tp_mode,
+                boll.candle_ts_ms,
+                self.state.tp_price,
+                tp_price,
+                self.state.avg_entry_price,
+                self.state.breakeven_price,
+            )
             return None
+
         self.state.tp_price = tp_price
         self.state.tp_mode = tp_mode
-        self.state.last_tp_update_ts_ms = ts_ms
         size = self.sizer.calculate(price, layer_index=self.state.layers)
         logger.info(
-            "TP_SELECTED | side=%s mode=%s avg_entry=%.4f breakeven=%.4f middle=%.4f upper=%.4f lower=%.4f tp=%.4f",
+            "TP_SELECTED | reason=new_candle side=%s mode=%s avg_entry=%.4f breakeven=%.4f candle_ts=%s middle=%.4f upper=%.4f lower=%.4f tp=%.4f",
             self.state.side,
             tp_mode,
             self.state.avg_entry_price,
             self.state.breakeven_price,
+            boll.candle_ts_ms,
             boll.middle,
             boll.upper,
             boll.lower,
             tp_price,
         )
-        return self._intent("UPDATE_TP", self.state.side, price, self.state.layers, tp_price, f"15分钟更新止盈到{tp_mode}轨", size, boll, cvd, ts_ms)
+        return self._intent("UPDATE_TP", self.state.side, price, self.state.layers, tp_price, f"新15m K线更新止盈到{tp_mode}轨", size, boll, cvd, ts_ms)
 
     def _update_position_cost(self, entry_price: float, eth_qty: float) -> None:
         if eth_qty <= 0:
