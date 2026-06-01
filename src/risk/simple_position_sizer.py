@@ -18,6 +18,14 @@ class SimplePositionSizerConfig:
             leverage=float(os.getenv("LEVERAGE", "50")),
         )
 
+    @classmethod
+    def from_account_equity(cls, account_equity_usdt: float) -> "SimplePositionSizerConfig":
+        return cls(
+            dry_run_equity_usdt=account_equity_usdt,
+            layer_margin_pct=float(os.getenv("LAYER_MARGIN_PCT", "0.03")),
+            leverage=float(os.getenv("LEVERAGE", "50")),
+        )
+
 
 @dataclass(frozen=True)
 class PositionSize:
