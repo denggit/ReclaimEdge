@@ -1,0 +1,34 @@
+[Unit]
+Description=ReclaimEdge BOLL CVD Live Trader
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Change this to your actual project path.
+WorkingDirectory=/home/ubuntu/ReclaimEdge
+
+# Use your actual Python path if you use venv/conda.
+# Examples:
+# ExecStart=/home/ubuntu/ReclaimEdge/.venv/bin/python -u scripts/run_boll_cvd_live.py
+# ExecStart=/home/ubuntu/miniconda3/envs/reclaimedge/bin/python -u scripts/run_boll_cvd_live.py
+ExecStart=/usr/bin/python3 -u scripts/run_boll_cvd_live.py
+
+# Load environment from project .env. Keep this file permission restricted.
+EnvironmentFile=/home/ubuntu/ReclaimEdge/.env
+
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+# Keep logs in journald. Use journalctl -u reclaimedge-boll-cvd-live -f
+StandardOutput=journal
+StandardError=journal
+
+# Safer defaults.
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
