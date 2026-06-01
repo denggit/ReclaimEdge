@@ -16,7 +16,7 @@ SRC = ROOT / "src"
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(SRC))
 
-from src.execution.trader import LiveTradeResult, Trader  # noqa: E402
+from src.execution.trader import Trader  # noqa: E402
 from src.indicators.cvd_tracker import CvdTracker, CvdTrackerConfig  # noqa: E402
 from src.monitors.boll_band_breakout_monitor import (  # noqa: E402
     BollBandBreakoutMonitor,
@@ -67,6 +67,9 @@ def build_live_failure_email(intent: TradeIntent, error: Exception, rolled_back:
     <tr><td style="padding: 8px; border-bottom: 1px solid #eee;">layer</td><td style="padding: 8px; border-bottom: 1px solid #eee; text-align: right;">{intent.layer_index}</td></tr>
     <tr><td style="padding: 8px; border-bottom: 1px solid #eee;">price</td><td style="padding: 8px; border-bottom: 1px solid #eee; text-align: right;">{intent.price:.4f}</td></tr>
     <tr><td style="padding: 8px; border-bottom: 1px solid #eee;">tp_price</td><td style="padding: 8px; border-bottom: 1px solid #eee; text-align: right;">{intent.tp_price:.4f}</td></tr>
+    <tr><td style="padding: 8px; border-bottom: 1px solid #eee;">tp_mode</td><td style="padding: 8px; border-bottom: 1px solid #eee; text-align: right;">{html.escape(intent.tp_mode)}</td></tr>
+    <tr><td style="padding: 8px; border-bottom: 1px solid #eee;">avg_entry</td><td style="padding: 8px; border-bottom: 1px solid #eee; text-align: right;">{intent.avg_entry_price:.4f}</td></tr>
+    <tr><td style="padding: 8px; border-bottom: 1px solid #eee;">breakeven</td><td style="padding: 8px; border-bottom: 1px solid #eee; text-align: right;">{intent.breakeven_price:.4f}</td></tr>
   </table>
   <p><strong>Reason:</strong> {html.escape(intent.reason)}</p>
   <p><strong>Error:</strong> {html.escape(str(error))}</p>
@@ -129,6 +132,7 @@ async def main() -> None:
             if trading_halted:
                 return
 
+            backup_state = copy.deepcopy(strategy.state)
             intents = strategy.on_tick(
                 price=event.tick.price,
                 ts_ms=event.tick.ts_ms,
@@ -136,7 +140,6 @@ async def main() -> None:
                 cvd=cvd_snapshot,
             )
             for intent in intents:
-                backup_state = copy.deepcopy(strategy.state)
                 try:
                     result = await trader.execute_intent(intent)
                     if not result.ok:
@@ -148,23 +151,29 @@ async def main() -> None:
 
                     if intent.intent_type == "UPDATE_TP":
                         logger.warning(
-                            "LIVE TP update success | side=%s layer=%s price=%.4f contracts=%s new_tp_price=%s tp_order_id=%s",
+                            "LIVE TP update success | side=%s layer=%s price=%.4f contracts=%s new_tp_price=%s tp_mode=%s avg_entry=%.4f breakeven=%.4f tp_order_id=%s",
                             intent.side,
                             intent.layer_index,
                             intent.price,
                             result.contracts,
                             result.tp_price,
+                            intent.tp_mode,
+                            intent.avg_entry_price,
+                            intent.breakeven_price,
                             result.tp_order_id,
                         )
                     else:
                         logger.warning(
-                            "LIVE entry success | intent_type=%s side=%s layer=%s price=%.4f contracts=%s tp_price=%s order_id=%s tp_order_id=%s",
+                            "LIVE entry success | intent_type=%s side=%s layer=%s price=%.4f contracts=%s tp_price=%s tp_mode=%s avg_entry=%.4f breakeven=%.4f order_id=%s tp_order_id=%s",
                             intent.intent_type,
                             intent.side,
                             intent.layer_index,
                             intent.price,
                             result.contracts,
                             result.tp_price,
+                            intent.tp_mode,
+                            intent.avg_entry_price,
+                            intent.breakeven_price,
                             result.order_id,
                             result.tp_order_id,
                         )
