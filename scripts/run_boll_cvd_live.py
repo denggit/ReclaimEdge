@@ -51,30 +51,6 @@ def format_ts_ms(ts_ms: int) -> str:
     return dt.datetime.fromtimestamp(ts_ms / 1000).astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
 
 
-def build_live_success_email(intent: TradeIntent, result: LiveTradeResult) -> tuple[str, str]:
-    subject = f"LIVE order executed | ETH-USDT-SWAP | {intent.intent_type} | layer {intent.layer_index}"
-    event_time = format_ts_ms(intent.ts_ms)
-    content = f"""
-<div style="font-family: Arial, Helvetica, sans-serif; line-height: 1.55; color: #222; max-width: 760px;">
-  <h2>LIVE order executed</h2>
-  <table style="width: 100%; border-collapse: collapse; font-size: 14px;">
-    <tr><td style="padding: 8px; border-bottom: 1px solid #eee;">intent_type</td><td style="padding: 8px; border-bottom: 1px solid #eee; text-align: right;">{html.escape(intent.intent_type)}</td></tr>
-    <tr><td style="padding: 8px; border-bottom: 1px solid #eee;">side</td><td style="padding: 8px; border-bottom: 1px solid #eee; text-align: right;">{html.escape(intent.side)}</td></tr>
-    <tr><td style="padding: 8px; border-bottom: 1px solid #eee;">layer</td><td style="padding: 8px; border-bottom: 1px solid #eee; text-align: right;">{intent.layer_index}</td></tr>
-    <tr><td style="padding: 8px; border-bottom: 1px solid #eee;">price</td><td style="padding: 8px; border-bottom: 1px solid #eee; text-align: right;">{intent.price:.4f}</td></tr>
-    <tr><td style="padding: 8px; border-bottom: 1px solid #eee;">contracts</td><td style="padding: 8px; border-bottom: 1px solid #eee; text-align: right;">{html.escape(result.contracts)}</td></tr>
-    <tr><td style="padding: 8px; border-bottom: 1px solid #eee;">tp_price</td><td style="padding: 8px; border-bottom: 1px solid #eee; text-align: right;">{html.escape(result.tp_price)}</td></tr>
-    <tr><td style="padding: 8px; border-bottom: 1px solid #eee;">order_id</td><td style="padding: 8px; border-bottom: 1px solid #eee; text-align: right;">{html.escape(result.order_id or '')}</td></tr>
-    <tr><td style="padding: 8px; border-bottom: 1px solid #eee;">tp_order_id</td><td style="padding: 8px; border-bottom: 1px solid #eee; text-align: right;">{html.escape(result.tp_order_id or '')}</td></tr>
-  </table>
-  <p><strong>Reason:</strong> {html.escape(intent.reason)}</p>
-  <p><strong>Message:</strong> {html.escape(result.message)}</p>
-  <p><strong>Event time:</strong> {html.escape(event_time)}</p>
-</div>
-""".strip()
-    return subject, content
-
-
 def build_live_failure_email(intent: TradeIntent, error: Exception, rolled_back: bool, halted: bool) -> tuple[str, str]:
     subject = f"LIVE order failed | ETH-USDT-SWAP | {intent.intent_type} | layer {intent.layer_index}"
     event_time = format_ts_ms(intent.ts_ms)
@@ -170,17 +146,28 @@ async def main() -> None:
                         strategy.state = backup_state
                         raise RuntimeError(result.message)
 
-                    logger.warning(
-                        "LIVE execution success | intent_type=%s side=%s layer=%s price=%.4f contracts=%s tp_price=%s order_id=%s tp_order_id=%s",
-                        intent.intent_type,
-                        intent.side,
-                        intent.layer_index,
-                        intent.price,
-                        result.contracts,
-                        result.tp_price,
-                        result.order_id,
-                        result.tp_order_id,
-                    )
+                    if intent.intent_type == "UPDATE_TP":
+                        logger.warning(
+                            "LIVE TP update success | side=%s layer=%s price=%.4f contracts=%s new_tp_price=%s tp_order_id=%s",
+                            intent.side,
+                            intent.layer_index,
+                            intent.price,
+                            result.contracts,
+                            result.tp_price,
+                            result.tp_order_id,
+                        )
+                    else:
+                        logger.warning(
+                            "LIVE entry success | intent_type=%s side=%s layer=%s price=%.4f contracts=%s tp_price=%s order_id=%s tp_order_id=%s",
+                            intent.intent_type,
+                            intent.side,
+                            intent.layer_index,
+                            intent.price,
+                            result.contracts,
+                            result.tp_price,
+                            result.order_id,
+                            result.tp_order_id,
+                        )
                 except Exception as exc:
                     try:
                         contracts = await trader.fetch_position_contracts()
