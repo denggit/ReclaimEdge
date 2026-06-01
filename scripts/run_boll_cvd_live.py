@@ -16,7 +16,7 @@ SRC = ROOT / "src"
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(SRC))
 
-from src.execution.trader import Trader  # noqa: E402
+from src.execution.trader import PositionSnapshot, Trader  # noqa: E402
 from src.indicators.cvd_tracker import CvdTracker, CvdTrackerConfig  # noqa: E402
 from src.monitors.boll_band_breakout_monitor import (  # noqa: E402
     BollBandBreakoutMonitor,
@@ -79,6 +79,41 @@ def build_live_failure_email(intent: TradeIntent, error: Exception, rolled_back:
     return subject, content
 
 
+def restore_strategy_from_position(strategy: BollCvdReclaimStrategy, position: PositionSnapshot) -> None:
+    if not position.has_position or position.side is None or position.avg_entry_price <= 0:
+        return
+    strategy.state = StrategyPositionState(
+        side=position.side,
+        layers=1,
+        last_entry_price=position.avg_entry_price,
+        tp_price=None,
+        last_order_ts_ms=0,
+        last_tp_update_ts_ms=0,
+        total_entry_qty=position.eth_qty,
+        total_entry_notional=position.avg_entry_price * position.eth_qty,
+        avg_entry_price=position.avg_entry_price,
+    )
+    logger.warning(
+        "Recovered existing position into strategy state | side=%s contracts=%s eth_qty=%.6f avg_entry=%.4f",
+        position.side,
+        position.contracts,
+        position.eth_qty,
+        position.avg_entry_price,
+    )
+
+
+def sync_strategy_cost_from_position(strategy: BollCvdReclaimStrategy, position: PositionSnapshot) -> None:
+    if not position.has_position or position.side is None or position.avg_entry_price <= 0:
+        return
+    if strategy.state.side is None or strategy.state.side != position.side or strategy.state.layers <= 0:
+        restore_strategy_from_position(strategy, position)
+        return
+    strategy.state.total_entry_qty = position.eth_qty
+    strategy.state.total_entry_notional = position.avg_entry_price * position.eth_qty
+    strategy.state.avg_entry_price = position.avg_entry_price
+    strategy.state.last_entry_price = strategy.state.last_entry_price or position.avg_entry_price
+
+
 async def main() -> None:
     load_dotenv()
     if not live_trading_enabled():
@@ -90,32 +125,56 @@ async def main() -> None:
         price_stall_seconds=float(os.getenv("PRICE_STALL_SECONDS", "2")),
         price_stall_tolerance_pct=float(os.getenv("PRICE_STALL_TOLERANCE_PCT", "0.0005")),
     )
-    sizer = SimplePositionSizer(SimplePositionSizerConfig.from_env())
-    strategy = BollCvdReclaimStrategy(BollCvdReclaimStrategyConfig.from_env(), sizer)
-    cvd = CvdTracker(cvd_config)
     email_sender = EmailSender()
     trader = Trader()
     await trader.initialize()
 
+    sizer = SimplePositionSizer(SimplePositionSizerConfig.from_account_equity(trader.account_equity_usdt))
+    strategy = BollCvdReclaimStrategy(BollCvdReclaimStrategyConfig.from_env(), sizer)
+    startup_position = await trader.fetch_position_snapshot()
+    if startup_position.has_position:
+        restore_strategy_from_position(strategy, startup_position)
+
+    cvd = CvdTracker(cvd_config)
     trade_lock = asyncio.Lock()
     trading_halted = False
+    position_sync_seconds = float(os.getenv("POSITION_SYNC_SECONDS", "5"))
+    account_sync_seconds = float(os.getenv("ACCOUNT_SYNC_SECONDS", "60"))
+    last_account_sync = 0.0
 
-    async def position_sync_loop() -> None:
-        nonlocal trading_halted
+    async def account_position_sync_loop() -> None:
+        nonlocal trading_halted, last_account_sync
         while True:
             try:
-                await asyncio.sleep(5)
+                await asyncio.sleep(position_sync_seconds)
                 async with trade_lock:
-                    contracts = await trader.fetch_position_contracts()
-                    if contracts <= 0 and strategy.state.layers > 0:
-                        logger.warning("Position is flat on OKX. Resetting strategy and trader state.")
+                    now = asyncio.get_running_loop().time()
+                    if now - last_account_sync >= account_sync_seconds:
+                        equity = await trader.fetch_usdt_equity()
+                        trader.account_equity_usdt = equity
+                        sizer.update_account_equity(equity)
+                        last_account_sync = now
+                        logger.info("ACCOUNT_SYNC | equity=%.4f layer_margin_pct=%.4f leverage=%.2f", equity, sizer.config.layer_margin_pct, sizer.config.leverage)
+
+                    position = await trader.fetch_position_snapshot()
+                    if not position.has_position and strategy.state.layers > 0:
+                        logger.warning("POSITION_SYNC | flat_on_okx=true. Resetting strategy and trader state.")
                         strategy.state = StrategyPositionState()
                         trader.mark_flat()
                         trading_halted = False
-                    elif contracts > 0:
-                        trader.position_contracts = contracts
+                    elif position.has_position:
+                        trader.position_contracts = position.contracts
+                        sync_strategy_cost_from_position(strategy, position)
+                        logger.debug(
+                            "POSITION_SYNC | side=%s contracts=%s avg_entry=%.4f eth_qty=%.6f strategy_layers=%s",
+                            position.side,
+                            position.contracts,
+                            position.avg_entry_price,
+                            position.eth_qty,
+                            strategy.state.layers,
+                        )
             except Exception:
-                logger.exception("Position sync loop failed")
+                logger.exception("Account/position sync loop failed")
 
     async def on_market_tick(event: MarketTickEvent) -> None:
         nonlocal trading_halted
@@ -179,7 +238,8 @@ async def main() -> None:
                         )
                 except Exception as exc:
                     try:
-                        contracts = await trader.fetch_position_contracts()
+                        position = await trader.fetch_position_snapshot()
+                        contracts = position.contracts
                     except Exception:
                         contracts = trader.position_contracts
 
@@ -205,7 +265,7 @@ async def main() -> None:
         tick_handlers=[on_market_tick],
     )
     await asyncio.gather(
-        position_sync_loop(),
+        account_position_sync_loop(),
         monitor.run_forever(),
     )
 
