@@ -86,6 +86,8 @@ class StrategyPositionState:
     upper_extreme_price: Optional[float] = None
     lower_armed_ts_ms: int = 0
     upper_armed_ts_ms: int = 0
+    lower_last_burst_ts_ms: int = 0
+    upper_last_burst_ts_ms: int = 0
     total_entry_qty: float = 0.0
     total_entry_notional: float = 0.0
     avg_entry_price: float = 0.0
@@ -163,6 +165,7 @@ class BollCvdReclaimStrategy:
             self.state.upper_armed = False
             self.state.upper_extreme_price = None
             self.state.upper_armed_ts_ms = 0
+            self.state.upper_last_burst_ts_ms = 0
             return
 
         if price > boll.upper:
@@ -188,6 +191,7 @@ class BollCvdReclaimStrategy:
             self.state.lower_armed = False
             self.state.lower_extreme_price = None
             self.state.lower_armed_ts_ms = 0
+            self.state.lower_last_burst_ts_ms = 0
             return
 
         # If price mean-reverts all the way to the middle, the original outside-band
@@ -212,11 +216,13 @@ class BollCvdReclaimStrategy:
         self.state.lower_armed = False
         self.state.lower_extreme_price = None
         self.state.lower_armed_ts_ms = 0
+        self.state.lower_last_burst_ts_ms = 0
 
     def _reset_upper_armed(self) -> None:
         self.state.upper_armed = False
         self.state.upper_extreme_price = None
         self.state.upper_armed_ts_ms = 0
+        self.state.upper_last_burst_ts_ms = 0
 
     def _long_setup(self, price: float, cvd: CvdSnapshot) -> bool:
         if not self.state.lower_armed or self.state.lower_extreme_price is None:
