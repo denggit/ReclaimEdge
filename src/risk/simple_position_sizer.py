@@ -38,6 +38,17 @@ class SimplePositionSizer:
     def __init__(self, config: SimplePositionSizerConfig):
         self.config = config
 
+    def update_account_equity(self, account_equity_usdt: float) -> None:
+        self.config = SimplePositionSizerConfig(
+            dry_run_equity_usdt=account_equity_usdt,
+            layer_margin_pct=self.config.layer_margin_pct,
+            leverage=self.config.leverage,
+        )
+
+    @property
+    def account_equity_usdt(self) -> float:
+        return self.config.dry_run_equity_usdt
+
     def calculate(self, price: float) -> PositionSize:
         margin = self.config.dry_run_equity_usdt * self.config.layer_margin_pct
         notional = margin * self.config.leverage
