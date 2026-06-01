@@ -379,7 +379,8 @@ async def strategy_tick_worker(
 
             async with state_lock:
                 trading_halted = execution_state.trading_halted
-            if trading_halted:
+                pending_order_count = execution_state.pending_order_count
+            if trading_halted or pending_order_count > 0:
                 continue
 
             backup_state = copy.deepcopy(strategy.state)
@@ -625,7 +626,10 @@ async def account_position_sync_worker(
             cash_after = cash
             equity_after = equity
             async with state_lock:
-                should_fetch_flat_balances = not position.has_position and strategy.state.layers > 0
+                pending_order_count = execution_state.pending_order_count
+                should_fetch_flat_balances = (
+                    pending_order_count == 0 and not position.has_position and strategy.state.layers > 0
+                )
             if should_fetch_flat_balances:
                 cash_after = await fetch_usdt_cash_balance(trader)
                 equity_after = await trader.fetch_usdt_equity()
@@ -654,7 +658,8 @@ async def account_position_sync_worker(
                     )
                     last_logged_cash = cash
 
-                if not position.has_position and strategy.state.layers > 0:
+                pending_order_count = execution_state.pending_order_count
+                if should_fetch_flat_balances and pending_order_count == 0 and not position.has_position and strategy.state.layers > 0:
                     record_flat_payload = {
                         "position_id": execution_state.current_position_id,
                         "symbol": trader.symbol,
@@ -678,6 +683,8 @@ async def account_position_sync_worker(
                     last_logged_position_key = current_position_key
                 elif position.has_position:
                     trader.position_contracts = position.contracts
+                    if pending_order_count > 0:
+                        continue
                     sync_strategy_cost_from_position(strategy, position)
                     save_state_payload = (execution_state.current_position_id, copy.deepcopy(strategy.state), execution_state.cash_before_position)
                     if current_position_key != last_logged_position_key:

@@ -314,7 +314,8 @@ class LiveRuntimeWorkerTest(unittest.IsolatedAsyncioTestCase):
         await strategy_queue.put(tick(1_001))
         await asyncio.wait_for(strategy_queue.join(), timeout=0.2)
 
-        self.assertEqual(strategy.processed_ts, [1_000, 1_001])
+        self.assertEqual(cvd.calls, [1_000, 1_001])
+        self.assertEqual(strategy.processed_ts, [1_000])
 
         strategy_task.cancel()
         execution_task.cancel()
@@ -322,6 +323,161 @@ class LiveRuntimeWorkerTest(unittest.IsolatedAsyncioTestCase):
             await strategy_task
         with contextlib.suppress(asyncio.CancelledError):
             await execution_task
+
+    async def test_strategy_tick_worker_skips_on_tick_while_execution_pending(self) -> None:
+        strategy = FakeStrategy(intents=[intent(1_000)])
+        cvd = FakeCvd()
+        strategy_queue: asyncio.Queue[MarketTickEvent] = asyncio.Queue()
+        execution_queue: asyncio.Queue[TradeCommand] = asyncio.Queue(maxsize=1000)
+        execution_state = ExecutionState(None, None, pending_order_count=1)
+        task = asyncio.create_task(
+            strategy_tick_worker(
+                strategy_tick_queue=strategy_queue,
+                execution_queue=execution_queue,
+                state_lock=asyncio.Lock(),
+                account_snapshot=AccountSnapshot(flat_position(), 100.0, 100.0, asyncio.get_running_loop().time(), 0, 1),
+                execution_state=execution_state,
+                cvd=cvd,  # type: ignore[arg-type]
+                strategy=strategy,  # type: ignore[arg-type]
+                heartbeat_seconds=1_000_000_000_000,
+                account_stale_warn_seconds=999,
+                strategy_lag_warn_seconds=1_000_000_000_000,
+            )
+        )
+        await strategy_queue.put(tick(1_000))
+        await asyncio.wait_for(strategy_queue.join(), timeout=0.2)
+
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+        self.assertEqual(cvd.calls, [1_000])
+        self.assertEqual(strategy.processed_ts, [])
+        self.assertTrue(execution_queue.empty())
+
+    async def test_account_sync_does_not_reset_flat_strategy_state_while_execution_pending(self) -> None:
+        fetched = asyncio.Event()
+
+        class PendingFlatTrader(FakeTrader):
+            async def fetch_position_snapshot(inner_self) -> PositionSnapshot:
+                fetched.set()
+                return flat_position()
+
+        strategy = FakeStrategy()
+        strategy.state = StrategyPositionState(
+            side="LONG",
+            layers=1,
+            last_entry_price=100.0,
+            tp_price=101.0,
+            total_entry_qty=1.0,
+            total_entry_notional=100.0,
+            avg_entry_price=100.0,
+        )
+        execution_state = ExecutionState("pos-1", 100.0, pending_order_count=1)
+        task = asyncio.create_task(
+            account_position_sync_worker(
+                state_lock=asyncio.Lock(),
+                account_snapshot=AccountSnapshot(flat_position(), 100.0, 100.0, asyncio.get_running_loop().time(), 0, 1),
+                execution_state=execution_state,
+                trader=PendingFlatTrader(),  # type: ignore[arg-type]
+                sizer=SimplePositionSizer(SimplePositionSizerConfig()),
+                strategy=strategy,  # type: ignore[arg-type]
+                journal=FakeJournal(),  # type: ignore[arg-type]
+                state_store=FakeStateStore(),  # type: ignore[arg-type]
+                position_sync_seconds=0,
+                account_sync_seconds=999,
+                cash_log_min_delta_usdt=999,
+            )
+        )
+        await asyncio.wait_for(fetched.wait(), timeout=0.2)
+        await asyncio.sleep(0)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+        self.assertEqual(strategy.state.side, "LONG")
+        self.assertEqual(strategy.state.layers, 1)
+        self.assertEqual(execution_state.current_position_id, "pos-1")
+
+    async def test_account_sync_does_not_sync_strategy_cost_while_execution_pending(self) -> None:
+        fetched = asyncio.Event()
+        live_position = PositionSnapshot("LONG", Decimal("2"), 99.0, 2.0, Decimal("2"))
+
+        class PendingPositionTrader(FakeTrader):
+            async def fetch_position_snapshot(inner_self) -> PositionSnapshot:
+                fetched.set()
+                return live_position
+
+        strategy = FakeStrategy()
+        strategy.state = StrategyPositionState(
+            side="LONG",
+            layers=1,
+            last_entry_price=100.0,
+            tp_price=101.0,
+            total_entry_qty=1.0,
+            total_entry_notional=100.0,
+            avg_entry_price=100.0,
+        )
+        trader = PendingPositionTrader()
+        execution_state = ExecutionState("pos-1", 100.0, pending_order_count=1)
+        task = asyncio.create_task(
+            account_position_sync_worker(
+                state_lock=asyncio.Lock(),
+                account_snapshot=AccountSnapshot(flat_position(), 100.0, 100.0, asyncio.get_running_loop().time(), 0, 1),
+                execution_state=execution_state,
+                trader=trader,  # type: ignore[arg-type]
+                sizer=SimplePositionSizer(SimplePositionSizerConfig()),
+                strategy=strategy,  # type: ignore[arg-type]
+                journal=FakeJournal(),  # type: ignore[arg-type]
+                state_store=FakeStateStore(),  # type: ignore[arg-type]
+                position_sync_seconds=0,
+                account_sync_seconds=999,
+                cash_log_min_delta_usdt=999,
+            )
+        )
+        await asyncio.wait_for(fetched.wait(), timeout=0.2)
+        await asyncio.sleep(0)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+        self.assertEqual(trader.position_contracts, Decimal("2"))
+        self.assertEqual(strategy.state.total_entry_qty, 1.0)
+        self.assertEqual(strategy.state.avg_entry_price, 100.0)
+
+    async def test_execution_pending_does_not_produce_second_trade_command(self) -> None:
+        strategy = FakeStrategy(intents=[intent(1_000), intent(1_001)])
+        cvd = FakeCvd()
+        strategy_queue: asyncio.Queue[MarketTickEvent] = asyncio.Queue()
+        execution_queue: asyncio.Queue[TradeCommand] = asyncio.Queue(maxsize=1000)
+        execution_state = ExecutionState(None, None)
+        task = asyncio.create_task(
+            strategy_tick_worker(
+                strategy_tick_queue=strategy_queue,
+                execution_queue=execution_queue,
+                state_lock=asyncio.Lock(),
+                account_snapshot=AccountSnapshot(flat_position(), 100.0, 100.0, asyncio.get_running_loop().time(), 0, 1),
+                execution_state=execution_state,
+                cvd=cvd,  # type: ignore[arg-type]
+                strategy=strategy,  # type: ignore[arg-type]
+                heartbeat_seconds=1_000_000_000_000,
+                account_stale_warn_seconds=999,
+                strategy_lag_warn_seconds=1_000_000_000_000,
+            )
+        )
+        await strategy_queue.put(tick(1_000))
+        await asyncio.wait_for(strategy_queue.join(), timeout=0.2)
+        await strategy_queue.put(tick(1_001))
+        await asyncio.wait_for(strategy_queue.join(), timeout=0.2)
+
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+        self.assertEqual(cvd.calls, [1_000, 1_001])
+        self.assertEqual(strategy.processed_ts, [1_000])
+        self.assertEqual(execution_queue.qsize(), 1)
+        self.assertEqual(execution_state.pending_order_count, 1)
 
     async def test_strategy_worker_processes_ticks_in_order(self) -> None:
         strategy = FakeStrategy()
