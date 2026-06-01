@@ -100,6 +100,23 @@ class BollCvdShockReclaimStrategyTest(unittest.TestCase):
         self.assertFalse(lower_strat.state.lower_deep_enough)
         self.assertFalse(upper_strat.state.upper_deep_enough)
 
+    def test_lower_outside_no_burst_logs_at_low_frequency_without_arming(self) -> None:
+        strat = strategy()
+        strat.outside_no_burst_log_interval_seconds = 2
+
+        with self.assertLogs("src.strategies.boll_cvd_shock_reclaim_strategy", level="INFO") as logs:
+            first = strat.on_tick(99.9, 10_000, boll_snapshot(), cvd_snapshot(down_burst=False))
+            second = strat.on_tick(99.8, 11_000, boll_snapshot(), cvd_snapshot(down_burst=False))
+            third = strat.on_tick(99.7, 12_001, boll_snapshot(), cvd_snapshot(down_burst=False))
+
+        output = "\n".join(logs.output)
+        self.assertNotIn("LOWER_ARMED", output)
+        self.assertEqual(output.count("LOWER_OUTSIDE_NO_BURST"), 2)
+        self.assertFalse(strat.state.lower_armed)
+        self.assertEqual(first, [])
+        self.assertEqual(second, [])
+        self.assertEqual(third, [])
+
 
 if __name__ == "__main__":
     unittest.main()

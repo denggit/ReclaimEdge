@@ -228,9 +228,11 @@ async def main() -> None:
     position_sync_seconds = float(os.getenv("POSITION_SYNC_SECONDS", "5"))
     account_sync_seconds = float(os.getenv("ACCOUNT_SYNC_SECONDS", "60"))
     cash_log_min_delta_usdt = float(os.getenv("ACCOUNT_LOG_MIN_DELTA_USDT", "0.01"))
+    market_tick_heartbeat_seconds = float(os.getenv("MARKET_TICK_HEARTBEAT_SECONDS", "10"))
     last_account_sync = 0.0
     last_logged_cash = startup_cash
     last_logged_position_key = position_log_key(startup_position)
+    last_market_tick_heartbeat = 0.0
 
     async def daily_report_loop() -> None:
         raw_time = os.getenv("DAILY_REPORT_TIME", "09:00")
@@ -319,7 +321,7 @@ async def main() -> None:
                 logger.exception("Account/position sync loop failed")
 
     async def on_market_tick(event: MarketTickEvent) -> None:
-        nonlocal trading_halted, current_position_id, cash_before_position
+        nonlocal trading_halted, current_position_id, cash_before_position, last_market_tick_heartbeat
         if event.boll is None:
             return
 
@@ -330,6 +332,33 @@ async def main() -> None:
                 price=event.tick.price,
                 ts_ms=event.tick.ts_ms,
             )
+            now = asyncio.get_running_loop().time()
+            if now - last_market_tick_heartbeat >= market_tick_heartbeat_seconds:
+                last_market_tick_heartbeat = now
+                logger.info(
+                    "MARKET_TICK_HEARTBEAT | price=%.4f tick_ts_ms=%s side=%s size=%.8f boll_lower=%.4f boll_middle=%.4f boll_upper=%.4f switch=%s fast_cvd=%.8f previous_fast_cvd=%.8f buy_ratio=%.4f sell_ratio=%.4f burst_net_move_pct=%.6f move_ratio=%.2f volume_ratio=%.2f burst_range_pct=%.6f baseline_range_pct=%.6f burst_volume=%.8f baseline_volume=%.8f up_burst=%s down_burst=%s",
+                    event.tick.price,
+                    event.tick.ts_ms,
+                    event.tick.side,
+                    event.tick.size,
+                    event.boll.lower,
+                    event.boll.middle,
+                    event.boll.upper,
+                    event.boll.alert_switch_on,
+                    cvd_snapshot.fast_cvd,
+                    cvd_snapshot.previous_fast_cvd,
+                    cvd_snapshot.buy_ratio,
+                    cvd_snapshot.sell_ratio,
+                    cvd_snapshot.burst_net_move_pct,
+                    cvd_snapshot.burst_move_ratio,
+                    cvd_snapshot.burst_volume_ratio,
+                    cvd_snapshot.burst_range_pct,
+                    cvd_snapshot.baseline_range_pct,
+                    cvd_snapshot.burst_volume,
+                    cvd_snapshot.baseline_volume,
+                    cvd_snapshot.up_burst,
+                    cvd_snapshot.down_burst,
+                )
             if trading_halted:
                 return
 

@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import os
+import logging
 from collections import deque
 from dataclasses import dataclass
 from statistics import mean
 from typing import Deque, Literal
 
 TradeSide = Literal["buy", "sell", "unknown"]
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -81,9 +83,25 @@ class CvdTracker:
         self._events: Deque[tuple[int, float, float, float, float, float]] = deque()
         self._total_cvd: float = 0.0
         self._last_fast_cvd: float = 0.0
+        self._last_tick_ts_ms: int | None = None
+        self._last_out_of_order_log_ts_ms: int = 0
 
     def update(self, side: str, size: float, price: float, ts_ms: int) -> CvdSnapshot:
         normalized_side = self._normalize_side(side)
+        if self._last_tick_ts_ms is not None and ts_ms < self._last_tick_ts_ms:
+            if self._last_out_of_order_log_ts_ms == 0 or ts_ms - self._last_out_of_order_log_ts_ms >= 5000:
+                logger.warning(
+                    "CVD_TICK_OUT_OF_ORDER | last_ts_ms=%s current_ts_ms=%s price=%.4f side=%s size=%.8f",
+                    self._last_tick_ts_ms,
+                    ts_ms,
+                    price,
+                    normalized_side,
+                    size,
+                )
+                self._last_out_of_order_log_ts_ms = ts_ms
+        else:
+            self._last_tick_ts_ms = ts_ms
+
         signed_delta = self._signed_delta(normalized_side, size)
         self._total_cvd += signed_delta
 
@@ -156,12 +174,11 @@ class CvdTracker:
             self.config.burst_baseline_seconds,
         )
         cutoff = ts_ms - int(keep_seconds * 1000)
-        while self._events and self._events[0][0] < cutoff:
-            self._events.popleft()
+        self._events = deque(item for item in self._events if item[0] >= cutoff)
 
     def _events_since(self, ts_ms: int, seconds: float) -> list[tuple[int, float, float, float, float, float]]:
         cutoff = ts_ms - int(seconds * 1000)
-        return [item for item in self._events if item[0] >= cutoff]
+        return sorted((item for item in self._events if cutoff <= item[0] <= ts_ms), key=lambda item: item[0])
 
     def _burst_stats(self, ts_ms: int, current_price: float) -> dict[str, float | bool]:
         burst_ms = int(self.config.burst_window_seconds * 1000)
@@ -169,8 +186,14 @@ class CvdTracker:
         burst_cutoff = ts_ms - burst_ms
         baseline_cutoff = ts_ms - baseline_ms
 
-        burst_events = [item for item in self._events if item[0] >= burst_cutoff]
-        baseline_events = [item for item in self._events if baseline_cutoff <= item[0] < burst_cutoff]
+        burst_events = sorted(
+            (item for item in self._events if burst_cutoff <= item[0] <= ts_ms),
+            key=lambda item: item[0],
+        )
+        baseline_events = sorted(
+            (item for item in self._events if baseline_cutoff <= item[0] < burst_cutoff),
+            key=lambda item: item[0],
+        )
 
         empty = {
             "net_move_pct": 0.0,
@@ -196,7 +219,9 @@ class CvdTracker:
         burst_volume = sum(item[5] for item in burst_events)
         baseline_volume = sum(item[5] for item in baseline_events)
         burst_vps = burst_volume / max(self.config.burst_window_seconds, 0.001)
-        baseline_elapsed_seconds = max((baseline_events[-1][0] - baseline_events[0][0]) / 1000, 0.001)
+        baseline_elapsed_seconds = (baseline_events[-1][0] - baseline_events[0][0]) / 1000
+        if baseline_elapsed_seconds <= 0:
+            return empty
         baseline_vps = baseline_volume / baseline_elapsed_seconds if baseline_volume > 0 else 0.0
 
         move_ratio = burst_range_pct / baseline_range_pct
@@ -218,11 +243,12 @@ class CvdTracker:
 
     def _baseline_avg_range_pct(self, ts_ms: int, baseline_events: list[tuple[int, float, float, float, float, float]]) -> float:
         window_ms = int(self.config.burst_window_seconds * 1000)
+        sorted_events = sorted(baseline_events, key=lambda item: item[0])
         ranges: list[float] = []
-        for end_event in baseline_events:
+        for end_event in sorted_events:
             end_ts = end_event[0]
             start_ts = end_ts - window_ms
-            samples = [item for item in baseline_events if start_ts <= item[0] <= end_ts]
+            samples = [item for item in sorted_events if start_ts <= item[0] <= end_ts]
             if len(samples) >= 2:
                 ranges.append(self._range_pct(samples))
         return mean(ranges) if ranges else 0.0
@@ -257,7 +283,7 @@ class CvdTracker:
 
     def _stall_samples(self, ts_ms: int) -> list[tuple[int, float]]:
         cutoff = ts_ms - int(self.config.price_stall_seconds * 1000)
-        return [(item[0], item[1]) for item in self._events if item[0] >= cutoff]
+        return [(item[0], item[1]) for item in sorted(self._events, key=lambda item: item[0]) if cutoff <= item[0] <= ts_ms]
 
     @staticmethod
     def _normalize_side(side: str) -> TradeSide:

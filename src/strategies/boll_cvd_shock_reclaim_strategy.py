@@ -29,6 +29,9 @@ class BollCvdShockReclaimStrategy(BollCvdReclaimStrategy):
         self.switch_grace_seconds = float(os.getenv("BOLL_SWITCH_GRACE_SECONDS", "300"))
         self._last_switch_on_ts_ms: int = 0
         self._last_switch_on_candle_ts_ms: int = 0
+        self._last_lower_outside_no_burst_log_ts_ms: int = 0
+        self._last_upper_outside_no_burst_log_ts_ms: int = 0
+        self.outside_no_burst_log_interval_seconds = float(os.getenv("OUTSIDE_NO_BURST_LOG_INTERVAL_SECONDS", "2"))
 
     def on_tick(self, price: float, ts_ms: int, boll: BollSnapshot, cvd: CvdSnapshot) -> list[TradeIntent]:
         intents: list[TradeIntent] = []
@@ -79,6 +82,7 @@ class BollCvdShockReclaimStrategy(BollCvdReclaimStrategy):
     def _update_shock_armed_state(self, price: float, ts_ms: int, boll: BollSnapshot, cvd: CvdSnapshot) -> None:
         if price < boll.lower:
             if not cvd.down_burst:
+                self._log_lower_outside_no_burst(price, ts_ms, boll, cvd)
                 if self.state.lower_armed:
                     self.state.lower_extreme_price = min(self.state.lower_extreme_price or price, price)
                     self._update_lower_deep_enough(boll)
@@ -122,6 +126,7 @@ class BollCvdShockReclaimStrategy(BollCvdReclaimStrategy):
 
         if price > boll.upper:
             if not cvd.up_burst:
+                self._log_upper_outside_no_burst(price, ts_ms, boll, cvd)
                 if self.state.upper_armed:
                     self.state.upper_extreme_price = max(self.state.upper_extreme_price or price, price)
                     self._update_upper_deep_enough(boll)
@@ -164,6 +169,56 @@ class BollCvdShockReclaimStrategy(BollCvdReclaimStrategy):
             return
 
         self._reset_armed_if_middle_reclaimed(price, boll)
+
+    def _log_lower_outside_no_burst(self, price: float, ts_ms: int, boll: BollSnapshot, cvd: CvdSnapshot) -> None:
+        interval_ms = int(self.outside_no_burst_log_interval_seconds * 1000)
+        if self._last_lower_outside_no_burst_log_ts_ms and ts_ms - self._last_lower_outside_no_burst_log_ts_ms < interval_ms:
+            return
+        self._last_lower_outside_no_burst_log_ts_ms = ts_ms
+        logger.info(
+            "LOWER_OUTSIDE_NO_BURST | price=%.4f lower=%.4f middle=%.4f switch_current=%s switch_latched=%s lower_armed=%s lower_extreme=%s burst_net_move_pct=%.6f move_ratio=%.2f volume_ratio=%.2f burst_range_pct=%.6f baseline_range_pct=%.6f burst_volume=%.8f baseline_volume=%.8f up_burst=%s down_burst=%s",
+            price,
+            boll.lower,
+            boll.middle,
+            boll.alert_switch_on,
+            not boll.alert_switch_on,
+            self.state.lower_armed,
+            self.state.lower_extreme_price,
+            cvd.burst_net_move_pct,
+            cvd.burst_move_ratio,
+            cvd.burst_volume_ratio,
+            cvd.burst_range_pct,
+            cvd.baseline_range_pct,
+            cvd.burst_volume,
+            cvd.baseline_volume,
+            cvd.up_burst,
+            cvd.down_burst,
+        )
+
+    def _log_upper_outside_no_burst(self, price: float, ts_ms: int, boll: BollSnapshot, cvd: CvdSnapshot) -> None:
+        interval_ms = int(self.outside_no_burst_log_interval_seconds * 1000)
+        if self._last_upper_outside_no_burst_log_ts_ms and ts_ms - self._last_upper_outside_no_burst_log_ts_ms < interval_ms:
+            return
+        self._last_upper_outside_no_burst_log_ts_ms = ts_ms
+        logger.info(
+            "UPPER_OUTSIDE_NO_BURST | price=%.4f upper=%.4f middle=%.4f switch_current=%s switch_latched=%s upper_armed=%s upper_extreme=%s burst_net_move_pct=%.6f move_ratio=%.2f volume_ratio=%.2f burst_range_pct=%.6f baseline_range_pct=%.6f burst_volume=%.8f baseline_volume=%.8f up_burst=%s down_burst=%s",
+            price,
+            boll.upper,
+            boll.middle,
+            boll.alert_switch_on,
+            not boll.alert_switch_on,
+            self.state.upper_armed,
+            self.state.upper_extreme_price,
+            cvd.burst_net_move_pct,
+            cvd.burst_move_ratio,
+            cvd.burst_volume_ratio,
+            cvd.burst_range_pct,
+            cvd.baseline_range_pct,
+            cvd.burst_volume,
+            cvd.baseline_volume,
+            cvd.up_burst,
+            cvd.down_burst,
+        )
 
     def _reset_armed_if_middle_reclaimed(self, price: float, boll: BollSnapshot) -> None:
         if self.state.lower_armed and price >= boll.middle:

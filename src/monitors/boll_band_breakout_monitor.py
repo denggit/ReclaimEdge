@@ -129,13 +129,31 @@ class BollCalculator:
 class OkxPublicMarketClient:
     def __init__(self, config: BollBandBreakoutMonitorConfig):
         self.config = config
+        self._session: aiohttp.ClientSession | None = None
+        self._timeout_seconds = float(os.getenv("OKX_REST_TIMEOUT_SECONDS", "10"))
+        self._connector_limit = int(os.getenv("OKX_REST_CONNECTOR_LIMIT", "10"))
+
+    async def start(self) -> None:
+        if self._session is not None and not self._session.closed:
+            return
+        connector = aiohttp.TCPConnector(limit=self._connector_limit)
+        timeout = aiohttp.ClientTimeout(total=self._timeout_seconds)
+        self._session = aiohttp.ClientSession(connector=connector, timeout=timeout)
+
+    async def close(self) -> None:
+        if self._session is None:
+            return
+        await self._session.close()
+        self._session = None
 
     async def fetch_candles(self, include_live: bool) -> list[Candle]:
+        await self.start()
+        if self._session is None:
+            raise RuntimeError("OKX REST session is not initialized")
         url = f"{self.config.rest_base_url}/api/v5/market/candles"
         params = {"instId": self.config.inst_id, "bar": self.config.bar, "limit": str(self.config.candle_limit)}
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
-            async with session.get(url, params=params) as resp:
-                payload = await resp.json()
+        async with self._session.get(url, params=params) as resp:
+            payload = await resp.json()
         if payload.get("code") != "0":
             raise RuntimeError(f"OKX candle API error: {payload}")
         candles: list[Candle] = []
@@ -171,6 +189,19 @@ class BollBandBreakoutMonitor:
         self._freeze_until_ts: float = 0.0
         self._running = False
         self._bar_interval_ms = self._parse_bar_interval_ms(config.bar)
+        self._tick_queue_maxsize = int(os.getenv("TICK_EVENT_QUEUE_MAXSIZE", "10000"))
+        self._tick_event_queue: asyncio.Queue[MarketTickEvent] = asyncio.Queue(maxsize=self._tick_queue_maxsize)
+        self._last_tick_backlog_log_ts: float = 0.0
+        self._tick_backlog_log_seconds = float(os.getenv("TICK_EVENT_QUEUE_BACKLOG_LOG_SECONDS", "5"))
+        self._candle_sync_consecutive_failures: int = 0
+        self._candle_sync_started_ts_ms: int = self._now_ms()
+        self._last_successful_candle_sync_ts_ms: int = 0
+        self._last_candle_sync_error_log_ts_ms: int = 0
+        self._last_candle_sync_stale_log_ts_ms: int = 0
+        self._last_boll_stale_log_ts_ms: int = 0
+        self._candle_sync_error_log_interval_seconds = float(os.getenv("CANDLE_SYNC_ERROR_LOG_INTERVAL_SECONDS", "60"))
+        self._candle_sync_stale_warn_seconds = float(os.getenv("CANDLE_SYNC_STALE_WARN_SECONDS", "180"))
+        self._candle_sync_max_backoff_seconds = float(os.getenv("CANDLE_SYNC_MAX_BACKOFF_SECONDS", "60"))
 
     def add_handler(self, handler: SignalHandler) -> None:
         self.handlers.append(handler)
@@ -180,15 +211,30 @@ class BollBandBreakoutMonitor:
 
     async def run_forever(self) -> None:
         self._running = True
-        await asyncio.gather(self._candle_sync_loop(), self._boll_recalc_loop(), self._tick_loop())
+        await self.client.start()
+        try:
+            await asyncio.gather(
+                self._candle_sync_loop(),
+                self._boll_recalc_loop(),
+                self._tick_loop(),
+                self._tick_event_consumer_loop(),
+            )
+        finally:
+            self._running = False
+            await self.client.close()
 
     async def _candle_sync_loop(self) -> None:
         while self._running:
-            try:
-                await self._sync_candles_from_rest()
-            except Exception:
-                logger.exception("Failed to sync candles from OKX REST")
-            await asyncio.sleep(self.config.candle_poll_seconds)
+            sleep_seconds = await self._run_candle_sync_once()
+            await asyncio.sleep(sleep_seconds)
+
+    async def _run_candle_sync_once(self) -> float:
+        try:
+            await self._sync_candles_from_rest()
+            self._handle_candle_sync_success()
+            return float(self.config.candle_poll_seconds)
+        except Exception as exc:
+            return self._handle_candle_sync_failure(exc)
 
     async def _sync_candles_from_rest(self) -> None:
         candles = await self.client.fetch_candles(include_live=self.config.use_live_candle)
@@ -197,6 +243,66 @@ class BollBandBreakoutMonitor:
             return
         async with self._candles_lock:
             self._candles = candles[-self.config.candle_limit:]
+
+    def _handle_candle_sync_success(self) -> None:
+        now_ms = self._now_ms()
+        failures = self._candle_sync_consecutive_failures
+        last_success_age_seconds = self._last_success_age_seconds(now_ms)
+        if failures > 0:
+            logger.info(
+                "CANDLE_SYNC_RECOVERED | failures=%s last_success_age_seconds=%.1f",
+                failures,
+                last_success_age_seconds,
+            )
+        self._candle_sync_consecutive_failures = 0
+        self._last_successful_candle_sync_ts_ms = now_ms
+        self._last_candle_sync_stale_log_ts_ms = 0
+
+    def _handle_candle_sync_failure(self, exc: Exception) -> float:
+        now_ms = self._now_ms()
+        self._candle_sync_consecutive_failures += 1
+        failures = self._candle_sync_consecutive_failures
+        last_success_age_seconds = self._last_success_age_seconds(now_ms)
+        should_log_error = self._should_log_candle_sync_error(now_ms)
+        if should_log_error:
+            logger.warning(
+                "CANDLE_SYNC_FAILED | failures=%s error_type=%s error=%s last_success_age_seconds=%.1f",
+                failures,
+                type(exc).__name__,
+                exc,
+                last_success_age_seconds,
+                exc_info=failures == 1 or logger.isEnabledFor(logging.DEBUG),
+            )
+            self._last_candle_sync_error_log_ts_ms = now_ms
+        if last_success_age_seconds >= self._candle_sync_stale_warn_seconds and self._should_log_candle_sync_stale(now_ms):
+            logger.error(
+                "CANDLE_SYNC_STALE | failures=%s last_success_age_seconds=%.1f risk=live_boll_may_be_stale",
+                failures,
+                last_success_age_seconds,
+                exc_info=True,
+            )
+            self._last_candle_sync_stale_log_ts_ms = now_ms
+        return min(
+            float(self.config.candle_poll_seconds) + failures * 5,
+            self._candle_sync_max_backoff_seconds,
+        )
+
+    def _should_log_candle_sync_error(self, now_ms: int) -> bool:
+        if self._last_candle_sync_error_log_ts_ms == 0:
+            return True
+        interval_ms = int(self._candle_sync_error_log_interval_seconds * 1000)
+        return now_ms - self._last_candle_sync_error_log_ts_ms >= interval_ms
+
+    def _should_log_candle_sync_stale(self, now_ms: int) -> bool:
+        if self._last_candle_sync_stale_log_ts_ms == 0:
+            return True
+        interval_ms = int(self._candle_sync_error_log_interval_seconds * 1000)
+        return now_ms - self._last_candle_sync_stale_log_ts_ms >= interval_ms
+
+    def _last_success_age_seconds(self, now_ms: int) -> float:
+        if self._last_successful_candle_sync_ts_ms <= 0:
+            return max((now_ms - self._candle_sync_started_ts_ms) / 1000, 0.0)
+        return max((now_ms - self._last_successful_candle_sync_ts_ms) / 1000, 0.0)
 
     async def _boll_recalc_loop(self) -> None:
         while self._running:
@@ -269,8 +375,9 @@ class BollBandBreakoutMonitor:
     async def _process_tick(self, tick: TradeTick) -> None:
         if self.config.use_live_candle:
             await self._update_live_candle_from_tick(tick.price, tick.ts_ms)
+            self._log_stale_rest_candles_if_needed(tick.price)
         snapshot = self._snapshot
-        self._emit_tick(MarketTickEvent(tick=tick, boll=snapshot))
+        await self._queue_tick_event(MarketTickEvent(tick=tick, boll=snapshot))
         if snapshot is None:
             self._previous_price = tick.price
             self._previous_zone = "UNKNOWN"
@@ -296,6 +403,40 @@ class BollBandBreakoutMonitor:
         logger.warning("BOLL breakout signal | inst=%s direction=%s prev=%.4f price=%.4f upper=%.4f middle=%.4f lower=%.4f freeze=%ss", signal.inst_id, signal.direction, signal.previous_price, signal.price, signal.upper, signal.middle, signal.lower, signal.freeze_seconds)
         self._emit(signal)
 
+    async def _queue_tick_event(self, event: MarketTickEvent) -> None:
+        if self._tick_event_queue.full():
+            logger.error(
+                "TICK_EVENT_QUEUE_FULL | price=%.4f tick_ts_ms=%s queue_size=%s",
+                event.tick.price,
+                event.tick.ts_ms,
+                self._tick_event_queue.qsize(),
+            )
+        await self._tick_event_queue.put(event)
+        self._log_tick_queue_backlog()
+
+    async def _tick_event_consumer_loop(self) -> None:
+        while self._running:
+            event = await self._tick_event_queue.get()
+            try:
+                await self._emit_tick(event)
+            finally:
+                self._tick_event_queue.task_done()
+                self._log_tick_queue_backlog()
+
+    def _log_tick_queue_backlog(self) -> None:
+        queue_size = self._tick_event_queue.qsize()
+        if queue_size <= 0:
+            return
+        now = time.time()
+        if now - self._last_tick_backlog_log_ts < self._tick_backlog_log_seconds:
+            return
+        self._last_tick_backlog_log_ts = now
+        logger.info(
+            "MARKET_TICK_QUEUE_BACKLOG | queue_size=%s maxsize=%s",
+            queue_size,
+            self._tick_queue_maxsize,
+        )
+
     async def _update_live_candle_from_tick(self, price: float, tick_ts_ms: int) -> None:
         bucket_ts = (tick_ts_ms // self._bar_interval_ms) * self._bar_interval_ms
         async with self._candles_lock:
@@ -312,6 +453,26 @@ class BollBandBreakoutMonitor:
             if bucket_ts < latest.ts_ms:
                 return
             self._candles[-1] = Candle(latest.ts_ms, latest.open, max(latest.high, price), min(latest.low, price), price, latest.volume, False)
+
+    def _log_stale_rest_candles_if_needed(self, last_price: float) -> None:
+        now_ms = self._now_ms()
+        last_success_age_seconds = self._last_success_age_seconds(now_ms)
+        if last_success_age_seconds < self._candle_sync_stale_warn_seconds:
+            return
+        if self._last_boll_stale_log_ts_ms:
+            interval_ms = int(self._candle_sync_error_log_interval_seconds * 1000)
+            if now_ms - self._last_boll_stale_log_ts_ms < interval_ms:
+                return
+        latest_candle_ts = self._candles[-1].ts_ms if self._candles else None
+        snapshot_candle_ts = self._snapshot.candle_ts_ms if self._snapshot is not None else None
+        logger.warning(
+            "BOLL_RUNNING_WITH_STALE_REST_CANDLES | last_success_age_seconds=%.1f latest_candle_ts=%s snapshot_candle_ts=%s last_price=%.4f",
+            last_success_age_seconds,
+            latest_candle_ts,
+            snapshot_candle_ts,
+            last_price,
+        )
+        self._last_boll_stale_log_ts_ms = now_ms
 
     def _build_signal(self, direction: BreakoutDirection, price: float, previous_price: float, tick_ts_ms: int, snapshot: BollSnapshot) -> BreakoutSignal:
         return BreakoutSignal(self.config.inst_id, direction, price, previous_price, tick_ts_ms, snapshot.candle_ts_ms, snapshot.middle, snapshot.upper, snapshot.lower, snapshot.upper_distance_pct, snapshot.lower_distance_pct, self.config.alert_freeze_seconds)
@@ -330,9 +491,9 @@ class BollBandBreakoutMonitor:
         for handler in self.handlers:
             asyncio.create_task(self._run_handler(handler, signal))
 
-    def _emit_tick(self, event: MarketTickEvent) -> None:
+    async def _emit_tick(self, event: MarketTickEvent) -> None:
         for handler in self.tick_handlers:
-            asyncio.create_task(self._run_tick_handler(handler, event))
+            await self._run_tick_handler(handler, event)
 
     async def _run_handler(self, handler: SignalHandler, signal: BreakoutSignal) -> None:
         try:
@@ -360,3 +521,7 @@ class BollBandBreakoutMonitor:
         if text.endswith("d"):
             return int(text[:-1]) * 24 * 60 * 60 * 1000
         raise ValueError(f"Unsupported bar interval: {bar}")
+
+    @staticmethod
+    def _now_ms() -> int:
+        return int(time.time() * 1000)
