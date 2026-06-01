@@ -1,0 +1,86 @@
+from __future__ import annotations
+
+import json
+import os
+from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_STATE_PATH = ROOT / "data" / "trade_journal" / "live_state.json"
+
+
+@dataclass
+class LivePositionState:
+    position_id: str | None = None
+    symbol: str = "ETH-USDT-SWAP"
+    side: str | None = None
+    layers: int = 0
+    last_entry_price: float | None = None
+    tp_price: float | None = None
+    total_entry_qty: float = 0.0
+    total_entry_notional: float = 0.0
+    avg_entry_price: float = 0.0
+    breakeven_price: float = 0.0
+    tp_mode: str = "MIDDLE"
+    last_order_ts_ms: int = 0
+    last_tp_update_ts_ms: int = 0
+    last_tp_update_candle_ts_ms: int = 0
+    cash_before_position: float | None = None
+    updated_at: str = ""
+
+
+class LiveStateStore:
+    """Small JSON state store for restart recovery.
+
+    OKX can tell us the current net position, but not how many strategy layers
+    created it or what the strategy thought its TP mode was. This state store
+    fills that gap for restarts and daily reporting.
+    """
+
+    def __init__(self, path: str | Path | None = None) -> None:
+        raw_path = path or os.getenv("LIVE_STATE_PATH") or DEFAULT_STATE_PATH
+        self.path = Path(raw_path)
+        if not self.path.is_absolute():
+            self.path = ROOT / self.path
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+
+    def load(self) -> LivePositionState | None:
+        if not self.path.exists():
+            return None
+        try:
+            raw = json.loads(self.path.read_text(encoding="utf-8"))
+            return LivePositionState(**raw)
+        except Exception:
+            return None
+
+    def save(self, state: LivePositionState) -> None:
+        state.updated_at = datetime.now(timezone.utc).isoformat()
+        tmp = self.path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(asdict(state), ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(self.path)
+
+    def clear(self) -> None:
+        if self.path.exists():
+            self.path.unlink()
+
+    @staticmethod
+    def from_strategy_state(*, position_id: str | None, symbol: str, strategy_state: Any, cash_before_position: float | None) -> LivePositionState:
+        return LivePositionState(
+            position_id=position_id,
+            symbol=symbol,
+            side=strategy_state.side,
+            layers=int(strategy_state.layers or 0),
+            last_entry_price=strategy_state.last_entry_price,
+            tp_price=strategy_state.tp_price,
+            total_entry_qty=float(strategy_state.total_entry_qty or 0.0),
+            total_entry_notional=float(strategy_state.total_entry_notional or 0.0),
+            avg_entry_price=float(strategy_state.avg_entry_price or 0.0),
+            breakeven_price=float(strategy_state.breakeven_price or 0.0),
+            tp_mode=strategy_state.tp_mode,
+            last_order_ts_ms=int(strategy_state.last_order_ts_ms or 0),
+            last_tp_update_ts_ms=int(strategy_state.last_tp_update_ts_ms or 0),
+            last_tp_update_candle_ts_ms=int(getattr(strategy_state, "last_tp_update_candle_ts_ms", 0) or 0),
+            cash_before_position=cash_before_position,
+        )
