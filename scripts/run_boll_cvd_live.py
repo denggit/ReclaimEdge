@@ -33,6 +33,7 @@ from src.strategies.boll_cvd_reclaim_strategy import (  # noqa: E402
     StrategyPositionState,
     TradeIntent,
 )
+from src.strategies.boll_cvd_shock_reclaim_strategy import BollCvdShockReclaimStrategy  # noqa: E402
 from src.utils.email_sender import EmailSender  # noqa: E402
 
 
@@ -120,6 +121,23 @@ def position_log_key(position: PositionSnapshot) -> tuple[str, str, float]:
     return (position.side, str(position.contracts), round(position.avg_entry_price, 2))
 
 
+async def fetch_usdt_cash_balance(trader: Trader) -> float:
+    """Fetch USDT cash-like balance for logging only.
+
+    OKX `eq` moves with unrealized PnL while a position is open, which creates
+    noisy account logs. This function prefers cashBal/availBal so logs only
+    reflect cash-like balance changes.
+    """
+    res = await trader.request("GET", "/api/v5/account/balance?ccy=USDT")
+    data = res.get("data", [])
+    if not data:
+        return 0.0
+    for item in data[0].get("details", []):
+        if item.get("ccy") == "USDT":
+            return float(item.get("cashBal") or item.get("availBal") or item.get("availEq") or item.get("eq") or 0.0)
+    return float(data[0].get("totalEq") or 0.0)
+
+
 async def main() -> None:
     load_dotenv()
     if not live_trading_enabled():
@@ -132,7 +150,7 @@ async def main() -> None:
     await trader.initialize()
 
     sizer = SimplePositionSizer(SimplePositionSizerConfig.from_account_equity(trader.account_equity_usdt))
-    strategy = BollCvdReclaimStrategy(BollCvdReclaimStrategyConfig.from_env(), sizer)
+    strategy = BollCvdShockReclaimStrategy(BollCvdReclaimStrategyConfig.from_env(), sizer)
     startup_position = await trader.fetch_position_snapshot()
     if startup_position.has_position:
         restore_strategy_from_position(strategy, startup_position)
@@ -142,13 +160,13 @@ async def main() -> None:
     trading_halted = False
     position_sync_seconds = float(os.getenv("POSITION_SYNC_SECONDS", "5"))
     account_sync_seconds = float(os.getenv("ACCOUNT_SYNC_SECONDS", "60"))
-    account_log_min_delta_usdt = float(os.getenv("ACCOUNT_LOG_MIN_DELTA_USDT", "0.01"))
+    cash_log_min_delta_usdt = float(os.getenv("ACCOUNT_LOG_MIN_DELTA_USDT", "0.01"))
     last_account_sync = 0.0
-    last_logged_equity = trader.account_equity_usdt
+    last_logged_cash = await fetch_usdt_cash_balance(trader)
     last_logged_position_key = position_log_key(startup_position)
 
     async def account_position_sync_loop() -> None:
-        nonlocal trading_halted, last_account_sync, last_logged_equity, last_logged_position_key
+        nonlocal trading_halted, last_account_sync, last_logged_cash, last_logged_position_key
         while True:
             try:
                 await asyncio.sleep(position_sync_seconds)
@@ -158,16 +176,19 @@ async def main() -> None:
                         equity = await trader.fetch_usdt_equity()
                         trader.account_equity_usdt = equity
                         sizer.update_account_equity(equity)
+
+                        cash = await fetch_usdt_cash_balance(trader)
                         last_account_sync = now
-                        if abs(equity - last_logged_equity) >= account_log_min_delta_usdt:
+                        if abs(cash - last_logged_cash) >= cash_log_min_delta_usdt:
                             logger.info(
-                                "ACCOUNT_SYNC_CHANGED | equity=%.4f previous=%.4f layer_margin_pct=%.4f leverage=%.2f",
+                                "CASH_SYNC_CHANGED | cash=%.4f previous=%.4f equity=%.4f layer_margin_pct=%.4f leverage=%.2f",
+                                cash,
+                                last_logged_cash,
                                 equity,
-                                last_logged_equity,
                                 sizer.config.layer_margin_pct,
                                 sizer.config.leverage,
                             )
-                            last_logged_equity = equity
+                            last_logged_cash = cash
 
                     position = await trader.fetch_position_snapshot()
                     current_position_key = position_log_key(position)
