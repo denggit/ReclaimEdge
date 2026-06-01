@@ -14,7 +14,7 @@ from typing import Any, Optional
 import aiohttp
 
 from config.env_loader import OKX_CONFIG
-from src.strategies.boll_cvd_reclaim_strategy import TradeIntent
+from src.strategies.boll_cvd_reclaim_strategy import PositionSide, TradeIntent
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +32,19 @@ class LiveTradeResult:
     tp_ok: bool = False
 
 
+@dataclass(frozen=True)
+class PositionSnapshot:
+    side: Optional[PositionSide]
+    contracts: Decimal
+    avg_entry_price: float
+    eth_qty: float
+    raw_pos: Decimal
+
+    @property
+    def has_position(self) -> bool:
+        return self.side is not None and self.contracts > 0
+
+
 class Trader:
     """Simple OKX live trader for ReclaimEdge.
 
@@ -39,8 +52,9 @@ class Trader:
     - verify account balance cap
     - set leverage
     - market open long/short
-    - place reduce-only take-profit limit order at BOLL middle
+    - place reduce-only take-profit limit order at BOLL target
     - replace take-profit when needed
+    - recover existing ETH-USDT-SWAP position on restart
     """
 
     def __init__(self) -> None:
@@ -64,6 +78,7 @@ class Trader:
 
         self.tp_order_id: str | None = None
         self.position_contracts = Decimal("0")
+        self.account_equity_usdt: float = 0.0
 
         if not self.api_key or not self.secret_key or not self.passphrase:
             raise ValueError("OKX API config is incomplete. Check OKX_API_KEY, OKX_SECRET_KEY, OKX_PASSPHASE.")
@@ -72,19 +87,23 @@ class Trader:
 
     async def initialize(self) -> None:
         equity = await self.fetch_usdt_equity()
+        self.account_equity_usdt = equity
         if equity > self.max_live_equity_usdt:
             raise RuntimeError(
                 f"USDT equity {equity:.4f} > MAX_LIVE_EQUITY_USDT {self.max_live_equity_usdt:.4f}. Refusing live trading."
             )
         await self.set_leverage()
-        self.position_contracts = await self.fetch_position_contracts()
+        position = await self.fetch_position_snapshot()
+        self.position_contracts = position.contracts
         logger.warning(
-            "LIVE trader initialized | symbol=%s td_mode=%s leverage=%s equity=%.4f existing_contracts=%s contract_multiplier=%s min_contracts=%s",
+            "LIVE trader initialized | symbol=%s td_mode=%s leverage=%s equity=%.4f existing_side=%s existing_contracts=%s existing_avg=%.4f contract_multiplier=%s min_contracts=%s",
             self.symbol,
             self.td_mode,
             self.leverage,
             equity,
+            position.side,
             self.position_contracts,
+            position.avg_entry_price,
             self.contract_multiplier,
             self.min_contracts,
         )
@@ -112,8 +131,8 @@ class Trader:
         # From here on, assume the entry may already be live. Never let a later TP
         # failure look like a pre-entry failure to the caller.
         try:
-            current_pos = await self.fetch_position_contracts()
-            self.position_contracts = current_pos if current_pos > 0 else self.position_contracts + contracts
+            position = await self.fetch_position_snapshot()
+            self.position_contracts = position.contracts if position.contracts > 0 else self.position_contracts + contracts
         except Exception:
             logger.exception("Failed to refresh position after entry; using requested contracts as fallback")
             self.position_contracts += contracts
@@ -159,20 +178,16 @@ class Trader:
 
     async def replace_take_profit(self, intent: TradeIntent) -> LiveTradeResult:
         try:
-            current_pos = await self.fetch_position_contracts()
-            if current_pos > 0:
-                self.position_contracts = current_pos
+            position = await self.fetch_position_snapshot()
+            if position.contracts > 0:
+                self.position_contracts = position.contracts
         except Exception:
             logger.exception("Failed to refresh position before replacing TP")
 
         if self.position_contracts <= 0:
             return LiveTradeResult(False, intent.intent_type, None, None, "0", self.price_to_str(intent.tp_price), "no position to protect")
 
-        if self.tp_order_id:
-            try:
-                await self.request("POST", "/api/v5/trade/cancel-order", {"instId": self.symbol, "ordId": self.tp_order_id})
-            except Exception:
-                logger.exception("Cancel previous TP failed; will try to place a new reduce-only TP anyway")
+        await self.cancel_existing_reduce_only_orders()
 
         close_side = "sell" if intent.side == "LONG" else "buy"
         body: dict[str, Any] = {
@@ -203,6 +218,26 @@ class Trader:
             tp_ok=True,
         )
 
+    async def cancel_existing_reduce_only_orders(self) -> None:
+        orders = await self.fetch_pending_orders()
+        for item in orders:
+            if item.get("instId") != self.symbol:
+                continue
+            if str(item.get("reduceOnly", "")).lower() != "true":
+                continue
+            ord_id = item.get("ordId")
+            if not ord_id:
+                continue
+            try:
+                await self.request("POST", "/api/v5/trade/cancel-order", {"instId": self.symbol, "ordId": ord_id})
+                logger.info("Canceled existing reduce-only order | ordId=%s", ord_id)
+            except Exception:
+                logger.exception("Failed to cancel existing reduce-only order | ordId=%s", ord_id)
+
+    async def fetch_pending_orders(self) -> list[dict[str, Any]]:
+        res = await self.request("GET", f"/api/v5/trade/orders-pending?instId={self.symbol}")
+        return list(res.get("data", []))
+
     async def fetch_usdt_equity(self) -> float:
         res = await self.request("GET", "/api/v5/account/balance?ccy=USDT")
         data = res.get("data", [])
@@ -215,12 +250,35 @@ class Trader:
         return float(data[0].get("totalEq") or 0.0)
 
     async def fetch_position_contracts(self) -> Decimal:
+        return (await self.fetch_position_snapshot()).contracts
+
+    async def fetch_position_snapshot(self) -> PositionSnapshot:
         res = await self.request("GET", f"/api/v5/account/positions?instId={self.symbol}")
-        total = Decimal("0")
+        best: PositionSnapshot | None = None
         for item in res.get("data", []):
-            if item.get("instId") == self.symbol:
-                total += abs(Decimal(str(item.get("pos", "0"))))
-        return total
+            if item.get("instId") != self.symbol:
+                continue
+            raw_pos = Decimal(str(item.get("pos", "0")))
+            if raw_pos == 0:
+                continue
+            contracts = abs(raw_pos)
+            avg_entry = float(item.get("avgPx") or item.get("avgPxUsd") or 0.0)
+            if self.pos_side_mode == "long_short":
+                pos_side = str(item.get("posSide", "")).lower()
+                side: PositionSide | None = "LONG" if pos_side == "long" else "SHORT" if pos_side == "short" else None
+            else:
+                side = "LONG" if raw_pos > 0 else "SHORT"
+            best = PositionSnapshot(
+                side=side,
+                contracts=contracts,
+                avg_entry_price=avg_entry,
+                eth_qty=float(contracts * self.contract_multiplier),
+                raw_pos=raw_pos,
+            )
+            break
+        if best is None:
+            return PositionSnapshot(None, Decimal("0"), 0.0, 0.0, Decimal("0"))
+        return best
 
     def mark_flat(self) -> None:
         self.position_contracts = Decimal("0")
