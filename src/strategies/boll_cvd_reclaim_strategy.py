@@ -283,7 +283,7 @@ class BollCvdReclaimStrategy:
         reason: str,
     ) -> TradeIntent:
         next_layer = self.state.layers + 1
-        size = self.sizer.calculate(price)
+        size = self.sizer.calculate(price, layer_index=next_layer)
         self._update_position_cost(price, size.eth_qty)
         tp_price, tp_mode = self._select_tp_price(side, boll)
         if tp_mode != "MIDDLE":
@@ -320,7 +320,7 @@ class BollCvdReclaimStrategy:
         self.state.tp_price = tp_price
         self.state.tp_mode = tp_mode
         self.state.last_tp_update_ts_ms = ts_ms
-        size = self.sizer.calculate(price)
+        size = self.sizer.calculate(price, layer_index=self.state.layers)
         logger.info(
             "TP_SELECTED | side=%s mode=%s avg_entry=%.4f breakeven=%.4f middle=%.4f upper=%.4f lower=%.4f tp=%.4f",
             self.state.side,
