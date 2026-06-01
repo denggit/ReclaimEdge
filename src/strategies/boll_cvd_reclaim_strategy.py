@@ -26,7 +26,7 @@ class BollCvdReclaimStrategyConfig:
     max_layers: int = 3
     order_cooldown_seconds: int = 10
     tp_update_interval_seconds: int = 900
-    max_entry_distance_from_extreme_pct: float = 0.0015
+    max_entry_distance_from_extreme_pct: float = 0.002
     max_armed_seconds: int = 900
 
     @classmethod
@@ -38,7 +38,7 @@ class BollCvdReclaimStrategyConfig:
             max_layers=int(os.getenv("MAX_LAYERS", "3")),
             order_cooldown_seconds=int(os.getenv("ORDER_COOLDOWN_SECONDS", "10")),
             tp_update_interval_seconds=int(os.getenv("TP_UPDATE_INTERVAL_SECONDS", "900")),
-            max_entry_distance_from_extreme_pct=float(os.getenv("MAX_ENTRY_DISTANCE_FROM_EXTREME_PCT", "0.0015")),
+            max_entry_distance_from_extreme_pct=float(os.getenv("MAX_ENTRY_DISTANCE_FROM_EXTREME_PCT", "0.002")),
             max_armed_seconds=int(os.getenv("MAX_ARMED_SECONDS", "900")),
         )
 
