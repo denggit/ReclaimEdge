@@ -5,13 +5,13 @@ from dataclasses import dataclass
 from typing import Deque, Literal
 
 TradeSide = Literal["buy", "sell", "unknown"]
-CvdReversal = Literal["NONE", "CROSS_POSITIVE", "CROSS_NEGATIVE"]
 
 
 @dataclass(frozen=True)
 class CvdTrackerConfig:
-    window_seconds: int = 60
-    min_reversal_delta: float = 0.0
+    fast_window_seconds: float = 5.0
+    price_stall_seconds: float = 2.0
+    price_stall_tolerance_pct: float = 0.0005
 
 
 @dataclass(frozen=True)
@@ -22,27 +22,34 @@ class CvdSnapshot:
     size: float
     signed_delta: float
     total_cvd: float
-    window_cvd: float
+    fast_cvd: float
+    previous_fast_cvd: float
     buy_volume: float
     sell_volume: float
-    reversal: CvdReversal
+    buy_ratio: float
+    sell_ratio: float
+    cross_positive: bool
+    cross_negative: bool
+    cvd_increasing: bool
+    cvd_decreasing: bool
+    no_new_low: bool
+    no_new_high: bool
+    window_low: float
+    window_high: float
 
 
 class CvdTracker:
-    """Realtime rolling CVD tracker.
+    """Fast-window CVD tracker for BOLL reclaim strategy.
 
-    OKX public trades provide side and size. We treat buy-side trades as positive
-    delta and sell-side trades as negative delta.
-
-    The tracker keeps only a rolling time window in memory, so memory usage is
-    bounded by recent tick volume rather than total runtime.
+    The tracker only keeps a short rolling window in memory. It is designed for
+    quick reclaim detection, not for long-session CVD analysis.
     """
 
     def __init__(self, config: CvdTrackerConfig):
         self.config = config
-        self._events: Deque[tuple[int, float, float, float]] = deque()
+        self._events: Deque[tuple[int, float, float, float, float]] = deque()
         self._total_cvd: float = 0.0
-        self._last_window_cvd: float | None = None
+        self._last_fast_cvd: float = 0.0
 
     def update(self, side: str, size: float, price: float, ts_ms: int) -> CvdSnapshot:
         normalized_side = self._normalize_side(side)
@@ -51,14 +58,28 @@ class CvdTracker:
 
         buy_volume = size if normalized_side == "buy" else 0.0
         sell_volume = size if normalized_side == "sell" else 0.0
-        self._events.append((ts_ms, signed_delta, buy_volume, sell_volume))
+        self._events.append((ts_ms, price, signed_delta, buy_volume, sell_volume))
         self._drop_old_events(ts_ms)
 
-        window_cvd = sum(item[1] for item in self._events)
-        window_buy_volume = sum(item[2] for item in self._events)
-        window_sell_volume = sum(item[3] for item in self._events)
-        reversal = self._detect_reversal(window_cvd)
-        self._last_window_cvd = window_cvd
+        previous_fast_cvd = self._last_fast_cvd
+        fast_cvd = sum(item[2] for item in self._events)
+        window_buy_volume = sum(item[3] for item in self._events)
+        window_sell_volume = sum(item[4] for item in self._events)
+        total_volume = window_buy_volume + window_sell_volume
+        buy_ratio = window_buy_volume / total_volume if total_volume > 0 else 0.0
+        sell_ratio = window_sell_volume / total_volume if total_volume > 0 else 0.0
+
+        prices = [item[1] for item in self._events]
+        window_low = min(prices) if prices else price
+        window_high = max(prices) if prices else price
+        no_new_low = self._is_no_new_low(ts_ms, price)
+        no_new_high = self._is_no_new_high(ts_ms, price)
+
+        cross_positive = previous_fast_cvd <= 0 < fast_cvd
+        cross_negative = previous_fast_cvd >= 0 > fast_cvd
+        cvd_increasing = fast_cvd > previous_fast_cvd
+        cvd_decreasing = fast_cvd < previous_fast_cvd
+        self._last_fast_cvd = fast_cvd
 
         return CvdSnapshot(
             ts_ms=ts_ms,
@@ -67,47 +88,50 @@ class CvdTracker:
             size=size,
             signed_delta=signed_delta,
             total_cvd=self._total_cvd,
-            window_cvd=window_cvd,
+            fast_cvd=fast_cvd,
+            previous_fast_cvd=previous_fast_cvd,
             buy_volume=window_buy_volume,
             sell_volume=window_sell_volume,
-            reversal=reversal,
-        )
-
-    def latest(self) -> CvdSnapshot | None:
-        if not self._events:
-            return None
-        latest_ts = self._events[-1][0]
-        window_cvd = sum(item[1] for item in self._events)
-        buy_volume = sum(item[2] for item in self._events)
-        sell_volume = sum(item[3] for item in self._events)
-        return CvdSnapshot(
-            ts_ms=latest_ts,
-            price=0.0,
-            side="unknown",
-            size=0.0,
-            signed_delta=0.0,
-            total_cvd=self._total_cvd,
-            window_cvd=window_cvd,
-            buy_volume=buy_volume,
-            sell_volume=sell_volume,
-            reversal="NONE",
+            buy_ratio=buy_ratio,
+            sell_ratio=sell_ratio,
+            cross_positive=cross_positive,
+            cross_negative=cross_negative,
+            cvd_increasing=cvd_increasing,
+            cvd_decreasing=cvd_decreasing,
+            no_new_low=no_new_low,
+            no_new_high=no_new_high,
+            window_low=window_low,
+            window_high=window_high,
         )
 
     def _drop_old_events(self, ts_ms: int) -> None:
-        cutoff = ts_ms - self.config.window_seconds * 1000
+        cutoff = ts_ms - int(self.config.fast_window_seconds * 1000)
         while self._events and self._events[0][0] < cutoff:
             self._events.popleft()
 
-    def _detect_reversal(self, window_cvd: float) -> CvdReversal:
-        previous = self._last_window_cvd
-        threshold = abs(self.config.min_reversal_delta)
-        if previous is None:
-            return "NONE"
-        if previous <= 0 < window_cvd and abs(window_cvd) >= threshold:
-            return "CROSS_POSITIVE"
-        if previous >= 0 > window_cvd and abs(window_cvd) >= threshold:
-            return "CROSS_NEGATIVE"
-        return "NONE"
+    def _is_no_new_low(self, ts_ms: int, current_price: float) -> bool:
+        samples = self._stall_samples(ts_ms)
+        if len(samples) < 2:
+            return False
+        min_ts, min_price = min(samples, key=lambda item: item[1])
+        tolerance = abs(self.config.price_stall_tolerance_pct)
+        low_is_old_enough = ts_ms - min_ts >= int(self.config.price_stall_seconds * 1000)
+        recovered_from_low = current_price >= min_price * (1 + tolerance)
+        return low_is_old_enough or recovered_from_low
+
+    def _is_no_new_high(self, ts_ms: int, current_price: float) -> bool:
+        samples = self._stall_samples(ts_ms)
+        if len(samples) < 2:
+            return False
+        max_ts, max_price = max(samples, key=lambda item: item[1])
+        tolerance = abs(self.config.price_stall_tolerance_pct)
+        high_is_old_enough = ts_ms - max_ts >= int(self.config.price_stall_seconds * 1000)
+        pulled_back_from_high = current_price <= max_price * (1 - tolerance)
+        return high_is_old_enough or pulled_back_from_high
+
+    def _stall_samples(self, ts_ms: int) -> list[tuple[int, float]]:
+        cutoff = ts_ms - int(self.config.price_stall_seconds * 1000)
+        return [(item[0], item[1]) for item in self._events if item[0] >= cutoff]
 
     @staticmethod
     def _normalize_side(side: str) -> TradeSide:
