@@ -20,14 +20,6 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
-class InstrumentSpec:
-    inst_id: str
-    ct_val: Decimal
-    lot_sz: Decimal
-    min_sz: Decimal
-
-
-@dataclass(frozen=True)
 class LiveTradeResult:
     ok: bool
     action: str
@@ -51,18 +43,23 @@ class Trader:
 
     def __init__(self) -> None:
         self.symbol = os.getenv("OKX_INST_ID", "ETH-USDT-SWAP")
+        if self.symbol != "ETH-USDT-SWAP":
+            raise RuntimeError("Live trader only supports ETH-USDT-SWAP for now.")
+
         self.base_url = os.getenv("OKX_BASE_URL", "https://www.okx.com")
         self.td_mode = os.getenv("OKX_TD_MODE", "isolated")
         self.leverage = os.getenv("LEVERAGE", "50")
         self.pos_side_mode = os.getenv("OKX_POS_SIDE_MODE", "net")
         self.live_trading = os.getenv("LIVE_TRADING", "false").strip().lower() in {"1", "true", "yes", "y", "on"}
         self.max_live_equity_usdt = float(os.getenv("MAX_LIVE_EQUITY_USDT", "30"))
+        self.contract_multiplier = Decimal("0.1")
+        self.contract_precision = Decimal("0.01")
+        self.min_contracts = Decimal("0.01")
 
         self.api_key = OKX_CONFIG.get("api_key", "")
         self.secret_key = OKX_CONFIG.get("secret_key", "")
         self.passphrase = OKX_CONFIG.get("passphrase", "")
 
-        self.instrument: InstrumentSpec | None = None
         self.tp_order_id: str | None = None
         self.position_contracts = Decimal("0")
 
@@ -72,7 +69,6 @@ class Trader:
             raise RuntimeError("LIVE_TRADING is not true. Refusing to initialize live trader.")
 
     async def initialize(self) -> None:
-        self.instrument = await self.fetch_instrument_spec()
         equity = await self.fetch_usdt_equity()
         if equity > self.max_live_equity_usdt:
             raise RuntimeError(
@@ -80,14 +76,13 @@ class Trader:
             )
         await self.set_leverage()
         logger.warning(
-            "LIVE trader initialized | symbol=%s td_mode=%s leverage=%s equity=%.4f ctVal=%s lotSz=%s minSz=%s",
+            "LIVE trader initialized | symbol=%s td_mode=%s leverage=%s equity=%.4f contract_multiplier=%s min_contracts=%s",
             self.symbol,
             self.td_mode,
             self.leverage,
             equity,
-            self.instrument.ct_val,
-            self.instrument.lot_sz,
-            self.instrument.min_sz,
+            self.contract_multiplier,
+            self.min_contracts,
         )
 
     async def execute_intent(self, intent: TradeIntent) -> LiveTradeResult:
@@ -109,13 +104,15 @@ class Trader:
 
         res = await self.request("POST", "/api/v5/trade/order", body)
         order_id = self.extract_order_id(res)
-        self.position_contracts += contracts
+
+        current_pos = await self.fetch_position_contracts()
+        self.position_contracts = current_pos if current_pos > 0 else self.position_contracts + contracts
         tp = await self.replace_take_profit(intent)
         return LiveTradeResult(True, intent.intent_type, order_id, tp.tp_order_id, self.decimal_to_str(contracts), self.price_to_str(intent.tp_price), "market order placed")
 
     async def replace_take_profit(self, intent: TradeIntent) -> LiveTradeResult:
-        if self.position_contracts <= 0:
-            current_pos = await self.fetch_position_contracts()
+        current_pos = await self.fetch_position_contracts()
+        if current_pos > 0:
             self.position_contracts = current_pos
         if self.position_contracts <= 0:
             return LiveTradeResult(False, intent.intent_type, None, None, "0", self.price_to_str(intent.tp_price), "no position to protect")
@@ -164,21 +161,6 @@ class Trader:
                 total += abs(Decimal(str(item.get("pos", "0"))))
         return total
 
-    async def fetch_instrument_spec(self) -> InstrumentSpec:
-        url = f"{self.base_url}/api/v5/public/instruments?instType=SWAP&instId={self.symbol}"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=10) as resp:
-                payload = await resp.json()
-        if payload.get("code") != "0" or not payload.get("data"):
-            raise RuntimeError(f"Failed to fetch instrument spec: {payload}")
-        item = payload["data"][0]
-        return InstrumentSpec(
-            inst_id=item["instId"],
-            ct_val=Decimal(str(item["ctVal"])),
-            lot_sz=Decimal(str(item["lotSz"])),
-            min_sz=Decimal(str(item["minSz"])),
-        )
-
     async def set_leverage(self) -> None:
         body = {"instId": self.symbol, "lever": str(self.leverage), "mgnMode": self.td_mode}
         if self.pos_side_mode == "long_short":
@@ -218,13 +200,11 @@ class Trader:
         }
 
     def eth_qty_to_contracts(self, eth_qty: Decimal) -> Decimal:
-        if self.instrument is None:
-            raise RuntimeError("Instrument spec not initialized")
-        raw = eth_qty / self.instrument.ct_val
-        lots = (raw / self.instrument.lot_sz).to_integral_value(rounding=ROUND_DOWN)
-        contracts = lots * self.instrument.lot_sz
-        if contracts < self.instrument.min_sz:
-            raise RuntimeError(f"Order size {contracts} is below minSz {self.instrument.min_sz}")
+        raw_contracts = eth_qty / self.contract_multiplier
+        lots = (raw_contracts / self.contract_precision).to_integral_value(rounding=ROUND_DOWN)
+        contracts = lots * self.contract_precision
+        if contracts < self.min_contracts:
+            raise RuntimeError(f"Order size {contracts} contracts is below minimum {self.min_contracts}")
         return contracts
 
     def pos_side(self, side: str) -> str | None:
