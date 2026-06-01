@@ -181,10 +181,6 @@ async def main() -> None:
                         result.order_id,
                         result.tp_order_id,
                     )
-                    subject, content = build_live_success_email(intent, result)
-                    ok = await email_sender.send_email_async(subject, content, content_type="html")
-                    if not ok:
-                        logger.error("Failed to send live execution success email")
                 except Exception as exc:
                     try:
                         contracts = await trader.fetch_position_contracts()
