@@ -28,6 +28,8 @@ class LiveTradeResult:
     contracts: str
     tp_price: str
     message: str
+    entry_filled: bool = False
+    tp_ok: bool = False
 
 
 class Trader:
@@ -75,12 +77,14 @@ class Trader:
                 f"USDT equity {equity:.4f} > MAX_LIVE_EQUITY_USDT {self.max_live_equity_usdt:.4f}. Refusing live trading."
             )
         await self.set_leverage()
+        self.position_contracts = await self.fetch_position_contracts()
         logger.warning(
-            "LIVE trader initialized | symbol=%s td_mode=%s leverage=%s equity=%.4f contract_multiplier=%s min_contracts=%s",
+            "LIVE trader initialized | symbol=%s td_mode=%s leverage=%s equity=%.4f existing_contracts=%s contract_multiplier=%s min_contracts=%s",
             self.symbol,
             self.td_mode,
             self.leverage,
             equity,
+            self.position_contracts,
             self.contract_multiplier,
             self.min_contracts,
         )
@@ -105,15 +109,62 @@ class Trader:
         res = await self.request("POST", "/api/v5/trade/order", body)
         order_id = self.extract_order_id(res)
 
-        current_pos = await self.fetch_position_contracts()
-        self.position_contracts = current_pos if current_pos > 0 else self.position_contracts + contracts
-        tp = await self.replace_take_profit(intent)
-        return LiveTradeResult(True, intent.intent_type, order_id, tp.tp_order_id, self.decimal_to_str(contracts), self.price_to_str(intent.tp_price), "market order placed")
+        # From here on, assume the entry may already be live. Never let a later TP
+        # failure look like a pre-entry failure to the caller.
+        try:
+            current_pos = await self.fetch_position_contracts()
+            self.position_contracts = current_pos if current_pos > 0 else self.position_contracts + contracts
+        except Exception:
+            logger.exception("Failed to refresh position after entry; using requested contracts as fallback")
+            self.position_contracts += contracts
+
+        try:
+            tp = await self.replace_take_profit(intent)
+            if not tp.ok:
+                return LiveTradeResult(
+                    ok=False,
+                    action=intent.intent_type,
+                    order_id=order_id,
+                    tp_order_id=tp.tp_order_id,
+                    contracts=self.decimal_to_str(contracts),
+                    tp_price=self.price_to_str(intent.tp_price),
+                    message=f"entry_filled_but_tp_failed: {tp.message}",
+                    entry_filled=True,
+                    tp_ok=False,
+                )
+            return LiveTradeResult(
+                ok=True,
+                action=intent.intent_type,
+                order_id=order_id,
+                tp_order_id=tp.tp_order_id,
+                contracts=self.decimal_to_str(contracts),
+                tp_price=self.price_to_str(intent.tp_price),
+                message="market order placed and take-profit protected",
+                entry_filled=True,
+                tp_ok=True,
+            )
+        except Exception as exc:
+            logger.exception("Entry appears filled, but TP placement raised an exception")
+            return LiveTradeResult(
+                ok=False,
+                action=intent.intent_type,
+                order_id=order_id,
+                tp_order_id=None,
+                contracts=self.decimal_to_str(contracts),
+                tp_price=self.price_to_str(intent.tp_price),
+                message=f"entry_filled_but_tp_exception: {exc}",
+                entry_filled=True,
+                tp_ok=False,
+            )
 
     async def replace_take_profit(self, intent: TradeIntent) -> LiveTradeResult:
-        current_pos = await self.fetch_position_contracts()
-        if current_pos > 0:
-            self.position_contracts = current_pos
+        try:
+            current_pos = await self.fetch_position_contracts()
+            if current_pos > 0:
+                self.position_contracts = current_pos
+        except Exception:
+            logger.exception("Failed to refresh position before replacing TP")
+
         if self.position_contracts <= 0:
             return LiveTradeResult(False, intent.intent_type, None, None, "0", self.price_to_str(intent.tp_price), "no position to protect")
 
@@ -140,7 +191,17 @@ class Trader:
         res = await self.request("POST", "/api/v5/trade/order", body)
         tp_order_id = self.extract_order_id(res)
         self.tp_order_id = tp_order_id
-        return LiveTradeResult(True, intent.intent_type, None, tp_order_id, self.decimal_to_str(self.position_contracts), self.price_to_str(intent.tp_price), "take-profit replaced")
+        return LiveTradeResult(
+            True,
+            intent.intent_type,
+            None,
+            tp_order_id,
+            self.decimal_to_str(self.position_contracts),
+            self.price_to_str(intent.tp_price),
+            "take-profit replaced",
+            entry_filled=False,
+            tp_ok=True,
+        )
 
     async def fetch_usdt_equity(self) -> float:
         res = await self.request("GET", "/api/v5/account/balance?ccy=USDT")
@@ -160,6 +221,10 @@ class Trader:
             if item.get("instId") == self.symbol:
                 total += abs(Decimal(str(item.get("pos", "0"))))
         return total
+
+    def mark_flat(self) -> None:
+        self.position_contracts = Decimal("0")
+        self.tp_order_id = None
 
     async def set_leverage(self) -> None:
         body = {"instId": self.symbol, "lever": str(self.leverage), "mgnMode": self.td_mode}
