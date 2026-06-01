@@ -126,11 +126,7 @@ async def main() -> None:
         raise RuntimeError("LIVE_TRADING is not true. Refusing to start live runner.")
 
     monitor_config = BollBandBreakoutMonitorConfig.from_env()
-    cvd_config = CvdTrackerConfig(
-        fast_window_seconds=float(os.getenv("CVD_FAST_WINDOW_SECONDS", "5")),
-        price_stall_seconds=float(os.getenv("PRICE_STALL_SECONDS", "2")),
-        price_stall_tolerance_pct=float(os.getenv("PRICE_STALL_TOLERANCE_PCT", "0.0005")),
-    )
+    cvd_config = CvdTrackerConfig.from_env()
     email_sender = EmailSender()
     trader = Trader()
     await trader.initialize()
