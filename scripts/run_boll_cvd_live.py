@@ -610,10 +610,16 @@ async def account_position_sync_worker(
     last_account_sync = 0.0
     last_logged_cash = account_snapshot.cash
     last_logged_position_key = position_log_key(account_snapshot.position) if account_snapshot.position is not None else ("FLAT", "0", 0.0)
+    consecutive_failures = 0
+    first_failure_monotonic = 0.0
+    last_failure_log = 0.0
+    last_stale_log = 0.0
+    sync_failure_log_interval_seconds = float(os.getenv("ACCOUNT_SYNC_FAILURE_LOG_INTERVAL_SECONDS", "60"))
+    sync_stale_warn_seconds = float(os.getenv("ACCOUNT_SYNC_STALE_WARN_SECONDS", "180"))
     while True:
         try:
             await asyncio.sleep(position_sync_seconds)
-            now = asyncio.get_running_loop().time()
+            now = time.monotonic()
             cash = account_snapshot.cash
             equity = account_snapshot.equity
             if now - last_account_sync >= account_sync_seconds:
@@ -683,20 +689,19 @@ async def account_position_sync_worker(
                     last_logged_position_key = current_position_key
                 elif position.has_position:
                     trader.position_contracts = position.contracts
-                    if pending_order_count > 0:
-                        continue
-                    sync_strategy_cost_from_position(strategy, position)
-                    save_state_payload = (execution_state.current_position_id, copy.deepcopy(strategy.state), execution_state.cash_before_position)
-                    if current_position_key != last_logged_position_key:
-                        logger.info(
-                            "POSITION_SYNC_CHANGED | side=%s contracts=%s avg_entry=%.4f eth_qty=%.6f strategy_layers=%s",
-                            position.side,
-                            position.contracts,
-                            position.avg_entry_price,
-                            position.eth_qty,
-                            strategy.state.layers,
-                        )
-                        last_logged_position_key = current_position_key
+                    if pending_order_count == 0:
+                        sync_strategy_cost_from_position(strategy, position)
+                        save_state_payload = (execution_state.current_position_id, copy.deepcopy(strategy.state), execution_state.cash_before_position)
+                        if current_position_key != last_logged_position_key:
+                            logger.info(
+                                "POSITION_SYNC_CHANGED | side=%s contracts=%s avg_entry=%.4f eth_qty=%.6f strategy_layers=%s",
+                                position.side,
+                                position.contracts,
+                                position.avg_entry_price,
+                                position.eth_qty,
+                                strategy.state.layers,
+                            )
+                            last_logged_position_key = current_position_key
 
             if record_flat_payload is not None:
                 journal.record_flat(**record_flat_payload)
@@ -705,8 +710,36 @@ async def account_position_sync_worker(
             if save_state_payload is not None:
                 position_id, strategy_state, cash_before_position = save_state_payload
                 state_store.save(LiveStateStore.from_strategy_state(position_id=position_id, symbol=trader.symbol, strategy_state=strategy_state, cash_before_position=cash_before_position))
-        except Exception:
-            logger.exception("Account/position sync loop failed")
+            if consecutive_failures > 0:
+                logger.warning("ACCOUNT_SYNC_RECOVERED | failures=%s", consecutive_failures)
+            consecutive_failures = 0
+            first_failure_monotonic = 0.0
+        except Exception as exc:
+            now = time.monotonic()
+            consecutive_failures += 1
+            if first_failure_monotonic <= 0:
+                first_failure_monotonic = now
+            last_success_age_seconds = (
+                max(now - account_snapshot.updated_monotonic, 0.0)
+                if account_snapshot.updated_monotonic > 0
+                else float("inf")
+            )
+            if now - last_failure_log >= sync_failure_log_interval_seconds:
+                logger.warning(
+                    "ACCOUNT_SYNC_FAILED | failures=%s error_type=%s error=%s last_success_age_seconds=%.1f",
+                    consecutive_failures,
+                    type(exc).__name__,
+                    str(exc),
+                    last_success_age_seconds,
+                )
+                last_failure_log = now
+            if now - first_failure_monotonic >= sync_stale_warn_seconds and now - last_stale_log >= sync_failure_log_interval_seconds:
+                logger.warning(
+                    "ACCOUNT_SYNC_STALE | failures=%s last_success_age_seconds=%.1f risk=account_snapshot_may_be_stale",
+                    consecutive_failures,
+                    last_success_age_seconds,
+                )
+                last_stale_log = now
 
 
 async def main() -> None:
@@ -721,12 +754,16 @@ async def main() -> None:
     state_store = LiveStateStore()
     reporter = DailyTradeReporter(journal, email_sender)
     trader = Trader()
-    await trader.initialize()
-
-    sizer = SimplePositionSizer(SimplePositionSizerConfig.from_account_equity(trader.account_equity_usdt))
-    strategy = BollCvdShockReclaimStrategy(BollCvdReclaimStrategyConfig.from_env(), sizer)
-    startup_position = await trader.fetch_position_snapshot()
-    startup_cash = await fetch_usdt_cash_balance(trader)
+    await trader.start()
+    try:
+        await trader.initialize()
+        sizer = SimplePositionSizer(SimplePositionSizerConfig.from_account_equity(trader.account_equity_usdt))
+        strategy = BollCvdShockReclaimStrategy(BollCvdReclaimStrategyConfig.from_env(), sizer)
+        startup_position = await trader.fetch_position_snapshot()
+        startup_cash = await fetch_usdt_cash_balance(trader)
+    except Exception:
+        await trader.close()
+        raise
     current_position_id: str | None = None
     cash_before_position: float | None = None
 
@@ -803,47 +840,50 @@ async def main() -> None:
         config=monitor_config,
         tick_handlers=[on_market_tick],
     )
-    await asyncio.gather(
-        account_position_sync_worker(
-            state_lock=state_lock,
-            account_snapshot=account_snapshot,
-            execution_state=execution_state,
-            trader=trader,
-            sizer=sizer,
-            strategy=strategy,
-            journal=journal,
-            state_store=state_store,
-            position_sync_seconds=position_sync_seconds,
-            account_sync_seconds=account_sync_seconds,
-            cash_log_min_delta_usdt=cash_log_min_delta_usdt,
-        ),
-        strategy_tick_worker(
-            strategy_tick_queue=strategy_tick_queue,
-            execution_queue=execution_queue,
-            state_lock=state_lock,
-            account_snapshot=account_snapshot,
-            execution_state=execution_state,
-            cvd=cvd,
-            strategy=strategy,
-            heartbeat_seconds=market_tick_heartbeat_seconds,
-            account_stale_warn_seconds=account_snapshot_stale_warn_seconds,
-            strategy_lag_warn_seconds=strategy_lag_warn_seconds,
-        ),
-        execution_worker(
-            execution_queue=execution_queue,
-            state_lock=state_lock,
-            execution_state=execution_state,
-            account_snapshot=account_snapshot,
-            trader=trader,
-            strategy=strategy,
-            journal=journal,
-            state_store=state_store,
-            email_sender=email_sender,
-            backlog_log_seconds=execution_backlog_log_seconds,
-        ),
-        daily_report_loop(),
-        monitor.run_forever(),
-    )
+    try:
+        await asyncio.gather(
+            account_position_sync_worker(
+                state_lock=state_lock,
+                account_snapshot=account_snapshot,
+                execution_state=execution_state,
+                trader=trader,
+                sizer=sizer,
+                strategy=strategy,
+                journal=journal,
+                state_store=state_store,
+                position_sync_seconds=position_sync_seconds,
+                account_sync_seconds=account_sync_seconds,
+                cash_log_min_delta_usdt=cash_log_min_delta_usdt,
+            ),
+            strategy_tick_worker(
+                strategy_tick_queue=strategy_tick_queue,
+                execution_queue=execution_queue,
+                state_lock=state_lock,
+                account_snapshot=account_snapshot,
+                execution_state=execution_state,
+                cvd=cvd,
+                strategy=strategy,
+                heartbeat_seconds=market_tick_heartbeat_seconds,
+                account_stale_warn_seconds=account_snapshot_stale_warn_seconds,
+                strategy_lag_warn_seconds=strategy_lag_warn_seconds,
+            ),
+            execution_worker(
+                execution_queue=execution_queue,
+                state_lock=state_lock,
+                execution_state=execution_state,
+                account_snapshot=account_snapshot,
+                trader=trader,
+                strategy=strategy,
+                journal=journal,
+                state_store=state_store,
+                email_sender=email_sender,
+                backlog_log_seconds=execution_backlog_log_seconds,
+            ),
+            daily_report_loop(),
+            monitor.run_forever(),
+        )
+    finally:
+        await trader.close()
 
 
 if __name__ == "__main__":

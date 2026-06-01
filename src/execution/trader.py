@@ -79,11 +79,24 @@ class Trader:
         self.tp_order_id: str | None = None
         self.position_contracts = Decimal("0")
         self.account_equity_usdt: float = 0.0
+        self._session: aiohttp.ClientSession | None = None
+        self._timeout_seconds = float(os.getenv("OKX_PRIVATE_REST_TIMEOUT_SECONDS", "10"))
 
         if not self.api_key or not self.secret_key or not self.passphrase:
             raise ValueError("OKX API config is incomplete. Check OKX_API_KEY, OKX_SECRET_KEY, OKX_PASSPHASE.")
         if not self.live_trading:
             raise RuntimeError("LIVE_TRADING is not true. Refusing to initialize live trader.")
+
+    async def start(self) -> None:
+        if self._session is not None and not self._session.closed:
+            return
+        self._session = aiohttp.ClientSession()
+
+    async def close(self) -> None:
+        if self._session is None:
+            return
+        await self._session.close()
+        self._session = None
 
     async def initialize(self) -> None:
         equity = await self.fetch_usdt_equity()
@@ -295,16 +308,18 @@ class Trader:
             await self.request("POST", "/api/v5/account/set-leverage", body)
 
     async def request(self, method: str, endpoint: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        await self.start()
+        if self._session is None:
+            raise RuntimeError("OKX private REST session is not initialized")
         method = method.upper()
         body = "" if method == "GET" else json.dumps(payload or {}, separators=(",", ":"))
         headers = self.headers(method, endpoint, body)
-        async with aiohttp.ClientSession() as session:
-            if method == "GET":
-                async with session.get(self.base_url + endpoint, headers=headers, timeout=10) as resp:
-                    res = await resp.json()
-            else:
-                async with session.post(self.base_url + endpoint, headers=headers, data=body, timeout=10) as resp:
-                    res = await resp.json()
+        if method == "GET":
+            async with self._session.get(self.base_url + endpoint, headers=headers, timeout=self._timeout_seconds) as resp:
+                res = await resp.json()
+        else:
+            async with self._session.post(self.base_url + endpoint, headers=headers, data=body, timeout=self._timeout_seconds) as resp:
+                res = await resp.json()
         if res.get("code") != "0":
             raise RuntimeError(f"OKX API error: method={method} endpoint={endpoint} response={res}")
         return res

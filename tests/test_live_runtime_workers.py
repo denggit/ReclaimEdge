@@ -3,9 +3,11 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import importlib.util
+import os
 import sys
 import types
 import unittest
+from unittest.mock import patch
 from decimal import Decimal
 
 if importlib.util.find_spec("dotenv") is None:
@@ -582,6 +584,148 @@ class LiveRuntimeWorkerTest(unittest.IsolatedAsyncioTestCase):
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task
+
+    async def test_account_sync_timeout_does_not_clear_strategy_or_snapshot(self) -> None:
+        fetched = asyncio.Event()
+        live_position = PositionSnapshot("LONG", Decimal("1"), 100.0, 0.1, Decimal("1"))
+
+        class TimeoutTrader(FakeTrader):
+            def __init__(inner_self) -> None:
+                super().__init__()
+                inner_self.mark_flat_calls = 0
+
+            async def fetch_position_snapshot(inner_self) -> PositionSnapshot:
+                fetched.set()
+                raise TimeoutError("private REST timeout")
+
+            def mark_flat(inner_self) -> None:
+                inner_self.mark_flat_calls += 1
+                super().mark_flat()
+
+        strategy = FakeStrategy()
+        strategy.state = StrategyPositionState(
+            side="LONG",
+            layers=1,
+            last_entry_price=100.0,
+            tp_price=101.0,
+            total_entry_qty=0.1,
+            total_entry_notional=10.0,
+            avg_entry_price=100.0,
+        )
+        account_snapshot = AccountSnapshot(live_position, 100.0, 100.0, asyncio.get_running_loop().time(), 0, 1)
+        trader = TimeoutTrader()
+        task = asyncio.create_task(
+            account_position_sync_worker(
+                state_lock=asyncio.Lock(),
+                account_snapshot=account_snapshot,
+                execution_state=ExecutionState("pos-1", 100.0),
+                trader=trader,  # type: ignore[arg-type]
+                sizer=SimplePositionSizer(SimplePositionSizerConfig()),
+                strategy=strategy,  # type: ignore[arg-type]
+                journal=FakeJournal(),  # type: ignore[arg-type]
+                state_store=FakeStateStore(),  # type: ignore[arg-type]
+                position_sync_seconds=0,
+                account_sync_seconds=999,
+                cash_log_min_delta_usdt=999,
+            )
+        )
+        with self.assertLogs("scripts.run_boll_cvd_live", level="WARNING"):
+            await asyncio.wait_for(fetched.wait(), timeout=0.2)
+            await asyncio.sleep(0)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+        self.assertIs(account_snapshot.position, live_position)
+        self.assertEqual(account_snapshot.version, 1)
+        self.assertEqual(strategy.state.side, "LONG")
+        self.assertEqual(strategy.state.layers, 1)
+        self.assertEqual(trader.mark_flat_calls, 0)
+
+    async def test_account_sync_failure_logs_are_throttled(self) -> None:
+        fetched = asyncio.Event()
+
+        class FailingTrader(FakeTrader):
+            def __init__(inner_self) -> None:
+                super().__init__()
+                inner_self.calls = 0
+
+            async def fetch_position_snapshot(inner_self) -> PositionSnapshot:
+                inner_self.calls += 1
+                if inner_self.calls >= 5:
+                    fetched.set()
+                raise TimeoutError("private REST timeout")
+
+        with patch.dict(os.environ, {"ACCOUNT_SYNC_FAILURE_LOG_INTERVAL_SECONDS": "60", "ACCOUNT_SYNC_STALE_WARN_SECONDS": "180"}):
+            task = asyncio.create_task(
+                account_position_sync_worker(
+                    state_lock=asyncio.Lock(),
+                    account_snapshot=AccountSnapshot(flat_position(), 100.0, 100.0, asyncio.get_running_loop().time(), 0, 1),
+                    execution_state=ExecutionState(None, None),
+                    trader=FailingTrader(),  # type: ignore[arg-type]
+                    sizer=SimplePositionSizer(SimplePositionSizerConfig()),
+                    strategy=FakeStrategy(),  # type: ignore[arg-type]
+                    journal=FakeJournal(),  # type: ignore[arg-type]
+                    state_store=FakeStateStore(),  # type: ignore[arg-type]
+                    position_sync_seconds=0,
+                    account_sync_seconds=999,
+                    cash_log_min_delta_usdt=999,
+                )
+            )
+            with self.assertLogs("scripts.run_boll_cvd_live", level="WARNING") as logs:
+                await asyncio.wait_for(fetched.wait(), timeout=0.2)
+                await asyncio.sleep(0)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+        output = "\n".join(logs.output)
+        self.assertEqual(output.count("ACCOUNT_SYNC_FAILED"), 1)
+        self.assertNotIn("Traceback", output)
+
+    async def test_account_sync_recovery_resets_failures(self) -> None:
+        fetched_after_recovery = asyncio.Event()
+        live_position = PositionSnapshot("LONG", Decimal("1"), 100.0, 0.1, Decimal("1"))
+
+        class RecoveringTrader(FakeTrader):
+            def __init__(inner_self) -> None:
+                super().__init__()
+                inner_self.calls = 0
+
+            async def fetch_position_snapshot(inner_self) -> PositionSnapshot:
+                inner_self.calls += 1
+                if inner_self.calls in {1, 2, 4}:
+                    if inner_self.calls == 4:
+                        fetched_after_recovery.set()
+                    raise TimeoutError("private REST timeout")
+                return live_position
+
+        with patch.dict(os.environ, {"ACCOUNT_SYNC_FAILURE_LOG_INTERVAL_SECONDS": "0", "ACCOUNT_SYNC_STALE_WARN_SECONDS": "999"}):
+            task = asyncio.create_task(
+                account_position_sync_worker(
+                    state_lock=asyncio.Lock(),
+                    account_snapshot=AccountSnapshot(flat_position(), 100.0, 100.0, asyncio.get_running_loop().time(), 0, 1),
+                    execution_state=ExecutionState("pos-1", 100.0),
+                    trader=RecoveringTrader(),  # type: ignore[arg-type]
+                    sizer=SimplePositionSizer(SimplePositionSizerConfig()),
+                    strategy=FakeStrategy(),  # type: ignore[arg-type]
+                    journal=FakeJournal(),  # type: ignore[arg-type]
+                    state_store=FakeStateStore(),  # type: ignore[arg-type]
+                    position_sync_seconds=0,
+                    account_sync_seconds=999,
+                    cash_log_min_delta_usdt=999,
+                )
+            )
+            with self.assertLogs("scripts.run_boll_cvd_live", level="WARNING") as logs:
+                await asyncio.wait_for(fetched_after_recovery.wait(), timeout=0.2)
+                await asyncio.sleep(0)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+        output = "\n".join(logs.output)
+        self.assertIn("ACCOUNT_SYNC_RECOVERED | failures=2", output)
+        self.assertIn("ACCOUNT_SYNC_FAILED | failures=1", output.split("ACCOUNT_SYNC_RECOVERED | failures=2", 1)[1])
 
 
 if __name__ == "__main__":

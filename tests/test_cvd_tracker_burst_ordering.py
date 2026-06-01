@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+import os
 import unittest
-from collections import deque
 from unittest.mock import patch
 
 from src.indicators.cvd_tracker import CvdTracker, CvdTrackerConfig
@@ -53,27 +53,31 @@ class CvdTrackerBurstOrderingTest(unittest.TestCase):
         self.assertGreaterEqual(snapshot.burst_volume_ratio, 2.0)
         self.assertLess(snapshot.burst_net_move_pct, 0)
 
-    def test_out_of_order_tick_excludes_future_ticks_and_still_detects_burst(self) -> None:
+    def test_out_of_order_tick_is_dropped_for_realtime(self) -> None:
         tracker = CvdTracker(config())
         start_ts = 2_000_000
         feed_baseline(tracker, start_ts)
         tracker.update("sell", 10.0, 100.0, start_ts + 60_000)
         tracker.update("sell", 10.0, 99.80, start_ts + 61_000)
         tracker.update("sell", 10.0, 99.50, start_ts + 62_000)
-        tracker.update("sell", 10.0, 99.00, start_ts + 64_000)
+        latest = tracker.update("sell", 10.0, 99.00, start_ts + 64_000)
+        burst_len = len(tracker._burst_events)
+        fast_len = len(tracker._fast_events)
+        total_cvd = tracker._total_cvd
 
         with self.assertLogs("src.indicators.cvd_tracker", level="WARNING") as logs:
             snapshot = tracker.update("sell", 10.0, 99.29, start_ts + 63_000)
 
         self.assertIn("CVD_TICK_OUT_OF_ORDER", "\n".join(logs.output))
-        self.assertTrue(snapshot.down_burst)
-        self.assertLess(snapshot.burst_net_move_pct, 0)
-        window = tracker._events_since(start_ts + 63_000, 3)
-        self.assertTrue(all(item[0] <= start_ts + 63_000 for item in window))
-        self.assertEqual([item[0] for item in window], sorted(item[0] for item in window))
+        self.assertEqual(len(tracker._burst_events), burst_len)
+        self.assertEqual(len(tracker._fast_events), fast_len)
+        self.assertEqual(tracker._total_cvd, total_cvd)
+        self.assertEqual(snapshot.fast_cvd, latest.fast_cvd)
+        self.assertFalse(snapshot.down_burst)
 
     def test_out_of_order_log_throttle_uses_monotonic_not_tick_timestamp(self) -> None:
-        tracker = CvdTracker(config())
+        with patch.dict(os.environ, {"CVD_UPDATE_SLOW_LOG_MS": "0"}):
+            tracker = CvdTracker(config())
         tracker.update("buy", 1.0, 100.0, 10_000)
 
         with patch("src.indicators.cvd_tracker.time.monotonic", side_effect=[100.0, 101.0, 106.1]):
@@ -84,26 +88,6 @@ class CvdTrackerBurstOrderingTest(unittest.TestCase):
 
         output = "\n".join(logs.output)
         self.assertEqual(output.count("CVD_TICK_OUT_OF_ORDER"), 2)
-
-    def test_baseline_elapsed_uses_sorted_events_when_baseline_is_out_of_order(self) -> None:
-        tracker = CvdTracker(config())
-        tracker._events = deque(
-            [
-                (59_000, 100.00, 1.0, 1.0, 0.0, 1.0),
-                (3_000, 100.02, 1.0, 1.0, 0.0, 1.0),
-                (4_000, 99.98, 1.0, 1.0, 0.0, 1.0),
-                (30_000, 100.01, 1.0, 1.0, 0.0, 1.0),
-                (31_000, 99.99, 1.0, 1.0, 0.0, 1.0),
-                (60_000, 100.00, -100.0, 0.0, 100.0, 100.0),
-                (61_000, 99.80, -100.0, 0.0, 100.0, 100.0),
-            ]
-        )
-
-        stats = tracker._burst_stats(63_000, 99.29)
-
-        self.assertGreater(float(stats["baseline_range_pct"]), 0.0)
-        self.assertGreaterEqual(float(stats["volume_ratio"]), 2.0)
-        self.assertTrue(bool(stats["down_burst"]))
 
 
 if __name__ == "__main__":
