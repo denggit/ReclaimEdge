@@ -114,6 +114,12 @@ def sync_strategy_cost_from_position(strategy: BollCvdReclaimStrategy, position:
     strategy.state.last_entry_price = strategy.state.last_entry_price or position.avg_entry_price
 
 
+def position_log_key(position: PositionSnapshot) -> tuple[str, str, float]:
+    if not position.has_position or position.side is None:
+        return ("FLAT", "0", 0.0)
+    return (position.side, str(position.contracts), round(position.avg_entry_price, 2))
+
+
 async def main() -> None:
     load_dotenv()
     if not live_trading_enabled():
@@ -140,10 +146,13 @@ async def main() -> None:
     trading_halted = False
     position_sync_seconds = float(os.getenv("POSITION_SYNC_SECONDS", "5"))
     account_sync_seconds = float(os.getenv("ACCOUNT_SYNC_SECONDS", "60"))
+    account_log_min_delta_usdt = float(os.getenv("ACCOUNT_LOG_MIN_DELTA_USDT", "0.01"))
     last_account_sync = 0.0
+    last_logged_equity = trader.account_equity_usdt
+    last_logged_position_key = position_log_key(startup_position)
 
     async def account_position_sync_loop() -> None:
-        nonlocal trading_halted, last_account_sync
+        nonlocal trading_halted, last_account_sync, last_logged_equity, last_logged_position_key
         while True:
             try:
                 await asyncio.sleep(position_sync_seconds)
@@ -154,25 +163,37 @@ async def main() -> None:
                         trader.account_equity_usdt = equity
                         sizer.update_account_equity(equity)
                         last_account_sync = now
-                        logger.info("ACCOUNT_SYNC | equity=%.4f layer_margin_pct=%.4f leverage=%.2f", equity, sizer.config.layer_margin_pct, sizer.config.leverage)
+                        if abs(equity - last_logged_equity) >= account_log_min_delta_usdt:
+                            logger.info(
+                                "ACCOUNT_SYNC_CHANGED | equity=%.4f previous=%.4f layer_margin_pct=%.4f leverage=%.2f",
+                                equity,
+                                last_logged_equity,
+                                sizer.config.layer_margin_pct,
+                                sizer.config.leverage,
+                            )
+                            last_logged_equity = equity
 
                     position = await trader.fetch_position_snapshot()
+                    current_position_key = position_log_key(position)
                     if not position.has_position and strategy.state.layers > 0:
-                        logger.warning("POSITION_SYNC | flat_on_okx=true. Resetting strategy and trader state.")
+                        logger.warning("POSITION_SYNC_CHANGED | flat_on_okx=true. Resetting strategy and trader state.")
                         strategy.state = StrategyPositionState()
                         trader.mark_flat()
                         trading_halted = False
+                        last_logged_position_key = current_position_key
                     elif position.has_position:
                         trader.position_contracts = position.contracts
                         sync_strategy_cost_from_position(strategy, position)
-                        logger.debug(
-                            "POSITION_SYNC | side=%s contracts=%s avg_entry=%.4f eth_qty=%.6f strategy_layers=%s",
-                            position.side,
-                            position.contracts,
-                            position.avg_entry_price,
-                            position.eth_qty,
-                            strategy.state.layers,
-                        )
+                        if current_position_key != last_logged_position_key:
+                            logger.info(
+                                "POSITION_SYNC_CHANGED | side=%s contracts=%s avg_entry=%.4f eth_qty=%.6f strategy_layers=%s",
+                                position.side,
+                                position.contracts,
+                                position.avg_entry_price,
+                                position.eth_qty,
+                                strategy.state.layers,
+                            )
+                            last_logged_position_key = current_position_key
             except Exception:
                 logger.exception("Account/position sync loop failed")
 
