@@ -81,6 +81,7 @@ class BollCvdShockReclaimStrategy(BollCvdReclaimStrategy):
             if not cvd.down_burst:
                 if self.state.lower_armed:
                     self.state.lower_extreme_price = min(self.state.lower_extreme_price or price, price)
+                    self._update_lower_deep_enough(boll)
                 return
             if not self.state.lower_armed:
                 self.state.lower_armed = True
@@ -100,6 +101,7 @@ class BollCvdShockReclaimStrategy(BollCvdReclaimStrategy):
                     self.config.max_entry_distance_from_extreme_pct * 100,
                     self.config.max_armed_seconds,
                 )
+                self._update_lower_deep_enough(boll)
             else:
                 old_extreme = self.state.lower_extreme_price or price
                 self.state.lower_extreme_price = min(old_extreme, price)
@@ -111,6 +113,7 @@ class BollCvdShockReclaimStrategy(BollCvdReclaimStrategy):
                         cvd.burst_move_ratio,
                         cvd.burst_volume_ratio,
                     )
+                self._update_lower_deep_enough(boll)
             self.state.lower_last_burst_ts_ms = ts_ms
             if self.state.upper_armed:
                 logger.info("UPPER_ARMED_RESET | reason=opposite_lower_shock price=%.4f", price)
@@ -121,6 +124,7 @@ class BollCvdShockReclaimStrategy(BollCvdReclaimStrategy):
             if not cvd.up_burst:
                 if self.state.upper_armed:
                     self.state.upper_extreme_price = max(self.state.upper_extreme_price or price, price)
+                    self._update_upper_deep_enough(boll)
                 return
             if not self.state.upper_armed:
                 self.state.upper_armed = True
@@ -140,6 +144,7 @@ class BollCvdShockReclaimStrategy(BollCvdReclaimStrategy):
                     self.config.max_entry_distance_from_extreme_pct * 100,
                     self.config.max_armed_seconds,
                 )
+                self._update_upper_deep_enough(boll)
             else:
                 old_extreme = self.state.upper_extreme_price or price
                 self.state.upper_extreme_price = max(old_extreme, price)
@@ -151,6 +156,7 @@ class BollCvdShockReclaimStrategy(BollCvdReclaimStrategy):
                         cvd.burst_move_ratio,
                         cvd.burst_volume_ratio,
                     )
+                self._update_upper_deep_enough(boll)
             self.state.upper_last_burst_ts_ms = ts_ms
             if self.state.lower_armed:
                 logger.info("LOWER_ARMED_RESET | reason=opposite_upper_shock price=%.4f", price)
