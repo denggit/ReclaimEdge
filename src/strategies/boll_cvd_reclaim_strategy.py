@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from typing import Literal, Optional
@@ -7,6 +8,8 @@ from typing import Literal, Optional
 from src.indicators.cvd_tracker import CvdSnapshot
 from src.monitors.boll_band_breakout_monitor import BollSnapshot
 from src.risk.simple_position_sizer import PositionSize, SimplePositionSizer
+
+logger = logging.getLogger(__name__)
 
 TradeIntentType = Literal[
     "OPEN_LONG",
@@ -129,8 +132,21 @@ class BollCvdReclaimStrategy:
                 self.state.lower_armed = True
                 self.state.lower_armed_ts_ms = ts_ms
                 self.state.lower_extreme_price = price
+                logger.info(
+                    "LOWER_ARMED | price=%.4f lower=%.4f middle=%.4f max_entry_distance=%.4f%% max_armed=%ss",
+                    price,
+                    boll.lower,
+                    boll.middle,
+                    self.config.max_entry_distance_from_extreme_pct * 100,
+                    self.config.max_armed_seconds,
+                )
             else:
-                self.state.lower_extreme_price = min(self.state.lower_extreme_price or price, price)
+                old_extreme = self.state.lower_extreme_price or price
+                self.state.lower_extreme_price = min(old_extreme, price)
+                if self.state.lower_extreme_price < old_extreme:
+                    logger.debug("LOWER_EXTREME_UPDATED | extreme=%.4f price=%.4f", self.state.lower_extreme_price, price)
+            if self.state.upper_armed:
+                logger.info("UPPER_ARMED_RESET | reason=opposite_lower_break price=%.4f", price)
             self.state.upper_armed = False
             self.state.upper_extreme_price = None
             self.state.upper_armed_ts_ms = 0
@@ -141,8 +157,21 @@ class BollCvdReclaimStrategy:
                 self.state.upper_armed = True
                 self.state.upper_armed_ts_ms = ts_ms
                 self.state.upper_extreme_price = price
+                logger.info(
+                    "UPPER_ARMED | price=%.4f upper=%.4f middle=%.4f max_entry_distance=%.4f%% max_armed=%ss",
+                    price,
+                    boll.upper,
+                    boll.middle,
+                    self.config.max_entry_distance_from_extreme_pct * 100,
+                    self.config.max_armed_seconds,
+                )
             else:
-                self.state.upper_extreme_price = max(self.state.upper_extreme_price or price, price)
+                old_extreme = self.state.upper_extreme_price or price
+                self.state.upper_extreme_price = max(old_extreme, price)
+                if self.state.upper_extreme_price > old_extreme:
+                    logger.debug("UPPER_EXTREME_UPDATED | extreme=%.4f price=%.4f", self.state.upper_extreme_price, price)
+            if self.state.lower_armed:
+                logger.info("LOWER_ARMED_RESET | reason=opposite_upper_break price=%.4f", price)
             self.state.lower_armed = False
             self.state.lower_extreme_price = None
             self.state.lower_armed_ts_ms = 0
@@ -151,15 +180,19 @@ class BollCvdReclaimStrategy:
         # If price mean-reverts all the way to the middle, the original outside-band
         # opportunity is considered stale.
         if self.state.lower_armed and price >= boll.middle:
+            logger.info("LOWER_ARMED_RESET | reason=middle_reclaimed price=%.4f middle=%.4f", price, boll.middle)
             self._reset_lower_armed()
         if self.state.upper_armed and price <= boll.middle:
+            logger.info("UPPER_ARMED_RESET | reason=middle_reclaimed price=%.4f middle=%.4f", price, boll.middle)
             self._reset_upper_armed()
 
     def _expire_armed_state(self, ts_ms: int) -> None:
         max_age_ms = self.config.max_armed_seconds * 1000
         if self.state.lower_armed and ts_ms - self.state.lower_armed_ts_ms > max_age_ms:
+            logger.info("LOWER_ARMED_RESET | reason=expired age_ms=%s", ts_ms - self.state.lower_armed_ts_ms)
             self._reset_lower_armed()
         if self.state.upper_armed and ts_ms - self.state.upper_armed_ts_ms > max_age_ms:
+            logger.info("UPPER_ARMED_RESET | reason=expired age_ms=%s", ts_ms - self.state.upper_armed_ts_ms)
             self._reset_upper_armed()
 
     def _reset_lower_armed(self) -> None:
