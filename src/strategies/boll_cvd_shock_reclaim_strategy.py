@@ -32,7 +32,7 @@ class BollCvdShockReclaimStrategy(BollCvdReclaimStrategy):
         self._last_switch_on_candle_ts_ms: int = 0
         self._last_lower_outside_no_burst_log_monotonic: float = 0.0
         self._last_upper_outside_no_burst_log_monotonic: float = 0.0
-        self.outside_no_burst_log_interval_seconds = float(os.getenv("OUTSIDE_NO_BURST_LOG_INTERVAL_SECONDS", "2"))
+        self.outside_no_burst_log_interval_seconds = float(os.getenv("OUTSIDE_NO_BURST_LOG_INTERVAL_SECONDS", "10"))
 
     def on_tick(self, price: float, ts_ms: int, boll: BollSnapshot, cvd: CvdSnapshot) -> list[TradeIntent]:
         intents: list[TradeIntent] = []

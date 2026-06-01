@@ -1,0 +1,432 @@
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import importlib.util
+import sys
+import types
+import unittest
+from decimal import Decimal
+
+if importlib.util.find_spec("dotenv") is None:
+    dotenv = types.ModuleType("dotenv")
+    dotenv.load_dotenv = lambda *args, **kwargs: None
+    sys.modules.setdefault("dotenv", dotenv)
+
+from scripts.run_boll_cvd_live import (  # noqa: E402
+    AccountSnapshot,
+    ExecutionState,
+    TradeCommand,
+    account_position_sync_worker,
+    execution_worker,
+    strategy_tick_worker,
+)
+from src.execution.trader import LiveTradeResult, PositionSnapshot  # noqa: E402
+from src.indicators.cvd_tracker import CvdSnapshot  # noqa: E402
+from src.monitors.boll_band_breakout_monitor import BollSnapshot, MarketTickEvent, TradeTick  # noqa: E402
+from src.risk.simple_position_sizer import PositionSize, SimplePositionSizer, SimplePositionSizerConfig  # noqa: E402
+from src.strategies.boll_cvd_reclaim_strategy import StrategyPositionState, TradeIntent  # noqa: E402
+
+
+def flat_position() -> PositionSnapshot:
+    return PositionSnapshot(None, Decimal("0"), 0.0, 0.0, Decimal("0"))
+
+
+def boll() -> BollSnapshot:
+    return BollSnapshot("ETH-USDT-SWAP", 0, 100.0, 100.0, 101.0, 99.0, 0.01, 0.01, True, True)
+
+
+def tick(ts_ms: int) -> MarketTickEvent:
+    return MarketTickEvent(TradeTick("ETH-USDT-SWAP", 100.0, 1.0, "buy", ts_ms), boll())
+
+
+def cvd_snapshot(ts_ms: int) -> CvdSnapshot:
+    return CvdSnapshot(
+        ts_ms=ts_ms,
+        price=100.0,
+        side="buy",
+        size=1.0,
+        signed_delta=1.0,
+        total_cvd=1.0,
+        fast_cvd=1.0,
+        previous_fast_cvd=0.0,
+        buy_volume=1.0,
+        sell_volume=0.0,
+        buy_ratio=1.0,
+        sell_ratio=0.0,
+        cross_positive=True,
+        cross_negative=False,
+        cvd_increasing=True,
+        cvd_decreasing=False,
+        no_new_low=False,
+        no_new_high=False,
+        window_low=100.0,
+        window_high=100.0,
+        burst_net_move_pct=0.0,
+        burst_range_pct=0.0,
+        baseline_range_pct=0.0,
+        burst_move_ratio=0.0,
+        burst_volume=0.0,
+        baseline_volume=0.0,
+        burst_volume_ratio=0.0,
+        up_burst=False,
+        down_burst=False,
+    )
+
+
+def intent(ts_ms: int, intent_type: str = "OPEN_LONG") -> TradeIntent:
+    return TradeIntent(
+        intent_type=intent_type,  # type: ignore[arg-type]
+        side="LONG",
+        price=100.0,
+        layer_index=1,
+        tp_price=101.0,
+        reason="test",
+        size=PositionSize(1.0, 50.0, 0.5, 1, 1.0),
+        fast_cvd=1.0,
+        previous_fast_cvd=0.0,
+        buy_ratio=1.0,
+        sell_ratio=0.0,
+        boll_upper=101.0,
+        boll_middle=100.0,
+        boll_lower=99.0,
+        ts_ms=ts_ms,
+        avg_entry_price=100.0,
+        breakeven_price=100.1,
+        tp_mode="MIDDLE",
+    )
+
+
+class FakeCvd:
+    def __init__(self) -> None:
+        self.calls: list[int] = []
+
+    def update(self, *, side: str, size: float, price: float, ts_ms: int) -> CvdSnapshot:
+        self.calls.append(ts_ms)
+        return cvd_snapshot(ts_ms)
+
+
+class FakeStrategy:
+    def __init__(self, intents: list[TradeIntent] | None = None, processed: asyncio.Event | None = None) -> None:
+        self.state = StrategyPositionState()
+        self.intents = intents or []
+        self.processed_ts: list[int] = []
+        self.processed = processed
+
+    def on_tick(self, price: float, ts_ms: int, boll: BollSnapshot, cvd: CvdSnapshot) -> list[TradeIntent]:
+        self.processed_ts.append(ts_ms)
+        if self.processed is not None:
+            self.processed.set()
+        return [self.intents.pop(0)] if self.intents else []
+
+
+class FakeJournal:
+    def __init__(self) -> None:
+        self.entries: list[int] = []
+
+    def new_position_id(self, symbol: str, side: str, ts_ms: int | None = None) -> str:
+        return f"{symbol}:{side}:{ts_ms}"
+
+    def record_entry(self, **kwargs) -> None:  # type: ignore[no-untyped-def]
+        self.entries.append(kwargs["intent"].ts_ms)
+
+    def record_tp_update(self, **kwargs) -> None:  # type: ignore[no-untyped-def]
+        pass
+
+    def record_error(self, **kwargs) -> None:  # type: ignore[no-untyped-def]
+        pass
+
+    def record_flat(self, **kwargs) -> None:  # type: ignore[no-untyped-def]
+        pass
+
+
+class FakeStateStore:
+    def save(self, state) -> None:  # type: ignore[no-untyped-def]
+        pass
+
+    def clear(self) -> None:
+        pass
+
+
+class FakeEmailSender:
+    async def send_email_async(self, *args, **kwargs) -> bool:  # type: ignore[no-untyped-def]
+        return True
+
+
+class FakeTrader:
+    def __init__(self, execute_delay: float = 0.0, position_delay: float = 0.0) -> None:
+        self.symbol = "ETH-USDT-SWAP"
+        self.account_equity_usdt = 100.0
+        self.position_contracts = Decimal("0")
+        self.execute_delay = execute_delay
+        self.position_delay = position_delay
+        self.executed: list[int] = []
+
+    async def execute_intent(self, trade_intent: TradeIntent) -> LiveTradeResult:
+        if self.execute_delay:
+            await asyncio.sleep(self.execute_delay)
+        self.executed.append(trade_intent.ts_ms)
+        return LiveTradeResult(True, trade_intent.intent_type, f"ord-{trade_intent.ts_ms}", "tp", "1", "101", "ok", True, True)
+
+    async def fetch_position_snapshot(self) -> PositionSnapshot:
+        if self.position_delay:
+            await asyncio.sleep(self.position_delay)
+        return flat_position()
+
+    async def fetch_usdt_equity(self) -> float:
+        return 100.0
+
+    async def request(self, method: str, endpoint: str, payload=None):  # type: ignore[no-untyped-def]
+        return {"data": [{"details": [{"ccy": "USDT", "cashBal": "100"}]}]}
+
+    def mark_flat(self) -> None:
+        self.position_contracts = Decimal("0")
+
+
+class GuardedLock:
+    def __init__(self) -> None:
+        self._lock = asyncio.Lock()
+        self.held = False
+
+    async def __aenter__(self):
+        await self._lock.acquire()
+        self.held = True
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:  # type: ignore[no-untyped-def]
+        self.held = False
+        self._lock.release()
+
+
+class LiveRuntimeWorkerTest(unittest.IsolatedAsyncioTestCase):
+    async def run_strategy_worker_once(self, strategy: FakeStrategy, cvd: FakeCvd, queue: asyncio.Queue[MarketTickEvent]) -> asyncio.Queue[TradeCommand]:
+        execution_queue: asyncio.Queue[TradeCommand] = asyncio.Queue(maxsize=1000)
+        worker = asyncio.create_task(
+            strategy_tick_worker(
+                strategy_tick_queue=queue,
+                execution_queue=execution_queue,
+                state_lock=asyncio.Lock(),
+                account_snapshot=AccountSnapshot(flat_position(), 100.0, 100.0, asyncio.get_running_loop().time(), 0, 1),
+                execution_state=ExecutionState(None, None),
+                cvd=cvd,  # type: ignore[arg-type]
+                strategy=strategy,  # type: ignore[arg-type]
+                heartbeat_seconds=1_000_000_000_000,
+                account_stale_warn_seconds=999,
+                strategy_lag_warn_seconds=1_000_000_000_000,
+            )
+        )
+        await asyncio.wait_for(queue.join(), timeout=1)
+        worker.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await worker
+        return execution_queue
+
+    async def test_account_sync_slow_network_does_not_block_strategy_tick_worker(self) -> None:
+        processed = asyncio.Event()
+        strategy = FakeStrategy(processed=processed)
+        cvd = FakeCvd()
+        queue: asyncio.Queue[MarketTickEvent] = asyncio.Queue()
+        state_lock = asyncio.Lock()
+        account_snapshot = AccountSnapshot(flat_position(), 100.0, 100.0, asyncio.get_running_loop().time(), 0, 1)
+        execution_state = ExecutionState(None, None)
+        trader = FakeTrader(position_delay=1.0)
+        account_task = asyncio.create_task(
+            account_position_sync_worker(
+                state_lock=state_lock,
+                account_snapshot=account_snapshot,
+                execution_state=execution_state,
+                trader=trader,  # type: ignore[arg-type]
+                sizer=SimplePositionSizer(SimplePositionSizerConfig()),
+                strategy=strategy,  # type: ignore[arg-type]
+                journal=FakeJournal(),  # type: ignore[arg-type]
+                state_store=FakeStateStore(),  # type: ignore[arg-type]
+                position_sync_seconds=0,
+                account_sync_seconds=999,
+                cash_log_min_delta_usdt=999,
+            )
+        )
+        strategy_task = asyncio.create_task(
+            strategy_tick_worker(
+                strategy_tick_queue=queue,
+                execution_queue=asyncio.Queue(maxsize=1000),
+                state_lock=state_lock,
+                account_snapshot=account_snapshot,
+                execution_state=execution_state,
+                cvd=cvd,  # type: ignore[arg-type]
+                strategy=strategy,  # type: ignore[arg-type]
+                heartbeat_seconds=1_000_000_000_000,
+                account_stale_warn_seconds=999,
+                strategy_lag_warn_seconds=1_000_000_000_000,
+            )
+        )
+        await asyncio.sleep(0.05)
+        await queue.put(tick(1_000))
+
+        await asyncio.wait_for(processed.wait(), timeout=0.2)
+
+        account_task.cancel()
+        strategy_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await account_task
+        with contextlib.suppress(asyncio.CancelledError):
+            await strategy_task
+
+    async def test_slow_execution_worker_does_not_block_strategy_ticks(self) -> None:
+        strategy = FakeStrategy(intents=[intent(1_000)])
+        cvd = FakeCvd()
+        strategy_queue: asyncio.Queue[MarketTickEvent] = asyncio.Queue()
+        execution_queue: asyncio.Queue[TradeCommand] = asyncio.Queue(maxsize=1000)
+        state_lock = asyncio.Lock()
+        account_snapshot = AccountSnapshot(flat_position(), 100.0, 100.0, asyncio.get_running_loop().time(), 0, 1)
+        execution_state = ExecutionState(None, None)
+        trader = FakeTrader(execute_delay=1.0)
+        strategy_task = asyncio.create_task(
+            strategy_tick_worker(
+                strategy_tick_queue=strategy_queue,
+                execution_queue=execution_queue,
+                state_lock=state_lock,
+                account_snapshot=account_snapshot,
+                execution_state=execution_state,
+                cvd=cvd,  # type: ignore[arg-type]
+                strategy=strategy,  # type: ignore[arg-type]
+                heartbeat_seconds=1_000_000_000_000,
+                account_stale_warn_seconds=999,
+                strategy_lag_warn_seconds=1_000_000_000_000,
+            )
+        )
+        execution_task = asyncio.create_task(
+            execution_worker(
+                execution_queue=execution_queue,
+                state_lock=state_lock,
+                execution_state=execution_state,
+                account_snapshot=account_snapshot,
+                trader=trader,  # type: ignore[arg-type]
+                strategy=strategy,  # type: ignore[arg-type]
+                journal=FakeJournal(),  # type: ignore[arg-type]
+                state_store=FakeStateStore(),  # type: ignore[arg-type]
+                email_sender=FakeEmailSender(),  # type: ignore[arg-type]
+                backlog_log_seconds=999,
+            )
+        )
+        await strategy_queue.put(tick(1_000))
+        await asyncio.wait_for(strategy_queue.join(), timeout=0.2)
+        await asyncio.sleep(0.05)
+        await strategy_queue.put(tick(1_001))
+        await asyncio.wait_for(strategy_queue.join(), timeout=0.2)
+
+        self.assertEqual(strategy.processed_ts, [1_000, 1_001])
+
+        strategy_task.cancel()
+        execution_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await strategy_task
+        with contextlib.suppress(asyncio.CancelledError):
+            await execution_task
+
+    async def test_strategy_worker_processes_ticks_in_order(self) -> None:
+        strategy = FakeStrategy()
+        cvd = FakeCvd()
+        queue: asyncio.Queue[MarketTickEvent] = asyncio.Queue()
+        for ts_ms in [1_000, 1_001, 1_002]:
+            await queue.put(tick(ts_ms))
+
+        await self.run_strategy_worker_once(strategy, cvd, queue)
+
+        self.assertEqual(cvd.calls, [1_000, 1_001, 1_002])
+
+    async def test_execution_worker_processes_commands_in_order(self) -> None:
+        execution_queue: asyncio.Queue[TradeCommand] = asyncio.Queue(maxsize=1000)
+        for ts_ms in [1_000, 1_001, 1_002]:
+            await execution_queue.put(TradeCommand(intent(ts_ms), StrategyPositionState(), ts_ms, asyncio.get_running_loop().time(), 0, "test"))
+        trader = FakeTrader()
+        task = asyncio.create_task(
+            execution_worker(
+                execution_queue=execution_queue,
+                state_lock=asyncio.Lock(),
+                execution_state=ExecutionState(None, None),
+                account_snapshot=AccountSnapshot(flat_position(), 100.0, 100.0, asyncio.get_running_loop().time(), 0, 1),
+                trader=trader,  # type: ignore[arg-type]
+                strategy=FakeStrategy(),  # type: ignore[arg-type]
+                journal=FakeJournal(),  # type: ignore[arg-type]
+                state_store=FakeStateStore(),  # type: ignore[arg-type]
+                email_sender=FakeEmailSender(),  # type: ignore[arg-type]
+                backlog_log_seconds=999,
+            )
+        )
+        await asyncio.wait_for(execution_queue.join(), timeout=1)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+        self.assertEqual(trader.executed, [1_000, 1_001, 1_002])
+
+    async def test_account_snapshot_stale_warns_without_blocking_tick(self) -> None:
+        processed = asyncio.Event()
+        strategy = FakeStrategy(processed=processed)
+        queue: asyncio.Queue[MarketTickEvent] = asyncio.Queue()
+        task = asyncio.create_task(
+            strategy_tick_worker(
+                strategy_tick_queue=queue,
+                execution_queue=asyncio.Queue(maxsize=1000),
+                state_lock=asyncio.Lock(),
+                account_snapshot=AccountSnapshot(flat_position(), 100.0, 100.0, 0.0, 0, 0),
+                execution_state=ExecutionState(None, None),
+                cvd=FakeCvd(),  # type: ignore[arg-type]
+                strategy=strategy,  # type: ignore[arg-type]
+                heartbeat_seconds=1_000_000_000_000,
+                account_stale_warn_seconds=0.1,
+                strategy_lag_warn_seconds=1_000_000_000_000,
+            )
+        )
+        with self.assertLogs("scripts.run_boll_cvd_live", level="WARNING") as logs:
+            await queue.put(tick(1_000))
+            await asyncio.wait_for(processed.wait(), timeout=0.2)
+
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+        self.assertIn("ACCOUNT_SNAPSHOT_STALE", "\n".join(logs.output))
+
+    async def test_account_sync_network_awaits_do_not_happen_inside_state_lock(self) -> None:
+        state_lock = GuardedLock()
+
+        class GuardedTrader(FakeTrader):
+            async def fetch_position_snapshot(inner_self) -> PositionSnapshot:
+                self.assertFalse(state_lock.held)
+                await asyncio.sleep(0)
+                return flat_position()
+
+            async def fetch_usdt_equity(inner_self) -> float:
+                self.assertFalse(state_lock.held)
+                await asyncio.sleep(0)
+                return 100.0
+
+            async def request(inner_self, method: str, endpoint: str, payload=None):  # type: ignore[no-untyped-def]
+                self.assertFalse(state_lock.held)
+                await asyncio.sleep(0)
+                return {"data": [{"details": [{"ccy": "USDT", "cashBal": "100"}]}]}
+
+        task = asyncio.create_task(
+            account_position_sync_worker(
+                state_lock=state_lock,  # type: ignore[arg-type]
+                account_snapshot=AccountSnapshot(flat_position(), 100.0, 100.0, asyncio.get_running_loop().time(), 0, 1),
+                execution_state=ExecutionState(None, None),
+                trader=GuardedTrader(),  # type: ignore[arg-type]
+                sizer=SimplePositionSizer(SimplePositionSizerConfig()),
+                strategy=FakeStrategy(),  # type: ignore[arg-type]
+                journal=FakeJournal(),  # type: ignore[arg-type]
+                state_store=FakeStateStore(),  # type: ignore[arg-type]
+                position_sync_seconds=0,
+                account_sync_seconds=0,
+                cash_log_min_delta_usdt=999,
+            )
+        )
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+
+if __name__ == "__main__":
+    unittest.main()

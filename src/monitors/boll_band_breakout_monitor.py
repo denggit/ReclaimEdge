@@ -192,14 +192,14 @@ class BollBandBreakoutMonitor:
         self._tick_queue_maxsize = int(os.getenv("TICK_EVENT_QUEUE_MAXSIZE", "10000"))
         self._tick_event_queue: asyncio.Queue[MarketTickEvent] = asyncio.Queue(maxsize=self._tick_queue_maxsize)
         self._last_tick_backlog_log_ts: float = 0.0
-        self._tick_backlog_log_seconds = float(os.getenv("TICK_EVENT_QUEUE_BACKLOG_LOG_SECONDS", "5"))
+        self._tick_backlog_log_seconds = float(os.getenv("TICK_EVENT_QUEUE_BACKLOG_LOG_SECONDS", "30"))
         self._candle_sync_consecutive_failures: int = 0
         self._candle_sync_started_ts_ms: int = self._now_ms()
         self._last_successful_candle_sync_ts_ms: int = 0
         self._last_candle_sync_error_log_ts_ms: int = 0
         self._last_candle_sync_stale_log_ts_ms: int = 0
         self._last_boll_stale_log_ts_ms: int = 0
-        self._candle_sync_error_log_interval_seconds = float(os.getenv("CANDLE_SYNC_ERROR_LOG_INTERVAL_SECONDS", "60"))
+        self._candle_sync_error_log_interval_seconds = float(os.getenv("CANDLE_SYNC_ERROR_LOG_INTERVAL_SECONDS", "300"))
         self._candle_sync_stale_warn_seconds = float(os.getenv("CANDLE_SYNC_STALE_WARN_SECONDS", "180"))
         self._candle_sync_max_backoff_seconds = float(os.getenv("CANDLE_SYNC_MAX_BACKOFF_SECONDS", "60"))
 
@@ -425,13 +425,15 @@ class BollBandBreakoutMonitor:
 
     def _log_tick_queue_backlog(self) -> None:
         queue_size = self._tick_event_queue.qsize()
-        if queue_size <= 0:
+        level = queue_log_level(queue_size)
+        if level is None:
             return
         now = time.time()
         if now - self._last_tick_backlog_log_ts < self._tick_backlog_log_seconds:
             return
         self._last_tick_backlog_log_ts = now
-        logger.info(
+        logger.log(
+            level,
             "MARKET_TICK_QUEUE_BACKLOG | queue_size=%s maxsize=%s",
             queue_size,
             self._tick_queue_maxsize,
@@ -525,3 +527,13 @@ class BollBandBreakoutMonitor:
     @staticmethod
     def _now_ms() -> int:
         return int(time.time() * 1000)
+
+
+def queue_log_level(queue_size: int) -> int | None:
+    if queue_size < 500:
+        return None
+    if queue_size < 2000:
+        return logging.INFO
+    if queue_size < 8000:
+        return logging.WARNING
+    return logging.ERROR

@@ -90,6 +90,7 @@ class BollBandBreakoutMonitorTickQueueTest(unittest.IsolatedAsyncioTestCase):
         now_ms = 1_000_000
         monitor._now_ms = lambda: now_ms  # type: ignore[method-assign]
         monitor._candle_sync_started_ts_ms = now_ms
+        monitor._candle_sync_error_log_interval_seconds = 60
 
         with self.assertLogs("src.monitors.boll_band_breakout_monitor", level="WARNING") as logs:
             first_sleep = await monitor._run_candle_sync_once()
