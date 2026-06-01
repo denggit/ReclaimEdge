@@ -81,6 +81,21 @@ class BollSnapshot:
 
 
 @dataclass(frozen=True)
+class TradeTick:
+    inst_id: str
+    price: float
+    size: float
+    side: str
+    ts_ms: int
+
+
+@dataclass(frozen=True)
+class MarketTickEvent:
+    tick: TradeTick
+    boll: Optional[BollSnapshot]
+
+
+@dataclass(frozen=True)
 class BreakoutSignal:
     inst_id: str
     direction: BreakoutDirection
@@ -97,6 +112,7 @@ class BreakoutSignal:
 
 
 SignalHandler = Callable[[BreakoutSignal], Awaitable[None] | None]
+TickHandler = Callable[[MarketTickEvent], Awaitable[None] | None]
 
 
 class BollCalculator:
@@ -135,10 +151,16 @@ class OkxPublicMarketClient:
 
 
 class BollBandBreakoutMonitor:
-    def __init__(self, config: BollBandBreakoutMonitorConfig, handlers: Optional[list[SignalHandler]] = None):
+    def __init__(
+        self,
+        config: BollBandBreakoutMonitorConfig,
+        handlers: Optional[list[SignalHandler]] = None,
+        tick_handlers: Optional[list[TickHandler]] = None,
+    ):
         self.config = config
         self.client = OkxPublicMarketClient(config)
         self.handlers = handlers or []
+        self.tick_handlers = tick_handlers or []
         self._candles: list[Candle] = []
         self._candles_lock = asyncio.Lock()
         self._snapshot: Optional[BollSnapshot] = None
@@ -152,6 +174,9 @@ class BollBandBreakoutMonitor:
 
     def add_handler(self, handler: SignalHandler) -> None:
         self.handlers.append(handler)
+
+    def add_tick_handler(self, handler: TickHandler) -> None:
+        self.tick_handlers.append(handler)
 
     async def run_forever(self) -> None:
         self._running = True
@@ -230,22 +255,30 @@ class BollBandBreakoutMonitor:
             return
         for item in payload.get("data", []):
             try:
-                await self._process_tick(float(item["px"]), int(item["ts"]))
+                tick = TradeTick(
+                    inst_id=self.config.inst_id,
+                    price=float(item["px"]),
+                    size=float(item.get("sz", 0.0)),
+                    side=str(item.get("side", "unknown")),
+                    ts_ms=int(item["ts"]),
+                )
+                await self._process_tick(tick)
             except Exception:
                 logger.warning("Invalid trade tick payload: %s", item)
 
-    async def _process_tick(self, price: float, tick_ts_ms: int) -> None:
+    async def _process_tick(self, tick: TradeTick) -> None:
         if self.config.use_live_candle:
-            await self._update_live_candle_from_tick(price, tick_ts_ms)
+            await self._update_live_candle_from_tick(tick.price, tick.ts_ms)
         snapshot = self._snapshot
+        self._emit_tick(MarketTickEvent(tick=tick, boll=snapshot))
         if snapshot is None:
-            self._previous_price = price
+            self._previous_price = tick.price
             self._previous_zone = "UNKNOWN"
             return
-        current_zone = self._classify_price_zone(price)
+        current_zone = self._classify_price_zone(tick.price)
         previous_price = self._previous_price
         previous_zone = self._previous_zone
-        self._previous_price = price
+        self._previous_price = tick.price
         self._previous_zone = current_zone
         if previous_price is None or not snapshot.alert_switch_on:
             return
@@ -254,9 +287,9 @@ class BollBandBreakoutMonitor:
             return
         signal = None
         if current_zone == "ABOVE":
-            signal = self._build_signal("BREAK_UPPER", price, previous_price, tick_ts_ms, snapshot)
+            signal = self._build_signal("BREAK_UPPER", tick.price, previous_price, tick.ts_ms, snapshot)
         elif current_zone == "BELOW":
-            signal = self._build_signal("BREAK_LOWER", price, previous_price, tick_ts_ms, snapshot)
+            signal = self._build_signal("BREAK_LOWER", tick.price, previous_price, tick.ts_ms, snapshot)
         if signal is None:
             return
         self._freeze_until_ts = now + self.config.alert_freeze_seconds
@@ -297,6 +330,10 @@ class BollBandBreakoutMonitor:
         for handler in self.handlers:
             asyncio.create_task(self._run_handler(handler, signal))
 
+    def _emit_tick(self, event: MarketTickEvent) -> None:
+        for handler in self.tick_handlers:
+            asyncio.create_task(self._run_tick_handler(handler, event))
+
     async def _run_handler(self, handler: SignalHandler, signal: BreakoutSignal) -> None:
         try:
             result = handler(signal)
@@ -304,6 +341,14 @@ class BollBandBreakoutMonitor:
                 await result
         except Exception:
             logger.exception("Signal handler failed")
+
+    async def _run_tick_handler(self, handler: TickHandler, event: MarketTickEvent) -> None:
+        try:
+            result = handler(event)
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            logger.exception("Tick handler failed")
 
     @staticmethod
     def _parse_bar_interval_ms(bar: str) -> int:
