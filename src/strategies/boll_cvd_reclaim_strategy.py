@@ -26,6 +26,8 @@ class BollCvdReclaimStrategyConfig:
     max_layers: int = 3
     order_cooldown_seconds: int = 10
     tp_update_interval_seconds: int = 900
+    max_entry_distance_from_extreme_pct: float = 0.0015
+    max_armed_seconds: int = 900
 
     @classmethod
     def from_env(cls) -> "BollCvdReclaimStrategyConfig":
@@ -36,6 +38,8 @@ class BollCvdReclaimStrategyConfig:
             max_layers=int(os.getenv("MAX_LAYERS", "3")),
             order_cooldown_seconds=int(os.getenv("ORDER_COOLDOWN_SECONDS", "10")),
             tp_update_interval_seconds=int(os.getenv("TP_UPDATE_INTERVAL_SECONDS", "900")),
+            max_entry_distance_from_extreme_pct=float(os.getenv("MAX_ENTRY_DISTANCE_FROM_EXTREME_PCT", "0.0015")),
+            max_armed_seconds=int(os.getenv("MAX_ARMED_SECONDS", "900")),
         )
 
 
@@ -66,12 +70,22 @@ class StrategyPositionState:
     tp_price: Optional[float] = None
     last_order_ts_ms: int = 0
     last_tp_update_ts_ms: int = 0
+    lower_armed: bool = False
+    upper_armed: bool = False
+    lower_extreme_price: Optional[float] = None
+    upper_extreme_price: Optional[float] = None
+    lower_armed_ts_ms: int = 0
+    upper_armed_ts_ms: int = 0
 
 
 class BollCvdReclaimStrategy:
-    """Minimal dry-run strategy for BOLL outside + fast CVD reclaim.
+    """Minimal strategy for BOLL outside + fast CVD reclaim.
 
-    This module only emits TradeIntent. It does not place orders.
+    The strategy is armed after price moves outside a BOLL band. Entry does not
+    have to occur while price is still outside the band, but it must occur near
+    the recent outside-band extreme. This matches the manual workflow:
+
+    outside band -> watch for stall/reversal -> enter near low/high.
     """
 
     def __init__(self, config: BollCvdReclaimStrategyConfig, sizer: SimplePositionSizer):
@@ -81,45 +95,116 @@ class BollCvdReclaimStrategy:
 
     def on_tick(self, price: float, ts_ms: int, boll: BollSnapshot, cvd: CvdSnapshot) -> list[TradeIntent]:
         intents: list[TradeIntent] = []
-        if not boll.alert_switch_on:
-            return intents
 
+        self._update_armed_state(price, ts_ms, boll)
+
+        # TP maintenance should continue even if the BOLL width switch later turns off.
         tp_intent = self._maybe_update_tp(price, ts_ms, boll, cvd)
         if tp_intent is not None:
             intents.append(tp_intent)
 
+        if not boll.alert_switch_on:
+            return intents
+
         if not self._cooldown_ok(ts_ms):
             return intents
 
-        if self._long_setup(price, boll, cvd):
+        if self._long_setup(price, cvd):
             intent = self._maybe_open_or_add_long(price, ts_ms, boll, cvd)
             if intent is not None:
                 intents.append(intent)
 
-        if self._short_setup(price, boll, cvd):
+        if self._short_setup(price, cvd):
             intent = self._maybe_open_or_add_short(price, ts_ms, boll, cvd)
             if intent is not None:
                 intents.append(intent)
 
         return intents
 
-    def _long_setup(self, price: float, boll: BollSnapshot, cvd: CvdSnapshot) -> bool:
-        if price >= boll.lower:
+    def _update_armed_state(self, price: float, ts_ms: int, boll: BollSnapshot) -> None:
+        self._expire_armed_state(ts_ms)
+
+        if price < boll.lower:
+            if not self.state.lower_armed:
+                self.state.lower_armed = True
+                self.state.lower_armed_ts_ms = ts_ms
+                self.state.lower_extreme_price = price
+            else:
+                self.state.lower_extreme_price = min(self.state.lower_extreme_price or price, price)
+            self.state.upper_armed = False
+            self.state.upper_extreme_price = None
+            self.state.upper_armed_ts_ms = 0
+            return
+
+        if price > boll.upper:
+            if not self.state.upper_armed:
+                self.state.upper_armed = True
+                self.state.upper_armed_ts_ms = ts_ms
+                self.state.upper_extreme_price = price
+            else:
+                self.state.upper_extreme_price = max(self.state.upper_extreme_price or price, price)
+            self.state.lower_armed = False
+            self.state.lower_extreme_price = None
+            self.state.lower_armed_ts_ms = 0
+            return
+
+        # If price mean-reverts all the way to the middle, the original outside-band
+        # opportunity is considered stale.
+        if self.state.lower_armed and price >= boll.middle:
+            self._reset_lower_armed()
+        if self.state.upper_armed and price <= boll.middle:
+            self._reset_upper_armed()
+
+    def _expire_armed_state(self, ts_ms: int) -> None:
+        max_age_ms = self.config.max_armed_seconds * 1000
+        if self.state.lower_armed and ts_ms - self.state.lower_armed_ts_ms > max_age_ms:
+            self._reset_lower_armed()
+        if self.state.upper_armed and ts_ms - self.state.upper_armed_ts_ms > max_age_ms:
+            self._reset_upper_armed()
+
+    def _reset_lower_armed(self) -> None:
+        self.state.lower_armed = False
+        self.state.lower_extreme_price = None
+        self.state.lower_armed_ts_ms = 0
+
+    def _reset_upper_armed(self) -> None:
+        self.state.upper_armed = False
+        self.state.upper_extreme_price = None
+        self.state.upper_armed_ts_ms = 0
+
+    def _long_setup(self, price: float, cvd: CvdSnapshot) -> bool:
+        if not self.state.lower_armed or self.state.lower_extreme_price is None:
+            return False
+        if not self._near_lower_extreme(price):
             return False
         cvd_reclaim = cvd.cross_positive and cvd.buy_ratio >= self.config.min_buy_ratio and cvd.no_new_low
         cvd_absorption = cvd.cvd_increasing and cvd.buy_ratio >= self.config.min_buy_ratio and cvd.no_new_low
         return cvd_reclaim or cvd_absorption
 
-    def _short_setup(self, price: float, boll: BollSnapshot, cvd: CvdSnapshot) -> bool:
-        if price <= boll.upper:
+    def _short_setup(self, price: float, cvd: CvdSnapshot) -> bool:
+        if not self.state.upper_armed or self.state.upper_extreme_price is None:
+            return False
+        if not self._near_upper_extreme(price):
             return False
         cvd_reject = cvd.cross_negative and cvd.sell_ratio >= self.config.min_sell_ratio and cvd.no_new_high
         cvd_absorption = cvd.cvd_decreasing and cvd.sell_ratio >= self.config.min_sell_ratio and cvd.no_new_high
         return cvd_reject or cvd_absorption
 
+    def _near_lower_extreme(self, price: float) -> bool:
+        extreme = self.state.lower_extreme_price
+        if extreme is None:
+            return False
+        return price <= extreme * (1 + self.config.max_entry_distance_from_extreme_pct)
+
+    def _near_upper_extreme(self, price: float) -> bool:
+        extreme = self.state.upper_extreme_price
+        if extreme is None:
+            return False
+        return price >= extreme * (1 - self.config.max_entry_distance_from_extreme_pct)
+
     def _maybe_open_or_add_long(self, price: float, ts_ms: int, boll: BollSnapshot, cvd: CvdSnapshot) -> TradeIntent | None:
         if self.state.side is None:
-            return self._open_position("LONG", "OPEN_LONG", price, ts_ms, boll, cvd, "下轨外侧 + 快速CVD回流/跌不动")
+            return self._open_position("LONG", "OPEN_LONG", price, ts_ms, boll, cvd, "下轨出轨后armed + 低点附近快速CVD回流/跌不动")
         if self.state.side != "LONG":
             return None
         if self.state.layers >= self.config.max_layers:
@@ -128,11 +213,11 @@ class BollCvdReclaimStrategy:
             return None
         if price > self.state.last_entry_price * (1 - self.config.add_layer_gap_pct):
             return None
-        return self._open_position("LONG", "ADD_LONG", price, ts_ms, boll, cvd, "距离上一多仓超过0.3% + 再次跌不动")
+        return self._open_position("LONG", "ADD_LONG", price, ts_ms, boll, cvd, "距离上一多仓超过0.3% + 低点附近再次跌不动")
 
     def _maybe_open_or_add_short(self, price: float, ts_ms: int, boll: BollSnapshot, cvd: CvdSnapshot) -> TradeIntent | None:
         if self.state.side is None:
-            return self._open_position("SHORT", "OPEN_SHORT", price, ts_ms, boll, cvd, "上轨外侧 + 快速CVD转弱/涨不动")
+            return self._open_position("SHORT", "OPEN_SHORT", price, ts_ms, boll, cvd, "上轨出轨后armed + 高点附近快速CVD转弱/涨不动")
         if self.state.side != "SHORT":
             return None
         if self.state.layers >= self.config.max_layers:
@@ -141,7 +226,7 @@ class BollCvdReclaimStrategy:
             return None
         if price < self.state.last_entry_price * (1 + self.config.add_layer_gap_pct):
             return None
-        return self._open_position("SHORT", "ADD_SHORT", price, ts_ms, boll, cvd, "距离上一空仓超过0.3% + 再次涨不动")
+        return self._open_position("SHORT", "ADD_SHORT", price, ts_ms, boll, cvd, "距离上一空仓超过0.3% + 高点附近再次涨不动")
 
     def _open_position(
         self,
