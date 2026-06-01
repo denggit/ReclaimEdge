@@ -19,6 +19,7 @@ TradeIntentType = Literal[
     "UPDATE_TP",
 ]
 PositionSide = Literal["LONG", "SHORT"]
+TpMode = Literal["MIDDLE", "UPPER", "LOWER"]
 
 
 @dataclass(frozen=True)
@@ -31,6 +32,7 @@ class BollCvdReclaimStrategyConfig:
     tp_update_interval_seconds: int = 900
     max_entry_distance_from_extreme_pct: float = 0.002
     max_armed_seconds: int = 900
+    breakeven_fee_buffer_pct: float = 0.001
 
     @classmethod
     def from_env(cls) -> "BollCvdReclaimStrategyConfig":
@@ -43,6 +45,7 @@ class BollCvdReclaimStrategyConfig:
             tp_update_interval_seconds=int(os.getenv("TP_UPDATE_INTERVAL_SECONDS", "900")),
             max_entry_distance_from_extreme_pct=float(os.getenv("MAX_ENTRY_DISTANCE_FROM_EXTREME_PCT", "0.002")),
             max_armed_seconds=int(os.getenv("MAX_ARMED_SECONDS", "900")),
+            breakeven_fee_buffer_pct=float(os.getenv("BREAKEVEN_FEE_BUFFER_PCT", "0.001")),
         )
 
 
@@ -63,6 +66,9 @@ class TradeIntent:
     boll_middle: float
     boll_lower: float
     ts_ms: int
+    avg_entry_price: float
+    breakeven_price: float
+    tp_mode: TpMode
 
 
 @dataclass
@@ -79,6 +85,11 @@ class StrategyPositionState:
     upper_extreme_price: Optional[float] = None
     lower_armed_ts_ms: int = 0
     upper_armed_ts_ms: int = 0
+    total_entry_qty: float = 0.0
+    total_entry_notional: float = 0.0
+    avg_entry_price: float = 0.0
+    breakeven_price: float = 0.0
+    tp_mode: TpMode = "MIDDLE"
 
 
 class BollCvdReclaimStrategy:
@@ -272,14 +283,29 @@ class BollCvdReclaimStrategy:
         reason: str,
     ) -> TradeIntent:
         next_layer = self.state.layers + 1
-        tp_price = boll.middle
         size = self.sizer.calculate(price)
+        self._update_position_cost(price, size.eth_qty)
+        tp_price, tp_mode = self._select_tp_price(side, boll)
+        if tp_mode != "MIDDLE":
+            reason = f"{reason} + 中轨不足覆盖含手续费盈亏平衡，TP切换到{tp_mode}"
         self.state.side = side
         self.state.layers = next_layer
         self.state.last_entry_price = price
         self.state.tp_price = tp_price
+        self.state.tp_mode = tp_mode
         self.state.last_order_ts_ms = ts_ms
         self.state.last_tp_update_ts_ms = ts_ms
+        logger.info(
+            "TP_SELECTED | side=%s mode=%s avg_entry=%.4f breakeven=%.4f middle=%.4f upper=%.4f lower=%.4f tp=%.4f",
+            side,
+            tp_mode,
+            self.state.avg_entry_price,
+            self.state.breakeven_price,
+            boll.middle,
+            boll.upper,
+            boll.lower,
+            tp_price,
+        )
         return self._intent(intent_type, side, price, next_layer, tp_price, reason, size, boll, cvd, ts_ms)
 
     def _maybe_update_tp(self, price: float, ts_ms: int, boll: BollSnapshot, cvd: CvdSnapshot) -> TradeIntent | None:
@@ -287,13 +313,47 @@ class BollCvdReclaimStrategy:
             return None
         if ts_ms - self.state.last_tp_update_ts_ms < self.config.tp_update_interval_seconds * 1000:
             return None
-        if self.state.tp_price is not None and abs(self.state.tp_price - boll.middle) / boll.middle < 0.0001:
+        tp_price, tp_mode = self._select_tp_price(self.state.side, boll)
+        if self.state.tp_price is not None and abs(self.state.tp_price - tp_price) / tp_price < 0.0001:
             self.state.last_tp_update_ts_ms = ts_ms
             return None
-        self.state.tp_price = boll.middle
+        self.state.tp_price = tp_price
+        self.state.tp_mode = tp_mode
         self.state.last_tp_update_ts_ms = ts_ms
         size = self.sizer.calculate(price)
-        return self._intent("UPDATE_TP", self.state.side, price, self.state.layers, boll.middle, "15分钟更新一次止盈到最新BOLL中轨", size, boll, cvd, ts_ms)
+        logger.info(
+            "TP_SELECTED | side=%s mode=%s avg_entry=%.4f breakeven=%.4f middle=%.4f upper=%.4f lower=%.4f tp=%.4f",
+            self.state.side,
+            tp_mode,
+            self.state.avg_entry_price,
+            self.state.breakeven_price,
+            boll.middle,
+            boll.upper,
+            boll.lower,
+            tp_price,
+        )
+        return self._intent("UPDATE_TP", self.state.side, price, self.state.layers, tp_price, f"15分钟更新止盈到{tp_mode}轨", size, boll, cvd, ts_ms)
+
+    def _update_position_cost(self, entry_price: float, eth_qty: float) -> None:
+        if eth_qty <= 0:
+            return
+        self.state.total_entry_qty += eth_qty
+        self.state.total_entry_notional += entry_price * eth_qty
+        self.state.avg_entry_price = self.state.total_entry_notional / self.state.total_entry_qty
+
+    def _select_tp_price(self, side: PositionSide, boll: BollSnapshot) -> tuple[float, TpMode]:
+        if self.state.avg_entry_price <= 0:
+            return boll.middle, "MIDDLE"
+        fee = self.config.breakeven_fee_buffer_pct
+        if side == "LONG":
+            self.state.breakeven_price = self.state.avg_entry_price * (1 + fee)
+            if self.state.breakeven_price > boll.middle:
+                return boll.upper, "UPPER"
+            return boll.middle, "MIDDLE"
+        self.state.breakeven_price = self.state.avg_entry_price * (1 - fee)
+        if self.state.breakeven_price < boll.middle:
+            return boll.lower, "LOWER"
+        return boll.middle, "MIDDLE"
 
     def _intent(
         self,
@@ -324,6 +384,9 @@ class BollCvdReclaimStrategy:
             boll_middle=boll.middle,
             boll_lower=boll.lower,
             ts_ms=ts_ms,
+            avg_entry_price=self.state.avg_entry_price,
+            breakeven_price=self.state.breakeven_price,
+            tp_mode=self.state.tp_mode,
         )
 
     def _cooldown_ok(self, ts_ms: int) -> bool:
