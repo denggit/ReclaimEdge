@@ -172,8 +172,6 @@ class BollBandBreakoutMonitor:
             return
         async with self._candles_lock:
             self._candles = candles[-self.config.candle_limit:]
-        latest = candles[-1]
-        logger.info("Candles synced | inst=%s count=%s live_mode=%s latest_ts=%s latest_confirmed=%s", self.config.inst_id, len(candles), self.config.use_live_candle, latest.ts_ms, latest.confirmed)
 
     async def _boll_recalc_loop(self) -> None:
         while self._running:
