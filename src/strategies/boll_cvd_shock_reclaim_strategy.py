@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 
 from src.indicators.cvd_tracker import CvdSnapshot
 from src.monitors.boll_band_breakout_monitor import BollSnapshot
@@ -15,28 +16,32 @@ logger = logging.getLogger(__name__)
 
 
 class BollCvdShockReclaimStrategy(BollCvdReclaimStrategy):
-    """BOLL reclaim strategy gated by a relative shock before armed state.
+    """BOLL reclaim strategy gated by relative shock and latched BOLL width.
 
-    Two-stage design:
-    1. Shock stage only opens/refreshes armed state.
-       - LOWER_ARMED requires price below lower band and cvd.down_burst.
-       - UPPER_ARMED requires price above upper band and cvd.up_burst.
-    2. Reclaim stage opens/adds only after armed, near the extreme, with CVD
-       reclaim/stall confirmation inherited from BollCvdReclaimStrategy.
-
-    This prevents slow grinding moves along the BOLL band from arming entries.
+    BOLL width can flicker around the threshold when live candles are used. A
+    strict per-tick switch check can miss good entries near the threshold. This
+    strategy latches switch eligibility for the current candle and a short grace
+    period after the last switch=True tick.
     """
 
     def __init__(self, config: BollCvdReclaimStrategyConfig, sizer: SimplePositionSizer):
         super().__init__(config, sizer)
+        self.switch_grace_seconds = float(os.getenv("BOLL_SWITCH_GRACE_SECONDS", "300"))
+        self._last_switch_on_ts_ms: int = 0
+        self._last_switch_on_candle_ts_ms: int = 0
 
     def on_tick(self, price: float, ts_ms: int, boll: BollSnapshot, cvd: CvdSnapshot) -> list[TradeIntent]:
         intents: list[TradeIntent] = []
 
-        # Existing armed state still needs expiry/middle reset even if BOLL width
-        # switch turns off later. But new armed state must respect switch=True.
-        self._expire_armed_state(ts_ms)
         if boll.alert_switch_on:
+            self._last_switch_on_ts_ms = ts_ms
+            self._last_switch_on_candle_ts_ms = boll.candle_ts_ms
+        switch_eligible = self._switch_eligible(ts_ms, boll)
+
+        # Existing armed state still needs expiry/middle reset even if BOLL width
+        # switch turns off later. But new armed state requires switch eligibility.
+        self._expire_armed_state(ts_ms)
+        if switch_eligible:
             self._update_shock_armed_state(price, ts_ms, boll, cvd)
         else:
             self._reset_armed_if_middle_reclaimed(price, boll)
@@ -45,7 +50,7 @@ class BollCvdShockReclaimStrategy(BollCvdReclaimStrategy):
         if tp_intent is not None:
             intents.append(tp_intent)
 
-        if not boll.alert_switch_on:
+        if not switch_eligible:
             return intents
 
         if not self._cooldown_ok(ts_ms):
@@ -63,6 +68,14 @@ class BollCvdShockReclaimStrategy(BollCvdReclaimStrategy):
 
         return intents
 
+    def _switch_eligible(self, ts_ms: int, boll: BollSnapshot) -> bool:
+        if boll.alert_switch_on:
+            return True
+        if self._last_switch_on_candle_ts_ms == boll.candle_ts_ms and self._last_switch_on_ts_ms > 0:
+            return True
+        grace_ms = int(self.switch_grace_seconds * 1000)
+        return self._last_switch_on_ts_ms > 0 and ts_ms - self._last_switch_on_ts_ms <= grace_ms
+
     def _update_shock_armed_state(self, price: float, ts_ms: int, boll: BollSnapshot, cvd: CvdSnapshot) -> None:
         if price < boll.lower:
             if not cvd.down_burst:
@@ -74,10 +87,12 @@ class BollCvdShockReclaimStrategy(BollCvdReclaimStrategy):
                 self.state.lower_armed_ts_ms = ts_ms
                 self.state.lower_extreme_price = price
                 logger.info(
-                    "LOWER_ARMED | reason=down_shock price=%.4f lower=%.4f middle=%.4f move_ratio=%.2f volume_ratio=%.2f burst_range=%.5f baseline_range=%.5f max_entry_distance=%.4f%% max_armed=%ss",
+                    "LOWER_ARMED | reason=down_shock price=%.4f lower=%.4f middle=%.4f switch_current=%s switch_latched=%s move_ratio=%.2f volume_ratio=%.2f burst_range=%.5f baseline_range=%.5f max_entry_distance=%.4f%% max_armed=%ss",
                     price,
                     boll.lower,
                     boll.middle,
+                    boll.alert_switch_on,
+                    not boll.alert_switch_on,
                     cvd.burst_move_ratio,
                     cvd.burst_volume_ratio,
                     cvd.burst_range_pct,
@@ -112,10 +127,12 @@ class BollCvdShockReclaimStrategy(BollCvdReclaimStrategy):
                 self.state.upper_armed_ts_ms = ts_ms
                 self.state.upper_extreme_price = price
                 logger.info(
-                    "UPPER_ARMED | reason=up_shock price=%.4f upper=%.4f middle=%.4f move_ratio=%.2f volume_ratio=%.2f burst_range=%.5f baseline_range=%.5f max_entry_distance=%.4f%% max_armed=%ss",
+                    "UPPER_ARMED | reason=up_shock price=%.4f upper=%.4f middle=%.4f switch_current=%s switch_latched=%s move_ratio=%.2f volume_ratio=%.2f burst_range=%.5f baseline_range=%.5f max_entry_distance=%.4f%% max_armed=%ss",
                     price,
                     boll.upper,
                     boll.middle,
+                    boll.alert_switch_on,
+                    not boll.alert_switch_on,
                     cvd.burst_move_ratio,
                     cvd.burst_volume_ratio,
                     cvd.burst_range_pct,
