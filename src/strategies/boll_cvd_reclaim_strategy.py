@@ -33,6 +33,7 @@ class BollCvdReclaimStrategyConfig:
     max_entry_distance_from_extreme_pct: float = 0.002
     max_armed_seconds: int = 900
     breakeven_fee_buffer_pct: float = 0.001
+    min_outside_pct: float = 0.001
 
     @classmethod
     def from_env(cls) -> "BollCvdReclaimStrategyConfig":
@@ -46,6 +47,7 @@ class BollCvdReclaimStrategyConfig:
             max_entry_distance_from_extreme_pct=float(os.getenv("MAX_ENTRY_DISTANCE_FROM_EXTREME_PCT", "0.002")),
             max_armed_seconds=int(os.getenv("MAX_ARMED_SECONDS", "900")),
             breakeven_fee_buffer_pct=float(os.getenv("BREAKEVEN_FEE_BUFFER_PCT", "0.001")),
+            min_outside_pct=float(os.getenv("BOLL_MIN_OUTSIDE_PCT", "0.001")),
         )
 
 
@@ -88,6 +90,8 @@ class StrategyPositionState:
     upper_armed_ts_ms: int = 0
     lower_last_burst_ts_ms: int = 0
     upper_last_burst_ts_ms: int = 0
+    lower_deep_enough: bool = False
+    upper_deep_enough: bool = False
     total_entry_qty: float = 0.0
     total_entry_notional: float = 0.0
     avg_entry_price: float = 0.0
@@ -160,12 +164,10 @@ class BollCvdReclaimStrategy:
                 self.state.lower_extreme_price = min(old_extreme, price)
                 if self.state.lower_extreme_price < old_extreme:
                     logger.debug("LOWER_EXTREME_UPDATED | extreme=%.4f price=%.4f", self.state.lower_extreme_price, price)
+            self._update_lower_deep_enough(boll)
             if self.state.upper_armed:
                 logger.info("UPPER_ARMED_RESET | reason=opposite_lower_break price=%.4f", price)
-            self.state.upper_armed = False
-            self.state.upper_extreme_price = None
-            self.state.upper_armed_ts_ms = 0
-            self.state.upper_last_burst_ts_ms = 0
+            self._reset_upper_armed()
             return
 
         if price > boll.upper:
@@ -186,12 +188,10 @@ class BollCvdReclaimStrategy:
                 self.state.upper_extreme_price = max(old_extreme, price)
                 if self.state.upper_extreme_price > old_extreme:
                     logger.debug("UPPER_EXTREME_UPDATED | extreme=%.4f price=%.4f", self.state.upper_extreme_price, price)
+            self._update_upper_deep_enough(boll)
             if self.state.lower_armed:
                 logger.info("LOWER_ARMED_RESET | reason=opposite_upper_break price=%.4f", price)
-            self.state.lower_armed = False
-            self.state.lower_extreme_price = None
-            self.state.lower_armed_ts_ms = 0
-            self.state.lower_last_burst_ts_ms = 0
+            self._reset_lower_armed()
             return
 
         # If price mean-reverts all the way to the middle, the original outside-band
@@ -202,6 +202,34 @@ class BollCvdReclaimStrategy:
         if self.state.upper_armed and price <= boll.middle:
             logger.info("UPPER_ARMED_RESET | reason=middle_reclaimed price=%.4f middle=%.4f", price, boll.middle)
             self._reset_upper_armed()
+
+    def _update_lower_deep_enough(self, boll: BollSnapshot) -> None:
+        if self.state.lower_deep_enough or self.state.lower_extreme_price is None:
+            return
+        threshold = boll.lower * (1 - self.config.min_outside_pct)
+        if self.state.lower_extreme_price <= threshold:
+            self.state.lower_deep_enough = True
+            logger.info(
+                "LOWER_DEEP_ENOUGH | extreme=%.4f lower=%.4f required_below=%.4f min_outside=%.4f%%",
+                self.state.lower_extreme_price,
+                boll.lower,
+                threshold,
+                self.config.min_outside_pct * 100,
+            )
+
+    def _update_upper_deep_enough(self, boll: BollSnapshot) -> None:
+        if self.state.upper_deep_enough or self.state.upper_extreme_price is None:
+            return
+        threshold = boll.upper * (1 + self.config.min_outside_pct)
+        if self.state.upper_extreme_price >= threshold:
+            self.state.upper_deep_enough = True
+            logger.info(
+                "UPPER_DEEP_ENOUGH | extreme=%.4f upper=%.4f required_above=%.4f min_outside=%.4f%%",
+                self.state.upper_extreme_price,
+                boll.upper,
+                threshold,
+                self.config.min_outside_pct * 100,
+            )
 
     def _expire_armed_state(self, ts_ms: int) -> None:
         max_age_ms = self.config.max_armed_seconds * 1000
@@ -217,15 +245,19 @@ class BollCvdReclaimStrategy:
         self.state.lower_extreme_price = None
         self.state.lower_armed_ts_ms = 0
         self.state.lower_last_burst_ts_ms = 0
+        self.state.lower_deep_enough = False
 
     def _reset_upper_armed(self) -> None:
         self.state.upper_armed = False
         self.state.upper_extreme_price = None
         self.state.upper_armed_ts_ms = 0
         self.state.upper_last_burst_ts_ms = 0
+        self.state.upper_deep_enough = False
 
     def _long_setup(self, price: float, cvd: CvdSnapshot) -> bool:
         if not self.state.lower_armed or self.state.lower_extreme_price is None:
+            return False
+        if not self.state.lower_deep_enough:
             return False
         if not self._near_lower_extreme(price):
             return False
@@ -235,6 +267,8 @@ class BollCvdReclaimStrategy:
 
     def _short_setup(self, price: float, cvd: CvdSnapshot) -> bool:
         if not self.state.upper_armed or self.state.upper_extreme_price is None:
+            return False
+        if not self.state.upper_deep_enough:
             return False
         if not self._near_upper_extreme(price):
             return False
@@ -256,7 +290,7 @@ class BollCvdReclaimStrategy:
 
     def _maybe_open_or_add_long(self, price: float, ts_ms: int, boll: BollSnapshot, cvd: CvdSnapshot) -> TradeIntent | None:
         if self.state.side is None:
-            return self._open_position("LONG", "OPEN_LONG", price, ts_ms, boll, cvd, "下轨出轨后armed + 低点附近快速CVD回流/跌不动")
+            return self._open_position("LONG", "OPEN_LONG", price, ts_ms, boll, cvd, "下轨出轨深度达标 + 低点附近快速CVD回流/跌不动")
         if self.state.side != "LONG":
             return None
         if self.state.layers >= self.config.max_layers:
@@ -265,11 +299,11 @@ class BollCvdReclaimStrategy:
             return None
         if price > self.state.last_entry_price * (1 - self.config.add_layer_gap_pct):
             return None
-        return self._open_position("LONG", "ADD_LONG", price, ts_ms, boll, cvd, "距离上一多仓超过0.3% + 低点附近再次跌不动")
+        return self._open_position("LONG", "ADD_LONG", price, ts_ms, boll, cvd, "距离上一多仓超过0.3% + 新出轨深度达标后低点附近再次跌不动")
 
     def _maybe_open_or_add_short(self, price: float, ts_ms: int, boll: BollSnapshot, cvd: CvdSnapshot) -> TradeIntent | None:
         if self.state.side is None:
-            return self._open_position("SHORT", "OPEN_SHORT", price, ts_ms, boll, cvd, "上轨出轨后armed + 高点附近快速CVD转弱/涨不动")
+            return self._open_position("SHORT", "OPEN_SHORT", price, ts_ms, boll, cvd, "上轨出轨深度达标 + 高点附近快速CVD转弱/涨不动")
         if self.state.side != "SHORT":
             return None
         if self.state.layers >= self.config.max_layers:
@@ -278,7 +312,7 @@ class BollCvdReclaimStrategy:
             return None
         if price < self.state.last_entry_price * (1 + self.config.add_layer_gap_pct):
             return None
-        return self._open_position("SHORT", "ADD_SHORT", price, ts_ms, boll, cvd, "距离上一空仓超过0.3% + 高点附近再次涨不动")
+        return self._open_position("SHORT", "ADD_SHORT", price, ts_ms, boll, cvd, "距离上一空仓超过0.3% + 新出轨深度达标后高点附近再次涨不动")
 
     def _open_position(
         self,
