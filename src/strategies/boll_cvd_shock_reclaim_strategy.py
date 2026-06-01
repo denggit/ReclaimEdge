@@ -33,7 +33,13 @@ class BollCvdShockReclaimStrategy(BollCvdReclaimStrategy):
     def on_tick(self, price: float, ts_ms: int, boll: BollSnapshot, cvd: CvdSnapshot) -> list[TradeIntent]:
         intents: list[TradeIntent] = []
 
-        self._update_shock_armed_state(price, ts_ms, boll, cvd)
+        # Existing armed state still needs expiry/middle reset even if BOLL width
+        # switch turns off later. But new armed state must respect switch=True.
+        self._expire_armed_state(ts_ms)
+        if boll.alert_switch_on:
+            self._update_shock_armed_state(price, ts_ms, boll, cvd)
+        else:
+            self._reset_armed_if_middle_reclaimed(price, boll)
 
         tp_intent = self._maybe_update_tp(price, ts_ms, boll, cvd)
         if tp_intent is not None:
@@ -58,8 +64,6 @@ class BollCvdShockReclaimStrategy(BollCvdReclaimStrategy):
         return intents
 
     def _update_shock_armed_state(self, price: float, ts_ms: int, boll: BollSnapshot, cvd: CvdSnapshot) -> None:
-        self._expire_armed_state(ts_ms)
-
         if price < boll.lower:
             if not cvd.down_burst:
                 if self.state.lower_armed:
@@ -84,13 +88,14 @@ class BollCvdShockReclaimStrategy(BollCvdReclaimStrategy):
             else:
                 old_extreme = self.state.lower_extreme_price or price
                 self.state.lower_extreme_price = min(old_extreme, price)
-                logger.info(
-                    "LOWER_ARMED_REFRESH | reason=down_shock price=%.4f extreme=%.4f move_ratio=%.2f volume_ratio=%.2f",
-                    price,
-                    self.state.lower_extreme_price,
-                    cvd.burst_move_ratio,
-                    cvd.burst_volume_ratio,
-                )
+                if self.state.lower_extreme_price < old_extreme:
+                    logger.info(
+                        "LOWER_ARMED_EXTREME_UPDATED | reason=down_shock extreme=%.4f price=%.4f move_ratio=%.2f volume_ratio=%.2f",
+                        self.state.lower_extreme_price,
+                        price,
+                        cvd.burst_move_ratio,
+                        cvd.burst_volume_ratio,
+                    )
             self.state.lower_last_burst_ts_ms = ts_ms
             if self.state.upper_armed:
                 logger.info("UPPER_ARMED_RESET | reason=opposite_lower_shock price=%.4f", price)
@@ -121,19 +126,23 @@ class BollCvdShockReclaimStrategy(BollCvdReclaimStrategy):
             else:
                 old_extreme = self.state.upper_extreme_price or price
                 self.state.upper_extreme_price = max(old_extreme, price)
-                logger.info(
-                    "UPPER_ARMED_REFRESH | reason=up_shock price=%.4f extreme=%.4f move_ratio=%.2f volume_ratio=%.2f",
-                    price,
-                    self.state.upper_extreme_price,
-                    cvd.burst_move_ratio,
-                    cvd.burst_volume_ratio,
-                )
+                if self.state.upper_extreme_price > old_extreme:
+                    logger.info(
+                        "UPPER_ARMED_EXTREME_UPDATED | reason=up_shock extreme=%.4f price=%.4f move_ratio=%.2f volume_ratio=%.2f",
+                        self.state.upper_extreme_price,
+                        price,
+                        cvd.burst_move_ratio,
+                        cvd.burst_volume_ratio,
+                    )
             self.state.upper_last_burst_ts_ms = ts_ms
             if self.state.lower_armed:
                 logger.info("LOWER_ARMED_RESET | reason=opposite_upper_shock price=%.4f", price)
             self._reset_lower_armed()
             return
 
+        self._reset_armed_if_middle_reclaimed(price, boll)
+
+    def _reset_armed_if_middle_reclaimed(self, price: float, boll: BollSnapshot) -> None:
         if self.state.lower_armed and price >= boll.middle:
             logger.info("LOWER_ARMED_RESET | reason=middle_reclaimed price=%.4f middle=%.4f", price, boll.middle)
             self._reset_lower_armed()
