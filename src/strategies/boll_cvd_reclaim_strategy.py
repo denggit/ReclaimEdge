@@ -29,8 +29,13 @@ class BollCvdReclaimStrategyConfig:
     min_buy_ratio: float = 0.55
     min_sell_ratio: float = 0.55
     add_layer_gap_pct: float = 0.003
+    add_layer_gap_pct_layer_9_10: float = 0.004
+    add_layer_gap_pct_layer_11_plus: float = 0.005
     max_layers: int = 3
     order_cooldown_seconds: int = 10
+    first_add_block_seconds: int = 1800
+    add_min_interval_seconds: int = 600
+    add_min_interval_bypass_gap_pct: float = 0.005
     tp_update_interval_seconds: int = 900
     max_entry_distance_from_extreme_pct: float = 0.002
     max_armed_seconds: int = 900
@@ -65,8 +70,13 @@ class BollCvdReclaimStrategyConfig:
             min_buy_ratio=float(os.getenv("CVD_MIN_BUY_RATIO", "0.55")),
             min_sell_ratio=float(os.getenv("CVD_MIN_SELL_RATIO", "0.55")),
             add_layer_gap_pct=float(os.getenv("ADD_LAYER_GAP_PCT", "0.003")),
+            add_layer_gap_pct_layer_9_10=float(os.getenv("ADD_LAYER_GAP_PCT_LAYER_9_10", "0.004")),
+            add_layer_gap_pct_layer_11_plus=float(os.getenv("ADD_LAYER_GAP_PCT_LAYER_11_PLUS", "0.005")),
             max_layers=int(os.getenv("MAX_LAYERS", "3")),
             order_cooldown_seconds=int(os.getenv("ORDER_COOLDOWN_SECONDS", "10")),
+            first_add_block_seconds=int(os.getenv("FIRST_ADD_BLOCK_SECONDS", "1800")),
+            add_min_interval_seconds=int(os.getenv("ADD_MIN_INTERVAL_SECONDS", "600")),
+            add_min_interval_bypass_gap_pct=float(os.getenv("ADD_MIN_INTERVAL_BYPASS_GAP_PCT", "0.005")),
             tp_update_interval_seconds=int(os.getenv("TP_UPDATE_INTERVAL_SECONDS", "900")),
             max_entry_distance_from_extreme_pct=float(os.getenv("MAX_ENTRY_DISTANCE_FROM_EXTREME_PCT", "0.002")),
             max_armed_seconds=int(os.getenv("MAX_ARMED_SECONDS", "900")),
@@ -381,9 +391,41 @@ class BollCvdReclaimStrategy:
             return None
         if self.state.last_entry_price is None:
             return None
-        if price > self.state.last_entry_price * (1 - self.config.add_layer_gap_pct):
+        target_layer = self.state.layers + 1
+        timing_ok, timing_reason = self._add_timing_passed("LONG", price, ts_ms)
+        if not timing_ok:
+            self._log_add_timing_skipped("LONG", timing_reason, price, ts_ms, target_layer)
             return None
-        return self._open_position("LONG", "ADD_LONG", price, ts_ms, boll, cvd, "距离上一多仓超过0.3% + 新出轨深度达标后低点附近再次跌不动")
+        gap_ok, gap_pct, required_price = self._add_gap_passed("LONG", price, target_layer)
+        if not gap_ok:
+            logger.info(
+                "ADD_SKIPPED | reason=add_gap side=LONG price=%.4f layers=%s target_layer=%s last_entry=%.4f required_price=%.4f gap_pct=%.4f%%",
+                price,
+                self.state.layers,
+                target_layer,
+                self.state.last_entry_price,
+                required_price,
+                gap_pct * 100,
+            )
+            return None
+        logger.info(
+            "ADD_GAP_PASSED | side=LONG price=%.4f layers=%s target_layer=%s last_entry=%.4f required_price=%.4f gap_pct=%.4f%%",
+            price,
+            self.state.layers,
+            target_layer,
+            self.state.last_entry_price,
+            required_price,
+            gap_pct * 100,
+        )
+        return self._open_position(
+            "LONG",
+            "ADD_LONG",
+            price,
+            ts_ms,
+            boll,
+            cvd,
+            f"距离上一多仓超过{gap_pct * 100:.2f}% + 新出轨深度达标后低点附近再次跌不动",
+        )
 
     def _maybe_open_or_add_short(self, price: float, ts_ms: int, boll: BollSnapshot, cvd: CvdSnapshot) -> TradeIntent | None:
         if self.state.side is None:
@@ -397,9 +439,134 @@ class BollCvdReclaimStrategy:
             return None
         if self.state.last_entry_price is None:
             return None
-        if price < self.state.last_entry_price * (1 + self.config.add_layer_gap_pct):
+        target_layer = self.state.layers + 1
+        timing_ok, timing_reason = self._add_timing_passed("SHORT", price, ts_ms)
+        if not timing_ok:
+            self._log_add_timing_skipped("SHORT", timing_reason, price, ts_ms, target_layer)
             return None
-        return self._open_position("SHORT", "ADD_SHORT", price, ts_ms, boll, cvd, "距离上一空仓超过0.3% + 新出轨深度达标后高点附近再次涨不动")
+        gap_ok, gap_pct, required_price = self._add_gap_passed("SHORT", price, target_layer)
+        if not gap_ok:
+            logger.info(
+                "ADD_SKIPPED | reason=add_gap side=SHORT price=%.4f layers=%s target_layer=%s last_entry=%.4f required_price=%.4f gap_pct=%.4f%%",
+                price,
+                self.state.layers,
+                target_layer,
+                self.state.last_entry_price,
+                required_price,
+                gap_pct * 100,
+            )
+            return None
+        logger.info(
+            "ADD_GAP_PASSED | side=SHORT price=%.4f layers=%s target_layer=%s last_entry=%.4f required_price=%.4f gap_pct=%.4f%%",
+            price,
+            self.state.layers,
+            target_layer,
+            self.state.last_entry_price,
+            required_price,
+            gap_pct * 100,
+        )
+        return self._open_position(
+            "SHORT",
+            "ADD_SHORT",
+            price,
+            ts_ms,
+            boll,
+            cvd,
+            f"距离上一空仓超过{gap_pct * 100:.2f}% + 新出轨深度达标后高点附近再次涨不动",
+        )
+
+    def _add_layer_gap_pct_for_target_layer(self, target_layer: int) -> float:
+        if target_layer >= 11:
+            return self.config.add_layer_gap_pct_layer_11_plus
+        if target_layer >= 9:
+            return self.config.add_layer_gap_pct_layer_9_10
+        return self.config.add_layer_gap_pct
+
+    def _add_gap_passed(self, side: PositionSide, price: float, target_layer: int) -> tuple[bool, float, float]:
+        gap_pct = self._add_layer_gap_pct_for_target_layer(target_layer)
+        last = self.state.last_entry_price
+        if last is None or last <= 0:
+            return False, gap_pct, 0.0
+
+        if side == "LONG":
+            required_price = last * (1 - gap_pct)
+            return price <= required_price, gap_pct, required_price
+
+        required_price = last * (1 + gap_pct)
+        return price >= required_price, gap_pct, required_price
+
+    def _add_timing_passed(self, side: PositionSide, price: float, ts_ms: int) -> tuple[bool, str]:
+        last = self.state.last_entry_price
+        if last is None or last <= 0:
+            return False, "missing_last_entry"
+
+        elapsed_seconds = self._add_elapsed_seconds(ts_ms)
+        if self.state.layers == 1:
+            if elapsed_seconds < self.config.first_add_block_seconds:
+                return False, "first_add_block"
+            return True, "ok"
+
+        if self.state.layers >= 2:
+            adverse_gap_pct = self._adverse_gap_pct(side, price)
+            if (
+                elapsed_seconds < self.config.add_min_interval_seconds
+                and adverse_gap_pct < self.config.add_min_interval_bypass_gap_pct
+            ):
+                return False, "add_interval"
+
+        return True, "ok"
+
+    def _add_elapsed_seconds(self, ts_ms: int) -> float:
+        return max((ts_ms - self.state.last_order_ts_ms) / 1000, 0.0)
+
+    def _adverse_gap_pct(self, side: PositionSide, price: float) -> float:
+        last = self.state.last_entry_price
+        if last is None or last <= 0:
+            return 0.0
+        if side == "LONG":
+            return (last - price) / last
+        return (price - last) / last
+
+    def _log_add_timing_skipped(self, side: PositionSide, reason: str, price: float, ts_ms: int, target_layer: int) -> None:
+        last = self.state.last_entry_price if self.state.last_entry_price is not None else 0.0
+        elapsed_seconds = self._add_elapsed_seconds(ts_ms)
+        if reason == "first_add_block":
+            logger.info(
+                "ADD_SKIPPED | reason=first_add_block side=%s price=%.4f layers=%s target_layer=%s last_entry=%.4f elapsed_seconds=%.1f required_seconds=%s",
+                side,
+                price,
+                self.state.layers,
+                target_layer,
+                last,
+                elapsed_seconds,
+                self.config.first_add_block_seconds,
+            )
+            return
+        if reason == "add_interval":
+            adverse_gap_pct = self._adverse_gap_pct(side, price)
+            logger.info(
+                "ADD_SKIPPED | reason=add_interval side=%s price=%.4f layers=%s target_layer=%s last_entry=%.4f elapsed_seconds=%.1f required_seconds=%s adverse_gap_pct=%.4f%% bypass_gap_pct=%.4f%%",
+                side,
+                price,
+                self.state.layers,
+                target_layer,
+                last,
+                elapsed_seconds,
+                self.config.add_min_interval_seconds,
+                adverse_gap_pct * 100,
+                self.config.add_min_interval_bypass_gap_pct * 100,
+            )
+            return
+        logger.info(
+            "ADD_SKIPPED | reason=%s side=%s price=%.4f layers=%s target_layer=%s last_entry=%.4f elapsed_seconds=%.1f",
+            reason,
+            side,
+            price,
+            self.state.layers,
+            target_layer,
+            last,
+            elapsed_seconds,
+        )
 
     def _open_position(
         self,
