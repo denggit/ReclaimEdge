@@ -128,6 +128,9 @@ class FakeStrategy:
 class FakeJournal:
     def __init__(self) -> None:
         self.entries: list[int] = []
+        self.flats = []
+        self.cash_transfers = []
+        self.cash_drifts = []
 
     def new_position_id(self, symbol: str, side: str, ts_ms: int | None = None) -> str:
         return f"{symbol}:{side}:{ts_ms}"
@@ -142,7 +145,13 @@ class FakeJournal:
         pass
 
     def record_flat(self, **kwargs) -> None:  # type: ignore[no-untyped-def]
-        pass
+        self.flats.append(kwargs)
+
+    def record_cash_transfer(self, **kwargs) -> None:  # type: ignore[no-untyped-def]
+        self.cash_transfers.append(kwargs)
+
+    def record_account_cash_drift(self, **kwargs) -> None:  # type: ignore[no-untyped-def]
+        self.cash_drifts.append(kwargs)
 
 
 class FakeStateStore:
@@ -434,6 +443,99 @@ class LiveRuntimeWorkerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(strategy.state.side, "LONG")
         self.assertEqual(strategy.state.layers, 1)
         self.assertEqual(execution_state.current_position_id, "pos-1")
+
+    async def test_flat_settle_cash_delta_does_not_record_cash_transfer(self) -> None:
+        flat_recorded = asyncio.Event()
+        allow_second_sync = asyncio.Event()
+        second_sync = asyncio.Event()
+        live_position = PositionSnapshot("LONG", Decimal("1"), 100.0, 0.1, Decimal("1"))
+
+        class FlatSettleTrader(FakeTrader):
+            def __init__(inner_self) -> None:
+                super().__init__()
+                inner_self.position_calls = 0
+                inner_self.cash_values = [100.0, 150.0, 140.0]
+                inner_self.equity_values = [100.0, 150.0, 140.0]
+
+            async def fetch_position_snapshot(inner_self) -> PositionSnapshot:
+                inner_self.position_calls += 1
+                if inner_self.position_calls >= 2:
+                    second_sync.set()
+                return flat_position()
+
+            async def fetch_usdt_equity(inner_self) -> float:
+                if inner_self.equity_values:
+                    return inner_self.equity_values.pop(0)
+                return 140.0
+
+            async def request(inner_self, method: str, endpoint: str, payload=None):  # type: ignore[no-untyped-def]
+                if inner_self.cash_values:
+                    cash = inner_self.cash_values.pop(0)
+                else:
+                    cash = 140.0
+                if cash == 140.0:
+                    await allow_second_sync.wait()
+                return {"data": [{"details": [{"ccy": "USDT", "cashBal": str(cash)}]}]}
+
+        class RecordingJournal(FakeJournal):
+            def record_flat(inner_self, **kwargs) -> None:  # type: ignore[no-untyped-def]
+                super().record_flat(**kwargs)
+                flat_recorded.set()
+
+        strategy = FakeStrategy()
+        strategy.state = StrategyPositionState(
+            side="LONG",
+            layers=1,
+            last_entry_price=100.0,
+            tp_price=101.0,
+            total_entry_qty=0.1,
+            total_entry_notional=10.0,
+            avg_entry_price=100.0,
+        )
+        account_snapshot = AccountSnapshot(live_position, 100.0, 100.0, asyncio.get_running_loop().time(), 0, 1)
+        execution_state = ExecutionState("pos-1", 100.0)
+        journal = RecordingJournal()
+        trader = FlatSettleTrader()
+
+        with patch.dict(
+            os.environ,
+            {
+                "CASH_TRANSFER_MIN_DELTA_USDT": "0.5",
+                "CASH_TRANSFER_SETTLE_SECONDS": "0",
+                "CASH_TRANSFER_AFTER_FLAT_COOLDOWN_SECONDS": "180",
+                "CASH_DRIFT_MIN_DELTA_USDT": "0.5",
+            },
+        ):
+            task = asyncio.create_task(
+                account_position_sync_worker(
+                    state_lock=asyncio.Lock(),
+                    account_snapshot=account_snapshot,
+                    execution_state=execution_state,
+                    trader=trader,  # type: ignore[arg-type]
+                    sizer=SimplePositionSizer(SimplePositionSizerConfig()),
+                    strategy=strategy,  # type: ignore[arg-type]
+                    journal=journal,  # type: ignore[arg-type]
+                    state_store=FakeStateStore(),  # type: ignore[arg-type]
+                    position_sync_seconds=0,
+                    account_sync_seconds=0,
+                    cash_log_min_delta_usdt=999,
+                )
+            )
+            await asyncio.wait_for(flat_recorded.wait(), timeout=0.2)
+            self.assertEqual(account_snapshot.cash, 150.0)
+            allow_second_sync.set()
+            await asyncio.wait_for(second_sync.wait(), timeout=0.2)
+            await asyncio.sleep(0)
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+        self.assertEqual(len(journal.flats), 1)
+        self.assertEqual(journal.flats[0]["cash_after"], 150.0)
+        self.assertEqual(account_snapshot.cash, 140.0)
+        self.assertEqual(journal.cash_transfers, [])
+        self.assertEqual(len(journal.cash_drifts), 1)
+        self.assertIn("flat_settle_cooldown", journal.cash_drifts[0]["reason"])
 
     async def test_account_sync_does_not_sync_strategy_cost_while_execution_pending(self) -> None:
         fetched = asyncio.Event()

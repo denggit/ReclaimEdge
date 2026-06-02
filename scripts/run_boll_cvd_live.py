@@ -736,11 +736,13 @@ async def account_position_sync_worker(
     last_failure_log = 0.0
     last_stale_log = 0.0
     last_cash_event_log = 0.0
+    last_flat_detected_monotonic = 0.0
     sync_failure_log_interval_seconds = float(os.getenv("ACCOUNT_SYNC_FAILURE_LOG_INTERVAL_SECONDS", "60"))
     sync_stale_warn_seconds = float(os.getenv("ACCOUNT_SYNC_STALE_WARN_SECONDS", "180"))
     cash_transfer_detect_enabled = os.getenv("CASH_TRANSFER_DETECT_ENABLED", "true").strip().lower() in {"1", "true", "yes", "y", "on"}
     cash_transfer_min_delta_usdt = float(os.getenv("CASH_TRANSFER_MIN_DELTA_USDT", "0.5"))
     cash_transfer_settle_seconds = float(os.getenv("CASH_TRANSFER_SETTLE_SECONDS", "120"))
+    cash_transfer_after_flat_cooldown_seconds = float(os.getenv("CASH_TRANSFER_AFTER_FLAT_COOLDOWN_SECONDS", "180"))
     cash_drift_min_delta_usdt = float(os.getenv("CASH_DRIFT_MIN_DELTA_USDT", "0.5"))
     cash_event_log_interval_seconds = float(os.getenv("CASH_EVENT_LOG_INTERVAL_SECONDS", "60"))
     while True:
@@ -800,6 +802,12 @@ async def account_position_sync_worker(
                     unsafe_reasons.append("current_position_id")
                 if seconds_since_last_order < cash_transfer_settle_seconds:
                     unsafe_reasons.append("order_settle")
+                in_flat_settle_cooldown = (
+                    last_flat_detected_monotonic > 0
+                    and now - last_flat_detected_monotonic < cash_transfer_after_flat_cooldown_seconds
+                )
+                if in_flat_settle_cooldown:
+                    unsafe_reasons.append("flat_settle_cooldown")
                 safe_for_cash_transfer = (
                     cash_transfer_detect_enabled
                     and pending_order_count == 0
@@ -807,6 +815,7 @@ async def account_position_sync_worker(
                     and strategy.state.layers == 0
                     and execution_state.current_position_id is None
                     and seconds_since_last_order >= cash_transfer_settle_seconds
+                    and not in_flat_settle_cooldown
                     and abs(cash_delta) >= cash_transfer_min_delta_usdt
                 )
                 if safe_for_cash_transfer:
@@ -880,6 +889,11 @@ async def account_position_sync_worker(
                         "partial_tp_consumed": getattr(strategy.state, "partial_tp_consumed", False),
                     }
                     logger.warning("POSITION_SYNC_CHANGED | flat_on_okx=true. Resetting strategy and trader state.")
+                    last_flat_detected_monotonic = now
+                    account_snapshot.cash = cash_after
+                    account_snapshot.equity = equity_after
+                    trader.account_equity_usdt = equity_after
+                    sizer.update_account_equity(equity_after)
                     strategy.state = StrategyPositionState()
                     trader.mark_flat()
                     execution_state.trading_halted = False
