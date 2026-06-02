@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import html
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -40,8 +41,22 @@ def short_ts(ts_iso: str) -> str:
         return ts_iso
 
 
+def _to_float(value: Any) -> float | None:
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except Exception:
+        return None
+
+
 class DailyTradeReporter:
-    """Build and send a daily HTML trade report from LiveTradeJournal."""
+    """Build and send HTML trade reports from LiveTradeJournal.
+
+    Report building reads JSONL files and renders HTML. Those operations are run
+    in a worker thread so scheduled reports never block the asyncio event loop
+    that handles live tick processing.
+    """
 
     def __init__(self, journal: LiveTradeJournal, email_sender: EmailSender) -> None:
         self.journal = journal
@@ -50,9 +65,20 @@ class DailyTradeReporter:
     async def send_last_24h_report(self) -> bool:
         end = datetime.now(timezone.utc)
         start = end - timedelta(hours=24)
-        events = self.journal.load_events(start=start, end=end)
-        subject, content = self.build_report(events, DailyReportWindow(start=start, end=end))
+        subject, content = await asyncio.to_thread(self._build_last_24h_report_sync, start, end)
         return await self.email_sender.send_email_async(subject, content, content_type="html")
+
+    async def send_overall_summary_report(self) -> bool:
+        subject, content = await asyncio.to_thread(self._build_overall_summary_report_sync)
+        return await self.email_sender.send_email_async(subject, content, content_type="html")
+
+    def _build_last_24h_report_sync(self, start: datetime, end: datetime) -> tuple[str, str]:
+        events = self.journal.load_events(start=start, end=end)
+        return self.build_report(events, DailyReportWindow(start=start, end=end))
+
+    def _build_overall_summary_report_sync(self) -> tuple[str, str]:
+        events = self.journal.load_events()
+        return self.build_overall_summary_report(events)
 
     def build_report(self, events: list[JournalEvent], window: DailyReportWindow) -> tuple[str, str]:
         grouped = group_position_events(events)
@@ -93,6 +119,141 @@ class DailyTradeReporter:
             win_count=win_count,
         )
         return subject, html_body
+
+    def build_overall_summary_report(self, events: list[JournalEvent]) -> tuple[str, str]:
+        events_sorted = sorted(events, key=lambda item: item.ts_iso)
+        grouped = group_position_events(events_sorted)
+
+        closed_count = 0
+        open_count = 0
+        win_count = 0
+        loss_count = 0
+        breakeven_count = 0
+        entry_count = 0
+        tp_update_count = 0
+        error_count = 0
+        total_pnl = 0.0
+        gross_profit = 0.0
+        gross_loss = 0.0
+        best_win: float | None = None
+        worst_loss: float | None = None
+        first_cash: float | None = None
+        latest_cash: float | None = None
+        equity_points: list[float] = []
+
+        for event in events_sorted:
+            if event.event_type == "ENTRY":
+                entry_count += 1
+            elif event.event_type == "TP_UPDATE":
+                tp_update_count += 1
+            elif event.event_type == "ERROR":
+                error_count += 1
+
+        for position_id, items in grouped.items():
+            if position_id == "UNKNOWN":
+                continue
+            flat_events = [e for e in items if e.event_type == "FLAT"]
+            if not flat_events:
+                open_count += 1
+                continue
+
+            closed_count += 1
+            flat = flat_events[-1]
+            pnl = _to_float(flat.payload.get("realized_pnl_usdt_est"))
+            cash_before = _to_float(flat.payload.get("cash_before_position"))
+            cash_after = _to_float(flat.payload.get("cash_after"))
+
+            if first_cash is None and cash_before is not None:
+                first_cash = cash_before
+                equity_points.append(cash_before)
+            if cash_after is not None:
+                latest_cash = cash_after
+                equity_points.append(cash_after)
+
+            if pnl is None:
+                continue
+            total_pnl += pnl
+            if pnl > 0:
+                win_count += 1
+                gross_profit += pnl
+                best_win = pnl if best_win is None else max(best_win, pnl)
+            elif pnl < 0:
+                loss_count += 1
+                gross_loss += abs(pnl)
+                worst_loss = pnl if worst_loss is None else min(worst_loss, pnl)
+            else:
+                breakeven_count += 1
+
+        win_rate = win_count / closed_count * 100 if closed_count else None
+        avg_pnl = total_pnl / closed_count if closed_count else None
+        profit_factor = gross_profit / gross_loss if gross_loss > 0 else None
+        total_return_pct = (latest_cash - first_cash) / first_cash * 100 if first_cash and latest_cash is not None else None
+        max_drawdown_usdt, max_drawdown_pct = self._max_drawdown(equity_points)
+        first_ts = short_ts(events_sorted[0].ts_iso) if events_sorted else "-"
+        last_ts = short_ts(events_sorted[-1].ts_iso) if events_sorted else "-"
+
+        subject = f"📈 ReclaimEdge 周总结 | overall | closed={closed_count} win_rate={fmt_pct(win_rate)} pnl={total_pnl:.4f}U"
+        content = f"""
+<div style="font-family:Arial,Helvetica,sans-serif;line-height:1.5;color:#222;max-width:980px;">
+  <h2>📈 ReclaimEdge 策略整体总结</h2>
+  <p><b>统计范围：</b>{html.escape(first_ts)} ~ {html.escape(last_ts)}</p>
+
+  <h3>账户收益</h3>
+  <div style="display:flex;gap:12px;flex-wrap:wrap;margin:12px 0;">
+    {self._metric_card('初始现金', fmt(first_cash, 4) + ' USDT')}
+    {self._metric_card('最新现金', fmt(latest_cash, 4) + ' USDT')}
+    {self._metric_card('累计实现盈亏', fmt(total_pnl, 4) + ' USDT')}
+    {self._metric_card('累计收益率', fmt_pct(total_return_pct))}
+    {self._metric_card('最大回撤', fmt(max_drawdown_usdt, 4) + ' USDT / ' + fmt_pct(max_drawdown_pct))}
+  </div>
+
+  <h3>策略表现</h3>
+  <div style="display:flex;gap:12px;flex-wrap:wrap;margin:12px 0;">
+    {self._metric_card('已平仓笔数', str(closed_count))}
+    {self._metric_card('未平/不完整仓位', str(open_count))}
+    {self._metric_card('胜率', fmt_pct(win_rate))}
+    {self._metric_card('盈利/亏损/打平', f'{win_count} / {loss_count} / {breakeven_count}')}
+    {self._metric_card('平均每笔盈亏', fmt(avg_pnl, 4) + ' USDT')}
+    {self._metric_card('Profit Factor', fmt(profit_factor, 2))}
+    {self._metric_card('最大单笔盈利', fmt(best_win, 4) + ' USDT')}
+    {self._metric_card('最大单笔亏损', fmt(worst_loss, 4) + ' USDT')}
+  </div>
+
+  <h3>程序事件</h3>
+  <div style="display:flex;gap:12px;flex-wrap:wrap;margin:12px 0;">
+    {self._metric_card('总事件数', str(len(events_sorted)))}
+    {self._metric_card('Entry 事件数', str(entry_count))}
+    {self._metric_card('TP 更新数', str(tp_update_count))}
+    {self._metric_card('错误事件数', str(error_count))}
+  </div>
+
+  <p style="color:#777;font-size:12px;margin-top:16px;">
+    说明：本报告基于 live_trade_events.jsonl 生成。收益和回撤使用程序记录的 cash_before_position / cash_after 估算；若程序中途接管已有仓位，早期资金曲线可能不完整。
+  </p>
+</div>
+""".strip()
+        return subject, content
+
+    @staticmethod
+    def _metric_card(title: str, value: str) -> str:
+        return f"<div style='padding:10px 14px;background:#f6f8fa;border-radius:8px;min-width:150px;'><b>{html.escape(title)}</b><br>{html.escape(value)}</div>"
+
+    @staticmethod
+    def _max_drawdown(equity_points: list[float]) -> tuple[float | None, float | None]:
+        if len(equity_points) < 2:
+            return None, None
+        peak = equity_points[0]
+        max_dd = 0.0
+        max_dd_pct = 0.0
+        for equity in equity_points:
+            if equity > peak:
+                peak = equity
+            drawdown = peak - equity
+            drawdown_pct = drawdown / peak * 100 if peak > 0 else 0.0
+            if drawdown > max_dd:
+                max_dd = drawdown
+                max_dd_pct = drawdown_pct
+        return max_dd, max_dd_pct
 
     def _render_html(
         self,
