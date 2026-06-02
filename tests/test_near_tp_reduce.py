@@ -326,6 +326,12 @@ class RecordingTrader(Trader):
         self.fail_fallback_attempts = 0
         self.fail_market_exit_attempts = 0
         self.market_order_count = 0
+        self.algo_submit_count = 0
+        self.algo_orders: dict[str, dict] = {}
+        self.verify_missing_attempts = 0
+        self.cancel_reduce_only_calls = 0
+        self.cancel_protective_calls = 0
+        self.fail_replace_take_profit = False
 
     async def fetch_position_snapshot(self) -> PositionSnapshot:
         if self.positions:
@@ -335,17 +341,39 @@ class RecordingTrader(Trader):
     async def fetch_pending_orders(self) -> list[dict]:
         return []
 
+    async def fetch_pending_algo_orders(self) -> list[dict]:
+        if self.verify_missing_attempts > 0:
+            self.verify_missing_attempts -= 1
+            return []
+        return list(self.algo_orders.values())
+
+    async def cancel_existing_reduce_only_orders(self) -> None:
+        self.cancel_reduce_only_calls += 1
+
+    async def cancel_near_tp_protective_stop(self, order_id: str | None) -> bool:
+        self.cancel_protective_calls += 1
+        return True
+
+    async def replace_take_profit(self, trade_intent: TradeIntent) -> LiveTradeResult:
+        if self.fail_replace_take_profit:
+            raise RuntimeError("replace tp failed")
+        return await super().replace_take_profit(trade_intent)
+
     async def request(self, method: str, endpoint: str, payload=None):  # type: ignore[no-untyped-def]
         self.requests.append((method, endpoint, payload or {}))
         if endpoint == "/api/v5/trade/order-algo":
-            body = payload or {}
-            if "slTriggerPx" in body and self.fail_algo_attempts > 0:
+            self.algo_submit_count += 1
+            body = dict(payload or {})
+            if self.algo_submit_count <= 3 and self.fail_algo_attempts > 0:
                 self.fail_algo_attempts -= 1
                 raise RuntimeError("primary algo failed")
-            if "triggerPx" in body and self.fail_fallback_attempts > 0:
+            if self.algo_submit_count > 3 and self.fail_fallback_attempts > 0:
                 self.fail_fallback_attempts -= 1
                 raise RuntimeError("fallback algo failed")
-            return {"code": "0", "data": [{"algoId": f"algo-{len(self.requests)}"}]}
+            algo_id = f"algo-{len(self.requests)}"
+            body["algoId"] = algo_id
+            self.algo_orders[algo_id] = body
+            return {"code": "0", "data": [{"algoId": algo_id}]}
         if endpoint == "/api/v5/trade/order":
             if payload and payload.get("ordType") == "market" and payload.get("reduceOnly") == "true":
                 self.market_order_count += 1
@@ -415,14 +443,95 @@ class NearTpTraderTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(ok)
         self.assertTrue(order_id)
         self.assertEqual(message, "fallback_conditional_close_placed")
-        fallback_orders = [payload for _m, endpoint, payload in trader.requests if endpoint == "/api/v5/trade/order-algo" and "triggerPx" in payload]
+        fallback_orders = [payload for index, (_m, endpoint, payload) in enumerate(trader.requests, start=1) if endpoint == "/api/v5/trade/order-algo" and index > 3]
         self.assertEqual(len(fallback_orders), 1)
+        self.assertIn("slTriggerPx", fallback_orders[0])
+        self.assertNotIn("triggerPx", fallback_orders[0])
+
+    async def test_reduce_filled_final_tp_replace_fails_still_places_protective_sl(self) -> None:
+        trader = RecordingTrader()
+        trader.fail_replace_take_profit = True
+
+        result = await trader.execute_near_tp_reduce(intent())
+
+        self.assertTrue(result.ok)
+        self.assertTrue(result.reduce_filled)
+        self.assertFalse(result.tp_ok)
+        self.assertTrue(result.protective_sl_ok)
+        self.assertIn("final_tp_failed", result.message)
+        self.assertIn("near_tp_reduce_done_final_tp_and_protective_sl_placed", result.message)
+
+    async def test_reduce_filled_final_tp_replace_fails_and_sl_fails_market_exits(self) -> None:
+        trader = RecordingTrader()
+        trader.fail_replace_take_profit = True
+        trader.fail_algo_attempts = 3
+        trader.fail_fallback_attempts = 3
+        trader.positions.append(PositionSnapshot("LONG", Decimal("0.5"), 100.0, 0.05, Decimal("0.5")))
+        trader.positions.append(flat_position())
+
+        with patch.dict(os.environ, {"NEAR_TP_PROTECTIVE_SL_RETRY_INTERVAL_SECONDS": "0"}):
+            result = await trader.execute_near_tp_reduce(intent())
+
+        self.assertTrue(result.ok)
+        self.assertFalse(result.tp_ok)
+        self.assertFalse(result.protective_sl_ok)
+        self.assertTrue(result.near_tp_exit_all)
+        self.assertIn("final_tp_failed", result.message)
+        self.assertIn("protective_sl_failed_market_exit_success", result.message)
+
+    async def test_protective_sl_api_success_but_verify_missing_retries(self) -> None:
+        trader = RecordingTrader()
+        trader.verify_missing_attempts = 1
+
+        with patch.dict(
+            os.environ,
+            {
+                "NEAR_TP_PROTECTIVE_SL_VERIFY_ATTEMPTS": "1",
+                "NEAR_TP_PROTECTIVE_SL_VERIFY_INTERVAL_SECONDS": "0",
+            },
+        ):
+            ok, order_id, message = await trader.place_near_tp_protective_stop_with_retries("LONG", Decimal("0.5"), 100.1, 2, 0)
+
+        self.assertTrue(ok)
+        self.assertTrue(order_id)
+        self.assertEqual(message, "protective_sl_placed")
+        algo_submits = [payload for _m, endpoint, payload in trader.requests if endpoint == "/api/v5/trade/order-algo"]
+        self.assertEqual(len(algo_submits), 2)
+
+    async def test_market_exit_confirms_flat_before_success(self) -> None:
+        trader = RecordingTrader()
+        trader.positions = [
+            PositionSnapshot("LONG", Decimal("0.5"), 100.0, 0.05, Decimal("0.5")),
+            PositionSnapshot("LONG", Decimal("0.25"), 100.0, 0.025, Decimal("0.25")),
+            flat_position(),
+        ]
+
+        ok, message = await trader.market_exit_remaining_position_with_retries("LONG", 3)
+
+        self.assertTrue(ok)
+        self.assertEqual(message, "already_flat")
+        self.assertEqual(trader.market_order_count, 1)
+
+    async def test_market_exit_success_cancels_leftover_reduce_only_tp(self) -> None:
+        trader = RecordingTrader()
+        trader.near_tp_protective_sl_order_id = "algo-old"
+        trader.positions = [
+            PositionSnapshot("LONG", Decimal("0.5"), 100.0, 0.05, Decimal("0.5")),
+            flat_position(),
+        ]
+
+        ok, _message = await trader.market_exit_remaining_position_with_retries("LONG", 1)
+
+        self.assertTrue(ok)
+        self.assertEqual(trader.cancel_reduce_only_calls, 1)
+        self.assertEqual(trader.cancel_protective_calls, 1)
 
     async def test_protective_sl_all_retries_fail_market_exit_success(self) -> None:
         trader = RecordingTrader()
         trader.fail_algo_attempts = 3
         trader.fail_fallback_attempts = 3
         trader.positions.append(PositionSnapshot("LONG", Decimal("0.5"), 100.0, 0.05, Decimal("0.5")))
+        trader.positions.append(flat_position())
 
         with patch.dict(os.environ, {"NEAR_TP_PROTECTIVE_SL_RETRY_INTERVAL_SECONDS": "0"}):
             result = await trader.execute_near_tp_reduce(intent())
@@ -508,17 +617,20 @@ class RecordingEmailSender:
 
 
 class RunnerTrader:
-    def __init__(self, result: LiveTradeResult) -> None:
+    def __init__(self, result: LiveTradeResult, positions: list[PositionSnapshot] | None = None) -> None:
         self.symbol = "ETH-USDT-SWAP"
         self.position_contracts = Decimal("0.5")
         self.account_equity_usdt = 100.0
         self.result = result
         self.cancelled_algo_ids: list[str] = []
+        self.positions = positions or []
 
     async def execute_intent(self, trade_intent: TradeIntent) -> LiveTradeResult:
         return self.result
 
     async def fetch_position_snapshot(self) -> PositionSnapshot:
+        if self.positions:
+            return self.positions.pop(0)
         return flat_position()
 
     async def fetch_usdt_equity(self) -> float:
@@ -549,11 +661,12 @@ async def run_execution_worker_once(
     journal: FakeJournal,
     state_store: RecordingStateStore,
     email_sender: RecordingEmailSender,
+    trader_positions: list[PositionSnapshot] | None = None,
 ) -> RunnerTrader:
     queue: asyncio.Queue[TradeCommand] = asyncio.Queue(maxsize=1000)
     near_intent = intent()
     await queue.put(TradeCommand(near_intent, strat_state, near_intent.ts_ms, asyncio.get_running_loop().time(), 0, near_intent.reason))
-    trader = RunnerTrader(result)
+    trader = RunnerTrader(result, trader_positions)
     strategy_obj = FakeStrategy()
     strategy_obj.state = strat_state
     task = asyncio.create_task(
@@ -608,6 +721,7 @@ class NearTpRunnerTest(unittest.IsolatedAsyncioTestCase):
             journal=journal,
             state_store=state_store,
             email_sender=email_sender,
+            trader_positions=[PositionSnapshot("LONG", Decimal("0.5"), 100.0, 0.05, Decimal("0.5"))],
         )
 
         self.assertEqual(len(journal.near_tp_reduces), 1)
@@ -618,7 +732,7 @@ class NearTpRunnerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(strat_state.near_tp_protective_sl_order_id, "algo-1")
         self.assertEqual(len(state_store.saved_states), 1)
 
-    async def test_execution_worker_near_tp_market_exit_success_does_not_halt(self) -> None:
+    async def test_near_tp_exit_all_temporarily_halts_until_account_sync(self) -> None:
         strat_state = seeded_long_state()
         journal = FakeJournal()
         state_store = RecordingStateStore()
@@ -650,9 +764,95 @@ class NearTpRunnerTest(unittest.IsolatedAsyncioTestCase):
             email_sender=email_sender,
         )
 
-        self.assertFalse(execution_state.trading_halted)
+        self.assertTrue(execution_state.trading_halted)
+        self.assertEqual(state_store.saved_states, [])
         self.assertEqual(journal.near_tp_reduces[0]["protective_sl_fail_action"], "MARKET_EXIT")
         self.assertIn("Near-TP protective SL failed; market-exited remaining position", email_sender.subjects)
+
+        cleared = asyncio.Event()
+
+        class ClearingStateStore(RecordingStateStore):
+            def clear(inner_self) -> None:
+                super().clear()
+                cleared.set()
+
+        strategy_obj = FakeStrategy()
+        strategy_obj.state = strat_state
+        clearing_store = ClearingStateStore()
+        with patch.dict(
+            os.environ,
+            {
+                "FLAT_BALANCE_CONFIRM_ATTEMPTS": "2",
+                "FLAT_BALANCE_CONFIRM_INTERVAL_SECONDS": "0",
+                "CASH_TRANSFER_MIN_DELTA_USDT": "0.5",
+                "CASH_TRANSFER_SETTLE_SECONDS": "0",
+                "CASH_TRANSFER_AFTER_FLAT_COOLDOWN_SECONDS": "180",
+                "CASH_DRIFT_MIN_DELTA_USDT": "0.5",
+            },
+        ):
+            task = asyncio.create_task(
+                account_position_sync_worker(
+                    state_lock=asyncio.Lock(),
+                    account_snapshot=AccountSnapshot(PositionSnapshot("LONG", Decimal("0.5"), 100.0, 0.05, Decimal("0.5")), 100.0, 100.0, asyncio.get_running_loop().time(), 0, 1),
+                    execution_state=execution_state,
+                    trader=RunnerTrader(LiveTradeResult(True, "noop", None, None, "0", "", "ok")),  # type: ignore[arg-type]
+                    sizer=SimplePositionSizer(SimplePositionSizerConfig()),
+                    strategy=strategy_obj,  # type: ignore[arg-type]
+                    journal=journal,  # type: ignore[arg-type]
+                    state_store=clearing_store,  # type: ignore[arg-type]
+                    position_sync_seconds=0,
+                    account_sync_seconds=999,
+                    cash_log_min_delta_usdt=999,
+                )
+            )
+            await asyncio.wait_for(cleared.wait(), timeout=1)
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+        self.assertFalse(execution_state.trading_halted)
+        self.assertEqual(strategy_obj.state, StrategyPositionState())
+
+    async def test_near_tp_success_syncs_remaining_position_before_state_save(self) -> None:
+        strat_state = seeded_long_state(total_entry_qty=1.0, total_entry_notional=100.0, avg_entry_price=100.0)
+        journal = FakeJournal()
+        state_store = RecordingStateStore()
+        email_sender = RecordingEmailSender()
+        result = LiveTradeResult(
+            True,
+            "NEAR_TP_REDUCE",
+            "ord-1",
+            "tp-1",
+            "0.5",
+            "110.00",
+            "ok",
+            tp_ok=True,
+            protective_sl_order_id="algo-1",
+            protective_sl_price="100.10",
+            protective_sl_ok=True,
+            contracts_before="1",
+            contracts_reduced="0.5",
+            contracts_after="0.5",
+            reduce_filled=True,
+        )
+
+        await run_execution_worker_once(
+            result=result,
+            strat_state=strat_state,
+            execution_state=ExecutionState("pos-1", 100.0, pending_order_count=1),
+            journal=journal,
+            state_store=state_store,
+            email_sender=email_sender,
+            trader_positions=[PositionSnapshot("LONG", Decimal("0.5"), 101.0, 0.05, Decimal("0.5"))],
+        )
+
+        self.assertAlmostEqual(strat_state.total_entry_qty, 0.05)
+        self.assertAlmostEqual(strat_state.total_entry_notional, 5.05)
+        self.assertAlmostEqual(strat_state.avg_entry_price, 101.0)
+        self.assertEqual(len(state_store.saved_states), 1)
+        saved = state_store.saved_states[0]
+        self.assertAlmostEqual(saved.total_entry_qty, 0.05)
+        self.assertAlmostEqual(saved.avg_entry_price, 101.0)
 
     async def test_execution_worker_near_tp_total_failure_halts(self) -> None:
         strat_state = seeded_long_state(near_tp_reduce_pending=True)

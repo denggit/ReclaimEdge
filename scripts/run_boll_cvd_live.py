@@ -695,11 +695,27 @@ async def execution_worker(
                 fail_action = None
                 if not getattr(result, "protective_sl_ok", False) and getattr(result, "near_tp_exit_all", False):
                     fail_action = "MARKET_EXIT"
+                remaining_position: PositionSnapshot | None = None
+                if getattr(result, "protective_sl_ok", False) and not getattr(result, "near_tp_exit_all", False):
+                    try:
+                        position = await trader.fetch_position_snapshot()
+                        if position.has_position and position.side == command.intent.side:
+                            remaining_position = position
+                    except Exception:
+                        logger.exception("NEAR_TP_STATE_PROTECTED | failed_to_sync_remaining_position_before_save")
                 async with state_lock:
                     current_position_id = execution_state.current_position_id
                     cash_before_position = execution_state.cash_before_position
                     execution_state.last_order_ts_ms = command.intent.ts_ms
-                    if getattr(result, "protective_sl_ok", False) and not getattr(result, "near_tp_exit_all", False):
+                    near_tp_state_synced = False
+                    if getattr(result, "near_tp_exit_all", False):
+                        execution_state.trading_halted = True
+                    elif getattr(result, "protective_sl_ok", False):
+                        if remaining_position is not None:
+                            sync_strategy_cost_from_position(strategy, remaining_position)
+                            account_snapshot.position = remaining_position
+                            trader.position_contracts = remaining_position.contracts
+                            near_tp_state_synced = True
                         strategy.state.near_tp_protected = True
                         strategy.state.near_tp_reduce_pending = False
                         strategy_config = getattr(strategy, "config", None)
@@ -725,7 +741,7 @@ async def execution_worker(
                     result=result,
                     protective_sl_fail_action=fail_action,
                 )
-                if getattr(result, "protective_sl_ok", False) and not getattr(result, "near_tp_exit_all", False):
+                if getattr(result, "protective_sl_ok", False) and not getattr(result, "near_tp_exit_all", False) and near_tp_state_synced:
                     state_store.save(
                         LiveStateStore.from_strategy_state(
                             position_id=current_position_id,
@@ -733,13 +749,13 @@ async def execution_worker(
                             strategy_state=strategy_state_for_save,
                             cash_before_position=cash_before_position,
                         )
-                    )
+                )
                 if fail_action == "MARKET_EXIT":
                     subject = "Near-TP protective SL failed; market-exited remaining position"
                     content = (
                         "<div style='font-family:Arial,Helvetica,sans-serif;line-height:1.55;'>"
                         "<h2>Near-TP protective SL failed</h2>"
-                        f"<p>Remaining position was market-exited successfully. Program continues.</p>"
+                        f"<p>Remaining position was market-exited successfully. Trading is temporarily halted until account sync records FLAT.</p>"
                         f"<p><b>position_id:</b> {html.escape(str(current_position_id))}</p>"
                         f"<p><b>message:</b> {html.escape(result.message)}</p>"
                         "</div>"
