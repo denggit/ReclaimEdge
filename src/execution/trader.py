@@ -527,6 +527,7 @@ class Trader:
                 algo_id = self.extract_algo_id(res)
                 if await self.verify_near_tp_protective_stop(algo_id, side, contracts, stop_price):
                     return True, algo_id, "protective_sl_placed"
+                await self._cancel_unverified_near_tp_algo(algo_id, phase="primary")
                 last_error = f"protective_sl_verify_failed algoId={algo_id}"
                 raise RuntimeError(last_error)
             except Exception as exc:
@@ -550,6 +551,7 @@ class Trader:
                 algo_id = self.extract_algo_id(res)
                 if await self.verify_near_tp_protective_stop(algo_id, side, contracts, stop_price):
                     return True, algo_id, "fallback_conditional_close_placed"
+                await self._cancel_unverified_near_tp_algo(algo_id, phase="secondary")
                 last_error = f"fallback_conditional_verify_failed algoId={algo_id}"
                 raise RuntimeError(last_error)
             except Exception as exc:
@@ -566,6 +568,23 @@ class Trader:
                 if attempt < retry_count and retry_interval_seconds > 0:
                     await asyncio.sleep(retry_interval_seconds)
         return False, None, last_error or "protective_sl_retries_exhausted"
+
+    async def _cancel_unverified_near_tp_algo(self, algo_id: str, *, phase: str) -> None:
+        try:
+            ok = await self.cancel_near_tp_protective_stop(algo_id)
+            logger.warning(
+                "NEAR_TP_PROTECTIVE_SL_VERIFY_CANCELLED | phase=%s algoId=%s ok=%s",
+                phase,
+                algo_id,
+                ok,
+            )
+        except Exception as exc:
+            logger.warning(
+                "NEAR_TP_PROTECTIVE_SL_VERIFY_CANCEL_FAILED | phase=%s algoId=%s error=%s",
+                phase,
+                algo_id,
+                exc,
+            )
 
     async def verify_near_tp_protective_stop(self, algo_id: str, side: PositionSide, contracts: Decimal, stop_price: float) -> bool:
         attempts = max(int(os.getenv("NEAR_TP_PROTECTIVE_SL_VERIFY_ATTEMPTS", "3")), 1)
@@ -652,16 +671,34 @@ class Trader:
         for attempt in range(1, retry_count + 1):
             try:
                 position = await self.fetch_position_snapshot()
-                if not position.has_position or position.side != side or position.contracts <= self.min_contracts:
+                if not position.has_position or position.contracts <= 0:
                     self.position_contracts = Decimal("0")
                     await self._cleanup_after_near_tp_market_exit()
                     logger.warning("NEAR_TP_MARKET_EXIT_SUCCESS | reason=already_flat")
                     return True, "already_flat"
+                if position.side != side:
+                    self.position_contracts = Decimal("0")
+                    await self._cleanup_after_near_tp_market_exit()
+                    logger.warning(
+                        "NEAR_TP_MARKET_EXIT_SUCCESS | reason=target_side_absent expected_side=%s actual_side=%s contracts=%s",
+                        side,
+                        position.side,
+                        self.decimal_to_str(position.contracts),
+                    )
+                    return True, "target_side_absent"
+                if Decimal("0") < position.contracts < self.min_contracts:
+                    last_error = (
+                        f"dust_position_below_min_contracts contracts={self.decimal_to_str(position.contracts)} "
+                        f"min_contracts={self.decimal_to_str(self.min_contracts)}"
+                    )
+                    logger.error("NEAR_TP_MARKET_EXIT_FAILED | reason=%s", last_error)
+                    return False, last_error
+
                 body = self._reduce_only_market_order_body(side, position.contracts)
                 res = await self.request("POST", "/api/v5/trade/order", body)
                 order_id = self.extract_order_id(res)
                 refreshed = await self.fetch_position_snapshot()
-                if not refreshed.has_position or refreshed.side != side or refreshed.contracts <= self.min_contracts:
+                if not refreshed.has_position or refreshed.contracts <= 0:
                     self.position_contracts = Decimal("0")
                     await self._cleanup_after_near_tp_market_exit()
                     logger.warning(
@@ -672,6 +709,31 @@ class Trader:
                         attempt,
                     )
                     return True, f"market_exit_order_id={order_id}"
+                if refreshed.side != side:
+                    self.position_contracts = Decimal("0")
+                    await self._cleanup_after_near_tp_market_exit()
+                    logger.warning(
+                        "NEAR_TP_MARKET_EXIT_SUCCESS | reason=target_side_absent_after_order side=%s actual_side=%s ordId=%s attempt=%s",
+                        side,
+                        refreshed.side,
+                        order_id,
+                        attempt,
+                    )
+                    return True, f"market_exit_order_id={order_id};target_side_absent_after_order"
+                if Decimal("0") < refreshed.contracts < self.min_contracts:
+                    last_error = (
+                        f"dust_position_below_min_contracts_after_order contracts={self.decimal_to_str(refreshed.contracts)} "
+                        f"min_contracts={self.decimal_to_str(self.min_contracts)}"
+                    )
+                    logger.error(
+                        "NEAR_TP_MARKET_EXIT_FAILED | reason=%s ordId=%s attempt=%s/%s",
+                        last_error,
+                        order_id,
+                        attempt,
+                        retry_count,
+                    )
+                    return False, last_error
+
                 self.position_contracts = refreshed.contracts
                 last_error = f"market_exit_not_flat_after_order contracts={self.decimal_to_str(refreshed.contracts)}"
                 logger.error(

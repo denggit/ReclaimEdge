@@ -367,6 +367,7 @@ class ExecutionState:
     trading_halted: bool = False
     last_order_ts_ms: int = 0
     pending_order_count: int = 0
+    halt_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -392,6 +393,15 @@ class ExecutionReport:
 
 def utc_ms() -> int:
     return int(time.time() * 1000)
+
+
+def _parse_optional_float(value: Any) -> float | None:
+    try:
+        if value in {None, ""}:
+            return None
+        return float(value)
+    except Exception:
+        return None
 
 
 def queue_log_level(queue_size: int) -> int | None:
@@ -696,12 +706,16 @@ async def execution_worker(
                 if not getattr(result, "protective_sl_ok", False) and getattr(result, "near_tp_exit_all", False):
                     fail_action = "MARKET_EXIT"
                 remaining_position: PositionSnapshot | None = None
+                remaining_position_sync_error: str | None = None
                 if getattr(result, "protective_sl_ok", False) and not getattr(result, "near_tp_exit_all", False):
                     try:
                         position = await trader.fetch_position_snapshot()
                         if position.has_position and position.side == command.intent.side:
                             remaining_position = position
+                        else:
+                            remaining_position_sync_error = f"position_absent_or_side_mismatch has_position={position.has_position} side={position.side}"
                     except Exception:
+                        remaining_position_sync_error = "fetch_position_failed"
                         logger.exception("NEAR_TP_STATE_PROTECTED | failed_to_sync_remaining_position_before_save")
                 async with state_lock:
                     current_position_id = execution_state.current_position_id
@@ -710,17 +724,26 @@ async def execution_worker(
                     near_tp_state_synced = False
                     if getattr(result, "near_tp_exit_all", False):
                         execution_state.trading_halted = True
+                        execution_state.halt_reason = "near_tp_exit_all_waiting_flat"
                     elif getattr(result, "protective_sl_ok", False):
                         if remaining_position is not None:
                             sync_strategy_cost_from_position(strategy, remaining_position)
                             account_snapshot.position = remaining_position
                             trader.position_contracts = remaining_position.contracts
                             near_tp_state_synced = True
+                        else:
+                            execution_state.trading_halted = True
+                            execution_state.halt_reason = "near_tp_protected_sync_failed"
+                            logger.warning(
+                                "NEAR_TP_STATE_PROTECTED_SYNC_FAILED | position_id=%s reason=%s trading_halted=true",
+                                current_position_id,
+                                remaining_position_sync_error or "unknown",
+                            )
                         strategy.state.near_tp_protected = True
                         strategy.state.near_tp_reduce_pending = False
                         strategy_config = getattr(strategy, "config", None)
                         strategy.state.near_tp_add_disabled = bool(getattr(strategy_config, "near_tp_disable_add_after_reduce", True))
-                        strategy.state.near_tp_protective_sl_price = getattr(command.intent, "near_tp_protective_sl_price", None)
+                        strategy.state.near_tp_protective_sl_price = getattr(command.intent, "near_tp_protective_sl_price", None) or _parse_optional_float(getattr(result, "protective_sl_price", ""))
                         strategy.state.near_tp_protective_sl_order_id = getattr(result, "protective_sl_order_id", None)
                         strategy.state.tp_plan = "SINGLE"
                         strategy.state.partial_tp_price = None
@@ -741,7 +764,7 @@ async def execution_worker(
                     result=result,
                     protective_sl_fail_action=fail_action,
                 )
-                if getattr(result, "protective_sl_ok", False) and not getattr(result, "near_tp_exit_all", False) and near_tp_state_synced:
+                if getattr(result, "protective_sl_ok", False) and not getattr(result, "near_tp_exit_all", False):
                     state_store.save(
                         LiveStateStore.from_strategy_state(
                             position_id=current_position_id,
@@ -749,7 +772,22 @@ async def execution_worker(
                             strategy_state=strategy_state_for_save,
                             cash_before_position=cash_before_position,
                         )
-                )
+                    )
+                    if not near_tp_state_synced:
+                        subject = "Near-TP protected but position sync failed"
+                        content = (
+                            "<div style='font-family:Arial,Helvetica,sans-serif;line-height:1.55;'>"
+                            "<h2>Near-TP protected but position sync failed</h2>"
+                            "<p>Reduce succeeded and protective SL was placed. Protected state was saved.</p>"
+                            "<p>Trading is temporarily halted until account sync refreshes the position.</p>"
+                            f"<p><b>position_id:</b> {html.escape(str(current_position_id))}</p>"
+                            f"<p><b>protective_sl_order_id:</b> {html.escape(str(getattr(result, 'protective_sl_order_id', None)))}</p>"
+                            f"<p><b>reason:</b> {html.escape(str(remaining_position_sync_error or 'unknown'))}</p>"
+                            "</div>"
+                        )
+                        ok = await email_sender.send_email_async(subject, content, content_type="html")
+                        if not ok:
+                            logger.error("Failed to send Near-TP protected sync failure email")
                 if fail_action == "MARKET_EXIT":
                     subject = "Near-TP protective SL failed; market-exited remaining position"
                     content = (
@@ -858,6 +896,10 @@ async def handle_execution_failure(
         current_position_id = execution_state.current_position_id
         if entry_may_be_live:
             execution_state.trading_halted = True
+            if command.intent.intent_type == "NEAR_TP_REDUCE" and getattr(result, "reduce_filled", False):
+                execution_state.halt_reason = "near_tp_reduce_failure"
+            else:
+                execution_state.halt_reason = "execution_failure_live_position"
             trader.position_contracts = contracts
         else:
             strategy.state = copy.deepcopy(command.strategy_state_snapshot)
@@ -1087,6 +1129,19 @@ async def account_position_sync_worker(
                     if pending_order_count == 0:
                         mark_partial_tp_consumed_if_position_reduced(strategy, position)
                         sync_strategy_cost_from_position(strategy, position)
+                        if (
+                            execution_state.trading_halted
+                            and execution_state.halt_reason == "near_tp_protected_sync_failed"
+                            and getattr(strategy.state, "near_tp_protected", False)
+                        ):
+                            execution_state.trading_halted = False
+                            execution_state.halt_reason = None
+                            logger.warning(
+                                "NEAR_TP_PROTECTED_SYNC_RECOVERED | trading_halted=false side=%s contracts=%s avg_entry=%.4f",
+                                position.side,
+                                position.contracts,
+                                position.avg_entry_price,
+                            )
                         save_state_payload = (execution_state.current_position_id, copy.deepcopy(strategy.state), execution_state.cash_before_position)
                         if current_position_key != last_logged_position_key:
                             logger.info(
@@ -1148,6 +1203,7 @@ async def account_position_sync_worker(
                     strategy.state = StrategyPositionState()
                     trader.mark_flat()
                     execution_state.trading_halted = False
+                    execution_state.halt_reason = None
                     execution_state.current_position_id = None
                     execution_state.cash_before_position = None
                     clear_state = True
