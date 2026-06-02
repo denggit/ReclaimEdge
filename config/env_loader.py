@@ -2,8 +2,22 @@
 # -*- coding: utf-8 -*-
 """
 环境变量配置加载器，用于读取 .env 文件中的配置。
+
+注意：导入本模块时会先初始化 src.utils.log，确保实盘脚本在调用
+logging.basicConfig 之前已经安装统一文件日志 handler。
 """
 import os
+
+# Bootstrap project logging early. This import is intentionally kept for its
+# side effect: src.utils.log configures root logging with daily file rotation.
+# If a script later calls logging.basicConfig(...), Python will no-op because
+# handlers already exist, so logs will not be duplicated to console by default.
+try:
+    from src.utils import log as _reclaimedge_log  # noqa: F401
+except Exception:
+    # Config loading must remain usable in minimal/offline contexts even if the
+    # logging package path is unavailable.
+    _reclaimedge_log = None
 
 
 def load_env_config() -> dict:
