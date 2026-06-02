@@ -240,7 +240,7 @@ class Trader:
         partial_tp_price = getattr(intent, "partial_tp_price", None)
         partial_tp_ratio = Decimal(str(getattr(intent, "partial_tp_ratio", 0.0)))
         tp_plan = getattr(intent, "tp_plan", "SINGLE")
-        if tp_plan != "SPLIT_50_50" or partial_tp_price is None or partial_tp_ratio <= 0 or partial_tp_ratio >= 1:
+        if tp_plan not in {"SPLIT_PARTIAL_FINAL", "SPLIT_50_50"} or partial_tp_price is None or partial_tp_ratio <= 0 or partial_tp_ratio >= 1:
             return [("final", self.position_contracts, intent.tp_price)]
 
         partial_contracts = self.round_contracts_down(self.position_contracts * partial_tp_ratio)

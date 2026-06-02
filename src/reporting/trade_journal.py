@@ -223,6 +223,7 @@ class LiveTradeJournal:
             "partial_tp_price": getattr(intent, "partial_tp_price", None),
             "partial_tp_ratio": getattr(intent, "partial_tp_ratio", 0.0),
             "tp_plan": getattr(intent, "tp_plan", "SINGLE"),
+            "partial_tp_consumed": getattr(intent, "partial_tp_consumed", False),
             "tp_mode": intent.tp_mode,
             "avg_entry_price": intent.avg_entry_price,
             "breakeven_price": intent.breakeven_price,
@@ -261,6 +262,7 @@ class LiveTradeJournal:
                 "partial_tp_price": getattr(intent, "partial_tp_price", None),
                 "partial_tp_ratio": getattr(intent, "partial_tp_ratio", 0.0),
                 "tp_plan": getattr(intent, "tp_plan", "SINGLE"),
+                "partial_tp_consumed": getattr(intent, "partial_tp_consumed", False),
                 "tp_mode": intent.tp_mode,
                 "avg_entry_price": intent.avg_entry_price,
                 "breakeven_price": intent.breakeven_price,
@@ -275,7 +277,23 @@ class LiveTradeJournal:
             position_id=position_id,
         )
 
-    def record_flat(self, *, position_id: str | None, symbol: str, side: str | None, cash_before_position: float | None, cash_after: float | None, equity_after: float | None, reason: str, layers: int, avg_entry_price: float, last_tp_price: float | None) -> None:
+    def record_flat(
+        self,
+        *,
+        position_id: str | None,
+        symbol: str,
+        side: str | None,
+        cash_before_position: float | None,
+        cash_after: float | None,
+        equity_after: float | None,
+        reason: str,
+        layers: int,
+        avg_entry_price: float,
+        last_tp_price: float | None,
+        last_partial_tp_price: float | None = None,
+        last_tp_plan: str = "SINGLE",
+        partial_tp_consumed: bool = False,
+    ) -> None:
         pnl = None
         pnl_pct = None
         if cash_before_position is not None and cash_after is not None:
@@ -295,6 +313,9 @@ class LiveTradeJournal:
                 "layers": layers,
                 "avg_entry_price": avg_entry_price,
                 "last_tp_price": last_tp_price,
+                "last_partial_tp_price": last_partial_tp_price,
+                "last_tp_plan": last_tp_plan,
+                "partial_tp_consumed": partial_tp_consumed,
             },
             position_id=position_id,
         )
@@ -310,6 +331,7 @@ class LiveTradeJournal:
                 "tp_price": getattr(intent, "tp_price", None),
                 "partial_tp_price": getattr(intent, "partial_tp_price", None),
                 "tp_plan": getattr(intent, "tp_plan", "SINGLE"),
+                "partial_tp_consumed": getattr(intent, "partial_tp_consumed", False),
                 "error": str(error),
                 "rolled_back": rolled_back,
                 "halted": halted,

@@ -22,6 +22,7 @@ class LivePositionState:
     partial_tp_price: float | None = None
     partial_tp_ratio: float = 0.0
     tp_plan: str = "SINGLE"
+    partial_tp_consumed: bool = False
     total_entry_qty: float = 0.0
     total_entry_notional: float = 0.0
     avg_entry_price: float = 0.0
@@ -79,7 +80,8 @@ class LiveStateStore:
             tp_price=strategy_state.tp_price,
             partial_tp_price=getattr(strategy_state, "partial_tp_price", None),
             partial_tp_ratio=float(getattr(strategy_state, "partial_tp_ratio", 0.0) or 0.0),
-            tp_plan=str(getattr(strategy_state, "tp_plan", "SINGLE") or "SINGLE"),
+            tp_plan=_normalize_tp_plan(str(getattr(strategy_state, "tp_plan", "SINGLE") or "SINGLE")),
+            partial_tp_consumed=bool(getattr(strategy_state, "partial_tp_consumed", False)),
             total_entry_qty=float(strategy_state.total_entry_qty or 0.0),
             total_entry_notional=float(strategy_state.total_entry_notional or 0.0),
             avg_entry_price=float(strategy_state.avg_entry_price or 0.0),
@@ -90,3 +92,11 @@ class LiveStateStore:
             last_tp_update_candle_ts_ms=int(getattr(strategy_state, "last_tp_update_candle_ts_ms", 0) or 0),
             cash_before_position=cash_before_position,
         )
+
+
+def _normalize_tp_plan(tp_plan: str) -> str:
+    if tp_plan == "SPLIT_50_50":
+        return "SPLIT_PARTIAL_FINAL"
+    if tp_plan == "SPLIT_PARTIAL_FINAL":
+        return tp_plan
+    return "SINGLE"

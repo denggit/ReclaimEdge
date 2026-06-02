@@ -20,7 +20,7 @@ TradeIntentType = Literal[
 ]
 PositionSide = Literal["LONG", "SHORT"]
 TpMode = Literal["MIDDLE", "UPPER", "LOWER"]
-TpPlan = Literal["SINGLE", "SPLIT_50_50"]
+TpPlan = Literal["SINGLE", "SPLIT_PARTIAL_FINAL"]
 
 
 @dataclass(frozen=True)
@@ -83,6 +83,7 @@ class TradeIntent:
     partial_tp_price: float | None = None
     partial_tp_ratio: float = 0.0
     tp_plan: TpPlan = "SINGLE"
+    partial_tp_consumed: bool = False
 
 
 @dataclass
@@ -112,6 +113,7 @@ class StrategyPositionState:
     partial_tp_price: float | None = None
     partial_tp_ratio: float = 0.0
     tp_plan: TpPlan = "SINGLE"
+    partial_tp_consumed: bool = False
 
 
 class BollCvdReclaimStrategy:
@@ -342,12 +344,13 @@ class BollCvdReclaimStrategy:
         next_layer = self.state.layers + 1
         size = self.sizer.calculate(price, layer_index=next_layer)
         self._update_position_cost(price, size.eth_qty)
+        self.state.partial_tp_consumed = False
         tp_price, tp_mode = self._select_tp_price(side, boll)
         partial_tp_price, partial_tp_ratio, tp_plan = self._select_tp_plan(side, tp_price, next_layer)
         if tp_mode != "MIDDLE":
             reason = f"{reason} + 中轨不足覆盖含手续费盈亏平衡，TP切换到{tp_mode}"
-        if tp_plan == "SPLIT_50_50":
-            reason = f"{reason} + 总层数>= {self.config.split_tp_min_layers}，启用50/50分批止盈"
+        if tp_plan == "SPLIT_PARTIAL_FINAL":
+            reason = f"{reason} + 总层数>= {self.config.split_tp_min_layers}，启用分批止盈"
         self.state.side = side
         self.state.layers = next_layer
         self.state.last_entry_price = price
@@ -449,6 +452,8 @@ class BollCvdReclaimStrategy:
     def _select_tp_plan(self, side: PositionSide, final_tp: float, layers: int) -> tuple[float | None, float, TpPlan]:
         if layers < self.config.split_tp_min_layers:
             return None, 0.0, "SINGLE"
+        if self.state.partial_tp_consumed:
+            return None, 0.0, "SINGLE"
         avg_entry = self.state.avg_entry_price
         if avg_entry <= 0 or final_tp <= 0:
             return None, 0.0, "SINGLE"
@@ -466,7 +471,7 @@ class BollCvdReclaimStrategy:
             partial_tp = max(path_tp, min_tp)
             if partial_tp >= final_tp:
                 return None, 0.0, "SINGLE"
-            return partial_tp, partial_ratio, "SPLIT_50_50"
+            return partial_tp, partial_ratio, "SPLIT_PARTIAL_FINAL"
 
         min_tp = avg_entry * (1 - min_profit_pct)
         if final_tp >= min_tp:
@@ -475,7 +480,7 @@ class BollCvdReclaimStrategy:
         partial_tp = min(path_tp, min_tp)
         if partial_tp <= final_tp:
             return None, 0.0, "SINGLE"
-        return partial_tp, partial_ratio, "SPLIT_50_50"
+        return partial_tp, partial_ratio, "SPLIT_PARTIAL_FINAL"
 
     def _tp_plan_unchanged(self, tp_price: float, partial_tp_price: float | None, partial_tp_ratio: float, tp_plan: TpPlan) -> bool:
         if self.state.tp_price is None:
@@ -525,6 +530,7 @@ class BollCvdReclaimStrategy:
             partial_tp_price=self.state.partial_tp_price,
             partial_tp_ratio=self.state.partial_tp_ratio,
             tp_plan=self.state.tp_plan,
+            partial_tp_consumed=self.state.partial_tp_consumed,
         )
 
     def _cooldown_ok(self, ts_ms: int) -> bool:

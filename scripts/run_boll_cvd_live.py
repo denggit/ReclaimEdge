@@ -46,6 +46,8 @@ from src.utils.log import get_logger  # noqa: E402
 
 logger = get_logger(__name__)
 
+SPLIT_TP_PLANS = {"SPLIT_PARTIAL_FINAL", "SPLIT_50_50"}
+
 
 def live_trading_enabled() -> bool:
     return os.getenv("LIVE_TRADING", "false").strip().lower() in {"1", "true", "yes", "y", "on"}
@@ -158,6 +160,9 @@ def restore_strategy_from_position(strategy: BollCvdReclaimStrategy, position: P
 
 
 def restore_strategy_from_saved_state(strategy: BollCvdReclaimStrategy, saved_state) -> None:  # type: ignore[no-untyped-def]
+    tp_plan = getattr(saved_state, "tp_plan", "SINGLE")
+    if tp_plan == "SPLIT_50_50":
+        tp_plan = "SPLIT_PARTIAL_FINAL"
     strategy.state = StrategyPositionState(
         side=saved_state.side,
         layers=saved_state.layers,
@@ -165,7 +170,8 @@ def restore_strategy_from_saved_state(strategy: BollCvdReclaimStrategy, saved_st
         tp_price=saved_state.tp_price,
         partial_tp_price=getattr(saved_state, "partial_tp_price", None),
         partial_tp_ratio=getattr(saved_state, "partial_tp_ratio", 0.0),
-        tp_plan=getattr(saved_state, "tp_plan", "SINGLE"),
+        tp_plan=tp_plan,
+        partial_tp_consumed=getattr(saved_state, "partial_tp_consumed", False),
         last_order_ts_ms=saved_state.last_order_ts_ms,
         last_tp_update_ts_ms=saved_state.last_tp_update_ts_ms,
         last_tp_update_candle_ts_ms=saved_state.last_tp_update_candle_ts_ms,
@@ -176,14 +182,15 @@ def restore_strategy_from_saved_state(strategy: BollCvdReclaimStrategy, saved_st
         tp_mode=saved_state.tp_mode,
     )
     logger.warning(
-        "Recovered strategy state from local disk | position_id=%s side=%s layers=%s avg_entry=%.4f tp=%s partial_tp=%s tp_plan=%s",
+        "Recovered strategy state from local disk | position_id=%s side=%s layers=%s avg_entry=%.4f tp=%s partial_tp=%s tp_plan=%s partial_tp_consumed=%s",
         saved_state.position_id,
         saved_state.side,
         saved_state.layers,
         saved_state.avg_entry_price,
         saved_state.tp_price,
         getattr(saved_state, "partial_tp_price", None),
-        getattr(saved_state, "tp_plan", "SINGLE"),
+        tp_plan,
+        getattr(saved_state, "partial_tp_consumed", False),
     )
 
 
@@ -197,6 +204,42 @@ def sync_strategy_cost_from_position(strategy: BollCvdReclaimStrategy, position:
     strategy.state.total_entry_notional = position.avg_entry_price * position.eth_qty
     strategy.state.avg_entry_price = position.avg_entry_price
     strategy.state.last_entry_price = strategy.state.last_entry_price or position.avg_entry_price
+
+
+def mark_partial_tp_consumed_if_position_reduced(strategy: BollCvdReclaimStrategy, position: PositionSnapshot) -> bool:
+    state = strategy.state
+    original_plan = getattr(state, "tp_plan", "SINGLE")
+    if original_plan not in SPLIT_TP_PLANS:
+        return False
+    if not position.has_position or position.side != state.side:
+        return False
+    total_entry_qty = float(getattr(state, "total_entry_qty", 0.0) or 0.0)
+    if total_entry_qty <= 0:
+        return False
+
+    old_partial_tp_price = getattr(state, "partial_tp_price", None)
+    partial_tp_ratio = float(getattr(state, "partial_tp_ratio", 0.0) or 0.0)
+    reduction_ratio = 1 - (float(position.eth_qty) / total_entry_qty)
+    required_ratio = max(0.05, partial_tp_ratio * 0.5)
+    if reduction_ratio < required_ratio:
+        return False
+
+    state.partial_tp_consumed = True
+    state.partial_tp_price = None
+    state.partial_tp_ratio = 0.0
+    state.tp_plan = "SINGLE"
+    logger.warning(
+        "SPLIT_TP_CONSUMED | side=%s original_plan=%s partial_tp_price=%s old_qty=%.8f new_qty=%.8f reduction_ratio=%.6f required_ratio=%.6f partial_ratio=%.4f",
+        state.side,
+        original_plan,
+        old_partial_tp_price,
+        total_entry_qty,
+        position.eth_qty,
+        reduction_ratio,
+        required_ratio,
+        partial_tp_ratio,
+    )
+    return True
 
 
 def position_log_key(position: PositionSnapshot) -> tuple[str, str, float]:
@@ -492,6 +535,43 @@ async def execution_worker(
             entry_cash_before = cash_before_position
             if command.intent.intent_type != "UPDATE_TP" and current_position_id is None:
                 entry_cash_before = await fetch_usdt_cash_balance(trader)
+
+            if command.intent.intent_type in {"ADD_LONG", "ADD_SHORT"} and getattr(command.strategy_state_snapshot, "tp_plan", "SINGLE") in SPLIT_TP_PLANS:
+                position = await trader.fetch_position_snapshot()
+                if position.has_position and position.side == command.intent.side:
+                    consumed = False
+                    async with state_lock:
+                        current_strategy_state = copy.deepcopy(strategy.state)
+                        strategy.state = copy.deepcopy(command.strategy_state_snapshot)
+                        consumed = mark_partial_tp_consumed_if_position_reduced(strategy, position)
+                        if consumed:
+                            sync_strategy_cost_from_position(strategy, position)
+                            current_position_id = execution_state.current_position_id
+                            cash_before_position = execution_state.cash_before_position
+                            strategy_state_for_save = copy.deepcopy(strategy.state)
+                            account_snapshot.position = position
+                            trader.position_contracts = position.contracts
+                        else:
+                            strategy.state = current_strategy_state
+                    if consumed:
+                        state_store.save(
+                            LiveStateStore.from_strategy_state(
+                                position_id=current_position_id,
+                                symbol=trader.symbol,
+                                strategy_state=strategy_state_for_save,
+                                cash_before_position=cash_before_position,
+                            )
+                        )
+                        logger.warning(
+                            "EXECUTION_SKIPPED | reason=partial_tp_consumed_before_add stale_add_command_skipped intent_type=%s side=%s layer=%s okx_eth_qty=%.8f strategy_eth_qty=%.8f tp_plan=%s",
+                            command.intent.intent_type,
+                            command.intent.side,
+                            command.intent.layer_index,
+                            position.eth_qty,
+                            strategy_state_for_save.total_entry_qty,
+                            strategy_state_for_save.tp_plan,
+                        )
+                        continue
 
             result = await trader.execute_intent(command.intent)
             if not result.ok:
@@ -797,6 +877,7 @@ async def account_position_sync_worker(
                         "last_tp_price": strategy.state.tp_price,
                         "last_partial_tp_price": getattr(strategy.state, "partial_tp_price", None),
                         "last_tp_plan": getattr(strategy.state, "tp_plan", "SINGLE"),
+                        "partial_tp_consumed": getattr(strategy.state, "partial_tp_consumed", False),
                     }
                     logger.warning("POSITION_SYNC_CHANGED | flat_on_okx=true. Resetting strategy and trader state.")
                     strategy.state = StrategyPositionState()
@@ -811,6 +892,7 @@ async def account_position_sync_worker(
                 elif position.has_position:
                     trader.position_contracts = position.contracts
                     if pending_order_count == 0:
+                        mark_partial_tp_consumed_if_position_reduced(strategy, position)
                         sync_strategy_cost_from_position(strategy, position)
                         save_state_payload = (execution_state.current_position_id, copy.deepcopy(strategy.state), execution_state.cash_before_position)
                         if current_position_key != last_logged_position_key:
