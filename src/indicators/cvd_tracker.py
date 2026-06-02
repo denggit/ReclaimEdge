@@ -12,7 +12,7 @@ OutOfOrderPolicy = Literal["drop_for_realtime", "accept_slow_debug"]
 logger = logging.getLogger(__name__)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class CvdTrackerConfig:
     fast_window_seconds: float = 5.0
     price_stall_seconds: float = 2.0
@@ -35,7 +35,7 @@ class CvdTrackerConfig:
         )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class CvdSnapshot:
     ts_ms: int
     price: float
@@ -68,7 +68,7 @@ class CvdSnapshot:
     down_burst: bool
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Event:
     ts_ms: int
     price: float
@@ -78,7 +78,7 @@ class Event:
     volume: float
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class RangeSample:
     ts_ms: int
     range_pct: float
@@ -132,19 +132,25 @@ class CvdTracker:
         self._last_tick_ts_ms: int | None = None
         self._last_snapshot: CvdSnapshot | None = None
         self._last_out_of_order_log_monotonic: float = 0.0
-        self._last_slow_log_monotonic: float = 0.0
         self._out_of_order_policy = self._load_out_of_order_policy()
         self._slow_log_threshold_ms = float(os.getenv("CVD_UPDATE_SLOW_LOG_MS", "20"))
+        self._stats_interval_seconds = float(os.getenv("CVD_UPDATE_STATS_INTERVAL_SECONDS", "60"))
+        self._stats_started_monotonic: float = time.monotonic() if self._stats_interval_seconds > 0 else 0.0
+        self._stats_count: int = 0
+        self._stats_slow_count: int = 0
+        self._stats_total_ms: float = 0.0
+        self._stats_max_ms: float = 0.0
+        self._stats_elapsed_ms: list[float] = []
 
     def update(self, side: str, size: float, price: float, ts_ms: int) -> CvdSnapshot:
-        started_monotonic = time.monotonic() if self._slow_log_threshold_ms > 0 else None
+        started_monotonic = time.monotonic() if self._stats_interval_seconds > 0 else None
         normalized_side = self._normalize_side(side)
         signed_delta = self._signed_delta(normalized_side, size)
 
         if self._last_tick_ts_ms is not None and ts_ms < self._last_tick_ts_ms:
             self._log_out_of_order_tick(ts_ms, price, normalized_side, size)
             snapshot = self._snapshot_without_mutating_windows(ts_ms, price, normalized_side, size, signed_delta)
-            self._log_slow_update_if_needed(started_monotonic)
+            self._record_update_stats(started_monotonic)
             return snapshot
 
         self._last_tick_ts_ms = ts_ms
@@ -229,7 +235,7 @@ class CvdTracker:
             down_burst=burst_net_move_pct < 0 and enough_move and enough_volume,
         )
         self._last_snapshot = snapshot
-        self._log_slow_update_if_needed(started_monotonic)
+        self._record_update_stats(started_monotonic)
         return snapshot
 
     def _append_fast_event(self, event: Event, ts_ms: int) -> None:
@@ -438,24 +444,65 @@ class CvdTracker:
         )
         self._last_out_of_order_log_monotonic = now_monotonic
 
-    def _log_slow_update_if_needed(self, started_monotonic: float | None) -> None:
-        if started_monotonic is None or self._slow_log_threshold_ms <= 0:
+    def _record_update_stats(self, started_monotonic: float | None) -> None:
+        if started_monotonic is None or self._stats_interval_seconds <= 0:
             return
         now_monotonic = time.monotonic()
         elapsed_ms = (now_monotonic - started_monotonic) * 1000
-        if elapsed_ms < self._slow_log_threshold_ms:
+
+        self._stats_count += 1
+        self._stats_total_ms += elapsed_ms
+        self._stats_max_ms = max(self._stats_max_ms, elapsed_ms)
+        self._stats_elapsed_ms.append(elapsed_ms)
+
+        if self._slow_log_threshold_ms > 0 and elapsed_ms >= self._slow_log_threshold_ms:
+            self._stats_slow_count += 1
+
+        if now_monotonic - self._stats_started_monotonic < self._stats_interval_seconds:
             return
-        if self._last_slow_log_monotonic and now_monotonic - self._last_slow_log_monotonic < 30:
-            return
-        logger.warning(
-            "CVD_UPDATE_SLOW | elapsed_ms=%.3f events_fast=%s events_burst=%s events_baseline=%s range_samples=%s",
-            elapsed_ms,
+
+        sorted_elapsed = sorted(self._stats_elapsed_ms)
+        avg_ms = self._stats_total_ms / self._stats_count
+        p95_ms = self._percentile(sorted_elapsed, 0.95)
+        p99_ms = self._percentile(sorted_elapsed, 0.99)
+
+        level = logging.WARNING if self._slow_log_threshold_ms > 0 and self._stats_max_ms >= self._slow_log_threshold_ms else logging.INFO
+
+        logger.log(
+            level,
+            "CVD_UPDATE_STATS | count=%s avg_ms=%.3f p95_ms=%.3f p99_ms=%.3f max_ms=%.3f slow_count=%s slow_threshold_ms=%.3f events_fast=%s events_burst=%s events_baseline=%s range_samples=%s",
+            self._stats_count,
+            avg_ms,
+            p95_ms,
+            p99_ms,
+            self._stats_max_ms,
+            self._stats_slow_count,
+            self._slow_log_threshold_ms,
             len(self._fast_events),
             len(self._burst_events),
             len(self._baseline_events),
             len(self._baseline_range_samples),
         )
-        self._last_slow_log_monotonic = now_monotonic
+
+        self._reset_update_stats(now_monotonic)
+
+    def _reset_update_stats(self, now_monotonic: float) -> None:
+        self._stats_started_monotonic = now_monotonic
+        self._stats_count = 0
+        self._stats_slow_count = 0
+        self._stats_total_ms = 0.0
+        self._stats_max_ms = 0.0
+        self._stats_elapsed_ms.clear()
+
+    @staticmethod
+    def _percentile(sorted_values: list[float], percentile: float) -> float:
+        if not sorted_values:
+            return 0.0
+        if len(sorted_values) == 1:
+            return sorted_values[0]
+        bounded = min(max(percentile, 0.0), 1.0)
+        index = int(round((len(sorted_values) - 1) * bounded))
+        return sorted_values[index]
 
     @staticmethod
     def _load_out_of_order_policy() -> OutOfOrderPolicy:

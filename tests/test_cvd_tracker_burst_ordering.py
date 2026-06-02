@@ -76,7 +76,7 @@ class CvdTrackerBurstOrderingTest(unittest.TestCase):
         self.assertFalse(snapshot.down_burst)
 
     def test_out_of_order_log_throttle_uses_monotonic_not_tick_timestamp(self) -> None:
-        with patch.dict(os.environ, {"CVD_UPDATE_SLOW_LOG_MS": "0"}):
+        with patch.dict(os.environ, {"CVD_UPDATE_SLOW_LOG_MS": "0", "CVD_UPDATE_STATS_INTERVAL_SECONDS": "0"}):
             tracker = CvdTracker(config())
         tracker.update("buy", 1.0, 100.0, 10_000)
 

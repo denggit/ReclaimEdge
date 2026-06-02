@@ -8,7 +8,7 @@ import time
 import unittest
 from unittest.mock import patch
 
-from src.indicators.cvd_tracker import CvdSnapshot, CvdTracker, CvdTrackerConfig
+from src.indicators.cvd_tracker import CvdSnapshot, CvdTracker, CvdTrackerConfig, Event, RangeSample
 
 
 def perf_config() -> CvdTrackerConfig:
@@ -23,6 +23,76 @@ def perf_config() -> CvdTrackerConfig:
 
 
 class CvdTrackerPerformanceTest(unittest.TestCase):
+    def test_hot_path_dataclasses_use_slots(self) -> None:
+        event = Event(
+            ts_ms=1,
+            price=100.0,
+            signed_delta=1.0,
+            buy_volume=1.0,
+            sell_volume=0.0,
+            volume=1.0,
+        )
+        sample = RangeSample(ts_ms=1, range_pct=0.01)
+        snapshot = CvdSnapshot(
+            ts_ms=1,
+            price=100.0,
+            side="buy",
+            size=1.0,
+            signed_delta=1.0,
+            total_cvd=1.0,
+            fast_cvd=1.0,
+            previous_fast_cvd=0.0,
+            buy_volume=1.0,
+            sell_volume=0.0,
+            buy_ratio=1.0,
+            sell_ratio=0.0,
+            cross_positive=True,
+            cross_negative=False,
+            cvd_increasing=True,
+            cvd_decreasing=False,
+            no_new_low=False,
+            no_new_high=False,
+            window_low=100.0,
+            window_high=100.0,
+            burst_net_move_pct=0.0,
+            burst_range_pct=0.0,
+            baseline_range_pct=0.0,
+            burst_move_ratio=0.0,
+            burst_volume=1.0,
+            baseline_volume=0.0,
+            burst_volume_ratio=0.0,
+            up_burst=False,
+            down_burst=False,
+        )
+
+        self.assertFalse(hasattr(event, "__dict__"))
+        self.assertFalse(hasattr(sample, "__dict__"))
+        self.assertFalse(hasattr(snapshot, "__dict__"))
+
+    def test_update_stats_logs_periodic_summary(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "CVD_UPDATE_STATS_INTERVAL_SECONDS": "0.001",
+                "CVD_UPDATE_SLOW_LOG_MS": "0.0001",
+            },
+        ):
+            tracker = CvdTracker(perf_config())
+
+        with self.assertLogs("src.indicators.cvd_tracker", level="INFO") as logs:
+            tracker.update("buy", 1.0, 100.0, 1_000)
+            time.sleep(0.002)
+            tracker.update("sell", 1.0, 99.9, 1_001)
+
+        output = "\n".join(logs.output)
+        self.assertIn("CVD_UPDATE_STATS", output)
+        self.assertNotIn("CVD_UPDATE_SLOW", output)
+        self.assertIn("avg_ms=", output)
+        self.assertIn("p95_ms=", output)
+        self.assertIn("p99_ms=", output)
+        self.assertIn("max_ms=", output)
+        self.assertIn("slow_count=", output)
+
     def test_ordered_update_path_handles_20k_ticks_quickly(self) -> None:
         tracker = CvdTracker(perf_config())
         rng = random.Random(7)
