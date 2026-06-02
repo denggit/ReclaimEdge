@@ -10,6 +10,7 @@ from typing import Any, Iterable
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_JOURNAL_PATH = ROOT / "data" / "trade_journal" / "live_trade_events.jsonl"
+DEFAULT_SUMMARY_PATH = ROOT / "data" / "trade_journal" / "live_trade_summary.jsonl"
 
 
 def utc_now_iso() -> str:
@@ -34,6 +35,11 @@ class LiveTradeJournal:
         if not self.path.is_absolute():
             self.path = ROOT / self.path
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        raw_summary_path = os.getenv("TRADE_SUMMARY_PATH") or self.path.with_name("live_trade_summary.jsonl")
+        self.summary_path = Path(raw_summary_path)
+        if not self.summary_path.is_absolute():
+            self.summary_path = ROOT / self.summary_path
+        self.summary_path.parent.mkdir(parents=True, exist_ok=True)
 
     def new_position_id(self, symbol: str, side: str, ts_ms: int | None = None) -> str:
         seed = ts_ms if ts_ms is not None else int(datetime.now(timezone.utc).timestamp() * 1000)
@@ -50,11 +56,25 @@ class LiveTradeJournal:
         with self.path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(asdict(event), ensure_ascii=False, separators=(",", ":")) + "\n")
 
+    def append_event(self, event: JournalEvent, path: str | Path | None = None) -> None:
+        target = Path(path) if path is not None else self.path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with target.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(asdict(event), ensure_ascii=False, separators=(",", ":")) + "\n")
+
     def load_events(self, start: datetime | None = None, end: datetime | None = None) -> list[JournalEvent]:
         if not self.path.exists():
             return []
+        return self._load_events_from_path(self.path, start=start, end=end)
+
+    def load_summary_events(self, start: datetime | None = None, end: datetime | None = None) -> list[JournalEvent]:
+        if not self.summary_path.exists():
+            return []
+        return self._load_events_from_path(self.summary_path, start=start, end=end)
+
+    def _load_events_from_path(self, path: Path, start: datetime | None = None, end: datetime | None = None) -> list[JournalEvent]:
         events: list[JournalEvent] = []
-        with self.path.open("r", encoding="utf-8") as f:
+        with path.open("r", encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if not line:
@@ -70,6 +90,111 @@ class LiveTradeJournal:
                 except Exception:
                     continue
         return events
+
+    def has_event_type(self, event_type: str) -> bool:
+        return any(event.event_type == event_type for event in self.load_events())
+
+    def record_cash_baseline(
+        self,
+        *,
+        source: str,
+        cash: float | None,
+        equity: float | None,
+        note: str | None = None,
+    ) -> None:
+        if source != "manual" and self.has_event_type("CASH_BASELINE"):
+            return
+        self.append(
+            "CASH_BASELINE",
+            {
+                "source": source,
+                "cash": cash,
+                "equity": equity,
+                "note": note,
+            },
+        )
+
+    def record_cash_transfer(
+        self,
+        *,
+        direction: str,
+        amount: float,
+        cash_before: float,
+        cash_after: float,
+        equity_before: float | None,
+        equity_after: float | None,
+        reason: str,
+    ) -> None:
+        if direction not in {"DEPOSIT", "WITHDRAWAL"}:
+            raise ValueError(f"Invalid cash transfer direction={direction}")
+        if direction == "DEPOSIT" and amount <= 0:
+            raise ValueError("DEPOSIT amount must be positive")
+        if direction == "WITHDRAWAL" and amount >= 0:
+            raise ValueError("WITHDRAWAL amount must be negative")
+        self.append(
+            "CASH_TRANSFER",
+            {
+                "direction": direction,
+                "amount": amount,
+                "cash_before": cash_before,
+                "cash_after": cash_after,
+                "equity_before": equity_before,
+                "equity_after": equity_after,
+                "reason": reason,
+            },
+        )
+
+    def record_account_cash_drift(
+        self,
+        *,
+        amount: float,
+        cash_before: float,
+        cash_after: float,
+        equity_before: float | None,
+        equity_after: float | None,
+        reason: str,
+    ) -> None:
+        self.append(
+            "ACCOUNT_CASH_DRIFT",
+            {
+                "amount": amount,
+                "cash_before": cash_before,
+                "cash_after": cash_after,
+                "equity_before": equity_before,
+                "equity_after": equity_after,
+                "reason": reason,
+            },
+        )
+
+    def record_summary_snapshot(self, payload: dict[str, Any]) -> None:
+        event = JournalEvent(
+            event_id=uuid.uuid4().hex,
+            event_type="SUMMARY_SNAPSHOT",
+            ts_iso=utc_now_iso(),
+            position_id=None,
+            payload=payload,
+        )
+        self.append_event(event, self.summary_path)
+
+    def record_journal_compacted(
+        self,
+        *,
+        archived_event_count: int,
+        retained_event_count: int,
+        archive_path: str | None,
+        summary_path: str | None,
+        snapshot_until: str,
+    ) -> None:
+        self.append(
+            "JOURNAL_COMPACTED",
+            {
+                "archived_event_count": archived_event_count,
+                "retained_event_count": retained_event_count,
+                "archive_path": archive_path,
+                "summary_path": summary_path,
+                "snapshot_until": snapshot_until,
+            },
+        )
 
     def record_startup_recovery(self, *, position_id: str, symbol: str, side: str, contracts: str, eth_qty: float, avg_entry: float, cash: float | None, equity: float | None) -> None:
         self.append(

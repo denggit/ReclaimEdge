@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import datetime as dt
 import importlib.util
 import os
 import sys
@@ -21,6 +22,7 @@ from scripts.run_boll_cvd_live import (  # noqa: E402
     TradeCommand,
     account_position_sync_worker,
     execution_worker,
+    next_weekly_summary_time,
     strategy_tick_worker,
 )
 from src.execution.trader import LiveTradeResult, PositionSnapshot  # noqa: E402
@@ -201,6 +203,37 @@ class GuardedLock:
 
 
 class LiveRuntimeWorkerTest(unittest.IsolatedAsyncioTestCase):
+    def test_weekly_summary_time(self) -> None:
+        real_datetime = dt.datetime
+
+        def fixed_datetime(now_value: dt.datetime):
+            class FixedDateTime(real_datetime):
+                @classmethod
+                def now(cls, tz=None):  # type: ignore[no-untyped-def]
+                    if tz is not None:
+                        return now_value.astimezone(tz)
+                    return now_value
+
+            return FixedDateTime
+
+        cases = [
+            (
+                dt.datetime(2026, 6, 1, 9, 0, tzinfo=dt.timezone(dt.timedelta(hours=8))),
+                dt.datetime(2026, 6, 1, 10, 0, tzinfo=dt.timezone(dt.timedelta(hours=8))),
+            ),
+            (
+                dt.datetime(2026, 6, 1, 11, 0, tzinfo=dt.timezone(dt.timedelta(hours=8))),
+                dt.datetime(2026, 6, 8, 10, 0, tzinfo=dt.timezone(dt.timedelta(hours=8))),
+            ),
+            (
+                dt.datetime(2026, 6, 2, 9, 0, tzinfo=dt.timezone(dt.timedelta(hours=8))),
+                dt.datetime(2026, 6, 8, 10, 0, tzinfo=dt.timezone(dt.timedelta(hours=8))),
+            ),
+        ]
+        for now_value, expected in cases:
+            with patch("scripts.run_boll_cvd_live.dt.datetime", fixed_datetime(now_value)):
+                self.assertEqual(next_weekly_summary_time(10, 0, weekday=0), expected)
+
     async def run_strategy_worker_once(self, strategy: FakeStrategy, cvd: FakeCvd, queue: asyncio.Queue[MarketTickEvent]) -> asyncio.Queue[TradeCommand]:
         execution_queue: asyncio.Queue[TradeCommand] = asyncio.Queue(maxsize=1000)
         worker = asyncio.create_task(

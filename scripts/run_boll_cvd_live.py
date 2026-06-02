@@ -26,7 +26,8 @@ from src.monitors.boll_band_breakout_monitor import (  # noqa: E402
     BollBandBreakoutMonitorConfig,
     MarketTickEvent,
 )
-from src.reporting.daily_trade_reporter import DailyTradeReporter  # noqa: E402
+from src.reporting.daily_trade_reporter import DailyTradeReporter, ReportRuntimeContext  # noqa: E402
+from src.reporting.journal_compactor import compact_after_weekly_summary  # noqa: E402
 from src.reporting.live_state_store import LiveStateStore  # noqa: E402
 from src.reporting.trade_journal import LiveTradeJournal  # noqa: E402
 from src.risk.simple_position_sizer import (  # noqa: E402
@@ -77,11 +78,30 @@ def next_daily_report_time(hour: int, minute: int) -> dt.datetime:
 
 def next_weekly_summary_time(hour: int, minute: int, weekday: int = 0) -> dt.datetime:
     now = dt.datetime.now().astimezone()
-    target = now + dt.timedelta(days=weekday - now.weekday())
-    target = target.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    days_ahead = weekday - now.weekday()
+    target_date = now.date() + dt.timedelta(days=days_ahead)
+    target = dt.datetime.combine(target_date, dt.time(hour, minute), tzinfo=now.tzinfo)
     if target <= now:
         target += dt.timedelta(days=7)
     return target
+
+
+def build_report_context(
+    *,
+    account_snapshot: AccountSnapshot,
+    execution_state: ExecutionState,
+    period_start_cash: float | None = None,
+    period_start_equity: float | None = None,
+) -> ReportRuntimeContext:
+    position = account_snapshot.position
+    return ReportRuntimeContext(
+        current_position_id=execution_state.current_position_id,
+        current_has_position=bool(position and position.has_position),
+        current_cash=account_snapshot.cash,
+        current_equity=account_snapshot.equity,
+        period_start_cash=period_start_cash,
+        period_start_equity=period_start_equity,
+    )
 
 
 def build_live_failure_email(intent: TradeIntent, error: Exception, rolled_back: bool, halted: bool) -> tuple[str, str]:
@@ -618,13 +638,20 @@ async def account_position_sync_worker(
 ) -> None:
     last_account_sync = 0.0
     last_logged_cash = account_snapshot.cash
+    last_logged_equity = account_snapshot.equity
     last_logged_position_key = position_log_key(account_snapshot.position) if account_snapshot.position is not None else ("FLAT", "0", 0.0)
     consecutive_failures = 0
     first_failure_monotonic = 0.0
     last_failure_log = 0.0
     last_stale_log = 0.0
+    last_cash_event_log = 0.0
     sync_failure_log_interval_seconds = float(os.getenv("ACCOUNT_SYNC_FAILURE_LOG_INTERVAL_SECONDS", "60"))
     sync_stale_warn_seconds = float(os.getenv("ACCOUNT_SYNC_STALE_WARN_SECONDS", "180"))
+    cash_transfer_detect_enabled = os.getenv("CASH_TRANSFER_DETECT_ENABLED", "true").strip().lower() in {"1", "true", "yes", "y", "on"}
+    cash_transfer_min_delta_usdt = float(os.getenv("CASH_TRANSFER_MIN_DELTA_USDT", "0.5"))
+    cash_transfer_settle_seconds = float(os.getenv("CASH_TRANSFER_SETTLE_SECONDS", "120"))
+    cash_drift_min_delta_usdt = float(os.getenv("CASH_DRIFT_MIN_DELTA_USDT", "0.5"))
+    cash_event_log_interval_seconds = float(os.getenv("CASH_EVENT_LOG_INTERVAL_SECONDS", "60"))
     while True:
         try:
             await asyncio.sleep(position_sync_seconds)
@@ -650,6 +677,8 @@ async def account_position_sync_worker(
                 equity_after = await trader.fetch_usdt_equity()
 
             record_flat_payload: dict[str, Any] | None = None
+            cash_transfer_payload: dict[str, Any] | None = None
+            cash_drift_payload: dict[str, Any] | None = None
             save_state_payload: tuple[str | None, StrategyPositionState, float | None] | None = None
             clear_state = False
             async with state_lock:
@@ -662,6 +691,71 @@ async def account_position_sync_worker(
                 trader.account_equity_usdt = equity
                 sizer.update_account_equity(equity)
 
+                cash_delta = cash - last_logged_cash
+                seconds_since_last_order = (
+                    cash_transfer_settle_seconds
+                    if execution_state.last_order_ts_ms == 0
+                    else max((utc_ms() - execution_state.last_order_ts_ms) / 1000, 0.0)
+                )
+                pending_order_count = execution_state.pending_order_count
+                unsafe_reasons = []
+                if pending_order_count > 0:
+                    unsafe_reasons.append("pending_order")
+                if position.has_position:
+                    unsafe_reasons.append("has_position")
+                if strategy.state.layers != 0:
+                    unsafe_reasons.append("strategy_layers")
+                if execution_state.current_position_id is not None:
+                    unsafe_reasons.append("current_position_id")
+                if seconds_since_last_order < cash_transfer_settle_seconds:
+                    unsafe_reasons.append("order_settle")
+                safe_for_cash_transfer = (
+                    cash_transfer_detect_enabled
+                    and pending_order_count == 0
+                    and not position.has_position
+                    and strategy.state.layers == 0
+                    and execution_state.current_position_id is None
+                    and seconds_since_last_order >= cash_transfer_settle_seconds
+                    and abs(cash_delta) >= cash_transfer_min_delta_usdt
+                )
+                if safe_for_cash_transfer:
+                    direction = "DEPOSIT" if cash_delta > 0 else "WITHDRAWAL"
+                    cash_transfer_payload = {
+                        "direction": direction,
+                        "amount": cash_delta,
+                        "cash_before": last_logged_cash,
+                        "cash_after": cash,
+                        "equity_before": last_logged_equity,
+                        "equity_after": equity,
+                        "reason": "safe_flat_account_sync",
+                    }
+                    if now - last_cash_event_log >= cash_event_log_interval_seconds:
+                        logger.warning(
+                            "CASH_TRANSFER_DETECTED | direction=%s amount=%.4f cash_before=%.4f cash_after=%.4f",
+                            direction,
+                            cash_delta,
+                            last_logged_cash,
+                            cash,
+                        )
+                        last_cash_event_log = now
+                elif unsafe_reasons and abs(cash_delta) >= cash_drift_min_delta_usdt:
+                    cash_drift_payload = {
+                        "amount": cash_delta,
+                        "cash_before": last_logged_cash,
+                        "cash_after": cash,
+                        "equity_before": last_logged_equity,
+                        "equity_after": equity,
+                        "reason": "unsafe_state:" + ",".join(unsafe_reasons),
+                    }
+                    if now - last_cash_event_log >= cash_event_log_interval_seconds:
+                        logger.warning(
+                            "ACCOUNT_CASH_DRIFT | amount=%.4f cash_before=%.4f cash_after=%.4f reason=unsafe_state",
+                            cash_delta,
+                            last_logged_cash,
+                            cash,
+                        )
+                        last_cash_event_log = now
+
                 if abs(cash - last_logged_cash) >= cash_log_min_delta_usdt:
                     logger.info(
                         "CASH_SYNC_CHANGED | cash=%.4f previous=%.4f equity=%.4f layer_margin_pct=%.4f leverage=%.2f",
@@ -672,6 +766,10 @@ async def account_position_sync_worker(
                         sizer.config.leverage,
                     )
                     last_logged_cash = cash
+                    last_logged_equity = equity
+                elif cash_transfer_payload is not None or cash_drift_payload is not None:
+                    last_logged_cash = cash
+                    last_logged_equity = equity
 
                 pending_order_count = execution_state.pending_order_count
                 if should_fetch_flat_balances and pending_order_count == 0 and not position.has_position and strategy.state.layers > 0:
@@ -695,6 +793,7 @@ async def account_position_sync_worker(
                     execution_state.cash_before_position = None
                     clear_state = True
                     last_logged_cash = cash_after
+                    last_logged_equity = equity_after
                     last_logged_position_key = current_position_key
                 elif position.has_position:
                     trader.position_contracts = position.contracts
@@ -712,6 +811,10 @@ async def account_position_sync_worker(
                             )
                             last_logged_position_key = current_position_key
 
+            if cash_transfer_payload is not None:
+                journal.record_cash_transfer(**cash_transfer_payload)
+            if cash_drift_payload is not None:
+                journal.record_account_cash_drift(**cash_drift_payload)
             if record_flat_payload is not None:
                 journal.record_flat(**record_flat_payload)
             if clear_state:
@@ -770,6 +873,12 @@ async def main() -> None:
         strategy = BollCvdShockReclaimStrategy(BollCvdReclaimStrategyConfig.from_env(), sizer)
         startup_position = await trader.fetch_position_snapshot()
         startup_cash = await fetch_usdt_cash_balance(trader)
+        journal.record_cash_baseline(
+            source="startup",
+            cash=startup_cash,
+            equity=trader.account_equity_usdt,
+            note="Live runner startup cash baseline.",
+        )
     except Exception:
         await trader.close()
         raise
@@ -834,7 +943,11 @@ async def main() -> None:
             sleep_seconds = max((target - dt.datetime.now().astimezone()).total_seconds(), 1)
             await asyncio.sleep(sleep_seconds)
             try:
-                ok = await reporter.send_last_24h_report()
+                context = build_report_context(
+                    account_snapshot=account_snapshot,
+                    execution_state=execution_state,
+                )
+                ok = await reporter.send_last_24h_report(context)
                 if ok:
                     logger.info("Daily trade report sent successfully")
                 else:
@@ -850,6 +963,7 @@ async def main() -> None:
 
         raw_time = os.getenv("WEEKLY_SUMMARY_TIME", "10:00")
         raw_weekday = os.getenv("WEEKLY_SUMMARY_WEEKDAY", "0")
+        compact_after_success = os.getenv("WEEKLY_COMPACT_AFTER_SUCCESS", "true").strip().lower() in {"1", "true", "yes", "y", "on"}
         hour, minute = parse_weekly_report_time(raw_time)
         weekday = int(raw_weekday)
         if weekday < 0 or weekday > 6:
@@ -866,9 +980,27 @@ async def main() -> None:
             sleep_seconds = max((target - dt.datetime.now().astimezone()).total_seconds(), 1)
             await asyncio.sleep(sleep_seconds)
             try:
-                ok = await reporter.send_overall_summary_report()
+                context = build_report_context(
+                    account_snapshot=account_snapshot,
+                    execution_state=execution_state,
+                )
+                ok = await reporter.send_overall_summary_report(context)
                 if ok:
                     logger.info("Weekly overall summary report sent successfully")
+                    if compact_after_success:
+                        result = await asyncio.to_thread(
+                            compact_after_weekly_summary,
+                            journal,
+                            target,
+                            execution_state.current_position_id,
+                        )
+                        if result.archived_event_count > 0:
+                            logger.warning(
+                                "JOURNAL_COMPACTED | archived_event_count=%s retained_event_count=%s archive_path=%s",
+                                result.archived_event_count,
+                                result.retained_event_count,
+                                result.archive_path,
+                            )
                 else:
                     logger.error("Weekly overall summary report failed")
             except Exception:

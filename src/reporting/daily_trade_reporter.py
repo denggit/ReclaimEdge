@@ -39,8 +39,22 @@ class ResidualPnlBucket:
     pnl: float | None
     cash_start: float | None
     cash_end: float | None
+    net_transfer: float
+    strategy_total_pnl: float | None
     known_closed_pnl: float
+    formula: str
     note: str
+
+
+@dataclass(frozen=True)
+class ReportPnlMath:
+    period_start_cash: float | None
+    current_cash: float | None
+    net_transfer: float
+    known_closed_pnl: float
+    strategy_total_pnl: float | None
+    residual_pnl: float | None
+    total_pnl: float | None
 
 
 def fmt(value: Any, digits: int = 4, default: str = "-") -> str:
@@ -153,8 +167,8 @@ class DailyTradeReporter:
             total_closed += 1
             finished_positions.append((position_id, first_entry, entry_events, tp_events, last_flat))
 
-        residual_bucket = self._build_residual_bucket(incomplete_count, known_closed_pnl, context)
-        total_pnl = known_closed_pnl + (residual_bucket.pnl or 0.0)
+        residual_bucket = self._build_residual_bucket(events, incomplete_count, known_closed_pnl, context)
+        total_pnl = residual_bucket.strategy_total_pnl if residual_bucket.strategy_total_pnl is not None else known_closed_pnl
         subject = f"📊 ReclaimEdge 日报 | 最近24小时 | closed={total_closed} pnl={total_pnl:.4f}U"
         html_body = self._render_html(
             window=window,
@@ -242,8 +256,8 @@ class DailyTradeReporter:
             else:
                 breakeven_count += 1
 
-        residual_bucket = self._build_residual_bucket(incomplete_count, known_closed_pnl, context)
-        total_pnl = known_closed_pnl + (residual_bucket.pnl or 0.0)
+        residual_bucket = self._build_residual_bucket(events_sorted, incomplete_count, known_closed_pnl, context)
+        total_pnl = residual_bucket.strategy_total_pnl if residual_bucket.strategy_total_pnl is not None else known_closed_pnl
         if residual_bucket.cash_start is not None:
             first_cash = residual_bucket.cash_start if first_cash is None else first_cash
         if residual_bucket.cash_end is not None:
@@ -308,33 +322,82 @@ class DailyTradeReporter:
 
     def _build_residual_bucket(
         self,
+        events: list[JournalEvent],
         incomplete_count: int,
         known_closed_pnl: float,
         context: ReportRuntimeContext | None,
     ) -> ResidualPnlBucket:
-        if incomplete_count <= 0:
-            return ResidualPnlBucket(0, None, None, None, known_closed_pnl, "no incomplete records")
+        math = self.calculate_pnl_math(events, known_closed_pnl, context)
+        formula = "current_cash - period_start_cash - net_transfer - known_closed_pnl"
         if context is None or context.current_cash is None or context.period_start_cash is None:
             return ResidualPnlBucket(
                 incomplete_count,
                 None,
                 context.period_start_cash if context else None,
                 context.current_cash if context else None,
+                math.net_transfer,
+                None,
                 known_closed_pnl,
+                formula,
                 "missing cash context; incomplete records hidden but not valued",
             )
-        residual_pnl = context.current_cash - context.period_start_cash - known_closed_pnl
+        if incomplete_count <= 0 and math.residual_pnl == 0:
+            note = "no incomplete records"
+        elif incomplete_count <= 0:
+            note = "no incomplete records; residual shows cash-based unaccounted strategy PnL"
+        else:
+            note = "incomplete records are bucketed, not displayed per position"
         return ResidualPnlBucket(
             incomplete_count,
-            residual_pnl,
+            math.residual_pnl,
             context.period_start_cash,
             context.current_cash,
+            math.net_transfer,
+            math.strategy_total_pnl,
             known_closed_pnl,
-            "current_cash - period_start_cash - known_closed_pnl",
+            formula,
+            note,
         )
 
+    @staticmethod
+    def calculate_pnl_math(
+        events: list[JournalEvent],
+        known_closed_pnl: float,
+        context: ReportRuntimeContext | None,
+    ) -> ReportPnlMath:
+        net_transfer = DailyTradeReporter._net_cash_transfer(events)
+        period_start_cash = context.period_start_cash if context else None
+        current_cash = context.current_cash if context else None
+        strategy_total_pnl = None
+        residual_pnl = None
+        total_pnl = None
+        if current_cash is not None and period_start_cash is not None:
+            strategy_total_pnl = current_cash - period_start_cash - net_transfer
+            residual_pnl = strategy_total_pnl - known_closed_pnl
+            total_pnl = strategy_total_pnl
+        return ReportPnlMath(
+            period_start_cash=period_start_cash,
+            current_cash=current_cash,
+            net_transfer=net_transfer,
+            known_closed_pnl=known_closed_pnl,
+            strategy_total_pnl=strategy_total_pnl,
+            residual_pnl=residual_pnl,
+            total_pnl=total_pnl,
+        )
+
+    @staticmethod
+    def _net_cash_transfer(events: list[JournalEvent]) -> float:
+        total = 0.0
+        for event in events:
+            if event.event_type != "CASH_TRANSFER":
+                continue
+            amount = _to_float(event.payload.get("amount"))
+            if amount is not None:
+                total += amount
+        return total
+
     def _residual_bucket_html(self, bucket: ResidualPnlBucket) -> str:
-        if bucket.incomplete_count <= 0:
+        if bucket.incomplete_count <= 0 and bucket.pnl in {None, 0}:
             return "<p style='color:#777;'>无不完整记录。</p>"
         return f"""
 <table style="width:100%;border-collapse:collapse;font-size:13px;">
@@ -342,16 +405,22 @@ class DailyTradeReporter:
     <th style="padding:8px;border:1px solid #ddd;">记录数</th>
     <th style="padding:8px;border:1px solid #ddd;">起始现金</th>
     <th style="padding:8px;border:1px solid #ddd;">当前现金</th>
+    <th style="padding:8px;border:1px solid #ddd;">净转入/转出</th>
+    <th style="padding:8px;border:1px solid #ddd;">策略估算总收益</th>
     <th style="padding:8px;border:1px solid #ddd;">已记录平仓盈亏</th>
     <th style="padding:8px;border:1px solid #ddd;">未知汇总盈亏</th>
+    <th style="padding:8px;border:1px solid #ddd;">公式</th>
     <th style="padding:8px;border:1px solid #ddd;">说明</th>
   </tr>
   <tr>
     <td style="padding:8px;border:1px solid #ddd;text-align:center;">{bucket.incomplete_count}</td>
     <td style="padding:8px;border:1px solid #ddd;text-align:right;">{fmt(bucket.cash_start, 4)}</td>
     <td style="padding:8px;border:1px solid #ddd;text-align:right;">{fmt(bucket.cash_end, 4)}</td>
+    <td style="padding:8px;border:1px solid #ddd;text-align:right;">{fmt(bucket.net_transfer, 4)}</td>
+    <td style="padding:8px;border:1px solid #ddd;text-align:right;">{fmt(bucket.strategy_total_pnl, 4)}</td>
     <td style="padding:8px;border:1px solid #ddd;text-align:right;">{fmt(bucket.known_closed_pnl, 4)}</td>
     <td style="padding:8px;border:1px solid #ddd;text-align:right;font-weight:700;">{fmt(bucket.pnl, 4)}</td>
+    <td style="padding:8px;border:1px solid #ddd;">{html.escape(bucket.formula)}</td>
     <td style="padding:8px;border:1px solid #ddd;">{html.escape(bucket.note)}</td>
   </tr>
 </table>
@@ -443,19 +512,31 @@ class DailyTradeReporter:
 
     @staticmethod
     def _cash_from_event(event: JournalEvent) -> float | None:
-        return (
-            _to_float(event.payload.get("cash_after"))
-            or _to_float(event.payload.get("cash_before_position"))
-            or _to_float(event.payload.get("cash"))
-        )
+        if event.event_type == "CASH_BASELINE":
+            return _to_float(event.payload.get("cash"))
+        if event.event_type == "CASH_TRANSFER":
+            return _to_float(event.payload.get("cash_after"))
+        if event.event_type == "FLAT":
+            return _to_float(event.payload.get("cash_after"))
+        if event.event_type == "ENTRY":
+            return _to_float(event.payload.get("cash_before_position"))
+        if event.event_type == "STARTUP_RECOVERY":
+            return _to_float(event.payload.get("cash"))
+        for key in ("cash_after", "cash_before_position", "cash"):
+            value = _to_float(event.payload.get(key))
+            if value is not None:
+                return value
+        return None
 
     @staticmethod
     def _cash_before_or_from_event(event: JournalEvent) -> float | None:
-        return (
-            _to_float(event.payload.get("cash_before_position"))
-            or _to_float(event.payload.get("cash"))
-            or _to_float(event.payload.get("cash_after"))
-        )
+        if event.event_type == "CASH_BASELINE":
+            return _to_float(event.payload.get("cash"))
+        for key in ("cash_before_position", "cash", "cash_after"):
+            value = _to_float(event.payload.get(key))
+            if value is not None:
+                return value
+        return None
 
     @staticmethod
     def _is_current_open_position(position_id: str, context: ReportRuntimeContext | None) -> bool:
@@ -562,7 +643,7 @@ class DailyTradeReporter:
   <h3>🧩 未知/不完整记录汇总</h3>
   {self._residual_bucket_html(residual_bucket)}
 
-  <p style="color:#777;font-size:12px;margin-top:16px;">说明：缺少 FLAT 的历史记录不会逐条展示；如果有现金上下文，则统一汇总为 residual PnL。公式：当前现金 - 周期起始现金 - 已记录平仓盈亏。</p>
+  <p style="color:#777;font-size:12px;margin-top:16px;">说明：缺少 FLAT 的历史记录不会逐条展示；如果有现金上下文，则统一汇总为 residual PnL。公式：当前现金 - 周期起始现金 - 净转入/转出 - 已记录平仓盈亏。</p>
 </div>
 """.strip()
 
