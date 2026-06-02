@@ -259,6 +259,87 @@ async def fetch_usdt_cash_balance(trader: Trader) -> float:
     return float(data[0].get("totalEq") or 0.0)
 
 
+@dataclass(frozen=True)
+class SettledFlatBalance:
+    cash: float
+    equity: float
+    attempts: int
+    stable: bool
+    reason: str
+
+
+async def fetch_settled_flat_balance(
+    trader: Trader,
+    *,
+    attempts: int,
+    interval_seconds: float,
+    stable_delta_usdt: float,
+    cash_equity_max_diff_usdt: float,
+) -> SettledFlatBalance:
+    attempts = max(int(attempts), 1)
+    previous_flat_cash: float | None = None
+    last_cash: float | None = None
+    last_equity: float | None = None
+    last_position: PositionSnapshot | None = None
+    last_attempt = 0
+    for attempt in range(1, attempts + 1):
+        last_attempt = attempt
+        try:
+            position = await trader.fetch_position_snapshot()
+            cash = await fetch_usdt_cash_balance(trader)
+            equity = await trader.fetch_usdt_equity()
+        except Exception as exc:
+            if last_cash is not None and last_equity is not None:
+                return SettledFlatBalance(
+                    cash=last_cash,
+                    equity=last_equity,
+                    attempts=last_attempt,
+                    stable=False,
+                    reason=f"error_after_last_balance:{type(exc).__name__}:{exc}",
+                )
+            raise
+
+        last_position = position
+        last_cash = cash
+        last_equity = equity
+        if position.has_position:
+            if attempt < attempts and interval_seconds > 0:
+                await asyncio.sleep(interval_seconds)
+            continue
+
+        cash_equity_stable = abs(cash - equity) <= cash_equity_max_diff_usdt
+        cash_repeat_stable = previous_flat_cash is not None and abs(cash - previous_flat_cash) <= stable_delta_usdt
+        if cash_equity_stable and cash_repeat_stable:
+            return SettledFlatBalance(
+                cash=cash,
+                equity=equity,
+                attempts=attempt,
+                stable=True,
+                reason="cash_equity_stable",
+            )
+        previous_flat_cash = cash
+        if attempt < attempts and interval_seconds > 0:
+            await asyncio.sleep(interval_seconds)
+
+    if last_cash is None or last_equity is None:
+        raise RuntimeError("flat balance settlement finished without any balance sample")
+    if last_position is not None and not last_position.has_position:
+        return SettledFlatBalance(
+            cash=last_equity,
+            equity=last_equity,
+            attempts=attempts,
+            stable=False,
+            reason="fallback_to_equity_after_timeout",
+        )
+    return SettledFlatBalance(
+        cash=last_cash,
+        equity=last_equity,
+        attempts=attempts,
+        stable=False,
+        reason="position_not_flat_after_timeout",
+    )
+
+
 @dataclass
 class AccountSnapshot:
     position: PositionSnapshot | None
@@ -743,6 +824,10 @@ async def account_position_sync_worker(
     cash_transfer_min_delta_usdt = float(os.getenv("CASH_TRANSFER_MIN_DELTA_USDT", "0.5"))
     cash_transfer_settle_seconds = float(os.getenv("CASH_TRANSFER_SETTLE_SECONDS", "120"))
     cash_transfer_after_flat_cooldown_seconds = float(os.getenv("CASH_TRANSFER_AFTER_FLAT_COOLDOWN_SECONDS", "180"))
+    flat_balance_confirm_attempts = int(os.getenv("FLAT_BALANCE_CONFIRM_ATTEMPTS", "5"))
+    flat_balance_confirm_interval_seconds = float(os.getenv("FLAT_BALANCE_CONFIRM_INTERVAL_SECONDS", "1.5"))
+    flat_balance_stable_delta_usdt = float(os.getenv("FLAT_BALANCE_STABLE_DELTA_USDT", "0.05"))
+    flat_balance_cash_equity_max_diff_usdt = float(os.getenv("FLAT_BALANCE_CASH_EQUITY_MAX_DIFF_USDT", "0.10"))
     cash_drift_min_delta_usdt = float(os.getenv("CASH_DRIFT_MIN_DELTA_USDT", "0.5"))
     cash_event_log_interval_seconds = float(os.getenv("CASH_EVENT_LOG_INTERVAL_SECONDS", "60"))
     while True:
@@ -758,47 +843,25 @@ async def account_position_sync_worker(
 
             position = await trader.fetch_position_snapshot()
             current_position_key = position_log_key(position)
-            cash_after = cash
-            equity_after = equity
-            async with state_lock:
-                pending_order_count = execution_state.pending_order_count
-                should_fetch_flat_balances = (
-                    pending_order_count == 0 and not position.has_position and strategy.state.layers > 0
-                )
-            if should_fetch_flat_balances:
-                cash_after = await fetch_usdt_cash_balance(trader)
-                equity_after = await trader.fetch_usdt_equity()
-
             record_flat_payload: dict[str, Any] | None = None
+            pending_flat_payload: dict[str, Any] | None = None
             cash_transfer_payload: dict[str, Any] | None = None
             cash_drift_payload: dict[str, Any] | None = None
             save_state_payload: tuple[str | None, StrategyPositionState, float | None] | None = None
             clear_state = False
             async with state_lock:
-                account_snapshot.position = position
-                account_snapshot.cash = cash
-                account_snapshot.equity = equity
-                account_snapshot.updated_monotonic = time.monotonic()
-                account_snapshot.updated_ts_ms = utc_ms()
-                account_snapshot.version += 1
-                trader.account_equity_usdt = equity
-                sizer.update_account_equity(equity)
-
                 pending_order_count = execution_state.pending_order_count
                 flat_transition_detected = (
-                    should_fetch_flat_balances
-                    and pending_order_count == 0
+                    pending_order_count == 0
                     and not position.has_position
                     and strategy.state.layers > 0
                 )
                 if flat_transition_detected:
-                    record_flat_payload = {
+                    pending_flat_payload = {
                         "position_id": execution_state.current_position_id,
                         "symbol": trader.symbol,
                         "side": strategy.state.side,
                         "cash_before_position": execution_state.cash_before_position,
-                        "cash_after": cash_after,
-                        "equity_after": equity_after,
                         "reason": "OKX position is flat. TP filled or manual close detected.",
                         "layers": strategy.state.layers,
                         "avg_entry_price": strategy.state.avg_entry_price,
@@ -807,22 +870,19 @@ async def account_position_sync_worker(
                         "last_tp_plan": getattr(strategy.state, "tp_plan", "SINGLE"),
                         "partial_tp_consumed": getattr(strategy.state, "partial_tp_consumed", False),
                     }
-                    logger.warning("POSITION_SYNC_CHANGED | flat_on_okx=true. Resetting strategy and trader state.")
+                    execution_state.trading_halted = True
                     last_flat_detected_monotonic = now
-                    account_snapshot.cash = cash_after
-                    account_snapshot.equity = equity_after
-                    trader.account_equity_usdt = equity_after
-                    sizer.update_account_equity(equity_after)
-                    strategy.state = StrategyPositionState()
-                    trader.mark_flat()
-                    execution_state.trading_halted = False
-                    execution_state.current_position_id = None
-                    execution_state.cash_before_position = None
-                    clear_state = True
-                    last_logged_cash = cash_after
-                    last_logged_equity = equity_after
-                    last_logged_position_key = current_position_key
+                    logger.warning("POSITION_SYNC_CHANGED | flat_on_okx=true. Confirming settled balance before FLAT journal.")
                 else:
+                    account_snapshot.position = position
+                    account_snapshot.cash = cash
+                    account_snapshot.equity = equity
+                    account_snapshot.updated_monotonic = time.monotonic()
+                    account_snapshot.updated_ts_ms = utc_ms()
+                    account_snapshot.version += 1
+                    trader.account_equity_usdt = equity
+                    sizer.update_account_equity(equity)
+
                     cash_delta = cash - last_logged_cash
                     seconds_since_last_order = (
                         cash_transfer_settle_seconds
@@ -927,6 +987,56 @@ async def account_position_sync_worker(
                                 strategy.state.layers,
                             )
                             last_logged_position_key = current_position_key
+
+            if pending_flat_payload is not None:
+                try:
+                    settled = await fetch_settled_flat_balance(
+                        trader,
+                        attempts=flat_balance_confirm_attempts,
+                        interval_seconds=flat_balance_confirm_interval_seconds,
+                        stable_delta_usdt=flat_balance_stable_delta_usdt,
+                        cash_equity_max_diff_usdt=flat_balance_cash_equity_max_diff_usdt,
+                    )
+                except Exception as exc:
+                    logger.exception("FLAT_BALANCE_SETTLE_FAILED | falling back to latest account equity before FLAT journal")
+                    settled = SettledFlatBalance(
+                        cash=equity,
+                        equity=equity,
+                        attempts=0,
+                        stable=False,
+                        reason=f"fallback_to_equity_after_error:{type(exc).__name__}:{exc}",
+                    )
+                logger.warning(
+                    "FLAT_BALANCE_SETTLED | cash=%.4f equity=%.4f attempts=%s stable=%s reason=%s",
+                    settled.cash,
+                    settled.equity,
+                    settled.attempts,
+                    settled.stable,
+                    settled.reason,
+                )
+                record_flat_payload = {
+                    **pending_flat_payload,
+                    "cash_after": settled.cash,
+                    "equity_after": settled.equity,
+                }
+                async with state_lock:
+                    account_snapshot.position = position
+                    account_snapshot.cash = settled.cash
+                    account_snapshot.equity = settled.equity
+                    account_snapshot.updated_monotonic = time.monotonic()
+                    account_snapshot.updated_ts_ms = utc_ms()
+                    account_snapshot.version += 1
+                    trader.account_equity_usdt = settled.equity
+                    sizer.update_account_equity(settled.equity)
+                    strategy.state = StrategyPositionState()
+                    trader.mark_flat()
+                    execution_state.trading_halted = False
+                    execution_state.current_position_id = None
+                    execution_state.cash_before_position = None
+                    clear_state = True
+                    last_logged_cash = settled.cash
+                    last_logged_equity = settled.equity
+                    last_logged_position_key = current_position_key
 
             if cash_transfer_payload is not None:
                 journal.record_cash_transfer(**cash_transfer_payload)
