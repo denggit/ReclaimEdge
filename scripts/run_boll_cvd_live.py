@@ -784,97 +784,14 @@ async def account_position_sync_worker(
                 trader.account_equity_usdt = equity
                 sizer.update_account_equity(equity)
 
-                cash_delta = cash - last_logged_cash
-                seconds_since_last_order = (
-                    cash_transfer_settle_seconds
-                    if execution_state.last_order_ts_ms == 0
-                    else max((utc_ms() - execution_state.last_order_ts_ms) / 1000, 0.0)
-                )
                 pending_order_count = execution_state.pending_order_count
-                unsafe_reasons = []
-                if pending_order_count > 0:
-                    unsafe_reasons.append("pending_order")
-                if position.has_position:
-                    unsafe_reasons.append("has_position")
-                if strategy.state.layers != 0:
-                    unsafe_reasons.append("strategy_layers")
-                if execution_state.current_position_id is not None:
-                    unsafe_reasons.append("current_position_id")
-                if seconds_since_last_order < cash_transfer_settle_seconds:
-                    unsafe_reasons.append("order_settle")
-                in_flat_settle_cooldown = (
-                    last_flat_detected_monotonic > 0
-                    and now - last_flat_detected_monotonic < cash_transfer_after_flat_cooldown_seconds
-                )
-                if in_flat_settle_cooldown:
-                    unsafe_reasons.append("flat_settle_cooldown")
-                safe_for_cash_transfer = (
-                    cash_transfer_detect_enabled
+                flat_transition_detected = (
+                    should_fetch_flat_balances
                     and pending_order_count == 0
                     and not position.has_position
-                    and strategy.state.layers == 0
-                    and execution_state.current_position_id is None
-                    and seconds_since_last_order >= cash_transfer_settle_seconds
-                    and not in_flat_settle_cooldown
-                    and abs(cash_delta) >= cash_transfer_min_delta_usdt
+                    and strategy.state.layers > 0
                 )
-                if safe_for_cash_transfer:
-                    direction = "DEPOSIT" if cash_delta > 0 else "WITHDRAWAL"
-                    cash_transfer_payload = {
-                        "direction": direction,
-                        "amount": cash_delta,
-                        "cash_before": last_logged_cash,
-                        "cash_after": cash,
-                        "equity_before": last_logged_equity,
-                        "equity_after": equity,
-                        "reason": "safe_flat_account_sync",
-                    }
-                    if now - last_cash_event_log >= cash_event_log_interval_seconds:
-                        logger.warning(
-                            "CASH_TRANSFER_DETECTED | direction=%s amount=%.4f cash_before=%.4f cash_after=%.4f",
-                            direction,
-                            cash_delta,
-                            last_logged_cash,
-                            cash,
-                        )
-                        last_cash_event_log = now
-                elif unsafe_reasons and abs(cash_delta) >= cash_drift_min_delta_usdt:
-                    drift_reason = "unsafe_state:" + ",".join(unsafe_reasons)
-                    cash_drift_payload = {
-                        "amount": cash_delta,
-                        "cash_before": last_logged_cash,
-                        "cash_after": cash,
-                        "equity_before": last_logged_equity,
-                        "equity_after": equity,
-                        "reason": drift_reason,
-                    }
-                    if now - last_cash_event_log >= cash_event_log_interval_seconds:
-                        logger.warning(
-                            "ACCOUNT_CASH_DRIFT | amount=%.4f cash_before=%.4f cash_after=%.4f reason=%s",
-                            cash_delta,
-                            last_logged_cash,
-                            cash,
-                            drift_reason,
-                        )
-                        last_cash_event_log = now
-
-                if abs(cash - last_logged_cash) >= cash_log_min_delta_usdt:
-                    logger.info(
-                        "CASH_SYNC_CHANGED | cash=%.4f previous=%.4f equity=%.4f layer_margin_pct=%.4f leverage=%.2f",
-                        cash,
-                        last_logged_cash,
-                        equity,
-                        sizer.config.layer_margin_pct,
-                        sizer.config.leverage,
-                    )
-                    last_logged_cash = cash
-                    last_logged_equity = equity
-                elif cash_transfer_payload is not None or cash_drift_payload is not None:
-                    last_logged_cash = cash
-                    last_logged_equity = equity
-
-                pending_order_count = execution_state.pending_order_count
-                if should_fetch_flat_balances and pending_order_count == 0 and not position.has_position and strategy.state.layers > 0:
+                if flat_transition_detected:
                     record_flat_payload = {
                         "position_id": execution_state.current_position_id,
                         "symbol": trader.symbol,
@@ -905,7 +822,96 @@ async def account_position_sync_worker(
                     last_logged_cash = cash_after
                     last_logged_equity = equity_after
                     last_logged_position_key = current_position_key
-                elif position.has_position:
+                else:
+                    cash_delta = cash - last_logged_cash
+                    seconds_since_last_order = (
+                        cash_transfer_settle_seconds
+                        if execution_state.last_order_ts_ms == 0
+                        else max((utc_ms() - execution_state.last_order_ts_ms) / 1000, 0.0)
+                    )
+                    unsafe_reasons = []
+                    if pending_order_count > 0:
+                        unsafe_reasons.append("pending_order")
+                    if position.has_position:
+                        unsafe_reasons.append("has_position")
+                    if strategy.state.layers != 0:
+                        unsafe_reasons.append("strategy_layers")
+                    if execution_state.current_position_id is not None:
+                        unsafe_reasons.append("current_position_id")
+                    if seconds_since_last_order < cash_transfer_settle_seconds:
+                        unsafe_reasons.append("order_settle")
+                    in_flat_settle_cooldown = (
+                        last_flat_detected_monotonic > 0
+                        and now - last_flat_detected_monotonic < cash_transfer_after_flat_cooldown_seconds
+                    )
+                    if in_flat_settle_cooldown:
+                        unsafe_reasons.append("flat_settle_cooldown")
+                    safe_for_cash_transfer = (
+                        cash_transfer_detect_enabled
+                        and pending_order_count == 0
+                        and not position.has_position
+                        and strategy.state.layers == 0
+                        and execution_state.current_position_id is None
+                        and seconds_since_last_order >= cash_transfer_settle_seconds
+                        and not in_flat_settle_cooldown
+                        and abs(cash_delta) >= cash_transfer_min_delta_usdt
+                    )
+                    if safe_for_cash_transfer:
+                        direction = "DEPOSIT" if cash_delta > 0 else "WITHDRAWAL"
+                        cash_transfer_payload = {
+                            "direction": direction,
+                            "amount": cash_delta,
+                            "cash_before": last_logged_cash,
+                            "cash_after": cash,
+                            "equity_before": last_logged_equity,
+                            "equity_after": equity,
+                            "reason": "safe_flat_account_sync",
+                        }
+                        if now - last_cash_event_log >= cash_event_log_interval_seconds:
+                            logger.warning(
+                                "CASH_TRANSFER_DETECTED | direction=%s amount=%.4f cash_before=%.4f cash_after=%.4f",
+                                direction,
+                                cash_delta,
+                                last_logged_cash,
+                                cash,
+                            )
+                            last_cash_event_log = now
+                    elif unsafe_reasons and abs(cash_delta) >= cash_drift_min_delta_usdt:
+                        drift_reason = "unsafe_state:" + ",".join(unsafe_reasons)
+                        cash_drift_payload = {
+                            "amount": cash_delta,
+                            "cash_before": last_logged_cash,
+                            "cash_after": cash,
+                            "equity_before": last_logged_equity,
+                            "equity_after": equity,
+                            "reason": drift_reason,
+                        }
+                        if now - last_cash_event_log >= cash_event_log_interval_seconds:
+                            logger.warning(
+                                "ACCOUNT_CASH_DRIFT | amount=%.4f cash_before=%.4f cash_after=%.4f reason=%s",
+                                cash_delta,
+                                last_logged_cash,
+                                cash,
+                                drift_reason,
+                            )
+                            last_cash_event_log = now
+
+                    if abs(cash - last_logged_cash) >= cash_log_min_delta_usdt:
+                        logger.info(
+                            "CASH_SYNC_CHANGED | cash=%.4f previous=%.4f equity=%.4f layer_margin_pct=%.4f leverage=%.2f",
+                            cash,
+                            last_logged_cash,
+                            equity,
+                            sizer.config.layer_margin_pct,
+                            sizer.config.leverage,
+                        )
+                        last_logged_cash = cash
+                        last_logged_equity = equity
+                    elif cash_transfer_payload is not None or cash_drift_payload is not None:
+                        last_logged_cash = cash
+                        last_logged_equity = equity
+
+                if not flat_transition_detected and position.has_position:
                     trader.position_contracts = position.contracts
                     if pending_order_count == 0:
                         mark_partial_tp_consumed_if_position_reduced(strategy, position)
