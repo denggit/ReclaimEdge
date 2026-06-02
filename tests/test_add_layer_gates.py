@@ -175,6 +175,23 @@ class AddLayerGateTest(unittest.TestCase):
         self.assertIsNone(result)
         self.assertEqual(strat.state.layers, 1)
 
+    def test_first_add_block_cannot_be_bypassed_even_when_adverse_gap_is_1pct(self) -> None:
+        long_strat = strategy()
+        long_strat.state = long_state(layers=1, last_order_ts_ms=NOW_MS - 29 * 60 * 1000)
+
+        long_result = long_strat._maybe_open_or_add_long(99.0, NOW_MS, boll(), cvd())
+
+        self.assertIsNone(long_result)
+        self.assertEqual(long_strat.state.layers, 1)
+
+        short_strat = strategy()
+        short_strat.state = short_state(layers=1, last_order_ts_ms=NOW_MS - 29 * 60 * 1000)
+
+        short_result = short_strat._maybe_open_or_add_short(101.0, NOW_MS, boll(), cvd())
+
+        self.assertIsNone(short_result)
+        self.assertEqual(short_strat.state.layers, 1)
+
     def test_first_add_allowed_after_30_minutes(self) -> None:
         strat = strategy()
         strat.state = long_state(layers=1, last_order_ts_ms=NOW_MS - 31 * 60 * 1000)

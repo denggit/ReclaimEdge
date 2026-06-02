@@ -354,6 +354,38 @@ class LiveTradeJournal:
             position_id=position_id,
         )
 
+    def record_rolling_loss_guard(
+        self,
+        *,
+        action: str,
+        window_start_ts_ms: int,
+        window_end_ts_ms: int,
+        baseline_equity: float,
+        rolling_realized_pnl: float,
+        loss_usdt: float,
+        loss_pct: float,
+        threshold_pct: float | None = None,
+        halt_hours: float | None = None,
+        halt_until_ts_ms: int | None = None,
+        reason: str | None = None,
+    ) -> None:
+        self.append(
+            "ROLLING_LOSS_GUARD",
+            {
+                "action": action,
+                "window_start_ts_ms": window_start_ts_ms,
+                "window_end_ts_ms": window_end_ts_ms,
+                "baseline_equity": baseline_equity,
+                "rolling_realized_pnl": rolling_realized_pnl,
+                "loss_usdt": loss_usdt,
+                "loss_pct": loss_pct,
+                "threshold_pct": threshold_pct,
+                "halt_hours": halt_hours,
+                "halt_until_ts_ms": halt_until_ts_ms,
+                "reason": reason,
+            },
+        )
+
     def record_error(self, *, position_id: str | None, intent: Any, error: Exception, rolled_back: bool, halted: bool) -> None:
         self.append(
             "ERROR",

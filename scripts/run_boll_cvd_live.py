@@ -34,6 +34,11 @@ from src.risk.simple_position_sizer import (  # noqa: E402
     SimplePositionSizer,
     SimplePositionSizerConfig,
 )
+from src.risk.rolling_loss_guard import (  # noqa: E402
+    ROLLING_LOSS_HALT_REASONS,
+    RollingLossGuard,
+    RollingLossGuardDecision,
+)
 from src.strategies.boll_cvd_reclaim_strategy import (  # noqa: E402
     BollCvdReclaimStrategy,
     BollCvdReclaimStrategyConfig,
@@ -47,6 +52,7 @@ from src.utils.log import get_logger  # noqa: E402
 logger = get_logger(__name__)
 
 SPLIT_TP_PLANS = {"SPLIT_PARTIAL_FINAL", "SPLIT_50_50"}
+POSITION_MANAGEMENT_INTENTS = {"UPDATE_TP", "NEAR_TP_REDUCE"}
 
 
 def live_trading_enabled() -> bool:
@@ -55,6 +61,163 @@ def live_trading_enabled() -> bool:
 
 def format_ts_ms(ts_ms: int) -> str:
     return dt.datetime.fromtimestamp(ts_ms / 1000).astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
+
+
+def rolling_loss_halt_reason(action: str) -> str | None:
+    if action == "SOFT_HALT":
+        return "rolling_loss_soft_halt"
+    if action == "HARD_HALT":
+        return "rolling_loss_hard_halt"
+    return None
+
+
+def rolling_loss_guard_subject(action: str, threshold_pct: float | None = None) -> str:
+    pct = int(round((threshold_pct or 0.0) * 100))
+    if action == "WARN":
+        return f"Rolling loss guard warning: {pct}% realized loss reached"
+    if action == "SOFT_HALT":
+        return f"Rolling loss guard soft halt: {pct}% realized loss reached"
+    if action == "HARD_HALT":
+        return f"Rolling loss guard hard halt: {pct}% realized loss reached"
+    if action == "RESUME":
+        return "Rolling loss guard cooldown ended; trading resumed"
+    return "Rolling loss guard update"
+
+
+def build_rolling_loss_guard_email(action: str, payload: dict[str, Any]) -> tuple[str, str]:
+    subject = rolling_loss_guard_subject(action, payload.get("threshold_pct"))
+    halt_until = payload.get("halt_until_ts_ms")
+    halt_until_text = format_ts_ms(halt_until) if isinstance(halt_until, int) else "-"
+    threshold = payload.get("threshold_pct")
+    threshold_text = f"{float(threshold) * 100:.2f}%" if threshold is not None else "-"
+    content = f"""
+<div style="font-family: Arial, Helvetica, sans-serif; line-height: 1.55; color: #222; max-width: 760px;">
+  <h2>{html.escape(subject)}</h2>
+  <p>This guard never force-closes an open position; this event was evaluated only after the account reached FLAT.</p>
+  <table style="width: 100%; border-collapse: collapse; font-size: 14px;">
+    <tr><td style="padding: 8px; border-bottom: 1px solid #eee;">baseline_equity</td><td style="padding: 8px; border-bottom: 1px solid #eee; text-align: right;">{float(payload.get("baseline_equity") or 0.0):.4f}</td></tr>
+    <tr><td style="padding: 8px; border-bottom: 1px solid #eee;">window_start</td><td style="padding: 8px; border-bottom: 1px solid #eee; text-align: right;">{html.escape(format_ts_ms(int(payload.get("window_start_ts_ms") or 0)))}</td></tr>
+    <tr><td style="padding: 8px; border-bottom: 1px solid #eee;">window_end</td><td style="padding: 8px; border-bottom: 1px solid #eee; text-align: right;">{html.escape(format_ts_ms(int(payload.get("window_end_ts_ms") or 0)))}</td></tr>
+    <tr><td style="padding: 8px; border-bottom: 1px solid #eee;">rolling_realized_pnl</td><td style="padding: 8px; border-bottom: 1px solid #eee; text-align: right;">{float(payload.get("rolling_realized_pnl") or 0.0):.4f}</td></tr>
+    <tr><td style="padding: 8px; border-bottom: 1px solid #eee;">loss_usdt</td><td style="padding: 8px; border-bottom: 1px solid #eee; text-align: right;">{float(payload.get("loss_usdt") or 0.0):.4f}</td></tr>
+    <tr><td style="padding: 8px; border-bottom: 1px solid #eee;">loss_pct</td><td style="padding: 8px; border-bottom: 1px solid #eee; text-align: right;">{float(payload.get("loss_pct") or 0.0) * 100:.2f}%</td></tr>
+    <tr><td style="padding: 8px; border-bottom: 1px solid #eee;">threshold</td><td style="padding: 8px; border-bottom: 1px solid #eee; text-align: right;">{html.escape(threshold_text)}</td></tr>
+    <tr><td style="padding: 8px; border-bottom: 1px solid #eee;">halt_until</td><td style="padding: 8px; border-bottom: 1px solid #eee; text-align: right;">{html.escape(halt_until_text)}</td></tr>
+  </table>
+  <p><strong>Reason:</strong> {html.escape(str(payload.get("reason") or action))}</p>
+</div>
+""".strip()
+    return subject, content
+
+
+def rolling_loss_guard_payload(action: str, decision: RollingLossGuardDecision) -> dict[str, Any]:
+    state = decision.state
+    return {
+        "action": action,
+        "window_start_ts_ms": state.window_start_ts_ms,
+        "window_end_ts_ms": state.window_end_ts_ms,
+        "baseline_equity": state.baseline_equity,
+        "rolling_realized_pnl": decision.rolling_realized_pnl,
+        "loss_usdt": decision.loss_usdt,
+        "loss_pct": decision.loss_pct,
+        "threshold_pct": decision.threshold_pct,
+        "halt_hours": decision.halt_hours,
+        "halt_until_ts_ms": decision.halt_until_ts_ms,
+        "reason": decision.reason,
+    }
+
+
+def rolling_loss_guard_state_payload(action: str, guard: RollingLossGuard, reason: str) -> dict[str, Any]:
+    state = guard.state
+    if state is None:
+        raise RuntimeError("RollingLossGuard state is not loaded")
+    return {
+        "action": action,
+        "window_start_ts_ms": state.window_start_ts_ms,
+        "window_end_ts_ms": state.window_end_ts_ms,
+        "baseline_equity": state.baseline_equity,
+        "rolling_realized_pnl": state.last_window_realized_pnl,
+        "loss_usdt": max(0.0, -state.last_window_realized_pnl),
+        "loss_pct": state.last_loss_pct,
+        "threshold_pct": None,
+        "halt_hours": None,
+        "halt_until_ts_ms": state.halt_until_ts_ms,
+        "reason": reason,
+    }
+
+
+async def record_and_notify_rolling_loss_guard(
+    *,
+    journal: LiveTradeJournal,
+    email_sender: EmailSender | None,
+    payload: dict[str, Any],
+    email_enabled: bool,
+) -> None:
+    journal.record_rolling_loss_guard(**payload)
+    if not email_enabled or email_sender is None:
+        return
+    subject, content = build_rolling_loss_guard_email(str(payload["action"]), payload)
+    try:
+        ok = await email_sender.send_email_async(subject, content, content_type="html")
+    except Exception:
+        logger.exception("Failed to send rolling loss guard email | action=%s", payload["action"])
+        return
+    if not ok:
+        logger.error("Failed to send rolling loss guard email | action=%s", payload["action"])
+
+
+async def apply_rolling_loss_guard_startup_state(
+    *,
+    rolling_loss_guard: RollingLossGuard,
+    execution_state: ExecutionState,
+    has_position: bool,
+    equity: float,
+    now_ms: int,
+    journal: LiveTradeJournal,
+    email_sender: EmailSender | None,
+) -> None:
+    if rolling_loss_guard.state is None or not rolling_loss_guard.state.enabled:
+        return
+    if (
+        rolling_loss_guard.state.halt_active
+        and rolling_loss_guard.state.halt_until_ts_ms is not None
+        and now_ms < rolling_loss_guard.state.halt_until_ts_ms
+    ):
+        execution_state.trading_halted = True
+        execution_state.halt_reason = (
+            "rolling_loss_hard_halt"
+            if rolling_loss_guard.state.halt_level == "HARD"
+            else "rolling_loss_soft_halt"
+        )
+        execution_state.halt_until_ts_ms = rolling_loss_guard.state.halt_until_ts_ms
+        logger.warning(
+            "ROLLING_LOSS_GUARD_RESTORED | halt_active=true halt_level=%s halt_until_ts_ms=%s",
+            rolling_loss_guard.state.halt_level,
+            rolling_loss_guard.state.halt_until_ts_ms,
+        )
+    elif rolling_loss_guard.state.halt_active and not has_position:
+        rolling_loss_guard.mark_resumed(now_ms, equity)
+        rolling_loss_guard.save()
+        await record_and_notify_rolling_loss_guard(
+            journal=journal,
+            email_sender=email_sender,
+            payload=rolling_loss_guard_state_payload(
+                "RESUME",
+                rolling_loss_guard,
+                "startup_rolling_loss_cooldown_elapsed_and_account_flat",
+            ),
+            email_enabled=rolling_loss_guard.config.email_enabled,
+        )
+    elif now_ms >= rolling_loss_guard.state.window_end_ts_ms and not has_position:
+        rolling_loss_guard.reset_window(now_ms, equity)
+        rolling_loss_guard.save()
+        journal.record_rolling_loss_guard(
+            **rolling_loss_guard_state_payload(
+                "WINDOW_RESET",
+                rolling_loss_guard,
+                "startup_rolling_loss_window_expired_and_account_flat",
+            )
+        )
 
 
 def parse_daily_report_time(value: str) -> tuple[int, int]:
@@ -368,6 +531,7 @@ class ExecutionState:
     last_order_ts_ms: int = 0
     pending_order_count: int = 0
     halt_reason: str | None = None
+    halt_until_ts_ms: int | None = None
 
 
 @dataclass(frozen=True)
@@ -559,8 +723,17 @@ async def strategy_tick_worker(
 
             async with state_lock:
                 trading_halted = execution_state.trading_halted
+                halt_reason = execution_state.halt_reason
                 pending_order_count = execution_state.pending_order_count
-            if trading_halted or pending_order_count > 0:
+                has_position = bool(account_snapshot.position and account_snapshot.position.has_position)
+            allow_position_management_only = (
+                trading_halted
+                and halt_reason in ROLLING_LOSS_HALT_REASONS
+                and has_position
+            )
+            if pending_order_count > 0:
+                continue
+            if trading_halted and not allow_position_management_only:
                 continue
 
             backup_state = copy.deepcopy(strategy.state)
@@ -570,6 +743,8 @@ async def strategy_tick_worker(
                 boll=event.boll,
                 cvd=cvd_snapshot,
             )
+            if allow_position_management_only:
+                intents = [intent for intent in intents if intent.intent_type in POSITION_MANAGEMENT_INTENTS]
             for intent in intents:
                 command = TradeCommand(
                     intent=intent,
@@ -622,7 +797,12 @@ async def execution_worker(
                 last_backlog_log = now
 
             async with state_lock:
-                if execution_state.trading_halted:
+                rolling_management_allowed = (
+                    execution_state.trading_halted
+                    and execution_state.halt_reason in ROLLING_LOSS_HALT_REASONS
+                    and command.intent.intent_type in POSITION_MANAGEMENT_INTENTS
+                )
+                if execution_state.trading_halted and not rolling_management_allowed:
                     logger.warning(
                         "EXECUTION_SKIPPED | reason=trading_halted intent_type=%s side=%s tick_ts_ms=%s",
                         command.intent.intent_type,
@@ -959,6 +1139,8 @@ async def account_position_sync_worker(
     position_sync_seconds: float,
     account_sync_seconds: float,
     cash_log_min_delta_usdt: float,
+    rolling_loss_guard: RollingLossGuard | None = None,
+    email_sender: EmailSender | None = None,
 ) -> None:
     last_account_sync = 0.0
     last_logged_cash = account_snapshot.cash
@@ -1001,6 +1183,7 @@ async def account_position_sync_worker(
             cash_drift_payload: dict[str, Any] | None = None
             save_state_payload: tuple[str | None, StrategyPositionState, float | None] | None = None
             clear_state = False
+            flat_previous_halt_reason: str | None = None
             async with state_lock:
                 pending_order_count = execution_state.pending_order_count
                 flat_transition_detected = (
@@ -1185,6 +1368,8 @@ async def account_position_sync_worker(
                     "cash_after": settled.cash,
                     "equity_after": settled.equity,
                 }
+                cash = settled.cash
+                equity = settled.equity
                 protective_sl_order_id = pending_flat_payload.get("near_tp_protective_sl_order_id")
                 if protective_sl_order_id:
                     try:
@@ -1192,6 +1377,7 @@ async def account_position_sync_worker(
                     except Exception:
                         logger.warning("NEAR_TP_PROTECTIVE_SL_CANCEL_ON_FLAT | algoId=%s failed_unhandled", protective_sl_order_id)
                 async with state_lock:
+                    flat_previous_halt_reason = execution_state.halt_reason if execution_state.trading_halted else None
                     account_snapshot.position = position
                     account_snapshot.cash = settled.cash
                     account_snapshot.equity = settled.equity
@@ -1202,8 +1388,20 @@ async def account_position_sync_worker(
                     sizer.update_account_equity(settled.equity)
                     strategy.state = StrategyPositionState()
                     trader.mark_flat()
-                    execution_state.trading_halted = False
-                    execution_state.halt_reason = None
+                    flat_clearable_halt_reasons = {
+                        None,
+                        "near_tp_exit_all_waiting_flat",
+                        "near_tp_protected_sync_failed",
+                        "rolling_loss_soft_halt",
+                        "rolling_loss_hard_halt",
+                    }
+                    preserve_critical_halt = (
+                        rolling_loss_guard is not None
+                        and flat_previous_halt_reason not in flat_clearable_halt_reasons
+                    )
+                    execution_state.trading_halted = preserve_critical_halt
+                    execution_state.halt_reason = flat_previous_halt_reason if preserve_critical_halt else None
+                    execution_state.halt_until_ts_ms = None
                     execution_state.current_position_id = None
                     execution_state.cash_before_position = None
                     clear_state = True
@@ -1219,11 +1417,95 @@ async def account_position_sync_worker(
             if record_flat_payload is not None:
                 record_flat_payload.pop("near_tp_protective_sl_order_id", None)
                 journal.record_flat(**record_flat_payload)
+                if rolling_loss_guard is not None and rolling_loss_guard.state is not None and rolling_loss_guard.state.enabled:
+                    guard_now_ms = utc_ms() + 1
+                    decision = rolling_loss_guard.evaluate_after_flat(
+                        now_ms=guard_now_ms,
+                        journal_events=journal.load_events(),
+                        has_position=False,
+                    )
+                    if decision.action is not None:
+                        halt_reason = rolling_loss_halt_reason(decision.action)
+                        if halt_reason is not None:
+                            can_apply_rolling_halt = flat_previous_halt_reason in {
+                                None,
+                                "near_tp_exit_all_waiting_flat",
+                                "near_tp_protected_sync_failed",
+                                "rolling_loss_soft_halt",
+                                "rolling_loss_hard_halt",
+                            }
+                            async with state_lock:
+                                if can_apply_rolling_halt and (
+                                    not execution_state.trading_halted
+                                    or execution_state.halt_reason in ROLLING_LOSS_HALT_REASONS
+                                    or execution_state.halt_reason is None
+                                ):
+                                    execution_state.trading_halted = True
+                                    execution_state.halt_reason = halt_reason
+                                    execution_state.halt_until_ts_ms = decision.halt_until_ts_ms
+                        await record_and_notify_rolling_loss_guard(
+                            journal=journal,
+                            email_sender=email_sender,
+                            payload=rolling_loss_guard_payload(decision.action, decision),
+                            email_enabled=rolling_loss_guard.config.email_enabled,
+                        )
             if clear_state:
                 state_store.clear()
             if save_state_payload is not None:
                 position_id, strategy_state, cash_before_position = save_state_payload
                 state_store.save(LiveStateStore.from_strategy_state(position_id=position_id, symbol=trader.symbol, strategy_state=strategy_state, cash_before_position=cash_before_position))
+            if rolling_loss_guard is not None and rolling_loss_guard.state is not None and rolling_loss_guard.state.enabled:
+                guard_now_ms = utc_ms()
+                has_position_now = bool(position.has_position)
+                async with state_lock:
+                    halted = execution_state.trading_halted
+                    halt_reason = execution_state.halt_reason
+                if (
+                    halted
+                    and halt_reason in ROLLING_LOSS_HALT_REASONS
+                    and rolling_loss_guard.should_resume(guard_now_ms, has_position_now)
+                ):
+                    rolling_loss_guard.mark_resumed(guard_now_ms, equity)
+                    rolling_loss_guard.save()
+                    async with state_lock:
+                        if execution_state.halt_reason in ROLLING_LOSS_HALT_REASONS:
+                            execution_state.trading_halted = False
+                            execution_state.halt_reason = None
+                            execution_state.halt_until_ts_ms = None
+                    payload = rolling_loss_guard_state_payload(
+                        "RESUME",
+                        rolling_loss_guard,
+                        "rolling_loss_cooldown_elapsed_and_account_flat",
+                    )
+                    await record_and_notify_rolling_loss_guard(
+                        journal=journal,
+                        email_sender=email_sender,
+                        payload=payload,
+                        email_enabled=rolling_loss_guard.config.email_enabled,
+                    )
+                    logger.warning("ROLLING_LOSS_GUARD_RESUMED | trading_halted=false baseline_equity=%.4f", equity)
+                elif (
+                    halted
+                    and halt_reason in ROLLING_LOSS_HALT_REASONS
+                    and rolling_loss_guard.state.halt_until_ts_ms is not None
+                    and guard_now_ms >= rolling_loss_guard.state.halt_until_ts_ms
+                    and has_position_now
+                ):
+                    logger.warning("ROLLING_LOSS_GUARD_RESUME_DELAYED | reason=position_open halt_until_ts_ms=%s", rolling_loss_guard.state.halt_until_ts_ms)
+                elif (
+                    not halted
+                    and rolling_loss_guard.should_reset_expired_window(guard_now_ms, has_position_now)
+                ):
+                    rolling_loss_guard.reset_window(guard_now_ms, equity)
+                    rolling_loss_guard.save()
+                    journal.record_rolling_loss_guard(
+                        **rolling_loss_guard_state_payload(
+                            "WINDOW_RESET",
+                            rolling_loss_guard,
+                            "rolling_loss_window_expired_and_account_flat",
+                        )
+                    )
+                    logger.info("ROLLING_LOSS_GUARD_WINDOW_RESET | baseline_equity=%.4f", equity)
             if consecutive_failures > 0:
                 logger.warning("ACCOUNT_SYNC_RECOVERED | failures=%s", consecutive_failures)
             consecutive_failures = 0
@@ -1265,6 +1547,7 @@ async def main() -> None:
     cvd_config = CvdTrackerConfig.from_env()
     email_sender = EmailSender()
     journal = LiveTradeJournal()
+    rolling_loss_guard = RollingLossGuard.from_env()
     state_store = LiveStateStore()
     reporter = DailyTradeReporter(journal, email_sender)
     trader = Trader()
@@ -1275,6 +1558,7 @@ async def main() -> None:
         strategy = BollCvdShockReclaimStrategy(BollCvdReclaimStrategyConfig.from_env(), sizer)
         startup_position = await trader.fetch_position_snapshot()
         startup_cash = await fetch_usdt_cash_balance(trader)
+        rolling_loss_guard.load_or_initialize(utc_ms(), trader.account_equity_usdt)
         journal.record_cash_baseline(
             source="startup",
             cash=startup_cash,
@@ -1325,6 +1609,15 @@ async def main() -> None:
         current_position_id=current_position_id,
         cash_before_position=cash_before_position,
         trading_halted=False,
+    )
+    await apply_rolling_loss_guard_startup_state(
+        rolling_loss_guard=rolling_loss_guard,
+        execution_state=execution_state,
+        has_position=startup_position.has_position,
+        equity=trader.account_equity_usdt,
+        now_ms=utc_ms(),
+        journal=journal,
+        email_sender=email_sender,
     )
     strategy_tick_queue: asyncio.Queue[MarketTickEvent] = asyncio.Queue(maxsize=int(os.getenv("STRATEGY_TICK_QUEUE_MAXSIZE", "20000")))
     execution_queue: asyncio.Queue[TradeCommand] = asyncio.Queue(maxsize=int(os.getenv("EXECUTION_QUEUE_MAXSIZE", "1000")))
@@ -1435,6 +1728,8 @@ async def main() -> None:
                 position_sync_seconds=position_sync_seconds,
                 account_sync_seconds=account_sync_seconds,
                 cash_log_min_delta_usdt=cash_log_min_delta_usdt,
+                rolling_loss_guard=rolling_loss_guard,
+                email_sender=email_sender,
             ),
             strategy_tick_worker(
                 strategy_tick_queue=strategy_tick_queue,
