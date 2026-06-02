@@ -839,20 +839,22 @@ async def account_position_sync_worker(
                         )
                         last_cash_event_log = now
                 elif unsafe_reasons and abs(cash_delta) >= cash_drift_min_delta_usdt:
+                    drift_reason = "unsafe_state:" + ",".join(unsafe_reasons)
                     cash_drift_payload = {
                         "amount": cash_delta,
                         "cash_before": last_logged_cash,
                         "cash_after": cash,
                         "equity_before": last_logged_equity,
                         "equity_after": equity,
-                        "reason": "unsafe_state:" + ",".join(unsafe_reasons),
+                        "reason": drift_reason,
                     }
                     if now - last_cash_event_log >= cash_event_log_interval_seconds:
                         logger.warning(
-                            "ACCOUNT_CASH_DRIFT | amount=%.4f cash_before=%.4f cash_after=%.4f reason=unsafe_state",
+                            "ACCOUNT_CASH_DRIFT | amount=%.4f cash_before=%.4f cash_after=%.4f reason=%s",
                             cash_delta,
                             last_logged_cash,
                             cash,
+                            drift_reason,
                         )
                         last_cash_event_log = now
 
