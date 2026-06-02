@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
-import logging
 import sys
 from pathlib import Path
 
@@ -29,13 +28,9 @@ from src.strategies.boll_cvd_reclaim_strategy import (  # noqa: E402
     TradeIntent,
 )
 from src.utils.email_sender import EmailSender  # noqa: E402
+from src.utils.log import get_logger  # noqa: E402
 
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-)
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 def format_ts_ms(ts_ms: int) -> str:
