@@ -5,7 +5,6 @@
 """
 import asyncio
 import datetime
-import logging
 import smtplib
 from email import encoders
 from email.mime.base import MIMEBase
@@ -14,6 +13,9 @@ from email.mime.text import MIMEText
 from typing import Optional
 
 from config.env_loader import EMAIL_CONFIG
+from src.utils.log import get_logger
+
+logger = get_logger(__name__)
 
 
 class EmailSender:
@@ -37,7 +39,7 @@ class EmailSender:
         if not self.sender or not self.password or not self.receiver:
             raise ValueError("邮件配置不完整，请检查 .env 文件中的 EMAIL_SENDER, EMAIL_PASSWORD, EMAIL_RECEIVER 配置")
 
-        self.logger = logging.getLogger(__name__)
+        self.logger = logger
 
     async def send_email_async(self, subject: str, content: str,
                                content_type: str = 'plain') -> bool:
@@ -214,66 +216,5 @@ async def send_email(subject: str, content: str, content_type: str = 'plain') ->
         sender = EmailSender()
         return await sender.send_email_async(subject, content, content_type)
     except Exception as e:
-        logging.getLogger(__name__).error(f"发送邮件失败: {e}")
+        logger.error(f"发送邮件失败: {e}")
         return False
-
-
-async def send_trading_signal_email(symbol: str, signal_type: str,
-                                    price: float, details: str) -> bool:
-    """
-    便捷函数：发送交易信号邮件。
-
-    Args:
-        symbol: 交易对符号
-        signal_type: 信号类型
-        price: 当前价格
-        details: 详细信息
-
-    Returns:
-        bool: 发送是否成功
-    """
-    try:
-        sender = EmailSender()
-        return await sender.send_trading_signal(symbol, signal_type, price, details)
-    except Exception as e:
-        logging.getLogger(__name__).error(f"发送交易信号邮件失败: {e}")
-        return False
-
-
-# 测试函数
-async def test_email_sender():
-    """测试邮件发送器"""
-    import sys
-    import os
-
-    # 添加项目根目录到路径
-    current_file = os.path.abspath(__file__)
-    project_root = os.path.dirname(os.path.dirname(os.path.dirname(current_file)))
-    if project_root not in sys.path:
-        sys.path.insert(0, project_root)
-
-    print("正在测试邮件发送器...")
-
-    try:
-        sender = EmailSender()
-        success = await sender.send_email_async(
-            subject="测试邮件 - Momentum1.66 量化系统",
-            content="这是一封测试邮件，用于验证邮件发送功能是否正常工作。",
-            content_type='plain'
-        )
-
-        if success:
-            print("✅ 邮件发送测试成功！")
-        else:
-            print("❌ 邮件发送测试失败！")
-
-    except ValueError as e:
-        print(f"❌ 配置错误: {e}")
-        print("请检查 .env 文件中的 EMAIL_SENDER, EMAIL_PASSWORD, EMAIL_RECEIVER 配置")
-    except Exception as e:
-        print(f"❌ 测试过程中发生错误: {e}")
-
-
-if __name__ == "__main__":
-    # 运行测试
-    asyncio.run(test_email_sender())
