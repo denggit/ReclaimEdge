@@ -63,11 +63,24 @@ def parse_daily_report_time(value: str) -> tuple[int, int]:
     return hour, minute
 
 
+def parse_weekly_report_time(value: str) -> tuple[int, int]:
+    return parse_daily_report_time(value)
+
+
 def next_daily_report_time(hour: int, minute: int) -> dt.datetime:
     now = dt.datetime.now().astimezone()
     target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
     if target <= now:
         target += dt.timedelta(days=1)
+    return target
+
+
+def next_weekly_summary_time(hour: int, minute: int, weekday: int = 0) -> dt.datetime:
+    now = dt.datetime.now().astimezone()
+    target = now + dt.timedelta(days=weekday - now.weekday())
+    target = target.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if target <= now:
+        target += dt.timedelta(days=7)
     return target
 
 
@@ -829,6 +842,38 @@ async def main() -> None:
             except Exception:
                 logger.exception("Daily trade report loop failed")
 
+    async def weekly_summary_loop() -> None:
+        enabled = os.getenv("WEEKLY_SUMMARY_ENABLED", "true").strip().lower() in {"1", "true", "yes", "y", "on"}
+        if not enabled:
+            logger.info("Weekly overall summary loop disabled")
+            return
+
+        raw_time = os.getenv("WEEKLY_SUMMARY_TIME", "10:00")
+        raw_weekday = os.getenv("WEEKLY_SUMMARY_WEEKDAY", "0")
+        hour, minute = parse_weekly_report_time(raw_time)
+        weekday = int(raw_weekday)
+        if weekday < 0 or weekday > 6:
+            raise ValueError(f"Invalid WEEKLY_SUMMARY_WEEKDAY={raw_weekday}")
+
+        logger.info(
+            "Weekly overall summary loop started | WEEKLY_SUMMARY_WEEKDAY=%s WEEKLY_SUMMARY_TIME=%s",
+            weekday,
+            raw_time,
+        )
+
+        while True:
+            target = next_weekly_summary_time(hour, minute, weekday)
+            sleep_seconds = max((target - dt.datetime.now().astimezone()).total_seconds(), 1)
+            await asyncio.sleep(sleep_seconds)
+            try:
+                ok = await reporter.send_overall_summary_report()
+                if ok:
+                    logger.info("Weekly overall summary report sent successfully")
+                else:
+                    logger.error("Weekly overall summary report failed")
+            except Exception:
+                logger.exception("Weekly overall summary report loop failed")
+
     async def on_market_tick(event: MarketTickEvent) -> None:
         await enqueue_strategy_tick(event, strategy_tick_queue, state_lock, execution_state)
 
@@ -876,6 +921,7 @@ async def main() -> None:
                 backlog_log_seconds=execution_backlog_log_seconds,
             ),
             daily_report_loop(),
+            weekly_summary_loop(),
             monitor.run_forever(),
         )
     finally:
