@@ -40,26 +40,29 @@ def compact_after_weekly_summary(
     archive_path = _next_archive_path(journal.path.parent / "archive", snapshot_until)
     summary_payload = _build_summary_payload(archived_events, snapshot_until, str(archive_path))
 
-    tmp_path = journal.path.with_suffix(journal.path.suffix + ".tmp")
+    archive_tmp_path = archive_path.with_suffix(archive_path.suffix + ".tmp")
+    journal_tmp_path = journal.path.with_suffix(journal.path.suffix + ".tmp")
     try:
         archive_path.parent.mkdir(parents=True, exist_ok=True)
-        with gzip.open(archive_path, "wt", encoding="utf-8") as f:
+        with gzip.open(archive_tmp_path, "wt", encoding="utf-8") as f:
             for event in archived_events:
                 f.write(json.dumps(asdict(event), ensure_ascii=False, separators=(",", ":")) + "\n")
+        os.replace(archive_tmp_path, archive_path)
 
-        journal.record_summary_snapshot(summary_payload)
-
-        with tmp_path.open("w", encoding="utf-8") as f:
+        with journal_tmp_path.open("w", encoding="utf-8") as f:
             for event in retained_events:
                 f.write(json.dumps(asdict(event), ensure_ascii=False, separators=(",", ":")) + "\n")
             f.flush()
             os.fsync(f.fileno())
-        os.replace(tmp_path, journal.path)
+        os.replace(journal_tmp_path, journal.path)
     except Exception:
-        if tmp_path.exists():
-            tmp_path.unlink()
+        if archive_tmp_path.exists():
+            archive_tmp_path.unlink()
+        if journal_tmp_path.exists():
+            journal_tmp_path.unlink()
         raise
 
+    journal.record_summary_snapshot(summary_payload)
     journal.record_journal_compacted(
         archived_event_count=len(archived_events),
         retained_event_count=len(retained_events),

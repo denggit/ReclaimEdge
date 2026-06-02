@@ -963,12 +963,16 @@ async def main() -> None:
 
         raw_time = os.getenv("WEEKLY_SUMMARY_TIME", "10:00")
         raw_weekday = os.getenv("WEEKLY_SUMMARY_WEEKDAY", "0")
-        compact_after_success = os.getenv("WEEKLY_COMPACT_AFTER_SUCCESS", "true").strip().lower() in {"1", "true", "yes", "y", "on"}
+        compact_after_success = os.getenv("WEEKLY_COMPACT_AFTER_SUCCESS", "false").strip().lower() in {"1", "true", "yes", "y", "on"}
         hour, minute = parse_weekly_report_time(raw_time)
         weekday = int(raw_weekday)
         if weekday < 0 or weekday > 6:
             raise ValueError(f"Invalid WEEKLY_SUMMARY_WEEKDAY={raw_weekday}")
 
+        logger.info(
+            "Weekly compaction config | WEEKLY_COMPACT_AFTER_SUCCESS=%s risk=enable_only_after_summary_merge_verified",
+            compact_after_success,
+        )
         logger.info(
             "Weekly overall summary loop started | WEEKLY_SUMMARY_WEEKDAY=%s WEEKLY_SUMMARY_TIME=%s",
             weekday,
@@ -988,11 +992,13 @@ async def main() -> None:
                 if ok:
                     logger.info("Weekly overall summary report sent successfully")
                     if compact_after_success:
+                        async with state_lock:
+                            compact_position_id = execution_state.current_position_id
                         result = await asyncio.to_thread(
                             compact_after_weekly_summary,
                             journal,
                             target,
-                            execution_state.current_position_id,
+                            compact_position_id,
                         )
                         if result.archived_event_count > 0:
                             logger.warning(

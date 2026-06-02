@@ -57,6 +57,21 @@ class ReportPnlMath:
     total_pnl: float | None
 
 
+@dataclass(frozen=True)
+class ArchivedSummaryStats:
+    closed_count: int = 0
+    win_count: int = 0
+    loss_count: int = 0
+    breakeven_count: int = 0
+    known_closed_pnl: float = 0.0
+    gross_profit: float = 0.0
+    gross_loss: float = 0.0
+    best_win: float | None = None
+    worst_loss: float | None = None
+    archived_event_count: int = 0
+    archived_position_count: int = 0
+
+
 def fmt(value: Any, digits: int = 4, default: str = "-") -> str:
     try:
         if value is None:
@@ -124,8 +139,53 @@ class DailyTradeReporter:
 
     def _build_overall_summary_report_sync(self, context: ReportRuntimeContext | None) -> tuple[str, str]:
         events = self.journal.load_events()
+        archived = self.load_archived_summary_stats()
         context = self._with_overall_start_cash(context, events)
-        return self.build_overall_summary_report(events, context=context)
+        return self.build_overall_summary_report(events, context=context, archived=archived)
+
+    def load_archived_summary_stats(self) -> ArchivedSummaryStats:
+        summary_events = self.journal.load_summary_events()
+        closed_count = 0
+        win_count = 0
+        loss_count = 0
+        breakeven_count = 0
+        known_closed_pnl = 0.0
+        gross_profit = 0.0
+        gross_loss = 0.0
+        best_win: float | None = None
+        worst_loss: float | None = None
+        archived_event_count = 0
+        archived_position_count = 0
+
+        for event in summary_events:
+            if event.event_type != "SUMMARY_SNAPSHOT":
+                continue
+            payload = event.payload
+            closed_count += self._to_int(payload.get("closed_count"))
+            win_count += self._to_int(payload.get("win_count"))
+            loss_count += self._to_int(payload.get("loss_count"))
+            breakeven_count += self._to_int(payload.get("breakeven_count"))
+            known_closed_pnl += _to_float(payload.get("known_closed_pnl")) or 0.0
+            gross_profit += _to_float(payload.get("gross_profit")) or 0.0
+            gross_loss += _to_float(payload.get("gross_loss")) or 0.0
+            best_win = self._max_non_none(best_win, _to_float(payload.get("best_win")))
+            worst_loss = self._min_non_none(worst_loss, _to_float(payload.get("worst_loss")))
+            archived_event_count += self._to_int(payload.get("archived_event_count"))
+            archived_position_count += self._to_int(payload.get("archived_position_count"))
+
+        return ArchivedSummaryStats(
+            closed_count=closed_count,
+            win_count=win_count,
+            loss_count=loss_count,
+            breakeven_count=breakeven_count,
+            known_closed_pnl=known_closed_pnl,
+            gross_profit=gross_profit,
+            gross_loss=gross_loss,
+            best_win=best_win,
+            worst_loss=worst_loss,
+            archived_event_count=archived_event_count,
+            archived_position_count=archived_position_count,
+        )
 
     def build_report(
         self,
@@ -187,24 +247,26 @@ class DailyTradeReporter:
         self,
         events: list[JournalEvent],
         context: ReportRuntimeContext | None = None,
+        archived: ArchivedSummaryStats | None = None,
     ) -> tuple[str, str]:
+        archived = archived or ArchivedSummaryStats()
         events_sorted = sorted(events, key=lambda item: item.ts_iso)
         grouped = group_position_events(events_sorted)
 
-        closed_count = 0
+        active_closed_count = 0
         open_count = 0
         incomplete_count = 0
-        win_count = 0
-        loss_count = 0
-        breakeven_count = 0
+        active_win_count = 0
+        active_loss_count = 0
+        active_breakeven_count = 0
         entry_count = 0
         tp_update_count = 0
         error_count = 0
-        known_closed_pnl = 0.0
-        gross_profit = 0.0
-        gross_loss = 0.0
-        best_win: float | None = None
-        worst_loss: float | None = None
+        active_known_closed_pnl = 0.0
+        active_gross_profit = 0.0
+        active_gross_loss = 0.0
+        active_best_win: float | None = None
+        active_worst_loss: float | None = None
         first_cash: float | None = None
         latest_cash: float | None = None
         equity_points: list[float] = []
@@ -230,7 +292,7 @@ class DailyTradeReporter:
                     incomplete_count += 1
                 continue
 
-            closed_count += 1
+            active_closed_count += 1
             pnl = _to_float(flat.payload.get("realized_pnl_usdt_est"))
             cash_before = _to_float(flat.payload.get("cash_before_position"))
             cash_after = _to_float(flat.payload.get("cash_after"))
@@ -244,17 +306,27 @@ class DailyTradeReporter:
 
             if pnl is None:
                 continue
-            known_closed_pnl += pnl
+            active_known_closed_pnl += pnl
             if pnl > 0:
-                win_count += 1
-                gross_profit += pnl
-                best_win = pnl if best_win is None else max(best_win, pnl)
+                active_win_count += 1
+                active_gross_profit += pnl
+                active_best_win = pnl if active_best_win is None else max(active_best_win, pnl)
             elif pnl < 0:
-                loss_count += 1
-                gross_loss += abs(pnl)
-                worst_loss = pnl if worst_loss is None else min(worst_loss, pnl)
+                active_loss_count += 1
+                active_gross_loss += abs(pnl)
+                active_worst_loss = pnl if active_worst_loss is None else min(active_worst_loss, pnl)
             else:
-                breakeven_count += 1
+                active_breakeven_count += 1
+
+        closed_count = archived.closed_count + active_closed_count
+        win_count = archived.win_count + active_win_count
+        loss_count = archived.loss_count + active_loss_count
+        breakeven_count = archived.breakeven_count + active_breakeven_count
+        known_closed_pnl = archived.known_closed_pnl + active_known_closed_pnl
+        gross_profit = archived.gross_profit + active_gross_profit
+        gross_loss = archived.gross_loss + active_gross_loss
+        best_win = self._max_non_none(archived.best_win, active_best_win)
+        worst_loss = self._min_non_none(archived.worst_loss, active_worst_loss)
 
         residual_bucket = self._build_residual_bucket(events_sorted, incomplete_count, known_closed_pnl, context)
         total_pnl = residual_bucket.strategy_total_pnl if residual_bucket.strategy_total_pnl is not None else known_closed_pnl
@@ -291,7 +363,11 @@ class DailyTradeReporter:
 
   <h3>策略表现</h3>
   <div style="display:flex;gap:12px;flex-wrap:wrap;margin:12px 0;">
-    {self._metric_card('已记录平仓笔数', str(closed_count))}
+    {self._metric_card('已归档平仓笔数', str(archived.closed_count))}
+    {self._metric_card('活跃账本平仓笔数', str(active_closed_count))}
+    {self._metric_card('总已记录平仓笔数', str(closed_count))}
+    {self._metric_card('已归档事件数', str(archived.archived_event_count))}
+    {self._metric_card('已归档仓位数', str(archived.archived_position_count))}
     {self._metric_card('当前未平仓位', str(open_count))}
     {self._metric_card('不完整记录数', str(incomplete_count))}
     {self._metric_card('胜率', fmt_pct(win_rate))}
@@ -314,7 +390,7 @@ class DailyTradeReporter:
   </div>
 
   <p style="color:#777;font-size:12px;margin-top:16px;">
-    说明：本报告基于 live_trade_events.jsonl 生成。缺少 FLAT 的历史记录不会逐条展示；如果当前总资金和起始资金可用，会把它们聚合为一个未知来源盈亏桶，避免重复累计不完整记录。
+    说明：本报告基于 live_trade_summary.jsonl 的已归档 SUMMARY_SNAPSHOT 与 live_trade_events.jsonl 的活跃账本合并生成。缺少 FLAT 的历史记录不会逐条展示；如果当前总资金和起始资金可用，会把它们聚合为一个未知来源盈亏桶，避免重复累计不完整记录。
   </p>
 </div>
 """.strip()
@@ -547,6 +623,27 @@ class DailyTradeReporter:
     @staticmethod
     def _metric_card(title: str, value: str) -> str:
         return f"<div style='padding:10px 14px;background:#f6f8fa;border-radius:8px;min-width:150px;'><b>{html.escape(title)}</b><br>{html.escape(value)}</div>"
+
+    @staticmethod
+    def _to_int(value: Any) -> int:
+        number = _to_float(value)
+        return int(number) if number is not None else 0
+
+    @staticmethod
+    def _max_non_none(left: float | None, right: float | None) -> float | None:
+        if left is None:
+            return right
+        if right is None:
+            return left
+        return max(left, right)
+
+    @staticmethod
+    def _min_non_none(left: float | None, right: float | None) -> float | None:
+        if left is None:
+            return right
+        if right is None:
+            return left
+        return min(left, right)
 
     @staticmethod
     def _max_drawdown(equity_points: list[float]) -> tuple[float | None, float | None]:
