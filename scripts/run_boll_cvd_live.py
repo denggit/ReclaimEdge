@@ -153,7 +153,14 @@ async def record_and_notify_rolling_loss_guard(
     payload: dict[str, Any],
     email_enabled: bool,
 ) -> None:
-    journal.record_rolling_loss_guard(**payload)
+    if (
+        payload.get("critical_halt_preserved") is not None
+        or payload.get("existing_halt_reason") is not None
+        or payload.get("rolling_loss_halt_not_applied") is not None
+    ) and hasattr(journal, "append"):
+        journal.append("ROLLING_LOSS_GUARD", payload)
+    else:
+        journal.record_rolling_loss_guard(**payload)
     if not email_enabled or email_sender is None:
         return
     subject, content = build_rolling_loss_guard_email(str(payload["action"]), payload)
@@ -1418,7 +1425,7 @@ async def account_position_sync_worker(
                 record_flat_payload.pop("near_tp_protective_sl_order_id", None)
                 journal.record_flat(**record_flat_payload)
                 if rolling_loss_guard is not None and rolling_loss_guard.state is not None and rolling_loss_guard.state.enabled:
-                    guard_now_ms = utc_ms() + 1
+                    guard_now_ms = utc_ms()
                     decision = rolling_loss_guard.evaluate_after_flat(
                         now_ms=guard_now_ms,
                         journal_events=journal.load_events(),
@@ -1426,6 +1433,7 @@ async def account_position_sync_worker(
                     )
                     if decision.action is not None:
                         halt_reason = rolling_loss_halt_reason(decision.action)
+                        critical_halt_preserved = False
                         if halt_reason is not None:
                             can_apply_rolling_halt = flat_previous_halt_reason in {
                                 None,
@@ -1434,20 +1442,38 @@ async def account_position_sync_worker(
                                 "rolling_loss_soft_halt",
                                 "rolling_loss_hard_halt",
                             }
-                            async with state_lock:
-                                if can_apply_rolling_halt and (
-                                    not execution_state.trading_halted
-                                    or execution_state.halt_reason in ROLLING_LOSS_HALT_REASONS
-                                    or execution_state.halt_reason is None
-                                ):
-                                    execution_state.trading_halted = True
-                                    execution_state.halt_reason = halt_reason
-                                    execution_state.halt_until_ts_ms = decision.halt_until_ts_ms
+                            critical_halt_preserved = halt_reason is not None and not can_apply_rolling_halt
+                            if critical_halt_preserved:
+                                logger.warning(
+                                    "ROLLING_LOSS_GUARD_TRIGGERED_BUT_CRITICAL_HALT_PRESERVED | action=%s existing_halt_reason=%s loss_pct=%.6f halt_not_applied=true",
+                                    decision.action,
+                                    flat_previous_halt_reason,
+                                    decision.loss_pct,
+                                )
+                            else:
+                                async with state_lock:
+                                    if (
+                                        not execution_state.trading_halted
+                                        or execution_state.halt_reason in ROLLING_LOSS_HALT_REASONS
+                                        or execution_state.halt_reason is None
+                                    ):
+                                        execution_state.trading_halted = True
+                                        execution_state.halt_reason = halt_reason
+                                        execution_state.halt_until_ts_ms = decision.halt_until_ts_ms
+                        payload = rolling_loss_guard_payload(decision.action, decision)
+                        if critical_halt_preserved:
+                            payload.update(
+                                {
+                                    "critical_halt_preserved": True,
+                                    "existing_halt_reason": flat_previous_halt_reason,
+                                    "rolling_loss_halt_not_applied": True,
+                                }
+                            )
                         await record_and_notify_rolling_loss_guard(
                             journal=journal,
                             email_sender=email_sender,
-                            payload=rolling_loss_guard_payload(decision.action, decision),
-                            email_enabled=rolling_loss_guard.config.email_enabled,
+                            payload=payload,
+                            email_enabled=rolling_loss_guard.config.email_enabled and not critical_halt_preserved,
                         )
             if clear_state:
                 state_store.clear()

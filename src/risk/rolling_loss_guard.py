@@ -35,6 +35,7 @@ class RollingLossGuardConfig:
     hard_halt_pct: float = 0.20
     hard_halt_hours: float = 12.0
     email_enabled: bool = True
+    event_time_tolerance_ms: int = 5000
 
     @classmethod
     def from_env(cls) -> "RollingLossGuardConfig":
@@ -47,6 +48,7 @@ class RollingLossGuardConfig:
             hard_halt_pct=float(os.getenv("ROLLING_LOSS_HARD_HALT_PCT", "0.20")),
             hard_halt_hours=float(os.getenv("ROLLING_LOSS_HARD_HALT_HOURS", "12")),
             email_enabled=_env_bool("ROLLING_LOSS_EMAIL_ENABLED", True),
+            event_time_tolerance_ms=int(os.getenv("ROLLING_LOSS_EVENT_TIME_TOLERANCE_MS", "5000")),
         )
 
 
@@ -222,13 +224,14 @@ class RollingLossGuard:
     def window_realized_pnl(self, journal_events: Iterable[JournalEvent], *, now_ms: int) -> float:
         state = self._require_state()
         total = 0.0
+        upper_bound_ms = now_ms + self.config.event_time_tolerance_ms
         for event in journal_events:
             if event.event_type != "FLAT":
                 continue
             event_ts_ms = self._event_ts_ms(event)
             if event_ts_ms is None:
                 continue
-            if event_ts_ms < state.window_start_ts_ms or event_ts_ms >= now_ms:
+            if event_ts_ms < state.window_start_ts_ms or event_ts_ms > upper_bound_ms:
                 continue
             value = event.payload.get("realized_pnl_usdt_est")
             try:

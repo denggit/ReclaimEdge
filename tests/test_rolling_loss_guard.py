@@ -4,12 +4,14 @@ import asyncio
 import contextlib
 import datetime as dt
 import importlib.util
+import os
 import sys
 import tempfile
 import types
 import unittest
 from decimal import Decimal
 from pathlib import Path
+from unittest.mock import patch
 
 if importlib.util.find_spec("dotenv") is None:
     dotenv = types.ModuleType("dotenv")
@@ -80,6 +82,7 @@ class FakeTrader:
 class FakeJournal:
     def __init__(self) -> None:
         self.rolling_loss_events: list[dict] = []  # type: ignore[type-arg]
+        self.events: list[JournalEvent] = []
         self.recorded = asyncio.Event()
 
     def record_cash_transfer(self, **kwargs) -> None:  # type: ignore[no-untyped-def]
@@ -91,6 +94,16 @@ class FakeJournal:
     def record_rolling_loss_guard(self, **kwargs) -> None:  # type: ignore[no-untyped-def]
         self.rolling_loss_events.append(kwargs)
         self.recorded.set()
+
+    def record_flat(self, **kwargs) -> None:  # type: ignore[no-untyped-def]
+        payload = dict(kwargs)
+        if kwargs.get("cash_before_position") is not None and kwargs.get("cash_after") is not None:
+            payload["realized_pnl_usdt_est"] = kwargs["cash_after"] - kwargs["cash_before_position"]
+        ts_iso = dt.datetime.now(dt.timezone.utc).isoformat()
+        self.events.append(JournalEvent("flat-id", "FLAT", ts_iso, kwargs.get("position_id"), payload))
+
+    def load_events(self) -> list[JournalEvent]:
+        return list(self.events)
 
 
 class FakeStateStore:
@@ -121,6 +134,7 @@ class RollingLossGuardTest(unittest.IsolatedAsyncioTestCase):
             "hard_halt_pct": 0.20,
             "hard_halt_hours": 12,
             "email_enabled": False,
+            "event_time_tolerance_ms": 5000,
         }
         values.update(overrides)
         return RollingLossGuard(root / "rolling_loss_guard_state.json", RollingLossGuardConfig(**values))
@@ -147,6 +161,32 @@ class RollingLossGuardTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(decision.action, "WARN")
             self.assertFalse(decision.should_halt)
             self.assertIsNone(rolling_loss_halt_reason(decision.action))
+
+    def test_current_flat_event_with_same_or_slightly_future_timestamp_is_counted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            guard = self.make_guard(Path(tmp))
+            guard.load_or_initialize(NOW_MS - MS_PER_HOUR, 100.0)
+
+            decision = guard.evaluate_after_flat(
+                now_ms=NOW_MS,
+                journal_events=[event("FLAT", NOW_MS + 1_000, {"realized_pnl_usdt_est": -10})],
+            )
+
+            self.assertEqual(decision.action, "WARN")
+            self.assertEqual(decision.rolling_realized_pnl, -10.0)
+
+    def test_far_future_flat_event_is_not_counted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            guard = self.make_guard(Path(tmp))
+            guard.load_or_initialize(NOW_MS - MS_PER_HOUR, 100.0)
+
+            decision = guard.evaluate_after_flat(
+                now_ms=NOW_MS,
+                journal_events=[event("FLAT", NOW_MS + 60_000, {"realized_pnl_usdt_est": -20})],
+            )
+
+            self.assertIsNone(decision.action)
+            self.assertEqual(decision.rolling_realized_pnl, 0.0)
 
     def test_soft_halt_at_15_percent_loss_after_flat(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -357,6 +397,128 @@ class RollingLossGuardTest(unittest.IsolatedAsyncioTestCase):
 
             self.assertTrue(execution_state.trading_halted)
             self.assertEqual(execution_state.halt_reason, "near_tp_reduce_failure")
+
+    async def test_rolling_loss_hard_halt_does_not_override_or_email_when_critical_halt_preserved(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            now_ms = int(dt.datetime.now(dt.timezone.utc).timestamp() * 1000)
+            guard = self.make_guard(Path(tmp), email_enabled=True)
+            guard.load_or_initialize(now_ms - MS_PER_HOUR, 100.0)
+            journal = FakeJournal()
+            email_sender = FakeEmailSender()
+            strategy = FakeStrategy()
+            strategy.state = StrategyPositionState(
+                side="LONG",
+                layers=1,
+                last_entry_price=100.0,
+                tp_price=101.0,
+                total_entry_qty=1.0,
+                total_entry_notional=100.0,
+                avg_entry_price=100.0,
+            )
+            execution_state = ExecutionState(
+                "pos-1",
+                100.0,
+                trading_halted=True,
+                halt_reason="near_tp_reduce_failure",
+            )
+
+            with patch.dict(
+                os.environ,
+                {
+                    "FLAT_BALANCE_CONFIRM_ATTEMPTS": "2",
+                    "FLAT_BALANCE_CONFIRM_INTERVAL_SECONDS": "0",
+                    "CASH_TRANSFER_MIN_DELTA_USDT": "0.5",
+                    "CASH_TRANSFER_SETTLE_SECONDS": "0",
+                    "CASH_TRANSFER_AFTER_FLAT_COOLDOWN_SECONDS": "180",
+                    "CASH_DRIFT_MIN_DELTA_USDT": "0.5",
+                },
+            ):
+                task = asyncio.create_task(
+                    account_position_sync_worker(
+                        state_lock=asyncio.Lock(),
+                        account_snapshot=AccountSnapshot(live_position(), 100.0, 100.0, asyncio.get_running_loop().time(), 0, 1),
+                        execution_state=execution_state,
+                        trader=FakeTrader(equity=80.0),  # type: ignore[arg-type]
+                        sizer=SimplePositionSizer(SimplePositionSizerConfig()),
+                        strategy=strategy,  # type: ignore[arg-type]
+                        journal=journal,  # type: ignore[arg-type]
+                        state_store=FakeStateStore(),  # type: ignore[arg-type]
+                        position_sync_seconds=0,
+                        account_sync_seconds=999,
+                        cash_log_min_delta_usdt=999,
+                        rolling_loss_guard=guard,
+                        email_sender=email_sender,  # type: ignore[arg-type]
+                    )
+                )
+                await asyncio.wait_for(journal.recorded.wait(), timeout=1)
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+
+            self.assertTrue(execution_state.trading_halted)
+            self.assertEqual(execution_state.halt_reason, "near_tp_reduce_failure")
+            self.assertIsNone(execution_state.halt_until_ts_ms)
+            self.assertEqual(journal.rolling_loss_events[-1]["action"], "HARD_HALT")
+            self.assertTrue(journal.rolling_loss_events[-1]["critical_halt_preserved"])
+            self.assertEqual(journal.rolling_loss_events[-1]["existing_halt_reason"], "near_tp_reduce_failure")
+            self.assertTrue(journal.rolling_loss_events[-1]["rolling_loss_halt_not_applied"])
+            self.assertNotIn("Rolling loss guard hard halt: 20% realized loss reached", email_sender.subjects)
+
+    async def test_rolling_loss_hard_halt_emails_when_no_critical_halt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            now_ms = int(dt.datetime.now(dt.timezone.utc).timestamp() * 1000)
+            guard = self.make_guard(Path(tmp), email_enabled=True)
+            guard.load_or_initialize(now_ms - MS_PER_HOUR, 100.0)
+            journal = FakeJournal()
+            email_sender = FakeEmailSender()
+            strategy = FakeStrategy()
+            strategy.state = StrategyPositionState(
+                side="LONG",
+                layers=1,
+                last_entry_price=100.0,
+                tp_price=101.0,
+                total_entry_qty=1.0,
+                total_entry_notional=100.0,
+                avg_entry_price=100.0,
+            )
+            execution_state = ExecutionState("pos-1", 100.0)
+
+            with patch.dict(
+                os.environ,
+                {
+                    "FLAT_BALANCE_CONFIRM_ATTEMPTS": "2",
+                    "FLAT_BALANCE_CONFIRM_INTERVAL_SECONDS": "0",
+                    "CASH_TRANSFER_MIN_DELTA_USDT": "0.5",
+                    "CASH_TRANSFER_SETTLE_SECONDS": "0",
+                    "CASH_TRANSFER_AFTER_FLAT_COOLDOWN_SECONDS": "180",
+                    "CASH_DRIFT_MIN_DELTA_USDT": "0.5",
+                },
+            ):
+                task = asyncio.create_task(
+                    account_position_sync_worker(
+                        state_lock=asyncio.Lock(),
+                        account_snapshot=AccountSnapshot(live_position(), 100.0, 100.0, asyncio.get_running_loop().time(), 0, 1),
+                        execution_state=execution_state,
+                        trader=FakeTrader(equity=80.0),  # type: ignore[arg-type]
+                        sizer=SimplePositionSizer(SimplePositionSizerConfig()),
+                        strategy=strategy,  # type: ignore[arg-type]
+                        journal=journal,  # type: ignore[arg-type]
+                        state_store=FakeStateStore(),  # type: ignore[arg-type]
+                        position_sync_seconds=0,
+                        account_sync_seconds=999,
+                        cash_log_min_delta_usdt=999,
+                        rolling_loss_guard=guard,
+                        email_sender=email_sender,  # type: ignore[arg-type]
+                    )
+                )
+                await asyncio.wait_for(journal.recorded.wait(), timeout=1)
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+
+            self.assertTrue(execution_state.trading_halted)
+            self.assertEqual(execution_state.halt_reason, "rolling_loss_hard_halt")
+            self.assertIn("Rolling loss guard hard halt: 20% realized loss reached", email_sender.subjects)
 
 
 if __name__ == "__main__":
