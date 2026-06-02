@@ -4,7 +4,6 @@ import base64
 import datetime
 import hmac
 import json
-import logging
 import math
 import os
 from dataclasses import dataclass
@@ -15,8 +14,9 @@ import aiohttp
 
 from config.env_loader import OKX_CONFIG
 from src.strategies.boll_cvd_reclaim_strategy import PositionSide, TradeIntent
+from src.utils.log import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 @dataclass(frozen=True)

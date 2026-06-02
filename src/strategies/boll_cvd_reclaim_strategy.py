@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 import os
 from dataclasses import dataclass
 from typing import Literal, Optional
@@ -8,8 +7,9 @@ from typing import Literal, Optional
 from src.indicators.cvd_tracker import CvdSnapshot
 from src.monitors.boll_band_breakout_monitor import BollSnapshot
 from src.risk.simple_position_sizer import PositionSize, SimplePositionSizer
+from src.utils.log import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 TradeIntentType = Literal[
     "OPEN_LONG",

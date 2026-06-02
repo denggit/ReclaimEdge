@@ -7,9 +7,11 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Deque, Literal
 
+from src.utils.log import get_logger
+
 TradeSide = Literal["buy", "sell", "unknown"]
 OutOfOrderPolicy = Literal["drop_for_realtime", "accept_slow_debug"]
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 @dataclass(frozen=True, slots=True)

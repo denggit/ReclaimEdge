@@ -12,7 +12,9 @@ from typing import Awaitable, Callable, Literal, Optional
 
 import aiohttp
 
-logger = logging.getLogger(__name__)
+from src.utils.log import get_logger
+
+logger = get_logger(__name__)
 PriceZone = Literal["INSIDE", "ABOVE", "BELOW", "UNKNOWN"]
 BreakoutDirection = Literal["BREAK_UPPER", "BREAK_LOWER"]
 
