@@ -30,6 +30,7 @@ class LiveTradeResult:
     message: str
     entry_filled: bool = False
     tp_ok: bool = False
+    tp_order_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -159,10 +160,11 @@ class Trader:
                     order_id=order_id,
                     tp_order_id=tp.tp_order_id,
                     contracts=self.decimal_to_str(contracts),
-                    tp_price=self.price_to_str(intent.tp_price),
+                    tp_price=tp.tp_price,
                     message=f"entry_filled_but_tp_failed: {tp.message}",
                     entry_filled=True,
                     tp_ok=False,
+                    tp_order_ids=tp.tp_order_ids,
                 )
             return LiveTradeResult(
                 ok=True,
@@ -170,10 +172,11 @@ class Trader:
                 order_id=order_id,
                 tp_order_id=tp.tp_order_id,
                 contracts=self.decimal_to_str(contracts),
-                tp_price=self.price_to_str(intent.tp_price),
+                tp_price=tp.tp_price,
                 message="market order placed and take-profit protected",
                 entry_filled=True,
                 tp_ok=True,
+                tp_order_ids=tp.tp_order_ids,
             )
         except Exception as exc:
             logger.exception("Entry appears filled, but TP placement raised an exception")
@@ -202,34 +205,94 @@ class Trader:
 
         await self.cancel_existing_reduce_only_orders()
 
-        close_side = "sell" if intent.side == "LONG" else "buy"
-        body: dict[str, Any] = {
-            "instId": self.symbol,
-            "tdMode": self.td_mode,
-            "side": close_side,
-            "ordType": "limit",
-            "px": self.price_to_str(intent.tp_price),
-            "sz": self.decimal_to_str(self.position_contracts),
-            "reduceOnly": "true",
-        }
-        pos_side = self.pos_side(intent.side)
-        if pos_side:
-            body["posSide"] = pos_side
+        specs = self._build_take_profit_order_specs(intent)
+        placed_order_ids: list[str] = []
+        message = "take-profit replaced"
+        try:
+            placed_order_ids = await self._place_reduce_only_take_profit_orders(intent, specs)
+        except Exception:
+            if len(specs) <= 1:
+                raise
+            logger.exception("Failed to place split take-profit orders; falling back to one full-size final TP")
+            await self.cancel_existing_reduce_only_orders()
+            fallback_specs = [("final", self.position_contracts, intent.tp_price)]
+            placed_order_ids = await self._place_reduce_only_take_profit_orders(intent, fallback_specs)
+            specs = fallback_specs
+            message = "split take-profit fallback to single final TP"
 
-        res = await self.request("POST", "/api/v5/trade/order", body)
-        tp_order_id = self.extract_order_id(res)
+        tp_order_id = ",".join(placed_order_ids)
         self.tp_order_id = tp_order_id
+        tp_price_text = self._tp_price_summary(specs)
         return LiveTradeResult(
             True,
             intent.intent_type,
             None,
             tp_order_id,
             self.decimal_to_str(self.position_contracts),
-            self.price_to_str(intent.tp_price),
-            "take-profit replaced",
+            tp_price_text,
+            message,
             entry_filled=False,
             tp_ok=True,
+            tp_order_ids=tuple(placed_order_ids),
         )
+
+    def _build_take_profit_order_specs(self, intent: TradeIntent) -> list[tuple[str, Decimal, float]]:
+        partial_tp_price = getattr(intent, "partial_tp_price", None)
+        partial_tp_ratio = Decimal(str(getattr(intent, "partial_tp_ratio", 0.0)))
+        tp_plan = getattr(intent, "tp_plan", "SINGLE")
+        if tp_plan != "SPLIT_50_50" or partial_tp_price is None or partial_tp_ratio <= 0 or partial_tp_ratio >= 1:
+            return [("final", self.position_contracts, intent.tp_price)]
+
+        partial_contracts = self.round_contracts_down(self.position_contracts * partial_tp_ratio)
+        final_contracts = self.position_contracts - partial_contracts
+        if partial_contracts < self.min_contracts or final_contracts < self.min_contracts:
+            logger.warning(
+                "SPLIT_TP_FALLBACK_SINGLE | reason=size_too_small total_contracts=%s partial_contracts=%s final_contracts=%s min_contracts=%s",
+                self.position_contracts,
+                partial_contracts,
+                final_contracts,
+                self.min_contracts,
+            )
+            return [("final", self.position_contracts, intent.tp_price)]
+        return [("partial", partial_contracts, float(partial_tp_price)), ("final", final_contracts, intent.tp_price)]
+
+    async def _place_reduce_only_take_profit_orders(self, intent: TradeIntent, specs: list[tuple[str, Decimal, float]]) -> list[str]:
+        placed_order_ids: list[str] = []
+        for label, contracts, price in specs:
+            body = self._reduce_only_tp_order_body(intent.side, contracts, price)
+            res = await self.request("POST", "/api/v5/trade/order", body)
+            order_id = self.extract_order_id(res)
+            placed_order_ids.append(order_id)
+            logger.info(
+                "TP_ORDER_PLACED | label=%s side=%s contracts=%s price=%s ordId=%s",
+                label,
+                intent.side,
+                self.decimal_to_str(contracts),
+                self.price_to_str(price),
+                order_id,
+            )
+        return placed_order_ids
+
+    def _reduce_only_tp_order_body(self, side: PositionSide, contracts: Decimal, price: float) -> dict[str, Any]:
+        close_side = "sell" if side == "LONG" else "buy"
+        body: dict[str, Any] = {
+            "instId": self.symbol,
+            "tdMode": self.td_mode,
+            "side": close_side,
+            "ordType": "limit",
+            "px": self.price_to_str(price),
+            "sz": self.decimal_to_str(contracts),
+            "reduceOnly": "true",
+        }
+        pos_side = self.pos_side(side)
+        if pos_side:
+            body["posSide"] = pos_side
+        return body
+
+    def _tp_price_summary(self, specs: list[tuple[str, Decimal, float]]) -> str:
+        if len(specs) == 1:
+            return self.price_to_str(specs[0][2])
+        return ",".join(f"{label}:{self.price_to_str(price)}" for label, _contracts, price in specs)
 
     async def cancel_existing_reduce_only_orders(self) -> None:
         orders = await self.fetch_pending_orders()
@@ -339,11 +402,14 @@ class Trader:
 
     def eth_qty_to_contracts(self, eth_qty: Decimal) -> Decimal:
         raw_contracts = eth_qty / self.contract_multiplier
-        lots = (raw_contracts / self.contract_precision).to_integral_value(rounding=ROUND_DOWN)
-        contracts = lots * self.contract_precision
+        contracts = self.round_contracts_down(raw_contracts)
         if contracts < self.min_contracts:
             raise RuntimeError(f"Order size {contracts} contracts is below minimum {self.min_contracts}")
         return contracts
+
+    def round_contracts_down(self, contracts: Decimal) -> Decimal:
+        lots = (contracts / self.contract_precision).to_integral_value(rounding=ROUND_DOWN)
+        return lots * self.contract_precision
 
     def pos_side(self, side: str) -> str | None:
         if self.pos_side_mode != "long_short":

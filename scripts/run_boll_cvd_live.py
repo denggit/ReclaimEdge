@@ -120,6 +120,8 @@ def build_live_failure_email(intent: TradeIntent, error: Exception, rolled_back:
     <tr><td style="padding: 8px; border-bottom: 1px solid #eee;">layer</td><td style="padding: 8px; border-bottom: 1px solid #eee; text-align: right;">{intent.layer_index}</td></tr>
     <tr><td style="padding: 8px; border-bottom: 1px solid #eee;">price</td><td style="padding: 8px; border-bottom: 1px solid #eee; text-align: right;">{intent.price:.4f}</td></tr>
     <tr><td style="padding: 8px; border-bottom: 1px solid #eee;">tp_price</td><td style="padding: 8px; border-bottom: 1px solid #eee; text-align: right;">{intent.tp_price:.4f}</td></tr>
+    <tr><td style="padding: 8px; border-bottom: 1px solid #eee;">partial_tp_price</td><td style="padding: 8px; border-bottom: 1px solid #eee; text-align: right;">{getattr(intent, 'partial_tp_price', None) or '-'}</td></tr>
+    <tr><td style="padding: 8px; border-bottom: 1px solid #eee;">tp_plan</td><td style="padding: 8px; border-bottom: 1px solid #eee; text-align: right;">{html.escape(getattr(intent, 'tp_plan', 'SINGLE'))}</td></tr>
     <tr><td style="padding: 8px; border-bottom: 1px solid #eee;">tp_mode</td><td style="padding: 8px; border-bottom: 1px solid #eee; text-align: right;">{html.escape(intent.tp_mode)}</td></tr>
     <tr><td style="padding: 8px; border-bottom: 1px solid #eee;">avg_entry</td><td style="padding: 8px; border-bottom: 1px solid #eee; text-align: right;">{intent.avg_entry_price:.4f}</td></tr>
     <tr><td style="padding: 8px; border-bottom: 1px solid #eee;">breakeven</td><td style="padding: 8px; border-bottom: 1px solid #eee; text-align: right;">{intent.breakeven_price:.4f}</td></tr>
@@ -161,6 +163,9 @@ def restore_strategy_from_saved_state(strategy: BollCvdReclaimStrategy, saved_st
         layers=saved_state.layers,
         last_entry_price=saved_state.last_entry_price,
         tp_price=saved_state.tp_price,
+        partial_tp_price=getattr(saved_state, "partial_tp_price", None),
+        partial_tp_ratio=getattr(saved_state, "partial_tp_ratio", 0.0),
+        tp_plan=getattr(saved_state, "tp_plan", "SINGLE"),
         last_order_ts_ms=saved_state.last_order_ts_ms,
         last_tp_update_ts_ms=saved_state.last_tp_update_ts_ms,
         last_tp_update_candle_ts_ms=saved_state.last_tp_update_candle_ts_ms,
@@ -171,12 +176,14 @@ def restore_strategy_from_saved_state(strategy: BollCvdReclaimStrategy, saved_st
         tp_mode=saved_state.tp_mode,
     )
     logger.warning(
-        "Recovered strategy state from local disk | position_id=%s side=%s layers=%s avg_entry=%.4f tp=%s",
+        "Recovered strategy state from local disk | position_id=%s side=%s layers=%s avg_entry=%.4f tp=%s partial_tp=%s tp_plan=%s",
         saved_state.position_id,
         saved_state.side,
         saved_state.layers,
         saved_state.avg_entry_price,
         saved_state.tp_price,
+        getattr(saved_state, "partial_tp_price", None),
+        getattr(saved_state, "tp_plan", "SINGLE"),
     )
 
 
@@ -500,13 +507,15 @@ async def execution_worker(
                 journal.record_tp_update(position_id=current_position_id, intent=command.intent, result=result, equity=equity)
                 state_store.save(LiveStateStore.from_strategy_state(position_id=current_position_id, symbol=trader.symbol, strategy_state=strategy_state_for_save, cash_before_position=cash_before_position))
                 logger.warning(
-                    "LIVE TP update success | side=%s layer=%s price=%.4f contracts=%s new_tp_price=%s tp_mode=%s avg_entry=%.4f breakeven=%.4f tp_order_id=%s",
+                    "LIVE TP update success | side=%s layer=%s price=%.4f contracts=%s tp_price=%s tp_mode=%s tp_plan=%s partial_tp=%s avg_entry=%.4f breakeven=%.4f tp_order_id=%s",
                     command.intent.side,
                     command.intent.layer_index,
                     command.intent.price,
                     result.contracts,
                     result.tp_price,
                     command.intent.tp_mode,
+                    getattr(command.intent, "tp_plan", "SINGLE"),
+                    getattr(command.intent, "partial_tp_price", None),
                     command.intent.avg_entry_price,
                     command.intent.breakeven_price,
                     result.tp_order_id,
@@ -533,7 +542,7 @@ async def execution_worker(
                 )
                 state_store.save(LiveStateStore.from_strategy_state(position_id=current_position_id, symbol=trader.symbol, strategy_state=strategy_state_for_save, cash_before_position=cash_before_position))
                 logger.warning(
-                    "LIVE entry success | intent_type=%s side=%s layer=%s price=%.4f contracts=%s tp_price=%s tp_mode=%s avg_entry=%.4f breakeven=%.4f order_id=%s tp_order_id=%s",
+                    "LIVE entry success | intent_type=%s side=%s layer=%s price=%.4f contracts=%s tp_price=%s tp_mode=%s tp_plan=%s partial_tp=%s avg_entry=%.4f breakeven=%.4f order_id=%s tp_order_id=%s",
                     command.intent.intent_type,
                     command.intent.side,
                     command.intent.layer_index,
@@ -541,6 +550,8 @@ async def execution_worker(
                     result.contracts,
                     result.tp_price,
                     command.intent.tp_mode,
+                    getattr(command.intent, "tp_plan", "SINGLE"),
+                    getattr(command.intent, "partial_tp_price", None),
                     command.intent.avg_entry_price,
                     command.intent.breakeven_price,
                     result.order_id,
@@ -784,6 +795,8 @@ async def account_position_sync_worker(
                         "layers": strategy.state.layers,
                         "avg_entry_price": strategy.state.avg_entry_price,
                         "last_tp_price": strategy.state.tp_price,
+                        "last_partial_tp_price": getattr(strategy.state, "partial_tp_price", None),
+                        "last_tp_plan": getattr(strategy.state, "tp_plan", "SINGLE"),
                     }
                     logger.warning("POSITION_SYNC_CHANGED | flat_on_okx=true. Resetting strategy and trader state.")
                     strategy.state = StrategyPositionState()

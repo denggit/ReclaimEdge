@@ -20,6 +20,7 @@ TradeIntentType = Literal[
 ]
 PositionSide = Literal["LONG", "SHORT"]
 TpMode = Literal["MIDDLE", "UPPER", "LOWER"]
+TpPlan = Literal["SINGLE", "SPLIT_50_50"]
 
 
 @dataclass(frozen=True)
@@ -34,6 +35,10 @@ class BollCvdReclaimStrategyConfig:
     max_armed_seconds: int = 900
     breakeven_fee_buffer_pct: float = 0.001
     min_outside_pct: float = 0.001
+    split_tp_min_layers: int = 4
+    split_tp_path_ratio: float = 0.8
+    split_tp_partial_ratio: float = 0.5
+    split_tp_min_profit_pct: float = 0.004
 
     @classmethod
     def from_env(cls) -> "BollCvdReclaimStrategyConfig":
@@ -48,6 +53,10 @@ class BollCvdReclaimStrategyConfig:
             max_armed_seconds=int(os.getenv("MAX_ARMED_SECONDS", "900")),
             breakeven_fee_buffer_pct=float(os.getenv("BREAKEVEN_FEE_BUFFER_PCT", "0.001")),
             min_outside_pct=float(os.getenv("BOLL_MIN_OUTSIDE_PCT", "0.001")),
+            split_tp_min_layers=int(os.getenv("SPLIT_TP_MIN_LAYERS", "4")),
+            split_tp_path_ratio=float(os.getenv("SPLIT_TP_PATH_RATIO", "0.8")),
+            split_tp_partial_ratio=float(os.getenv("SPLIT_TP_PARTIAL_RATIO", "0.5")),
+            split_tp_min_profit_pct=float(os.getenv("SPLIT_TP_MIN_PROFIT_PCT", "0.004")),
         )
 
 
@@ -71,6 +80,9 @@ class TradeIntent:
     avg_entry_price: float
     breakeven_price: float
     tp_mode: TpMode
+    partial_tp_price: float | None = None
+    partial_tp_ratio: float = 0.0
+    tp_plan: TpPlan = "SINGLE"
 
 
 @dataclass
@@ -97,6 +109,9 @@ class StrategyPositionState:
     avg_entry_price: float = 0.0
     breakeven_price: float = 0.0
     tp_mode: TpMode = "MIDDLE"
+    partial_tp_price: float | None = None
+    partial_tp_ratio: float = 0.0
+    tp_plan: TpPlan = "SINGLE"
 
 
 class BollCvdReclaimStrategy:
@@ -328,20 +343,29 @@ class BollCvdReclaimStrategy:
         size = self.sizer.calculate(price, layer_index=next_layer)
         self._update_position_cost(price, size.eth_qty)
         tp_price, tp_mode = self._select_tp_price(side, boll)
+        partial_tp_price, partial_tp_ratio, tp_plan = self._select_tp_plan(side, tp_price, next_layer)
         if tp_mode != "MIDDLE":
             reason = f"{reason} + 中轨不足覆盖含手续费盈亏平衡，TP切换到{tp_mode}"
+        if tp_plan == "SPLIT_50_50":
+            reason = f"{reason} + 总层数>= {self.config.split_tp_min_layers}，启用50/50分批止盈"
         self.state.side = side
         self.state.layers = next_layer
         self.state.last_entry_price = price
         self.state.tp_price = tp_price
         self.state.tp_mode = tp_mode
+        self.state.partial_tp_price = partial_tp_price
+        self.state.partial_tp_ratio = partial_tp_ratio
+        self.state.tp_plan = tp_plan
         self.state.last_order_ts_ms = ts_ms
         self.state.last_tp_update_ts_ms = ts_ms
         self.state.last_tp_update_candle_ts_ms = boll.candle_ts_ms
         logger.info(
-            "TP_SELECTED | reason=entry side=%s mode=%s avg_entry=%.4f breakeven=%.4f candle_ts=%s middle=%.4f upper=%.4f lower=%.4f tp=%.4f",
+            "TP_SELECTED | reason=entry side=%s mode=%s plan=%s partial_tp=%s partial_ratio=%.2f avg_entry=%.4f breakeven=%.4f candle_ts=%s middle=%.4f upper=%.4f lower=%.4f final_tp=%.4f",
             side,
             tp_mode,
+            tp_plan,
+            f"{partial_tp_price:.4f}" if partial_tp_price is not None else "-",
+            partial_tp_ratio,
             self.state.avg_entry_price,
             self.state.breakeven_price,
             boll.candle_ts_ms,
@@ -359,17 +383,20 @@ class BollCvdReclaimStrategy:
             return None
 
         tp_price, tp_mode = self._select_tp_price(self.state.side, boll)
+        partial_tp_price, partial_tp_ratio, tp_plan = self._select_tp_plan(self.state.side, tp_price, self.state.layers)
         self.state.last_tp_update_ts_ms = ts_ms
         self.state.last_tp_update_candle_ts_ms = boll.candle_ts_ms
 
-        if self.state.tp_price is not None and abs(self.state.tp_price - tp_price) / tp_price < 0.0001:
+        if self._tp_plan_unchanged(tp_price, partial_tp_price, partial_tp_ratio, tp_plan):
             logger.info(
-                "TP_UPDATE_SKIPPED | reason=price_unchanged side=%s mode=%s candle_ts=%s current_tp=%.4f target_tp=%.4f avg_entry=%.4f breakeven=%.4f",
+                "TP_UPDATE_SKIPPED | reason=plan_unchanged side=%s mode=%s plan=%s candle_ts=%s current_tp=%.4f target_tp=%.4f partial_tp=%s avg_entry=%.4f breakeven=%.4f",
                 self.state.side,
                 tp_mode,
+                tp_plan,
                 boll.candle_ts_ms,
                 self.state.tp_price,
                 tp_price,
+                f"{partial_tp_price:.4f}" if partial_tp_price is not None else "-",
                 self.state.avg_entry_price,
                 self.state.breakeven_price,
             )
@@ -377,11 +404,17 @@ class BollCvdReclaimStrategy:
 
         self.state.tp_price = tp_price
         self.state.tp_mode = tp_mode
+        self.state.partial_tp_price = partial_tp_price
+        self.state.partial_tp_ratio = partial_tp_ratio
+        self.state.tp_plan = tp_plan
         size = self.sizer.calculate(price, layer_index=self.state.layers)
         logger.info(
-            "TP_SELECTED | reason=new_candle side=%s mode=%s avg_entry=%.4f breakeven=%.4f candle_ts=%s middle=%.4f upper=%.4f lower=%.4f tp=%.4f",
+            "TP_SELECTED | reason=new_candle side=%s mode=%s plan=%s partial_tp=%s partial_ratio=%.2f avg_entry=%.4f breakeven=%.4f candle_ts=%s middle=%.4f upper=%.4f lower=%.4f final_tp=%.4f",
             self.state.side,
             tp_mode,
+            tp_plan,
+            f"{partial_tp_price:.4f}" if partial_tp_price is not None else "-",
+            partial_tp_ratio,
             self.state.avg_entry_price,
             self.state.breakeven_price,
             boll.candle_ts_ms,
@@ -412,6 +445,50 @@ class BollCvdReclaimStrategy:
         if self.state.breakeven_price < boll.middle:
             return boll.lower, "LOWER"
         return boll.middle, "MIDDLE"
+
+    def _select_tp_plan(self, side: PositionSide, final_tp: float, layers: int) -> tuple[float | None, float, TpPlan]:
+        if layers < self.config.split_tp_min_layers:
+            return None, 0.0, "SINGLE"
+        avg_entry = self.state.avg_entry_price
+        if avg_entry <= 0 or final_tp <= 0:
+            return None, 0.0, "SINGLE"
+        partial_ratio = min(max(self.config.split_tp_partial_ratio, 0.0), 1.0)
+        path_ratio = min(max(self.config.split_tp_path_ratio, 0.0), 1.0)
+        if partial_ratio <= 0 or partial_ratio >= 1 or path_ratio <= 0 or path_ratio >= 1:
+            return None, 0.0, "SINGLE"
+        min_profit_pct = abs(self.config.split_tp_min_profit_pct)
+
+        if side == "LONG":
+            min_tp = avg_entry * (1 + min_profit_pct)
+            if final_tp <= min_tp:
+                return None, 0.0, "SINGLE"
+            path_tp = avg_entry + (final_tp - avg_entry) * path_ratio
+            partial_tp = max(path_tp, min_tp)
+            if partial_tp >= final_tp:
+                return None, 0.0, "SINGLE"
+            return partial_tp, partial_ratio, "SPLIT_50_50"
+
+        min_tp = avg_entry * (1 - min_profit_pct)
+        if final_tp >= min_tp:
+            return None, 0.0, "SINGLE"
+        path_tp = avg_entry - (avg_entry - final_tp) * path_ratio
+        partial_tp = min(path_tp, min_tp)
+        if partial_tp <= final_tp:
+            return None, 0.0, "SINGLE"
+        return partial_tp, partial_ratio, "SPLIT_50_50"
+
+    def _tp_plan_unchanged(self, tp_price: float, partial_tp_price: float | None, partial_tp_ratio: float, tp_plan: TpPlan) -> bool:
+        if self.state.tp_price is None:
+            return False
+        if abs(self.state.tp_price - tp_price) / tp_price >= 0.0001:
+            return False
+        if self.state.tp_plan != tp_plan:
+            return False
+        if abs(self.state.partial_tp_ratio - partial_tp_ratio) >= 0.0001:
+            return False
+        if self.state.partial_tp_price is None or partial_tp_price is None:
+            return self.state.partial_tp_price is None and partial_tp_price is None
+        return abs(self.state.partial_tp_price - partial_tp_price) / partial_tp_price < 0.0001
 
     def _intent(
         self,
@@ -445,6 +522,9 @@ class BollCvdReclaimStrategy:
             avg_entry_price=self.state.avg_entry_price,
             breakeven_price=self.state.breakeven_price,
             tp_mode=self.state.tp_mode,
+            partial_tp_price=self.state.partial_tp_price,
+            partial_tp_ratio=self.state.partial_tp_ratio,
+            tp_plan=self.state.tp_plan,
         )
 
     def _cooldown_ok(self, ts_ms: int) -> bool:

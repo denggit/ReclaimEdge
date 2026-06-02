@@ -75,7 +75,9 @@ def build_trade_intent_email(intent: TradeIntent) -> tuple[str, str]:
         <tr><td style="padding: 8px; border-bottom: 1px solid #eee; color: #666;">模拟保证金</td><td style="padding: 8px; border-bottom: 1px solid #eee; text-align: right;">{intent.size.margin_usdt:.2f} USDT</td></tr>
         <tr><td style="padding: 8px; border-bottom: 1px solid #eee; color: #666;">模拟名义价值</td><td style="padding: 8px; border-bottom: 1px solid #eee; text-align: right;">{intent.size.notional_usdt:.2f} USDT</td></tr>
         <tr><td style="padding: 8px; border-bottom: 1px solid #eee; color: #666;">模拟 ETH 数量</td><td style="padding: 8px; border-bottom: 1px solid #eee; text-align: right;">{intent.size.eth_qty:.6f} ETH</td></tr>
-        <tr><td style="padding: 8px; border-bottom: 1px solid #eee; color: #666;">止盈目标</td><td style="padding: 8px; border-bottom: 1px solid #eee; text-align: right; font-weight: 700;">{intent.tp_price:.4f}</td></tr>
+        <tr><td style="padding: 8px; border-bottom: 1px solid #eee; color: #666;">最终止盈目标</td><td style="padding: 8px; border-bottom: 1px solid #eee; text-align: right; font-weight: 700;">{intent.tp_price:.4f}</td></tr>
+        <tr><td style="padding: 8px; border-bottom: 1px solid #eee; color: #666;">分批止盈计划</td><td style="padding: 8px; border-bottom: 1px solid #eee; text-align: right;">{intent.tp_plan}</td></tr>
+        <tr><td style="padding: 8px; border-bottom: 1px solid #eee; color: #666;">半仓止盈价</td><td style="padding: 8px; border-bottom: 1px solid #eee; text-align: right;">{f'{intent.partial_tp_price:.4f}' if intent.partial_tp_price is not None else '-'}</td></tr>
       </table>
 
       <h3 style="margin: 18px 0 10px;">📊 BOLL</h3>
@@ -139,12 +141,14 @@ async def main() -> None:
         )
         for intent in intents:
             logger.warning(
-                "DRY-RUN intent | type=%s side=%s layer=%s price=%.4f tp=%.4f fast_cvd=%.4f buy_ratio=%.2f sell_ratio=%.2f reason=%s",
+                "DRY-RUN intent | type=%s side=%s layer=%s price=%.4f tp=%.4f tp_plan=%s partial_tp=%s fast_cvd=%.4f buy_ratio=%.2f sell_ratio=%.2f reason=%s",
                 intent.intent_type,
                 intent.side,
                 intent.layer_index,
                 intent.price,
                 intent.tp_price,
+                intent.tp_plan,
+                intent.partial_tp_price,
                 intent.fast_cvd,
                 intent.buy_ratio,
                 intent.sell_ratio,
