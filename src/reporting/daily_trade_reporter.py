@@ -21,15 +21,26 @@ class ReportRuntimeContext:
     """Runtime account state used only for report classification.
 
     Reports must not mutate strategy state or journal files. The context lets us
-    distinguish a real open position from stale incomplete records:
-    - current open position => show as open
-    - no current position => infer stale incomplete records as flat with unknown reason
+    distinguish a real open position from stale incomplete records and lets us
+    aggregate stale records into one residual PnL bucket.
     """
 
     current_position_id: str | None = None
     current_has_position: bool = False
     current_cash: float | None = None
     current_equity: float | None = None
+    period_start_cash: float | None = None
+    period_start_equity: float | None = None
+
+
+@dataclass(frozen=True)
+class ResidualPnlBucket:
+    incomplete_count: int
+    pnl: float | None
+    cash_start: float | None
+    cash_end: float | None
+    known_closed_pnl: float
+    note: str
 
 
 def fmt(value: Any, digits: int = 4, default: str = "-") -> str:
@@ -89,11 +100,17 @@ class DailyTradeReporter:
         return await self.email_sender.send_email_async(subject, content, content_type="html")
 
     def _build_last_24h_report_sync(self, start: datetime, end: datetime, context: ReportRuntimeContext | None) -> tuple[str, str]:
-        events = self.journal.load_events(start=start, end=end)
+        # Load all events once in a worker thread. The report window only displays
+        # recent records, but all history can provide a best-effort starting cash
+        # when context.period_start_cash was not supplied by the live runner.
+        all_events = self.journal.load_events()
+        events = self._filter_events(all_events, start=start, end=end)
+        context = self._with_period_start_cash(context, all_events, start)
         return self.build_report(events, DailyReportWindow(start=start, end=end), context=context)
 
     def _build_overall_summary_report_sync(self, context: ReportRuntimeContext | None) -> tuple[str, str]:
         events = self.journal.load_events()
+        context = self._with_overall_start_cash(context, events)
         return self.build_overall_summary_report(events, context=context)
 
     def build_report(
@@ -105,9 +122,8 @@ class DailyTradeReporter:
         grouped = group_position_events(events)
         finished_positions = []
         open_positions = []
-        inferred_flat_count = 0
-        hidden_incomplete_count = 0
-        total_pnl = 0.0
+        incomplete_count = 0
+        known_closed_pnl = 0.0
         total_closed = 0
         win_count = 0
 
@@ -123,25 +139,22 @@ class DailyTradeReporter:
             last_event = items[-1]
 
             if last_flat is None:
-                inferred_flat = self._infer_unknown_flat_event(position_id, first_entry, entry_events, tp_events, last_event, context)
-                if inferred_flat is not None:
-                    last_flat = inferred_flat
-                    inferred_flat_count += 1
-                elif self._is_current_open_position(position_id, context):
+                if self._is_current_open_position(position_id, context):
                     open_positions.append((position_id, first_entry, entry_events, tp_events, last_event))
-                    continue
                 else:
-                    hidden_incomplete_count += 1
-                    continue
+                    incomplete_count += 1
+                continue
 
             pnl = last_flat.payload.get("realized_pnl_usdt_est")
             if pnl is not None:
                 pnl_float = float(pnl)
-                total_pnl += pnl_float
+                known_closed_pnl += pnl_float
                 win_count += 1 if pnl_float > 0 else 0
             total_closed += 1
             finished_positions.append((position_id, first_entry, entry_events, tp_events, last_flat))
 
+        residual_bucket = self._build_residual_bucket(incomplete_count, known_closed_pnl, context)
+        total_pnl = known_closed_pnl + (residual_bucket.pnl or 0.0)
         subject = f"📊 ReclaimEdge 日报 | 最近24小时 | closed={total_closed} pnl={total_pnl:.4f}U"
         html_body = self._render_html(
             window=window,
@@ -149,10 +162,10 @@ class DailyTradeReporter:
             finished_positions=finished_positions,
             open_positions=open_positions,
             total_pnl=total_pnl,
+            known_closed_pnl=known_closed_pnl,
             total_closed=total_closed,
             win_count=win_count,
-            inferred_flat_count=inferred_flat_count,
-            hidden_incomplete_count=hidden_incomplete_count,
+            residual_bucket=residual_bucket,
         )
         return subject, html_body
 
@@ -166,15 +179,14 @@ class DailyTradeReporter:
 
         closed_count = 0
         open_count = 0
-        hidden_incomplete_count = 0
-        inferred_flat_count = 0
+        incomplete_count = 0
         win_count = 0
         loss_count = 0
         breakeven_count = 0
         entry_count = 0
         tp_update_count = 0
         error_count = 0
-        total_pnl = 0.0
+        known_closed_pnl = 0.0
         gross_profit = 0.0
         gross_loss = 0.0
         best_win: float | None = None
@@ -194,24 +206,15 @@ class DailyTradeReporter:
         for position_id, items in grouped.items():
             if position_id == "UNKNOWN":
                 continue
-            entry_events = [e for e in items if e.event_type == "ENTRY"]
-            tp_events = [e for e in items if e.event_type == "TP_UPDATE"]
-            recovery_events = [e for e in items if e.event_type == "STARTUP_RECOVERY"]
-            first_entry = entry_events[0] if entry_events else recovery_events[0] if recovery_events else items[0]
-            last_event = items[-1]
             flat_events = [e for e in items if e.event_type == "FLAT"]
             flat = flat_events[-1] if flat_events else None
 
             if flat is None:
-                flat = self._infer_unknown_flat_event(position_id, first_entry, entry_events, tp_events, last_event, context)
-                if flat is not None:
-                    inferred_flat_count += 1
-                elif self._is_current_open_position(position_id, context):
+                if self._is_current_open_position(position_id, context):
                     open_count += 1
-                    continue
                 else:
-                    hidden_incomplete_count += 1
-                    continue
+                    incomplete_count += 1
+                continue
 
             closed_count += 1
             pnl = _to_float(flat.payload.get("realized_pnl_usdt_est"))
@@ -227,7 +230,7 @@ class DailyTradeReporter:
 
             if pnl is None:
                 continue
-            total_pnl += pnl
+            known_closed_pnl += pnl
             if pnl > 0:
                 win_count += 1
                 gross_profit += pnl
@@ -239,8 +242,16 @@ class DailyTradeReporter:
             else:
                 breakeven_count += 1
 
+        residual_bucket = self._build_residual_bucket(incomplete_count, known_closed_pnl, context)
+        total_pnl = known_closed_pnl + (residual_bucket.pnl or 0.0)
+        if residual_bucket.cash_start is not None:
+            first_cash = residual_bucket.cash_start if first_cash is None else first_cash
+        if residual_bucket.cash_end is not None:
+            latest_cash = residual_bucket.cash_end
+            equity_points.append(residual_bucket.cash_end)
+
         win_rate = win_count / closed_count * 100 if closed_count else None
-        avg_pnl = total_pnl / closed_count if closed_count else None
+        avg_pnl = known_closed_pnl / closed_count if closed_count else None
         profit_factor = gross_profit / gross_loss if gross_loss > 0 else None
         total_return_pct = (latest_cash - first_cash) / first_cash * 100 if first_cash and latest_cash is not None else None
         max_drawdown_usdt, max_drawdown_pct = self._max_drawdown(equity_points)
@@ -257,24 +268,28 @@ class DailyTradeReporter:
   <div style="display:flex;gap:12px;flex-wrap:wrap;margin:12px 0;">
     {self._metric_card('初始现金', fmt(first_cash, 4) + ' USDT')}
     {self._metric_card('最新现金', fmt(latest_cash, 4) + ' USDT')}
-    {self._metric_card('累计实现盈亏', fmt(total_pnl, 4) + ' USDT')}
+    {self._metric_card('已记录平仓盈亏', fmt(known_closed_pnl, 4) + ' USDT')}
+    {self._metric_card('未知/不完整汇总盈亏', fmt(residual_bucket.pnl, 4) + ' USDT')}
+    {self._metric_card('累计估算盈亏', fmt(total_pnl, 4) + ' USDT')}
     {self._metric_card('累计收益率', fmt_pct(total_return_pct))}
     {self._metric_card('最大回撤', fmt(max_drawdown_usdt, 4) + ' USDT / ' + fmt_pct(max_drawdown_pct))}
   </div>
 
   <h3>策略表现</h3>
   <div style="display:flex;gap:12px;flex-wrap:wrap;margin:12px 0;">
-    {self._metric_card('已平仓笔数', str(closed_count))}
+    {self._metric_card('已记录平仓笔数', str(closed_count))}
     {self._metric_card('当前未平仓位', str(open_count))}
-    {self._metric_card('未知原因推断平仓', str(inferred_flat_count))}
-    {self._metric_card('隐藏不完整记录', str(hidden_incomplete_count))}
+    {self._metric_card('不完整记录数', str(incomplete_count))}
     {self._metric_card('胜率', fmt_pct(win_rate))}
     {self._metric_card('盈利/亏损/打平', f'{win_count} / {loss_count} / {breakeven_count}')}
-    {self._metric_card('平均每笔盈亏', fmt(avg_pnl, 4) + ' USDT')}
+    {self._metric_card('平均每笔已记录盈亏', fmt(avg_pnl, 4) + ' USDT')}
     {self._metric_card('Profit Factor', fmt(profit_factor, 2))}
     {self._metric_card('最大单笔盈利', fmt(best_win, 4) + ' USDT')}
     {self._metric_card('最大单笔亏损', fmt(worst_loss, 4) + ' USDT')}
   </div>
+
+  <h3>未知/不完整记录汇总</h3>
+  {self._residual_bucket_html(residual_bucket)}
 
   <h3>程序事件</h3>
   <div style="display:flex;gap:12px;flex-wrap:wrap;margin:12px 0;">
@@ -285,67 +300,168 @@ class DailyTradeReporter:
   </div>
 
   <p style="color:#777;font-size:12px;margin-top:16px;">
-    说明：本报告基于 live_trade_events.jsonl 生成。收益和回撤使用程序记录的 cash_before_position / cash_after 估算；若某仓位缺少 FLAT 记录但当前 OKX 已无仓位，会以当前现金推断为已平仓，平仓原因显示为未知。
+    说明：本报告基于 live_trade_events.jsonl 生成。缺少 FLAT 的历史记录不会逐条展示；如果当前总资金和起始资金可用，会把它们聚合为一个未知来源盈亏桶，避免重复累计不完整记录。
   </p>
 </div>
 """.strip()
         return subject, content
 
-    def _infer_unknown_flat_event(
+    def _build_residual_bucket(
         self,
-        position_id: str,
-        first_entry: JournalEvent,
-        entry_events: list[JournalEvent],
-        tp_events: list[JournalEvent],
-        last_event: JournalEvent,
+        incomplete_count: int,
+        known_closed_pnl: float,
         context: ReportRuntimeContext | None,
-    ) -> JournalEvent | None:
-        if context is None or context.current_has_position or context.current_cash is None:
-            return None
-        cash_before = self._cash_before_position(first_entry, entry_events)
-        if cash_before is None:
-            return None
-        cash_after = context.current_cash
-        pnl = cash_after - cash_before
-        pnl_pct = pnl / cash_before * 100 if cash_before else None
-        latest_entry = entry_events[-1] if entry_events else first_entry
-        last_tp = tp_events[-1].payload.get("tp_price") if tp_events else latest_entry.payload.get("tp_price")
-        return JournalEvent(
-            event_id=f"inferred-flat-{position_id}",
-            event_type="FLAT_INFERRED",
-            ts_iso=datetime.now(timezone.utc).isoformat(),
-            position_id=position_id,
-            payload={
-                "cash_before_position": cash_before,
-                "cash_after": cash_after,
-                "equity_after": context.current_equity,
-                "realized_pnl_usdt_est": pnl,
-                "realized_pnl_pct_est": pnl_pct,
-                "flat_reason": "UNKNOWN_FLAT_INFERRED",
-                "layers": latest_entry.payload.get("layer_index") or len(entry_events) or 1,
-                "avg_entry_price": latest_entry.payload.get("avg_entry_price") or latest_entry.payload.get("avg_entry"),
-                "last_tp_price": last_tp,
-                "note": f"No FLAT event found for {position_id}; current OKX position is flat, so report inferred closure from current cash.",
-                "last_known_event_type": last_event.event_type,
-            },
+    ) -> ResidualPnlBucket:
+        if incomplete_count <= 0:
+            return ResidualPnlBucket(0, None, None, None, known_closed_pnl, "no incomplete records")
+        if context is None or context.current_cash is None or context.period_start_cash is None:
+            return ResidualPnlBucket(
+                incomplete_count,
+                None,
+                context.period_start_cash if context else None,
+                context.current_cash if context else None,
+                known_closed_pnl,
+                "missing cash context; incomplete records hidden but not valued",
+            )
+        residual_pnl = context.current_cash - context.period_start_cash - known_closed_pnl
+        return ResidualPnlBucket(
+            incomplete_count,
+            residual_pnl,
+            context.period_start_cash,
+            context.current_cash,
+            known_closed_pnl,
+            "current_cash - period_start_cash - known_closed_pnl",
+        )
+
+    def _residual_bucket_html(self, bucket: ResidualPnlBucket) -> str:
+        if bucket.incomplete_count <= 0:
+            return "<p style='color:#777;'>无不完整记录。</p>"
+        return f"""
+<table style="width:100%;border-collapse:collapse;font-size:13px;">
+  <tr style="background:#fef3c7;">
+    <th style="padding:8px;border:1px solid #ddd;">记录数</th>
+    <th style="padding:8px;border:1px solid #ddd;">起始现金</th>
+    <th style="padding:8px;border:1px solid #ddd;">当前现金</th>
+    <th style="padding:8px;border:1px solid #ddd;">已记录平仓盈亏</th>
+    <th style="padding:8px;border:1px solid #ddd;">未知汇总盈亏</th>
+    <th style="padding:8px;border:1px solid #ddd;">说明</th>
+  </tr>
+  <tr>
+    <td style="padding:8px;border:1px solid #ddd;text-align:center;">{bucket.incomplete_count}</td>
+    <td style="padding:8px;border:1px solid #ddd;text-align:right;">{fmt(bucket.cash_start, 4)}</td>
+    <td style="padding:8px;border:1px solid #ddd;text-align:right;">{fmt(bucket.cash_end, 4)}</td>
+    <td style="padding:8px;border:1px solid #ddd;text-align:right;">{fmt(bucket.known_closed_pnl, 4)}</td>
+    <td style="padding:8px;border:1px solid #ddd;text-align:right;font-weight:700;">{fmt(bucket.pnl, 4)}</td>
+    <td style="padding:8px;border:1px solid #ddd;">{html.escape(bucket.note)}</td>
+  </tr>
+</table>
+""".strip()
+
+    @staticmethod
+    def _with_period_start_cash(
+        context: ReportRuntimeContext | None,
+        all_events: list[JournalEvent],
+        start: datetime,
+    ) -> ReportRuntimeContext | None:
+        if context is not None and context.period_start_cash is not None:
+            return context
+        inferred = DailyTradeReporter._infer_cash_at_or_before(all_events, start)
+        if context is None:
+            return ReportRuntimeContext(period_start_cash=inferred)
+        return ReportRuntimeContext(
+            current_position_id=context.current_position_id,
+            current_has_position=context.current_has_position,
+            current_cash=context.current_cash,
+            current_equity=context.current_equity,
+            period_start_cash=inferred,
+            period_start_equity=context.period_start_equity,
         )
 
     @staticmethod
-    def _cash_before_position(first_entry: JournalEvent, entry_events: list[JournalEvent]) -> float | None:
-        for event in [first_entry, *entry_events]:
-            cash = _to_float(event.payload.get("cash_before_position"))
-            if cash is not None:
-                return cash
-            cash = _to_float(event.payload.get("cash"))
-            if cash is not None:
-                return cash
-        return None
+    def _with_overall_start_cash(context: ReportRuntimeContext | None, events: list[JournalEvent]) -> ReportRuntimeContext | None:
+        if context is not None and context.period_start_cash is not None:
+            return context
+        inferred = DailyTradeReporter._infer_first_cash(events)
+        if context is None:
+            return ReportRuntimeContext(period_start_cash=inferred)
+        return ReportRuntimeContext(
+            current_position_id=context.current_position_id,
+            current_has_position=context.current_has_position,
+            current_cash=context.current_cash,
+            current_equity=context.current_equity,
+            period_start_cash=inferred,
+            period_start_equity=context.period_start_equity,
+        )
+
+    @staticmethod
+    def _filter_events(events: list[JournalEvent], start: datetime, end: datetime) -> list[JournalEvent]:
+        filtered: list[JournalEvent] = []
+        for event in events:
+            try:
+                ts = datetime.fromisoformat(event.ts_iso)
+            except Exception:
+                continue
+            if start <= ts < end:
+                filtered.append(event)
+        return filtered
+
+    @staticmethod
+    def _infer_cash_at_or_before(events: list[JournalEvent], target: datetime) -> float | None:
+        best_ts: datetime | None = None
+        best_cash: float | None = None
+        for event in events:
+            try:
+                ts = datetime.fromisoformat(event.ts_iso)
+            except Exception:
+                continue
+            if ts > target:
+                continue
+            cash = DailyTradeReporter._cash_from_event(event)
+            if cash is None:
+                continue
+            if best_ts is None or ts >= best_ts:
+                best_ts = ts
+                best_cash = cash
+        return best_cash
+
+    @staticmethod
+    def _infer_first_cash(events: list[JournalEvent]) -> float | None:
+        best_ts: datetime | None = None
+        best_cash: float | None = None
+        for event in events:
+            try:
+                ts = datetime.fromisoformat(event.ts_iso)
+            except Exception:
+                continue
+            cash = DailyTradeReporter._cash_before_or_from_event(event)
+            if cash is None:
+                continue
+            if best_ts is None or ts < best_ts:
+                best_ts = ts
+                best_cash = cash
+        return best_cash
+
+    @staticmethod
+    def _cash_from_event(event: JournalEvent) -> float | None:
+        return (
+            _to_float(event.payload.get("cash_after"))
+            or _to_float(event.payload.get("cash_before_position"))
+            or _to_float(event.payload.get("cash"))
+        )
+
+    @staticmethod
+    def _cash_before_or_from_event(event: JournalEvent) -> float | None:
+        return (
+            _to_float(event.payload.get("cash_before_position"))
+            or _to_float(event.payload.get("cash"))
+            or _to_float(event.payload.get("cash_after"))
+        )
 
     @staticmethod
     def _is_current_open_position(position_id: str, context: ReportRuntimeContext | None) -> bool:
         if context is None or not context.current_has_position:
             return False
-        return context.current_position_id is None or context.current_position_id == position_id
+        return context.current_position_id == position_id
 
     @staticmethod
     def _metric_card(title: str, value: str) -> str:
@@ -376,10 +492,10 @@ class DailyTradeReporter:
         finished_positions: list[tuple[str, JournalEvent, list[JournalEvent], list[JournalEvent], JournalEvent]],
         open_positions: list[tuple[str, JournalEvent, list[JournalEvent], list[JournalEvent], JournalEvent]],
         total_pnl: float,
+        known_closed_pnl: float,
         total_closed: int,
         win_count: int,
-        inferred_flat_count: int,
-        hidden_incomplete_count: int,
+        residual_bucket: ResidualPnlBucket,
     ) -> str:
         win_rate = win_count / total_closed * 100 if total_closed else None
         rows = []
@@ -401,14 +517,15 @@ class DailyTradeReporter:
 
   <div style="display:flex;gap:12px;flex-wrap:wrap;margin:12px 0;">
     <div style="padding:10px 14px;background:#f6f8fa;border-radius:8px;"><b>事件数</b><br>{len(events)}</div>
-    <div style="padding:10px 14px;background:#f6f8fa;border-radius:8px;"><b>已平仓笔数</b><br>{total_closed}</div>
-    <div style="padding:10px 14px;background:#f6f8fa;border-radius:8px;"><b>未知原因推断平仓</b><br>{inferred_flat_count}</div>
-    <div style="padding:10px 14px;background:#f6f8fa;border-radius:8px;"><b>隐藏不完整记录</b><br>{hidden_incomplete_count}</div>
+    <div style="padding:10px 14px;background:#f6f8fa;border-radius:8px;"><b>已记录平仓笔数</b><br>{total_closed}</div>
+    <div style="padding:10px 14px;background:#f6f8fa;border-radius:8px;"><b>不完整记录数</b><br>{residual_bucket.incomplete_count}</div>
     <div style="padding:10px 14px;background:#f6f8fa;border-radius:8px;"><b>胜率</b><br>{fmt_pct(win_rate)}</div>
-    <div style="padding:10px 14px;background:#f6f8fa;border-radius:8px;"><b>估算实现盈亏</b><br>{fmt(total_pnl, 4)} USDT</div>
+    <div style="padding:10px 14px;background:#f6f8fa;border-radius:8px;"><b>已记录平仓盈亏</b><br>{fmt(known_closed_pnl, 4)} USDT</div>
+    <div style="padding:10px 14px;background:#f6f8fa;border-radius:8px;"><b>未知/不完整汇总盈亏</b><br>{fmt(residual_bucket.pnl, 4)} USDT</div>
+    <div style="padding:10px 14px;background:#f6f8fa;border-radius:8px;"><b>估算总盈亏</b><br>{fmt(total_pnl, 4)} USDT</div>
   </div>
 
-  <h3>✅ 已平仓交易</h3>
+  <h3>✅ 已记录平仓交易</h3>
   <table style="width:100%;border-collapse:collapse;font-size:13px;">
     <tr style="background:#f0f3f6;">
       <th style="padding:8px;border:1px solid #ddd;">时间</th>
@@ -442,7 +559,10 @@ class DailyTradeReporter:
     {''.join(open_rows)}
   </table>
 
-  <p style="color:#777;font-size:12px;margin-top:16px;">说明：缺少 FLAT 记录但当前 OKX 已无仓位的记录，会在报告中按当前现金推断为已平仓，平仓原因为未知；无法推断的不完整历史记录不会展示。</p>
+  <h3>🧩 未知/不完整记录汇总</h3>
+  {self._residual_bucket_html(residual_bucket)}
+
+  <p style="color:#777;font-size:12px;margin-top:16px;">说明：缺少 FLAT 的历史记录不会逐条展示；如果有现金上下文，则统一汇总为 residual PnL。公式：当前现金 - 周期起始现金 - 已记录平仓盈亏。</p>
 </div>
 """.strip()
 
@@ -457,9 +577,6 @@ class DailyTradeReporter:
         last_tp = tp_events[-1].payload.get("tp_price") if tp_events else flat.payload.get("last_tp_price")
         boll = f"M:{fmt(last_entry.payload.get('boll_middle'), 2)}<br>U:{fmt(last_entry.payload.get('boll_upper'), 2)}<br>L:{fmt(last_entry.payload.get('boll_lower'), 2)}"
         cvd = f"fast:{fmt(last_entry.payload.get('fast_cvd'), 4)}<br>buy:{fmt_pct((last_entry.payload.get('buy_ratio') or 0) * 100)}<br>sell:{fmt_pct((last_entry.payload.get('sell_ratio') or 0) * 100)}"
-        flat_reason = str(flat.payload.get("flat_reason") or "-")
-        if flat.event_type == "FLAT_INFERRED":
-            flat_reason = "未知（报告推断已平仓）"
         return f"""
 <tr>
   <td style="padding:8px;border:1px solid #ddd;">{short_ts(first_entry.ts_iso)}<br>→ {short_ts(flat.ts_iso)}</td>
@@ -469,7 +586,7 @@ class DailyTradeReporter:
   <td style="padding:8px;border:1px solid #ddd;">{reasons}</td>
   <td style="padding:8px;border:1px solid #ddd;text-align:right;">{fmt(flat.payload.get('avg_entry_price'), 2)}</td>
   <td style="padding:8px;border:1px solid #ddd;text-align:right;">{fmt(last_tp, 2)}</td>
-  <td style="padding:8px;border:1px solid #ddd;">{html.escape(flat_reason)}</td>
+  <td style="padding:8px;border:1px solid #ddd;">{html.escape(str(flat.payload.get('flat_reason') or '-'))}</td>
   <td style="padding:8px;border:1px solid #ddd;text-align:right;">{fmt(flat.payload.get('realized_pnl_usdt_est'), 4)}</td>
   <td style="padding:8px;border:1px solid #ddd;text-align:right;">{fmt_pct(flat.payload.get('realized_pnl_pct_est'))}</td>
   <td style="padding:8px;border:1px solid #ddd;">{boll}</td>
