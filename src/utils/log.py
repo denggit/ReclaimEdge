@@ -28,6 +28,43 @@ import sys
 from pathlib import Path
 
 _setup_done = False
+_env_loaded_for_logging = False
+
+
+def _load_dotenv_for_logging() -> None:
+    """Load LOG_* variables from project .env before logging is configured.
+
+    Most live modules import loggers at module import time, which can happen before
+    scripts call load_dotenv(). This lightweight parser only sets missing LOG_*/NUMBA_*
+    values so process-level environment variables still win.
+    """
+    global _env_loaded_for_logging
+    if _env_loaded_for_logging:
+        return
+    _env_loaded_for_logging = True
+
+    root = Path(__file__).resolve().parents[2]
+    env_file = root / ".env"
+    if not env_file.exists():
+        return
+
+    allowed_prefixes = ("LOG_", "NUMBA_LOG_LEVEL")
+    try:
+        for raw_line in env_file.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key = key.strip()
+            if not key.startswith(allowed_prefixes):
+                continue
+            value = value.strip()
+            if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
+                value = value[1:-1]
+            os.environ.setdefault(key, value)
+    except OSError:
+        # Logging bootstrap must never stop the trading process.
+        return
 
 
 def _bool_env(name: str, default: bool = True) -> bool:
@@ -112,6 +149,8 @@ def setup_logging(log_level: int | None = None, log_dir: str = "logs") -> None:
     global _setup_done
     if _setup_done:
         return
+
+    _load_dotenv_for_logging()
 
     if log_level is None:
         log_level = _get_log_level_from_env(logging.INFO)
