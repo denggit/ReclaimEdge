@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
-import logging
 import sys
 from pathlib import Path
 
@@ -19,12 +18,9 @@ from src.monitors.boll_band_breakout_monitor import (  # noqa: E402
     BreakoutSignal,
 )
 from src.utils.email_sender import EmailSender  # noqa: E402
+from src.utils.log import get_logger  # noqa: E402
 
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-)
+logger = get_logger(__name__)
 
 
 def format_ts_ms(ts_ms: int) -> str:
@@ -144,7 +140,7 @@ async def main() -> None:
         subject, content = build_alert_email(signal)
         ok = await email_sender.send_email_async(subject, content, content_type="html")
         if not ok:
-            logging.getLogger(__name__).error("Failed to send BOLL alert email")
+            logger.error("Failed to send BOLL alert email")
 
     monitor = BollBandBreakoutMonitor(
         config=monitor_config,
