@@ -54,6 +54,10 @@ class BollCvdShockReclaimStrategy(BollCvdReclaimStrategy):
         if tp_intent is not None:
             intents.append(tp_intent)
 
+        near_tp_intent = self._maybe_near_tp_reduce(price, ts_ms, boll, cvd)
+        if near_tp_intent is not None:
+            intents.append(near_tp_intent)
+
         if not switch_eligible:
             return intents
 

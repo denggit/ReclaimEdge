@@ -31,6 +31,16 @@ class LivePositionState:
     last_order_ts_ms: int = 0
     last_tp_update_ts_ms: int = 0
     last_tp_update_candle_ts_ms: int = 0
+    near_tp_armed: bool = False
+    near_tp_reduce_pending: bool = False
+    near_tp_protected: bool = False
+    near_tp_best_price: float | None = None
+    near_tp_armed_ts_ms: int = 0
+    near_tp_pending_ts_ms: int = 0
+    near_tp_trigger_ts_ms: int = 0
+    near_tp_protective_sl_price: float | None = None
+    near_tp_protective_sl_order_id: str | None = None
+    near_tp_add_disabled: bool = False
     cash_before_position: float | None = None
     updated_at: str = ""
 
@@ -55,7 +65,8 @@ class LiveStateStore:
             return None
         try:
             raw = json.loads(self.path.read_text(encoding="utf-8"))
-            return LivePositionState(**raw)
+            fields = set(LivePositionState.__dataclass_fields__.keys())
+            return LivePositionState(**{key: value for key, value in raw.items() if key in fields})
         except Exception:
             return None
 
@@ -90,6 +101,16 @@ class LiveStateStore:
             last_order_ts_ms=int(strategy_state.last_order_ts_ms or 0),
             last_tp_update_ts_ms=int(strategy_state.last_tp_update_ts_ms or 0),
             last_tp_update_candle_ts_ms=int(getattr(strategy_state, "last_tp_update_candle_ts_ms", 0) or 0),
+            near_tp_armed=bool(getattr(strategy_state, "near_tp_armed", False)),
+            near_tp_reduce_pending=bool(getattr(strategy_state, "near_tp_reduce_pending", False)),
+            near_tp_protected=bool(getattr(strategy_state, "near_tp_protected", False)),
+            near_tp_best_price=getattr(strategy_state, "near_tp_best_price", None),
+            near_tp_armed_ts_ms=int(getattr(strategy_state, "near_tp_armed_ts_ms", 0) or 0),
+            near_tp_pending_ts_ms=int(getattr(strategy_state, "near_tp_pending_ts_ms", 0) or 0),
+            near_tp_trigger_ts_ms=int(getattr(strategy_state, "near_tp_trigger_ts_ms", 0) or 0),
+            near_tp_protective_sl_price=getattr(strategy_state, "near_tp_protective_sl_price", None),
+            near_tp_protective_sl_order_id=getattr(strategy_state, "near_tp_protective_sl_order_id", None),
+            near_tp_add_disabled=bool(getattr(strategy_state, "near_tp_add_disabled", False)),
             cash_before_position=cash_before_position,
         )
 

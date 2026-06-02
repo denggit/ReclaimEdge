@@ -260,7 +260,10 @@ class DailyTradeReporter:
         active_loss_count = 0
         active_breakeven_count = 0
         entry_count = 0
+        add_count = 0
         tp_update_count = 0
+        split_tp_count = 0
+        near_tp_reduce_count = 0
         error_count = 0
         active_known_closed_pnl = 0.0
         active_gross_profit = 0.0
@@ -274,8 +277,14 @@ class DailyTradeReporter:
         for event in events_sorted:
             if event.event_type == "ENTRY":
                 entry_count += 1
+                if str(event.payload.get("intent_type", "")).startswith("ADD_"):
+                    add_count += 1
+                if event.payload.get("tp_plan") == "SPLIT_PARTIAL_FINAL":
+                    split_tp_count += 1
             elif event.event_type == "TP_UPDATE":
                 tp_update_count += 1
+            elif event.event_type == "NEAR_TP_REDUCE":
+                near_tp_reduce_count += 1
             elif event.event_type == "ERROR":
                 error_count += 1
 
@@ -385,7 +394,10 @@ class DailyTradeReporter:
   <div style="display:flex;gap:12px;flex-wrap:wrap;margin:12px 0;">
     {self._metric_card('总事件数', str(len(events_sorted)))}
     {self._metric_card('Entry 事件数', str(entry_count))}
+    {self._metric_card('ADD 事件数', str(add_count))}
     {self._metric_card('TP 更新数', str(tp_update_count))}
+    {self._metric_card('Split TP 次数', str(split_tp_count))}
+    {self._metric_card('Near-TP 减仓数', str(near_tp_reduce_count))}
     {self._metric_card('错误事件数', str(error_count))}
   </div>
 

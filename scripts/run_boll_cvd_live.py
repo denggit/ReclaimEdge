@@ -180,6 +180,16 @@ def restore_strategy_from_saved_state(strategy: BollCvdReclaimStrategy, saved_st
         avg_entry_price=saved_state.avg_entry_price,
         breakeven_price=saved_state.breakeven_price,
         tp_mode=saved_state.tp_mode,
+        near_tp_armed=getattr(saved_state, "near_tp_armed", False),
+        near_tp_reduce_pending=getattr(saved_state, "near_tp_reduce_pending", False),
+        near_tp_protected=getattr(saved_state, "near_tp_protected", False),
+        near_tp_best_price=getattr(saved_state, "near_tp_best_price", None),
+        near_tp_armed_ts_ms=getattr(saved_state, "near_tp_armed_ts_ms", 0),
+        near_tp_pending_ts_ms=getattr(saved_state, "near_tp_pending_ts_ms", 0),
+        near_tp_trigger_ts_ms=getattr(saved_state, "near_tp_trigger_ts_ms", 0),
+        near_tp_protective_sl_price=getattr(saved_state, "near_tp_protective_sl_price", None),
+        near_tp_protective_sl_order_id=getattr(saved_state, "near_tp_protective_sl_order_id", None),
+        near_tp_add_disabled=getattr(saved_state, "near_tp_add_disabled", False),
     )
     logger.warning(
         "Recovered strategy state from local disk | position_id=%s side=%s layers=%s avg_entry=%.4f tp=%s partial_tp=%s tp_plan=%s partial_tp_consumed=%s",
@@ -681,6 +691,76 @@ async def execution_worker(
                     command.intent.breakeven_price,
                     result.tp_order_id,
                 )
+            elif command.intent.intent_type == "NEAR_TP_REDUCE":
+                fail_action = None
+                if not getattr(result, "protective_sl_ok", False) and getattr(result, "near_tp_exit_all", False):
+                    fail_action = "MARKET_EXIT"
+                async with state_lock:
+                    current_position_id = execution_state.current_position_id
+                    cash_before_position = execution_state.cash_before_position
+                    execution_state.last_order_ts_ms = command.intent.ts_ms
+                    if getattr(result, "protective_sl_ok", False) and not getattr(result, "near_tp_exit_all", False):
+                        strategy.state.near_tp_protected = True
+                        strategy.state.near_tp_reduce_pending = False
+                        strategy_config = getattr(strategy, "config", None)
+                        strategy.state.near_tp_add_disabled = bool(getattr(strategy_config, "near_tp_disable_add_after_reduce", True))
+                        strategy.state.near_tp_protective_sl_price = getattr(command.intent, "near_tp_protective_sl_price", None)
+                        strategy.state.near_tp_protective_sl_order_id = getattr(result, "protective_sl_order_id", None)
+                        strategy.state.tp_plan = "SINGLE"
+                        strategy.state.partial_tp_price = None
+                        strategy.state.partial_tp_ratio = 0.0
+                        strategy.state.partial_tp_consumed = True
+                        logger.warning(
+                            "NEAR_TP_STATE_PROTECTED | position_id=%s protective_sl_order_id=%s protective_sl_price=%s",
+                            current_position_id,
+                            strategy.state.near_tp_protective_sl_order_id,
+                            strategy.state.near_tp_protective_sl_price,
+                        )
+                    strategy_state_for_save = copy.deepcopy(strategy.state)
+                    equity = account_snapshot.equity
+                journal.record_near_tp_reduce(
+                    position_id=current_position_id,
+                    symbol=trader.symbol,
+                    intent=command.intent,
+                    result=result,
+                    protective_sl_fail_action=fail_action,
+                )
+                if getattr(result, "protective_sl_ok", False) and not getattr(result, "near_tp_exit_all", False):
+                    state_store.save(
+                        LiveStateStore.from_strategy_state(
+                            position_id=current_position_id,
+                            symbol=trader.symbol,
+                            strategy_state=strategy_state_for_save,
+                            cash_before_position=cash_before_position,
+                        )
+                    )
+                if fail_action == "MARKET_EXIT":
+                    subject = "Near-TP protective SL failed; market-exited remaining position"
+                    content = (
+                        "<div style='font-family:Arial,Helvetica,sans-serif;line-height:1.55;'>"
+                        "<h2>Near-TP protective SL failed</h2>"
+                        f"<p>Remaining position was market-exited successfully. Program continues.</p>"
+                        f"<p><b>position_id:</b> {html.escape(str(current_position_id))}</p>"
+                        f"<p><b>message:</b> {html.escape(result.message)}</p>"
+                        "</div>"
+                    )
+                    ok = await email_sender.send_email_async(subject, content, content_type="html")
+                    if not ok:
+                        logger.error("Failed to send Near-TP market-exit success email")
+                logger.warning(
+                    "LIVE Near-TP reduce success | side=%s layer=%s price=%.4f contracts_before=%s contracts_reduced=%s contracts_after=%s tp_order_id=%s protective_sl_ok=%s protective_sl_order_id=%s near_tp_exit_all=%s equity=%.4f",
+                    command.intent.side,
+                    command.intent.layer_index,
+                    command.intent.price,
+                    result.contracts_before,
+                    result.contracts_reduced,
+                    result.contracts_after,
+                    result.tp_order_id,
+                    result.protective_sl_ok,
+                    result.protective_sl_order_id,
+                    result.near_tp_exit_all,
+                    equity or 0.0,
+                )
             else:
                 new_position_id = None
                 async with state_lock:
@@ -749,14 +829,14 @@ async def handle_execution_failure(
     email_sender: EmailSender,
 ) -> ExecutionReport:
     contracts = trader.position_contracts
-    if result is None or getattr(result, "entry_filled", False):
+    if result is None or getattr(result, "entry_filled", False) or getattr(result, "reduce_filled", False):
         try:
             position = await trader.fetch_position_snapshot()
             contracts = position.contracts
         except Exception:
             contracts = trader.position_contracts
 
-    entry_may_be_live = bool(getattr(result, "entry_filled", False)) or contracts > 0
+    entry_may_be_live = bool(getattr(result, "entry_filled", False)) or bool(getattr(result, "reduce_filled", False)) or contracts > 0
     rolled_back = False
     async with state_lock:
         current_position_id = execution_state.current_position_id
@@ -778,7 +858,21 @@ async def handle_execution_failure(
     except Exception:
         logger.exception("Failed to write trade journal error event")
 
-    subject, content = build_live_failure_email(command.intent, error, rolled_back=rolled_back, halted=halted)
+    if command.intent.intent_type == "NEAR_TP_REDUCE" and getattr(result, "reduce_filled", False) and halted:
+        subject = "CRITICAL: Near-TP protective SL and market exit failed"
+        content = f"""
+<div style="font-family: Arial, Helvetica, sans-serif; line-height: 1.55; color: #222; max-width: 760px;">
+  <h2>CRITICAL: Near-TP protective SL and market exit failed</h2>
+  <p><strong>Trading has been halted. Manual OKX intervention is required.</strong></p>
+  <p><strong>position_id:</strong> {html.escape(str(current_position_id))}</p>
+  <p><strong>side:</strong> {html.escape(command.intent.side)}</p>
+  <p><strong>contracts_after:</strong> {html.escape(str(getattr(result, 'contracts_after', contracts)))}</p>
+  <p><strong>protective_sl_price:</strong> {html.escape(str(getattr(result, 'protective_sl_price', '-')))}</p>
+  <p><strong>Error:</strong> {html.escape(str(error))}</p>
+</div>
+""".strip()
+    else:
+        subject, content = build_live_failure_email(command.intent, error, rolled_back=rolled_back, halted=halted)
     ok = await email_sender.send_email_async(subject, content, content_type="html")
     if not ok:
         logger.error("Failed to send live execution failure email")
@@ -869,6 +963,7 @@ async def account_position_sync_worker(
                         "last_partial_tp_price": getattr(strategy.state, "partial_tp_price", None),
                         "last_tp_plan": getattr(strategy.state, "tp_plan", "SINGLE"),
                         "partial_tp_consumed": getattr(strategy.state, "partial_tp_consumed", False),
+                        "near_tp_protective_sl_order_id": getattr(strategy.state, "near_tp_protective_sl_order_id", None),
                     }
                     execution_state.trading_halted = True
                     last_flat_detected_monotonic = now
@@ -1019,6 +1114,12 @@ async def account_position_sync_worker(
                     "cash_after": settled.cash,
                     "equity_after": settled.equity,
                 }
+                protective_sl_order_id = pending_flat_payload.get("near_tp_protective_sl_order_id")
+                if protective_sl_order_id:
+                    try:
+                        await trader.cancel_near_tp_protective_stop(protective_sl_order_id)
+                    except Exception:
+                        logger.warning("NEAR_TP_PROTECTIVE_SL_CANCEL_ON_FLAT | algoId=%s failed_unhandled", protective_sl_order_id)
                 async with state_lock:
                     account_snapshot.position = position
                     account_snapshot.cash = settled.cash
@@ -1037,12 +1138,14 @@ async def account_position_sync_worker(
                     last_logged_cash = settled.cash
                     last_logged_equity = settled.equity
                     last_logged_position_key = current_position_key
+                    logger.warning("NEAR_TP_STATE_CLEARED_ON_FLAT | protective_sl_order_id=%s", protective_sl_order_id)
 
             if cash_transfer_payload is not None:
                 journal.record_cash_transfer(**cash_transfer_payload)
             if cash_drift_payload is not None:
                 journal.record_account_cash_drift(**cash_drift_payload)
             if record_flat_payload is not None:
+                record_flat_payload.pop("near_tp_protective_sl_order_id", None)
                 journal.record_flat(**record_flat_payload)
             if clear_state:
                 state_store.clear()

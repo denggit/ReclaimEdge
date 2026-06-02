@@ -17,6 +17,7 @@ TradeIntentType = Literal[
     "OPEN_SHORT",
     "ADD_SHORT",
     "UPDATE_TP",
+    "NEAR_TP_REDUCE",
 ]
 PositionSide = Literal["LONG", "SHORT"]
 TpMode = Literal["MIDDLE", "UPPER", "LOWER"]
@@ -39,6 +40,24 @@ class BollCvdReclaimStrategyConfig:
     split_tp_path_ratio: float = 0.8
     split_tp_partial_ratio: float = 0.5
     split_tp_min_profit_pct: float = 0.004
+    near_tp_enabled: bool = False
+    near_tp_reduce_enabled: bool = True
+    near_tp_shadow_enabled: bool = False
+    near_tp_min_progress_ratio: float = 0.88
+    near_tp_max_distance_usd: float = 3.0
+    near_tp_min_profit_pct: float = 0.004
+    near_tp_giveback_usd: float = 3.0
+    near_tp_giveback_pct: float = 0.0015
+    near_tp_giveback_profit_ratio: float = 0.25
+    near_tp_reduce_ratio: float = 0.5
+    near_tp_min_reduce_profit_pct: float = 0.004
+    near_tp_disable_add_after_reduce: bool = True
+    near_tp_protective_sl_enabled: bool = True
+    near_tp_protective_sl_profit_pct: float = 0.001
+    near_tp_protective_sl_retry_count: int = 3
+    near_tp_protective_sl_retry_interval_seconds: float = 1.0
+    near_tp_sl_fail_action: str = "MARKET_EXIT"
+    near_tp_sl_fail_market_exit_retry_count: int = 3
 
     @classmethod
     def from_env(cls) -> "BollCvdReclaimStrategyConfig":
@@ -57,6 +76,24 @@ class BollCvdReclaimStrategyConfig:
             split_tp_path_ratio=float(os.getenv("SPLIT_TP_PATH_RATIO", "0.8")),
             split_tp_partial_ratio=float(os.getenv("SPLIT_TP_PARTIAL_RATIO", "0.5")),
             split_tp_min_profit_pct=float(os.getenv("SPLIT_TP_MIN_PROFIT_PCT", "0.004")),
+            near_tp_enabled=_env_bool("NEAR_TP_ENABLED", False),
+            near_tp_reduce_enabled=_env_bool("NEAR_TP_REDUCE_ENABLED", True),
+            near_tp_shadow_enabled=_env_bool("NEAR_TP_SHADOW_ENABLED", False),
+            near_tp_min_progress_ratio=float(os.getenv("NEAR_TP_MIN_PROGRESS_RATIO", "0.88")),
+            near_tp_max_distance_usd=float(os.getenv("NEAR_TP_MAX_DISTANCE_USD", "3")),
+            near_tp_min_profit_pct=float(os.getenv("NEAR_TP_MIN_PROFIT_PCT", "0.004")),
+            near_tp_giveback_usd=float(os.getenv("NEAR_TP_GIVEBACK_USD", "3")),
+            near_tp_giveback_pct=float(os.getenv("NEAR_TP_GIVEBACK_PCT", "0.0015")),
+            near_tp_giveback_profit_ratio=float(os.getenv("NEAR_TP_GIVEBACK_PROFIT_RATIO", "0.25")),
+            near_tp_reduce_ratio=float(os.getenv("NEAR_TP_REDUCE_RATIO", "0.5")),
+            near_tp_min_reduce_profit_pct=float(os.getenv("NEAR_TP_MIN_REDUCE_PROFIT_PCT", "0.004")),
+            near_tp_disable_add_after_reduce=_env_bool("NEAR_TP_DISABLE_ADD_AFTER_REDUCE", True),
+            near_tp_protective_sl_enabled=_env_bool("NEAR_TP_PROTECTIVE_SL_ENABLED", True),
+            near_tp_protective_sl_profit_pct=float(os.getenv("NEAR_TP_PROTECTIVE_SL_PROFIT_PCT", "0.001")),
+            near_tp_protective_sl_retry_count=int(os.getenv("NEAR_TP_PROTECTIVE_SL_RETRY_COUNT", "3")),
+            near_tp_protective_sl_retry_interval_seconds=float(os.getenv("NEAR_TP_PROTECTIVE_SL_RETRY_INTERVAL_SECONDS", "1")),
+            near_tp_sl_fail_action=os.getenv("NEAR_TP_SL_FAIL_ACTION", "MARKET_EXIT").strip().upper(),
+            near_tp_sl_fail_market_exit_retry_count=int(os.getenv("NEAR_TP_SL_FAIL_MARKET_EXIT_RETRY_COUNT", "3")),
         )
 
 
@@ -84,6 +121,12 @@ class TradeIntent:
     partial_tp_ratio: float = 0.0
     tp_plan: TpPlan = "SINGLE"
     partial_tp_consumed: bool = False
+    near_tp_progress_ratio: float = 0.0
+    near_tp_best_price: float | None = None
+    near_tp_giveback: float = 0.0
+    near_tp_giveback_threshold: float = 0.0
+    near_tp_reduce_ratio: float = 0.0
+    near_tp_protective_sl_price: float | None = None
 
 
 @dataclass
@@ -114,6 +157,23 @@ class StrategyPositionState:
     partial_tp_ratio: float = 0.0
     tp_plan: TpPlan = "SINGLE"
     partial_tp_consumed: bool = False
+    near_tp_armed: bool = False
+    near_tp_reduce_pending: bool = False
+    near_tp_protected: bool = False
+    near_tp_best_price: float | None = None
+    near_tp_armed_ts_ms: int = 0
+    near_tp_pending_ts_ms: int = 0
+    near_tp_trigger_ts_ms: int = 0
+    near_tp_protective_sl_price: float | None = None
+    near_tp_protective_sl_order_id: str | None = None
+    near_tp_add_disabled: bool = False
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
 class BollCvdReclaimStrategy:
@@ -141,6 +201,10 @@ class BollCvdReclaimStrategy:
         tp_intent = self._maybe_update_tp(price, ts_ms, boll, cvd)
         if tp_intent is not None:
             intents.append(tp_intent)
+
+        near_tp_intent = self._maybe_near_tp_reduce(price, ts_ms, boll, cvd)
+        if near_tp_intent is not None:
+            intents.append(near_tp_intent)
 
         if not boll.alert_switch_on:
             return intents
@@ -310,6 +374,9 @@ class BollCvdReclaimStrategy:
             return self._open_position("LONG", "OPEN_LONG", price, ts_ms, boll, cvd, "下轨出轨深度达标 + 低点附近快速CVD回流/跌不动")
         if self.state.side != "LONG":
             return None
+        if self.state.near_tp_add_disabled:
+            logger.info("ADD_SKIPPED | reason=near_tp_protected side=LONG price=%.4f layers=%s", price, self.state.layers)
+            return None
         if self.state.layers >= self.config.max_layers:
             return None
         if self.state.last_entry_price is None:
@@ -322,6 +389,9 @@ class BollCvdReclaimStrategy:
         if self.state.side is None:
             return self._open_position("SHORT", "OPEN_SHORT", price, ts_ms, boll, cvd, "上轨出轨深度达标 + 高点附近快速CVD转弱/涨不动")
         if self.state.side != "SHORT":
+            return None
+        if self.state.near_tp_add_disabled:
+            logger.info("ADD_SKIPPED | reason=near_tp_protected side=SHORT price=%.4f layers=%s", price, self.state.layers)
             return None
         if self.state.layers >= self.config.max_layers:
             return None
@@ -345,6 +415,7 @@ class BollCvdReclaimStrategy:
         size = self.sizer.calculate(price, layer_index=next_layer)
         self._update_position_cost(price, size.eth_qty)
         self.state.partial_tp_consumed = False
+        self._reset_near_tp_state()
         tp_price, tp_mode = self._select_tp_price(side, boll)
         partial_tp_price, partial_tp_ratio, tp_plan = self._select_tp_plan(side, tp_price, next_layer)
         if tp_mode != "MIDDLE":
@@ -386,7 +457,10 @@ class BollCvdReclaimStrategy:
             return None
 
         tp_price, tp_mode = self._select_tp_price(self.state.side, boll)
-        partial_tp_price, partial_tp_ratio, tp_plan = self._select_tp_plan(self.state.side, tp_price, self.state.layers)
+        if self.state.near_tp_protected or self.state.near_tp_add_disabled:
+            partial_tp_price, partial_tp_ratio, tp_plan = None, 0.0, "SINGLE"
+        else:
+            partial_tp_price, partial_tp_ratio, tp_plan = self._select_tp_plan(self.state.side, tp_price, self.state.layers)
         self.state.last_tp_update_ts_ms = ts_ms
         self.state.last_tp_update_candle_ts_ms = boll.candle_ts_ms
 
@@ -428,12 +502,210 @@ class BollCvdReclaimStrategy:
         )
         return self._intent("UPDATE_TP", self.state.side, price, self.state.layers, tp_price, f"新15m K线更新止盈到{tp_mode}轨", size, boll, cvd, ts_ms)
 
+    def _maybe_near_tp_reduce(self, price: float, ts_ms: int, boll: BollSnapshot, cvd: CvdSnapshot) -> TradeIntent | None:
+        if not self.config.near_tp_enabled:
+            return None
+        if self.state.side is None or self.state.tp_price is None:
+            return None
+        if self.state.avg_entry_price <= 0 or price <= 0:
+            return None
+        if self.state.near_tp_protected:
+            return None
+        if self.state.tp_plan == "SPLIT_PARTIAL_FINAL" and not self.state.partial_tp_consumed:
+            return None
+
+        side = self.state.side
+        avg = self.state.avg_entry_price
+        final_tp = self.state.tp_price
+        if side == "LONG":
+            if final_tp <= avg:
+                return None
+            progress = (price - avg) / (final_tp - avg)
+            profit_pct = (price - avg) / avg
+            near_by_distance = final_tp - price <= self.config.near_tp_max_distance_usd
+        else:
+            if final_tp >= avg:
+                return None
+            progress = (avg - price) / (avg - final_tp)
+            profit_pct = (avg - price) / avg
+            near_by_distance = price - final_tp <= self.config.near_tp_max_distance_usd
+
+        reduce_profit_ok = profit_pct >= self.config.near_tp_min_reduce_profit_pct
+        min_profit_seen_ok = profit_pct >= self.config.near_tp_min_profit_pct
+        near_by_progress = progress >= self.config.near_tp_min_progress_ratio
+
+        if not self.state.near_tp_armed:
+            if (near_by_progress or near_by_distance) and min_profit_seen_ok:
+                self.state.near_tp_armed = True
+                self.state.near_tp_best_price = price
+                self.state.near_tp_armed_ts_ms = ts_ms
+                logger.warning(
+                    "NEAR_TP_ARMED | side=%s price=%.4f avg_entry=%.4f final_tp=%.4f progress=%.6f profit_pct=%.6f near_by_progress=%s near_by_distance=%s",
+                    side,
+                    price,
+                    avg,
+                    final_tp,
+                    progress,
+                    profit_pct,
+                    near_by_progress,
+                    near_by_distance,
+                )
+            else:
+                return None
+
+        old_best = self.state.near_tp_best_price if self.state.near_tp_best_price is not None else price
+        if side == "LONG":
+            best = max(old_best, price)
+        else:
+            best = min(old_best, price)
+        if best != old_best:
+            self.state.near_tp_best_price = best
+            logger.info("NEAR_TP_BEST_UPDATED | side=%s best_price=%.4f price=%.4f", side, best, price)
+        else:
+            self.state.near_tp_best_price = best
+
+        if self.state.near_tp_reduce_pending:
+            if reduce_profit_ok:
+                return self._near_tp_reduce_intent(price, ts_ms, boll, cvd, progress, best, 0.0, 0.0)
+            return None
+
+        if side == "LONG":
+            giveback = best - price
+            floating_profit_path = best - avg
+        else:
+            giveback = price - best
+            floating_profit_path = avg - best
+        giveback_threshold = max(
+            self.config.near_tp_giveback_usd,
+            price * self.config.near_tp_giveback_pct,
+            floating_profit_path * self.config.near_tp_giveback_profit_ratio,
+        )
+        if giveback < giveback_threshold:
+            return None
+
+        logger.warning(
+            "NEAR_TP_GIVEBACK_TRIGGERED | side=%s price=%.4f best_price=%.4f avg_entry=%.4f final_tp=%.4f giveback=%.6f threshold=%.6f profit_pct=%.6f",
+            side,
+            price,
+            best,
+            avg,
+            final_tp,
+            giveback,
+            giveback_threshold,
+            profit_pct,
+        )
+        if not reduce_profit_ok:
+            self.state.near_tp_reduce_pending = True
+            self.state.near_tp_pending_ts_ms = ts_ms
+            logger.warning(
+                "NEAR_TP_REDUCE_PENDING | reason=profit_below_min_reduce_profit side=%s price=%.4f profit_pct=%.6f min_reduce_profit_pct=%.6f",
+                side,
+                price,
+                profit_pct,
+                self.config.near_tp_min_reduce_profit_pct,
+            )
+            return None
+
+        return self._near_tp_reduce_intent(price, ts_ms, boll, cvd, progress, best, giveback, giveback_threshold)
+
+    def _near_tp_reduce_intent(
+        self,
+        price: float,
+        ts_ms: int,
+        boll: BollSnapshot,
+        cvd: CvdSnapshot,
+        progress: float,
+        best: float,
+        giveback: float,
+        giveback_threshold: float,
+    ) -> TradeIntent | None:
+        side = self.state.side
+        if side is None or self.state.tp_price is None:
+            return None
+        pct = self.config.near_tp_protective_sl_profit_pct
+        protective_sl = self.state.avg_entry_price * (1 + pct) if side == "LONG" else self.state.avg_entry_price * (1 - pct)
+        size = self.sizer.calculate(price, layer_index=max(self.state.layers, 1))
+        if self.config.near_tp_shadow_enabled and not self.config.near_tp_reduce_enabled:
+            logger.warning(
+                "NEAR_TP_REDUCE_SHADOW | side=%s price=%.4f avg_entry=%.4f final_tp=%.4f progress=%.6f best_price=%.4f giveback=%.6f threshold=%.6f reduce_ratio=%.4f protective_sl=%.4f",
+                side,
+                price,
+                self.state.avg_entry_price,
+                self.state.tp_price,
+                progress,
+                best,
+                giveback,
+                giveback_threshold,
+                self.config.near_tp_reduce_ratio,
+                protective_sl,
+            )
+            return None
+        if not self.config.near_tp_reduce_enabled:
+            return None
+
+        self.state.near_tp_trigger_ts_ms = ts_ms
+        logger.warning(
+            "NEAR_TP_REDUCE_SIGNAL | side=%s price=%.4f avg_entry=%.4f final_tp=%.4f progress=%.6f best_price=%.4f giveback=%.6f threshold=%.6f reduce_ratio=%.4f protective_sl=%.4f",
+            side,
+            price,
+            self.state.avg_entry_price,
+            self.state.tp_price,
+            progress,
+            best,
+            giveback,
+            giveback_threshold,
+            self.config.near_tp_reduce_ratio,
+            protective_sl,
+        )
+        return TradeIntent(
+            intent_type="NEAR_TP_REDUCE",
+            side=side,
+            price=price,
+            layer_index=self.state.layers,
+            tp_price=self.state.tp_price,
+            reason="near_tp_giveback_protection",
+            size=size,
+            fast_cvd=cvd.fast_cvd,
+            previous_fast_cvd=cvd.previous_fast_cvd,
+            buy_ratio=cvd.buy_ratio,
+            sell_ratio=cvd.sell_ratio,
+            boll_upper=boll.upper,
+            boll_middle=boll.middle,
+            boll_lower=boll.lower,
+            ts_ms=ts_ms,
+            avg_entry_price=self.state.avg_entry_price,
+            breakeven_price=self.state.breakeven_price,
+            tp_mode=self.state.tp_mode,
+            partial_tp_price=None,
+            partial_tp_ratio=0.0,
+            tp_plan="SINGLE",
+            partial_tp_consumed=True,
+            near_tp_progress_ratio=progress,
+            near_tp_best_price=best,
+            near_tp_giveback=giveback,
+            near_tp_giveback_threshold=giveback_threshold,
+            near_tp_reduce_ratio=self.config.near_tp_reduce_ratio,
+            near_tp_protective_sl_price=protective_sl,
+        )
+
     def _update_position_cost(self, entry_price: float, eth_qty: float) -> None:
         if eth_qty <= 0:
             return
         self.state.total_entry_qty += eth_qty
         self.state.total_entry_notional += entry_price * eth_qty
         self.state.avg_entry_price = self.state.total_entry_notional / self.state.total_entry_qty
+
+    def _reset_near_tp_state(self) -> None:
+        self.state.near_tp_armed = False
+        self.state.near_tp_reduce_pending = False
+        self.state.near_tp_protected = False
+        self.state.near_tp_best_price = None
+        self.state.near_tp_armed_ts_ms = 0
+        self.state.near_tp_pending_ts_ms = 0
+        self.state.near_tp_trigger_ts_ms = 0
+        self.state.near_tp_protective_sl_price = None
+        self.state.near_tp_protective_sl_order_id = None
+        self.state.near_tp_add_disabled = False
 
     def _select_tp_price(self, side: PositionSide, boll: BollSnapshot) -> tuple[float, TpMode]:
         if self.state.avg_entry_price <= 0:

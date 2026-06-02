@@ -277,6 +277,40 @@ class LiveTradeJournal:
             position_id=position_id,
         )
 
+    def record_near_tp_reduce(
+        self,
+        *,
+        position_id: str | None,
+        symbol: str,
+        intent: Any,
+        result: Any,
+        protective_sl_fail_action: str | None = None,
+    ) -> None:
+        self.append(
+            "NEAR_TP_REDUCE",
+            {
+                "symbol": symbol,
+                "side": getattr(intent, "side", None),
+                "reduce_ratio": getattr(intent, "near_tp_reduce_ratio", 0.0),
+                "contracts_before": getattr(result, "contracts_before", ""),
+                "contracts_reduced": getattr(result, "contracts_reduced", ""),
+                "contracts_after": getattr(result, "contracts_after", ""),
+                "avg_entry_price": getattr(intent, "avg_entry_price", None),
+                "tp_price": getattr(intent, "tp_price", None),
+                "near_tp_best_price": getattr(intent, "near_tp_best_price", None),
+                "near_tp_progress_ratio": getattr(intent, "near_tp_progress_ratio", 0.0),
+                "near_tp_giveback": getattr(intent, "near_tp_giveback", 0.0),
+                "near_tp_giveback_threshold": getattr(intent, "near_tp_giveback_threshold", 0.0),
+                "protective_sl_price": getattr(result, "protective_sl_price", "") or getattr(intent, "near_tp_protective_sl_price", None),
+                "protective_sl_order_id": getattr(result, "protective_sl_order_id", None),
+                "protective_sl_ok": bool(getattr(result, "protective_sl_ok", False)),
+                "protective_sl_fail_action": protective_sl_fail_action,
+                "near_tp_exit_all": bool(getattr(result, "near_tp_exit_all", False)),
+                "reason": "near_tp_giveback_protection",
+            },
+            position_id=position_id,
+        )
+
     def record_flat(
         self,
         *,

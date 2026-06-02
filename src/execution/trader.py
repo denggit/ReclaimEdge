@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import base64
+import asyncio
 import datetime
 import hmac
 import json
 import math
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal, ROUND_DOWN
 from typing import Any, Optional
 
@@ -31,6 +32,14 @@ class LiveTradeResult:
     entry_filled: bool = False
     tp_ok: bool = False
     tp_order_ids: tuple[str, ...] = ()
+    protective_sl_order_id: Optional[str] = None
+    protective_sl_price: str = ""
+    protective_sl_ok: bool = False
+    contracts_before: str = ""
+    contracts_reduced: str = ""
+    contracts_after: str = ""
+    near_tp_exit_all: bool = False
+    reduce_filled: bool = False
 
 
 @dataclass(frozen=True)
@@ -78,6 +87,7 @@ class Trader:
         self.passphrase = OKX_CONFIG.get("passphrase", "")
 
         self.tp_order_id: str | None = None
+        self.near_tp_protective_sl_order_id: str | None = None
         self.position_contracts = Decimal("0")
         self.account_equity_usdt: float = 0.0
         self._session: aiohttp.ClientSession | None = None
@@ -123,6 +133,8 @@ class Trader:
         )
 
     async def execute_intent(self, intent: TradeIntent) -> LiveTradeResult:
+        if intent.intent_type == "NEAR_TP_REDUCE":
+            return await self.execute_near_tp_reduce(intent)
         if intent.intent_type == "UPDATE_TP":
             return await self.replace_take_profit(intent)
 
@@ -191,6 +203,200 @@ class Trader:
                 entry_filled=True,
                 tp_ok=False,
             )
+
+    async def execute_near_tp_reduce(self, intent: TradeIntent) -> LiveTradeResult:
+        action = "NEAR_TP_REDUCE"
+        position = await self.fetch_position_snapshot()
+        if not position.has_position:
+            return LiveTradeResult(False, action, None, None, "0", self.price_to_str(intent.tp_price), "no position")
+        if position.side != intent.side:
+            return LiveTradeResult(False, action, None, None, "0", self.price_to_str(intent.tp_price), "position side mismatch")
+
+        contracts_before = position.contracts
+        reduce_ratio = Decimal(str(getattr(intent, "near_tp_reduce_ratio", 0.0) or os.getenv("NEAR_TP_REDUCE_RATIO", "0.5")))
+        reduce_ratio = min(max(reduce_ratio, Decimal("0")), Decimal("1"))
+        reduce_contracts = self.round_contracts_down(contracts_before * reduce_ratio)
+        if reduce_contracts < self.min_contracts:
+            return LiveTradeResult(
+                False,
+                action,
+                None,
+                None,
+                self.decimal_to_str(contracts_before),
+                self.price_to_str(intent.tp_price),
+                "reduce size too small",
+                contracts_before=self.decimal_to_str(contracts_before),
+            )
+
+        body = self._reduce_only_market_order_body(intent.side, reduce_contracts)
+        res = await self.request("POST", "/api/v5/trade/order", body)
+        order_id = self.extract_order_id(res)
+        logger.warning(
+            "NEAR_TP_REDUCE_ORDER_PLACED | side=%s contracts=%s ordId=%s",
+            intent.side,
+            self.decimal_to_str(reduce_contracts),
+            order_id,
+        )
+
+        try:
+            refreshed = await self.fetch_position_snapshot()
+        except Exception:
+            logger.exception("Failed to refresh position after Near-TP reduce")
+            refreshed = PositionSnapshot(intent.side, contracts_before - reduce_contracts, position.avg_entry_price, 0.0, Decimal("0"))
+        contracts_after = refreshed.contracts if refreshed.has_position and refreshed.side == intent.side else Decimal("0")
+        self.position_contracts = contracts_after
+        logger.warning(
+            "NEAR_TP_REDUCE_FILLED | side=%s contracts_before=%s contracts_reduced=%s contracts_after=%s",
+            intent.side,
+            self.decimal_to_str(contracts_before),
+            self.decimal_to_str(reduce_contracts),
+            self.decimal_to_str(contracts_after),
+        )
+
+        base_result_kwargs = {
+            "order_id": order_id,
+            "contracts": self.decimal_to_str(reduce_contracts),
+            "tp_price": self.price_to_str(intent.tp_price),
+            "entry_filled": False,
+            "reduce_filled": True,
+            "contracts_before": self.decimal_to_str(contracts_before),
+            "contracts_reduced": self.decimal_to_str(reduce_contracts),
+            "contracts_after": self.decimal_to_str(contracts_after),
+        }
+        if contracts_after <= 0:
+            return LiveTradeResult(
+                True,
+                action,
+                tp_order_id=None,
+                message="near_tp_reduce_closed_position",
+                tp_ok=True,
+                protective_sl_ok=True,
+                near_tp_exit_all=True,
+                **base_result_kwargs,
+            )
+
+        single_intent = replace(intent, partial_tp_price=None, partial_tp_ratio=0.0, tp_plan="SINGLE", partial_tp_consumed=True)
+        try:
+            tp = await self.replace_take_profit(single_intent)
+        except Exception as exc:
+            logger.exception("Near-TP reduce filled but final TP replacement raised")
+            return LiveTradeResult(
+                False,
+                action,
+                tp_order_id=None,
+                message=f"reduce_filled_but_final_tp_exception: {exc}",
+                tp_ok=False,
+                **base_result_kwargs,
+            )
+        if not tp.ok:
+            return LiveTradeResult(
+                False,
+                action,
+                tp_order_id=tp.tp_order_id,
+                message=f"reduce_filled_but_final_tp_failed: {tp.message}",
+                tp_ok=False,
+                tp_order_ids=tp.tp_order_ids,
+                **base_result_kwargs,
+            )
+        logger.warning(
+            "NEAR_TP_FINAL_TP_REPLACED | side=%s contracts=%s tp_price=%s tp_order_id=%s",
+            intent.side,
+            tp.contracts,
+            tp.tp_price,
+            tp.tp_order_id,
+        )
+
+        protective_sl_price = getattr(intent, "near_tp_protective_sl_price", None)
+        if protective_sl_price is None:
+            pct = float(os.getenv("NEAR_TP_PROTECTIVE_SL_PROFIT_PCT", "0.001"))
+            protective_sl_price = intent.avg_entry_price * (1 + pct) if intent.side == "LONG" else intent.avg_entry_price * (1 - pct)
+
+        if os.getenv("NEAR_TP_PROTECTIVE_SL_ENABLED", "true").strip().lower() not in {"1", "true", "yes", "y", "on"}:
+            return LiveTradeResult(
+                True,
+                action,
+                tp_order_id=tp.tp_order_id,
+                message="near_tp_reduce_done_protective_sl_disabled",
+                tp_ok=True,
+                tp_order_ids=tp.tp_order_ids,
+                protective_sl_price=self.price_to_str(float(protective_sl_price)),
+                protective_sl_ok=True,
+                **base_result_kwargs,
+            )
+
+        sl_ok, sl_order_id, sl_message = await self.place_near_tp_protective_stop_with_retries(
+            intent.side,
+            contracts_after,
+            float(protective_sl_price),
+            retry_count=int(os.getenv("NEAR_TP_PROTECTIVE_SL_RETRY_COUNT", "3")),
+            retry_interval_seconds=float(os.getenv("NEAR_TP_PROTECTIVE_SL_RETRY_INTERVAL_SECONDS", "1")),
+        )
+        if sl_ok:
+            self.near_tp_protective_sl_order_id = sl_order_id
+            logger.warning(
+                "NEAR_TP_PROTECTIVE_SL_PLACED | side=%s contracts=%s stop_price=%s algoId=%s",
+                intent.side,
+                self.decimal_to_str(contracts_after),
+                self.price_to_str(float(protective_sl_price)),
+                sl_order_id,
+            )
+            return LiveTradeResult(
+                True,
+                action,
+                tp_order_id=tp.tp_order_id,
+                message="near_tp_reduce_done_final_tp_and_protective_sl_placed",
+                tp_ok=True,
+                tp_order_ids=tp.tp_order_ids,
+                protective_sl_order_id=sl_order_id,
+                protective_sl_price=self.price_to_str(float(protective_sl_price)),
+                protective_sl_ok=True,
+                **base_result_kwargs,
+            )
+
+        fail_action = os.getenv("NEAR_TP_SL_FAIL_ACTION", "MARKET_EXIT").strip().upper()
+        if fail_action == "MARKET_EXIT":
+            logger.error("NEAR_TP_PROTECTIVE_SL_FAILED_MARKET_EXIT | side=%s message=%s", intent.side, sl_message)
+            exit_ok, exit_message = await self.market_exit_remaining_position_with_retries(
+                intent.side,
+                retry_count=int(os.getenv("NEAR_TP_SL_FAIL_MARKET_EXIT_RETRY_COUNT", "3")),
+            )
+            if exit_ok:
+                return LiveTradeResult(
+                    True,
+                    action,
+                    tp_order_id=tp.tp_order_id,
+                    message=f"protective_sl_failed_market_exit_success: {sl_message}; {exit_message}",
+                    tp_ok=True,
+                    tp_order_ids=tp.tp_order_ids,
+                    protective_sl_price=self.price_to_str(float(protective_sl_price)),
+                    protective_sl_ok=False,
+                    near_tp_exit_all=True,
+                    contracts_after="0",
+                    **{k: v for k, v in base_result_kwargs.items() if k != "contracts_after"},
+                )
+            return LiveTradeResult(
+                False,
+                action,
+                tp_order_id=tp.tp_order_id,
+                message=f"protective_sl_failed_and_market_exit_failed: {sl_message}; {exit_message}",
+                tp_ok=True,
+                tp_order_ids=tp.tp_order_ids,
+                protective_sl_price=self.price_to_str(float(protective_sl_price)),
+                protective_sl_ok=False,
+                **base_result_kwargs,
+            )
+
+        return LiveTradeResult(
+            False,
+            action,
+            tp_order_id=tp.tp_order_id,
+            message=f"protective_sl_failed_halt_only: {sl_message}",
+            tp_ok=True,
+            tp_order_ids=tp.tp_order_ids,
+            protective_sl_price=self.price_to_str(float(protective_sl_price)),
+            protective_sl_ok=False,
+            **base_result_kwargs,
+        )
 
     async def replace_take_profit(self, intent: TradeIntent) -> LiveTradeResult:
         try:
@@ -289,6 +495,133 @@ class Trader:
             body["posSide"] = pos_side
         return body
 
+    def _reduce_only_market_order_body(self, side: PositionSide, contracts: Decimal) -> dict[str, Any]:
+        close_side = "sell" if side == "LONG" else "buy"
+        body: dict[str, Any] = {
+            "instId": self.symbol,
+            "tdMode": self.td_mode,
+            "side": close_side,
+            "ordType": "market",
+            "sz": self.decimal_to_str(contracts),
+            "reduceOnly": "true",
+        }
+        pos_side = self.pos_side(side)
+        if pos_side:
+            body["posSide"] = pos_side
+        return body
+
+    async def place_near_tp_protective_stop_with_retries(
+        self,
+        side: PositionSide,
+        contracts: Decimal,
+        stop_price: float,
+        retry_count: int,
+        retry_interval_seconds: float,
+    ) -> tuple[bool, str | None, str]:
+        retry_count = max(int(retry_count), 1)
+        last_error = ""
+        for attempt in range(1, retry_count + 1):
+            try:
+                body = self._near_tp_protective_sl_algo_body(side, contracts, stop_price)
+                res = await self.request("POST", "/api/v5/trade/order-algo", body)
+                return True, self.extract_algo_id(res), "protective_sl_placed"
+            except Exception as exc:
+                last_error = str(exc)
+                logger.warning(
+                    "NEAR_TP_PROTECTIVE_SL_RETRY | attempt=%s/%s side=%s contracts=%s stop_price=%s error=%s",
+                    attempt,
+                    retry_count,
+                    side,
+                    self.decimal_to_str(contracts),
+                    self.price_to_str(stop_price),
+                    exc,
+                )
+                if attempt < retry_count and retry_interval_seconds > 0:
+                    await asyncio.sleep(retry_interval_seconds)
+
+        for attempt in range(1, retry_count + 1):
+            try:
+                body = self._near_tp_fallback_conditional_close_body(side, contracts, stop_price)
+                res = await self.request("POST", "/api/v5/trade/order-algo", body)
+                return True, self.extract_algo_id(res), "fallback_conditional_close_placed"
+            except Exception as exc:
+                last_error = str(exc)
+                logger.warning(
+                    "NEAR_TP_PROTECTIVE_SL_FALLBACK_RETRY | attempt=%s/%s side=%s contracts=%s stop_price=%s error=%s",
+                    attempt,
+                    retry_count,
+                    side,
+                    self.decimal_to_str(contracts),
+                    self.price_to_str(stop_price),
+                    exc,
+                )
+                if attempt < retry_count and retry_interval_seconds > 0:
+                    await asyncio.sleep(retry_interval_seconds)
+        return False, None, last_error or "protective_sl_retries_exhausted"
+
+    def _near_tp_protective_sl_algo_body(self, side: PositionSide, contracts: Decimal, stop_price: float) -> dict[str, Any]:
+        close_side = "sell" if side == "LONG" else "buy"
+        body: dict[str, Any] = {
+            "instId": self.symbol,
+            "tdMode": self.td_mode,
+            "side": close_side,
+            "ordType": "conditional",
+            "sz": self.decimal_to_str(contracts),
+            "slTriggerPx": self.price_to_str(stop_price),
+            "slOrdPx": "-1",
+            "slTriggerPxType": "last",
+            "reduceOnly": "true",
+        }
+        pos_side = self.pos_side(side)
+        if pos_side:
+            body["posSide"] = pos_side
+        return body
+
+    def _near_tp_fallback_conditional_close_body(self, side: PositionSide, contracts: Decimal, stop_price: float) -> dict[str, Any]:
+        close_side = "sell" if side == "LONG" else "buy"
+        body: dict[str, Any] = {
+            "instId": self.symbol,
+            "tdMode": self.td_mode,
+            "side": close_side,
+            "ordType": "conditional",
+            "sz": self.decimal_to_str(contracts),
+            "triggerPx": self.price_to_str(stop_price),
+            "orderPx": "-1",
+            "triggerPxType": "last",
+            "reduceOnly": "true",
+        }
+        pos_side = self.pos_side(side)
+        if pos_side:
+            body["posSide"] = pos_side
+        return body
+
+    async def market_exit_remaining_position_with_retries(self, side: PositionSide, retry_count: int) -> tuple[bool, str]:
+        retry_count = max(int(retry_count), 1)
+        last_error = ""
+        for attempt in range(1, retry_count + 1):
+            try:
+                position = await self.fetch_position_snapshot()
+                if not position.has_position or position.side != side or position.contracts <= 0:
+                    self.position_contracts = Decimal("0")
+                    logger.warning("NEAR_TP_MARKET_EXIT_SUCCESS | reason=already_flat")
+                    return True, "already_flat"
+                body = self._reduce_only_market_order_body(side, position.contracts)
+                res = await self.request("POST", "/api/v5/trade/order", body)
+                order_id = self.extract_order_id(res)
+                self.position_contracts = Decimal("0")
+                logger.warning(
+                    "NEAR_TP_MARKET_EXIT_SUCCESS | side=%s contracts=%s ordId=%s attempt=%s",
+                    side,
+                    self.decimal_to_str(position.contracts),
+                    order_id,
+                    attempt,
+                )
+                return True, f"market_exit_order_id={order_id}"
+            except Exception as exc:
+                last_error = str(exc)
+                logger.error("NEAR_TP_MARKET_EXIT_FAILED | attempt=%s/%s side=%s error=%s", attempt, retry_count, side, exc)
+        return False, last_error or "market_exit_failed"
+
     def _tp_price_summary(self, specs: list[tuple[str, Decimal, float]]) -> str:
         if len(specs) == 1:
             return self.price_to_str(specs[0][2])
@@ -313,6 +646,27 @@ class Trader:
     async def fetch_pending_orders(self) -> list[dict[str, Any]]:
         res = await self.request("GET", f"/api/v5/trade/orders-pending?instId={self.symbol}")
         return list(res.get("data", []))
+
+    async def fetch_pending_algo_orders(self) -> list[dict[str, Any]]:
+        res = await self.request("GET", f"/api/v5/trade/orders-algo-pending?instId={self.symbol}&ordType=conditional")
+        return list(res.get("data", []))
+
+    async def cancel_near_tp_protective_stop(self, order_id: str | None) -> bool:
+        if not order_id:
+            return True
+        try:
+            await self.request("POST", "/api/v5/trade/cancel-algos", [{"instId": self.symbol, "algoId": order_id}])
+            if self.near_tp_protective_sl_order_id == order_id:
+                self.near_tp_protective_sl_order_id = None
+            logger.warning("NEAR_TP_PROTECTIVE_SL_CANCEL_ON_FLAT | algoId=%s", order_id)
+            return True
+        except Exception as exc:
+            text = str(exc).lower()
+            if "not found" in text or "not exist" in text or "does not exist" in text or "already" in text:
+                logger.info("NEAR_TP_PROTECTIVE_SL_CANCEL_ON_FLAT | algoId=%s already_absent message=%s", order_id, exc)
+                return True
+            logger.warning("NEAR_TP_PROTECTIVE_SL_CANCEL_ON_FLAT | algoId=%s failed=%s", order_id, exc)
+            return False
 
     async def fetch_usdt_equity(self) -> float:
         res = await self.request("GET", "/api/v5/account/balance?ccy=USDT")
@@ -370,7 +724,7 @@ class Trader:
         else:
             await self.request("POST", "/api/v5/account/set-leverage", body)
 
-    async def request(self, method: str, endpoint: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    async def request(self, method: str, endpoint: str, payload: Any | None = None) -> dict[str, Any]:
         await self.start()
         if self._session is None:
             raise RuntimeError("OKX private REST session is not initialized")
@@ -422,6 +776,16 @@ class Trader:
         if not data or not data[0].get("ordId"):
             raise RuntimeError(f"Missing ordId in response: {res}")
         return str(data[0]["ordId"])
+
+    @staticmethod
+    def extract_algo_id(res: dict[str, Any]) -> str:
+        data = res.get("data", [])
+        if not data:
+            raise RuntimeError(f"Missing algoId in response: {res}")
+        algo_id = data[0].get("algoId") or data[0].get("ordId")
+        if not algo_id:
+            raise RuntimeError(f"Missing algoId in response: {res}")
+        return str(algo_id)
 
     @staticmethod
     def decimal_to_str(value: Decimal) -> str:
