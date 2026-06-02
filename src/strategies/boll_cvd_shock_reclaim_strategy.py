@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 import os
 import time
 
@@ -12,8 +11,9 @@ from src.strategies.boll_cvd_reclaim_strategy import (
     BollCvdReclaimStrategyConfig,
     TradeIntent,
 )
+from src.utils.log import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class BollCvdShockReclaimStrategy(BollCvdReclaimStrategy):
