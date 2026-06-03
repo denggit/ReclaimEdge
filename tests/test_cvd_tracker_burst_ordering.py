@@ -7,15 +7,18 @@ from unittest.mock import patch
 from src.indicators.cvd_tracker import CvdTracker, CvdTrackerConfig
 
 
-def config() -> CvdTrackerConfig:
-    return CvdTrackerConfig(
+def config(**overrides) -> CvdTrackerConfig:
+    values = dict(
         fast_window_seconds=5,
         price_stall_seconds=2,
         burst_window_seconds=3,
         burst_baseline_seconds=60,
         burst_min_move_ratio=2.5,
         burst_min_volume_ratio=2.0,
+        burst_min_abs_range_pct=0.0015,
     )
+    values.update(overrides)
+    return CvdTrackerConfig(**values)
 
 
 def feed_baseline(tracker: CvdTracker, start_ts: int) -> None:
@@ -39,7 +42,29 @@ def feed_down_burst(tracker: CvdTracker, start_ts: int, *, include_last: bool = 
     return snapshot
 
 
+def feed_low_absolute_range_down_move(tracker: CvdTracker, start_ts: int):
+    snapshot = None
+    ticks = [
+        (60_000, 100.00),
+        (61_000, 99.96),
+        (62_000, 99.93),
+        (63_000, 99.90),
+    ]
+    for offset_ms, price in ticks:
+        snapshot = tracker.update("sell", 10.0, price, start_ts + offset_ms)
+    return snapshot
+
+
 class CvdTrackerBurstOrderingTest(unittest.TestCase):
+    def test_default_burst_min_abs_range_pct_is_0_15_pct(self) -> None:
+        self.assertAlmostEqual(CvdTrackerConfig().burst_min_abs_range_pct, 0.0015)
+
+    def test_from_env_reads_burst_min_abs_range_pct(self) -> None:
+        with patch.dict(os.environ, {"BURST_MIN_ABS_RANGE_PCT": "0.0012"}):
+            cfg = CvdTrackerConfig.from_env()
+
+        self.assertAlmostEqual(cfg.burst_min_abs_range_pct, 0.0012)
+
     def test_ordered_fast_down_move_triggers_down_burst(self) -> None:
         tracker = CvdTracker(config())
         start_ts = 1_000_000
@@ -51,7 +76,32 @@ class CvdTrackerBurstOrderingTest(unittest.TestCase):
         self.assertTrue(snapshot.down_burst)
         self.assertGreaterEqual(snapshot.burst_move_ratio, 2.5)
         self.assertGreaterEqual(snapshot.burst_volume_ratio, 2.0)
+        self.assertGreaterEqual(snapshot.burst_range_pct, 0.0015)
         self.assertLess(snapshot.burst_net_move_pct, 0)
+
+    def test_relative_move_and_volume_are_not_enough_when_abs_range_is_too_small(self) -> None:
+        tracker = CvdTracker(config())
+        start_ts = 1_500_000
+        feed_baseline(tracker, start_ts)
+
+        snapshot = feed_low_absolute_range_down_move(tracker, start_ts)
+
+        self.assertIsNotNone(snapshot)
+        self.assertGreaterEqual(snapshot.burst_move_ratio, 2.5)
+        self.assertGreaterEqual(snapshot.burst_volume_ratio, 2.0)
+        self.assertLess(snapshot.burst_range_pct, 0.0015)
+        self.assertLess(snapshot.burst_net_move_pct, 0)
+        self.assertFalse(snapshot.down_burst)
+
+    def test_abs_range_filter_can_be_disabled_for_debug(self) -> None:
+        tracker = CvdTracker(config(burst_min_abs_range_pct=0.0))
+        start_ts = 1_600_000
+        feed_baseline(tracker, start_ts)
+
+        snapshot = feed_low_absolute_range_down_move(tracker, start_ts)
+
+        self.assertIsNotNone(snapshot)
+        self.assertTrue(snapshot.down_burst)
 
     def test_out_of_order_tick_is_dropped_for_realtime(self) -> None:
         tracker = CvdTracker(config())
