@@ -21,7 +21,7 @@ TradeIntentType = Literal[
 ]
 PositionSide = Literal["LONG", "SHORT"]
 TpMode = Literal["MIDDLE", "UPPER", "LOWER"]
-TpPlan = Literal["SINGLE", "SPLIT_PARTIAL_FINAL"]
+TpPlan = Literal["SINGLE", "SPLIT_PARTIAL_FINAL", "MIDDLE_RUNNER"]
 
 
 @dataclass(frozen=True)
@@ -44,6 +44,7 @@ class BollCvdReclaimStrategyConfig:
     breakeven_fee_buffer_pct: float = 0.001
     tp_min_net_profit_pct: float = 0.002
     min_outside_pct: float = 0.001
+    split_tp_enabled: bool = True
     split_tp_min_layers: int = 4
     split_tp_path_ratio: float = 0.8
     split_tp_partial_ratio: float = 0.5
@@ -66,9 +67,19 @@ class BollCvdReclaimStrategyConfig:
     near_tp_protective_sl_retry_interval_seconds: float = 1.0
     near_tp_sl_fail_action: str = "MARKET_EXIT"
     near_tp_sl_fail_market_exit_retry_count: int = 3
+    middle_runner_enabled: bool = False
+    middle_runner_first_close_ratio: float = 0.8
+    middle_runner_extension_trigger_ratio: float = 0.6
+    middle_runner_disable_add_after_partial: bool = True
+    middle_runner_protective_sl_enabled: bool = True
 
     @classmethod
     def from_env(cls) -> "BollCvdReclaimStrategyConfig":
+        middle_runner_first_close_ratio = min(max(float(os.getenv("MIDDLE_RUNNER_FIRST_CLOSE_RATIO", "0.8")), 0.1), 0.95)
+        middle_runner_enabled = _env_bool("MIDDLE_RUNNER_ENABLED", False)
+        near_tp_enabled = _env_bool("NEAR_TP_ENABLED", False)
+        if middle_runner_enabled and near_tp_enabled:
+            raise RuntimeError("MIDDLE_RUNNER_ENABLED=true requires NEAR_TP_ENABLED=false; Middle Runner and Near-TP Reduce are mutually exclusive.")
         return cls(
             min_buy_ratio=float(os.getenv("CVD_MIN_BUY_RATIO", "0.55")),
             min_sell_ratio=float(os.getenv("CVD_MIN_SELL_RATIO", "0.55")),
@@ -88,11 +99,12 @@ class BollCvdReclaimStrategyConfig:
             breakeven_fee_buffer_pct=float(os.getenv("BREAKEVEN_FEE_BUFFER_PCT", "0.001")),
             tp_min_net_profit_pct=float(os.getenv("TP_MIN_NET_PROFIT_PCT", "0.002")),
             min_outside_pct=float(os.getenv("BOLL_MIN_OUTSIDE_PCT", "0.001")),
+            split_tp_enabled=_env_bool("SPLIT_TP_ENABLED", True),
             split_tp_min_layers=int(os.getenv("SPLIT_TP_MIN_LAYERS", "4")),
             split_tp_path_ratio=float(os.getenv("SPLIT_TP_PATH_RATIO", "0.8")),
             split_tp_partial_ratio=float(os.getenv("SPLIT_TP_PARTIAL_RATIO", "0.5")),
             split_tp_min_profit_pct=float(os.getenv("SPLIT_TP_MIN_PROFIT_PCT", "0.004")),
-            near_tp_enabled=_env_bool("NEAR_TP_ENABLED", False),
+            near_tp_enabled=near_tp_enabled,
             near_tp_reduce_enabled=_env_bool("NEAR_TP_REDUCE_ENABLED", True),
             near_tp_shadow_enabled=_env_bool("NEAR_TP_SHADOW_ENABLED", False),
             near_tp_min_progress_ratio=float(os.getenv("NEAR_TP_MIN_PROGRESS_RATIO", "0.88")),
@@ -110,6 +122,11 @@ class BollCvdReclaimStrategyConfig:
             near_tp_protective_sl_retry_interval_seconds=float(os.getenv("NEAR_TP_PROTECTIVE_SL_RETRY_INTERVAL_SECONDS", "1")),
             near_tp_sl_fail_action=os.getenv("NEAR_TP_SL_FAIL_ACTION", "MARKET_EXIT").strip().upper(),
             near_tp_sl_fail_market_exit_retry_count=int(os.getenv("NEAR_TP_SL_FAIL_MARKET_EXIT_RETRY_COUNT", "3")),
+            middle_runner_enabled=middle_runner_enabled,
+            middle_runner_first_close_ratio=middle_runner_first_close_ratio,
+            middle_runner_extension_trigger_ratio=float(os.getenv("MIDDLE_RUNNER_EXTENSION_TRIGGER_RATIO", "0.6")),
+            middle_runner_disable_add_after_partial=_env_bool("MIDDLE_RUNNER_DISABLE_ADD_AFTER_PARTIAL", True),
+            middle_runner_protective_sl_enabled=_env_bool("MIDDLE_RUNNER_PROTECTIVE_SL_ENABLED", True),
         )
 
 
@@ -143,6 +160,17 @@ class TradeIntent:
     near_tp_giveback_threshold: float = 0.0
     near_tp_reduce_ratio: float = 0.0
     near_tp_protective_sl_price: float | None = None
+    middle_runner_enabled_for_position: bool = False
+    middle_runner_pending: bool = False
+    middle_runner_active: bool = False
+    middle_runner_first_close_ratio: float = 0.0
+    middle_runner_keep_ratio: float = 0.0
+    middle_runner_first_tp_price: float | None = None
+    middle_runner_final_tp_price: float | None = None
+    middle_runner_protective_sl_price: float | None = None
+    middle_runner_protective_sl_order_id: str | None = None
+    middle_runner_extension_triggered: bool = False
+    middle_runner_add_disabled: bool = False
 
 
 @dataclass
@@ -183,6 +211,17 @@ class StrategyPositionState:
     near_tp_protective_sl_price: float | None = None
     near_tp_protective_sl_order_id: str | None = None
     near_tp_add_disabled: bool = False
+    middle_runner_enabled_for_position: bool = False
+    middle_runner_pending: bool = False
+    middle_runner_active: bool = False
+    middle_runner_first_close_ratio: float = 0.0
+    middle_runner_keep_ratio: float = 0.0
+    middle_runner_first_tp_price: float | None = None
+    middle_runner_final_tp_price: float | None = None
+    middle_runner_protective_sl_price: float | None = None
+    middle_runner_protective_sl_order_id: str | None = None
+    middle_runner_extension_triggered: bool = False
+    middle_runner_add_disabled: bool = False
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -393,6 +432,9 @@ class BollCvdReclaimStrategy:
         if self.state.near_tp_add_disabled:
             logger.info("ADD_SKIPPED | reason=near_tp_protected side=LONG price=%.4f layers=%s", price, self.state.layers)
             return None
+        if self.state.middle_runner_add_disabled or self.state.middle_runner_active:
+            logger.info("ADD_SKIPPED | reason=middle_runner_active side=LONG price=%.4f layers=%s", price, self.state.layers)
+            return None
         if self.state.layers >= self.config.max_layers:
             return None
         if self.state.last_entry_price is None:
@@ -463,6 +505,9 @@ class BollCvdReclaimStrategy:
             return None
         if self.state.near_tp_add_disabled:
             logger.info("ADD_SKIPPED | reason=near_tp_protected side=SHORT price=%.4f layers=%s", price, self.state.layers)
+            return None
+        if self.state.middle_runner_add_disabled or self.state.middle_runner_active:
+            logger.info("ADD_SKIPPED | reason=middle_runner_active side=SHORT price=%.4f layers=%s", price, self.state.layers)
             return None
         if self.state.layers >= self.config.max_layers:
             return None
@@ -659,12 +704,17 @@ class BollCvdReclaimStrategy:
         self._update_position_cost(price, size.eth_qty)
         self.state.partial_tp_consumed = False
         self._reset_near_tp_state()
+        self._reset_middle_runner_state()
         tp_price, tp_mode = self._select_tp_price(side, boll)
-        partial_tp_price, partial_tp_ratio, tp_plan = self._select_tp_plan(side, tp_price, next_layer)
+        partial_tp_price, partial_tp_ratio, tp_plan = self._select_tp_plan(side, tp_price, next_layer, tp_mode=tp_mode, boll=boll)
+        if tp_plan == "MIDDLE_RUNNER":
+            tp_price = boll.upper if side == "LONG" else boll.lower
         if tp_mode != "MIDDLE":
             reason = f"{reason} + 中轨净利润不足阈值，TP切换到{tp_mode}"
         if tp_plan == "SPLIT_PARTIAL_FINAL":
             reason = f"{reason} + 总层数>= {self.config.split_tp_min_layers}，启用分批止盈"
+        if tp_plan == "MIDDLE_RUNNER":
+            reason = f"{reason} + 中轨先平{partial_tp_ratio * 100:.0f}%，剩余runner到外轨"
         self.state.side = side
         self.state.layers = next_layer
         self.state.last_entry_price = price
@@ -673,6 +723,8 @@ class BollCvdReclaimStrategy:
         self.state.partial_tp_price = partial_tp_price
         self.state.partial_tp_ratio = partial_tp_ratio
         self.state.tp_plan = tp_plan
+        if tp_plan == "MIDDLE_RUNNER":
+            self._set_middle_runner_planned(partial_tp_price, tp_price)
         self.state.last_order_ts_ms = ts_ms
         self.state.last_tp_update_ts_ms = ts_ms
         self.state.last_tp_update_candle_ts_ms = boll.candle_ts_ms
@@ -699,15 +751,38 @@ class BollCvdReclaimStrategy:
         if self.state.last_tp_update_candle_ts_ms == boll.candle_ts_ms:
             return None
 
+        old_runner_sl = self.state.middle_runner_protective_sl_price
         tp_price, tp_mode = self._select_tp_price(self.state.side, boll)
-        if self.state.near_tp_protected or self.state.near_tp_add_disabled:
+        if self.state.middle_runner_active:
+            tp_price = boll.upper if self.state.side == "LONG" else boll.lower
+            tp_mode = "UPPER" if self.state.side == "LONG" else "LOWER"
+            partial_tp_price, partial_tp_ratio, tp_plan = None, 0.0, "SINGLE"
+            protective_sl = self._calculate_middle_runner_protective_sl(self.state.side, price, boll)
+            if protective_sl is not None and old_runner_sl is not None:
+                protective_sl = self._tighten_middle_runner_sl(self.state.side, old_runner_sl, protective_sl)
+            protective_sl = self._apply_middle_runner_extension_trigger(self.state.side, price, boll, protective_sl)
+            self.state.middle_runner_final_tp_price = tp_price
+            self.state.middle_runner_protective_sl_price = protective_sl
+        elif self.state.near_tp_protected or self.state.near_tp_add_disabled:
             partial_tp_price, partial_tp_ratio, tp_plan = None, 0.0, "SINGLE"
         else:
-            partial_tp_price, partial_tp_ratio, tp_plan = self._select_tp_plan(self.state.side, tp_price, self.state.layers)
+            partial_tp_price, partial_tp_ratio, tp_plan = self._select_tp_plan(self.state.side, tp_price, self.state.layers, tp_mode=tp_mode, boll=boll)
+            if tp_plan == "MIDDLE_RUNNER":
+                tp_price = boll.upper if self.state.side == "LONG" else boll.lower
+            if tp_plan == "MIDDLE_RUNNER":
+                self._set_middle_runner_planned(partial_tp_price, tp_price)
         self.state.last_tp_update_ts_ms = ts_ms
         self.state.last_tp_update_candle_ts_ms = boll.candle_ts_ms
 
-        if self._tp_plan_unchanged(tp_price, partial_tp_price, partial_tp_ratio, tp_plan):
+        runner_sl_changed = (
+            self.state.middle_runner_active
+            and self.state.middle_runner_protective_sl_price is not None
+            and (
+                old_runner_sl is None
+                or abs(self.state.middle_runner_protective_sl_price - old_runner_sl) / self.state.middle_runner_protective_sl_price >= 0.0001
+            )
+        )
+        if self._tp_plan_unchanged(tp_price, partial_tp_price, partial_tp_ratio, tp_plan) and not runner_sl_changed:
             logger.info(
                 "TP_UPDATE_SKIPPED | reason=plan_unchanged side=%s mode=%s plan=%s candle_ts=%s current_tp=%.4f target_tp=%.4f partial_tp=%s avg_entry=%.4f breakeven=%.4f",
                 self.state.side,
@@ -727,6 +802,8 @@ class BollCvdReclaimStrategy:
         self.state.partial_tp_price = partial_tp_price
         self.state.partial_tp_ratio = partial_tp_ratio
         self.state.tp_plan = tp_plan
+        if tp_plan == "MIDDLE_RUNNER":
+            self._set_middle_runner_planned(partial_tp_price, tp_price)
         size = self.sizer.calculate(price, layer_index=self.state.layers)
         logger.info(
             "TP_SELECTED | reason=new_candle side=%s mode=%s plan=%s partial_tp=%s partial_ratio=%.2f avg_entry=%.4f breakeven=%.4f candle_ts=%s middle=%.4f upper=%.4f lower=%.4f final_tp=%.4f",
@@ -753,6 +830,8 @@ class BollCvdReclaimStrategy:
         if self.state.avg_entry_price <= 0 or price <= 0:
             return None
         if self.state.near_tp_protected:
+            return None
+        if self.state.tp_plan == "MIDDLE_RUNNER" or self.state.middle_runner_pending or self.state.middle_runner_active:
             return None
         if self.state.tp_plan == "SPLIT_PARTIAL_FINAL" and not self.state.partial_tp_consumed:
             return None
@@ -950,6 +1029,106 @@ class BollCvdReclaimStrategy:
         self.state.near_tp_protective_sl_order_id = None
         self.state.near_tp_add_disabled = False
 
+    def _reset_middle_runner_state(self) -> None:
+        self.state.middle_runner_enabled_for_position = False
+        self.state.middle_runner_pending = False
+        self.state.middle_runner_active = False
+        self.state.middle_runner_first_close_ratio = 0.0
+        self.state.middle_runner_keep_ratio = 0.0
+        self.state.middle_runner_first_tp_price = None
+        self.state.middle_runner_final_tp_price = None
+        self.state.middle_runner_protective_sl_price = None
+        self.state.middle_runner_protective_sl_order_id = None
+        self.state.middle_runner_extension_triggered = False
+        self.state.middle_runner_add_disabled = False
+
+    def _set_middle_runner_planned(self, first_tp_price: float | None, final_tp_price: float) -> None:
+        first_close_ratio = min(max(self.config.middle_runner_first_close_ratio, 0.1), 0.95)
+        self.state.middle_runner_enabled_for_position = True
+        self.state.middle_runner_pending = True
+        self.state.middle_runner_active = False
+        self.state.middle_runner_first_close_ratio = first_close_ratio
+        self.state.middle_runner_keep_ratio = 1 - first_close_ratio
+        self.state.middle_runner_first_tp_price = first_tp_price
+        self.state.middle_runner_final_tp_price = final_tp_price
+        self.state.middle_runner_protective_sl_price = None
+        self.state.middle_runner_protective_sl_order_id = None
+        self.state.middle_runner_extension_triggered = False
+        self.state.middle_runner_add_disabled = False
+
+    def _calculate_middle_runner_protective_sl(self, side: PositionSide, current_price: float, boll: BollSnapshot) -> float | None:
+        avg_entry = self.state.avg_entry_price
+        if avg_entry <= 0 or current_price <= 0:
+            return None
+        fee = self.config.breakeven_fee_buffer_pct
+        if side == "LONG":
+            after_partial_breakeven = avg_entry * (1 + fee)
+            candidate_1 = (after_partial_breakeven + boll.middle) / 2
+            candidate_2 = (boll.lower + boll.middle) / 2
+            protective_sl = max(candidate_1, candidate_2)
+            if protective_sl >= current_price:
+                logger.warning(
+                    "MIDDLE_RUNNER_ORDER_WARNING | reason=long_sl_not_below_current side=LONG current_price=%.4f protective_sl_price=%.4f boll_middle=%.4f boll_lower=%.4f",
+                    current_price,
+                    protective_sl,
+                    boll.middle,
+                    boll.lower,
+                )
+                return None
+            return protective_sl
+
+        after_partial_breakeven = avg_entry * (1 - fee)
+        candidate_1 = (after_partial_breakeven + boll.middle) / 2
+        candidate_2 = (boll.upper + boll.middle) / 2
+        protective_sl = min(candidate_1, candidate_2)
+        if protective_sl <= current_price:
+            logger.warning(
+                "MIDDLE_RUNNER_ORDER_WARNING | reason=short_sl_not_above_current side=SHORT current_price=%.4f protective_sl_price=%.4f boll_middle=%.4f boll_upper=%.4f",
+                current_price,
+                protective_sl,
+                boll.middle,
+                boll.upper,
+            )
+            return None
+        return protective_sl
+
+    def _tighten_middle_runner_sl(self, side: PositionSide, old_sl: float, new_sl: float) -> float:
+        if side == "LONG":
+            return max(old_sl, new_sl)
+        return min(old_sl, new_sl)
+
+    def _apply_middle_runner_extension_trigger(
+        self,
+        side: PositionSide,
+        current_price: float,
+        boll: BollSnapshot,
+        protective_sl: float | None,
+    ) -> float | None:
+        ratio = min(max(self.config.middle_runner_extension_trigger_ratio, 0.0), 1.0)
+        if side == "LONG":
+            trigger_price = boll.middle + (boll.upper - boll.middle) * ratio
+            if current_price < trigger_price:
+                return protective_sl
+            new_sl = boll.middle if protective_sl is None else max(protective_sl, boll.middle)
+        else:
+            trigger_price = boll.middle - (boll.middle - boll.lower) * ratio
+            if current_price > trigger_price:
+                return protective_sl
+            new_sl = boll.middle if protective_sl is None else min(protective_sl, boll.middle)
+        if not self.state.middle_runner_extension_triggered:
+            logger.warning(
+                "MIDDLE_RUNNER_EXTENSION_TRIGGERED | side=%s current_price=%.4f extension_trigger_price=%.4f protective_sl_price=%.4f boll_middle=%.4f boll_upper=%.4f boll_lower=%.4f",
+                side,
+                current_price,
+                trigger_price,
+                new_sl,
+                boll.middle,
+                boll.upper,
+                boll.lower,
+            )
+        self.state.middle_runner_extension_triggered = True
+        return new_sl
+
     def _select_tp_price(self, side: PositionSide, boll: BollSnapshot) -> tuple[float, TpMode]:
         if self.state.avg_entry_price <= 0:
             return boll.middle, "MIDDLE"
@@ -968,7 +1147,20 @@ class BollCvdReclaimStrategy:
             return boll.lower, "LOWER"
         return boll.middle, "MIDDLE"
 
-    def _select_tp_plan(self, side: PositionSide, final_tp: float, layers: int) -> tuple[float | None, float, TpPlan]:
+    def _select_tp_plan(
+        self,
+        side: PositionSide,
+        final_tp: float,
+        layers: int,
+        *,
+        tp_mode: TpMode | None = None,
+        boll: BollSnapshot | None = None,
+    ) -> tuple[float | None, float, TpPlan]:
+        if self._middle_runner_plan_allowed(tp_mode, boll):
+            first_close_ratio = min(max(self.config.middle_runner_first_close_ratio, 0.1), 0.95)
+            return boll.middle, first_close_ratio, "MIDDLE_RUNNER"
+        if not self.config.split_tp_enabled:
+            return None, 0.0, "SINGLE"
         if layers < self.config.split_tp_min_layers:
             return None, 0.0, "SINGLE"
         if self.state.partial_tp_consumed:
@@ -1000,6 +1192,19 @@ class BollCvdReclaimStrategy:
         if partial_tp <= final_tp:
             return None, 0.0, "SINGLE"
         return partial_tp, partial_ratio, "SPLIT_PARTIAL_FINAL"
+
+    def _middle_runner_plan_allowed(self, tp_mode: TpMode | None, boll: BollSnapshot | None) -> bool:
+        if not self.config.middle_runner_enabled:
+            return False
+        if tp_mode != "MIDDLE" or boll is None:
+            return False
+        if self.state.near_tp_protected or self.state.near_tp_add_disabled:
+            return False
+        if self.state.partial_tp_consumed:
+            return False
+        if self.state.middle_runner_active:
+            return False
+        return True
 
     def _tp_plan_unchanged(self, tp_price: float, partial_tp_price: float | None, partial_tp_ratio: float, tp_plan: TpPlan) -> bool:
         if self.state.tp_price is None:
@@ -1050,6 +1255,17 @@ class BollCvdReclaimStrategy:
             partial_tp_ratio=self.state.partial_tp_ratio,
             tp_plan=self.state.tp_plan,
             partial_tp_consumed=self.state.partial_tp_consumed,
+            middle_runner_enabled_for_position=self.state.middle_runner_enabled_for_position,
+            middle_runner_pending=self.state.middle_runner_pending,
+            middle_runner_active=self.state.middle_runner_active,
+            middle_runner_first_close_ratio=self.state.middle_runner_first_close_ratio,
+            middle_runner_keep_ratio=self.state.middle_runner_keep_ratio,
+            middle_runner_first_tp_price=self.state.middle_runner_first_tp_price,
+            middle_runner_final_tp_price=self.state.middle_runner_final_tp_price,
+            middle_runner_protective_sl_price=self.state.middle_runner_protective_sl_price,
+            middle_runner_protective_sl_order_id=self.state.middle_runner_protective_sl_order_id,
+            middle_runner_extension_triggered=self.state.middle_runner_extension_triggered,
+            middle_runner_add_disabled=self.state.middle_runner_add_disabled,
         )
 
     def _cooldown_ok(self, ts_ms: int) -> bool:

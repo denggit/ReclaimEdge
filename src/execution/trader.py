@@ -88,6 +88,7 @@ class Trader:
 
         self.tp_order_id: str | None = None
         self.near_tp_protective_sl_order_id: str | None = None
+        self.middle_runner_protective_sl_order_id: str | None = None
         self.position_contracts = Decimal("0")
         self.account_equity_usdt: float = 0.0
         self._session: aiohttp.ClientSession | None = None
@@ -429,6 +430,48 @@ class Trader:
         tp_order_id = ",".join(placed_order_ids)
         self.tp_order_id = tp_order_id
         tp_price_text = self._tp_price_summary(specs)
+        protective_sl_order_id: str | None = None
+        protective_sl_price_text = ""
+        protective_sl_ok = False
+        runner_sl_price = getattr(intent, "middle_runner_protective_sl_price", None)
+        if getattr(intent, "middle_runner_active", False) and runner_sl_price is not None:
+            old_sl_order_id = getattr(intent, "middle_runner_protective_sl_order_id", None) or self.middle_runner_protective_sl_order_id
+            sl_ok, sl_order_id, sl_message = await self.place_middle_runner_protective_stop_with_retries(
+                intent.side,
+                self.position_contracts,
+                float(runner_sl_price),
+                retry_count=int(os.getenv("NEAR_TP_PROTECTIVE_SL_RETRY_COUNT", "3")),
+                retry_interval_seconds=float(os.getenv("NEAR_TP_PROTECTIVE_SL_RETRY_INTERVAL_SECONDS", "1")),
+            )
+            protective_sl_price_text = self.price_to_str(float(runner_sl_price))
+            if not sl_ok:
+                return LiveTradeResult(
+                    False,
+                    intent.intent_type,
+                    None,
+                    tp_order_id,
+                    self.decimal_to_str(self.position_contracts),
+                    tp_price_text,
+                    f"middle_runner_protective_sl_failed: {sl_message}",
+                    entry_filled=False,
+                    tp_ok=True,
+                    tp_order_ids=tuple(placed_order_ids),
+                    protective_sl_price=protective_sl_price_text,
+                    protective_sl_ok=False,
+                )
+            protective_sl_order_id = sl_order_id
+            protective_sl_ok = True
+            self.middle_runner_protective_sl_order_id = sl_order_id
+            if old_sl_order_id and old_sl_order_id != sl_order_id:
+                await self.cancel_middle_runner_protective_stop(old_sl_order_id)
+            logger.warning(
+                "MIDDLE_RUNNER_SL_UPDATED | side=%s contracts=%s protective_sl_price=%s old_sl_order_id=%s new_sl_order_id=%s",
+                intent.side,
+                self.decimal_to_str(self.position_contracts),
+                protective_sl_price_text,
+                old_sl_order_id,
+                sl_order_id,
+            )
         return LiveTradeResult(
             True,
             intent.intent_type,
@@ -440,13 +483,16 @@ class Trader:
             entry_filled=False,
             tp_ok=True,
             tp_order_ids=tuple(placed_order_ids),
+            protective_sl_order_id=protective_sl_order_id,
+            protective_sl_price=protective_sl_price_text,
+            protective_sl_ok=protective_sl_ok,
         )
 
     def _build_take_profit_order_specs(self, intent: TradeIntent) -> list[tuple[str, Decimal, float]]:
         partial_tp_price = getattr(intent, "partial_tp_price", None)
         partial_tp_ratio = Decimal(str(getattr(intent, "partial_tp_ratio", 0.0)))
         tp_plan = getattr(intent, "tp_plan", "SINGLE")
-        if tp_plan not in {"SPLIT_PARTIAL_FINAL", "SPLIT_50_50"} or partial_tp_price is None or partial_tp_ratio <= 0 or partial_tp_ratio >= 1:
+        if tp_plan not in {"SPLIT_PARTIAL_FINAL", "SPLIT_50_50", "MIDDLE_RUNNER"} or partial_tp_price is None or partial_tp_ratio <= 0 or partial_tp_ratio >= 1:
             return [("final", self.position_contracts, intent.tp_price)]
 
         partial_contracts = self.round_contracts_down(self.position_contracts * partial_tp_ratio)
@@ -460,6 +506,8 @@ class Trader:
                 self.min_contracts,
             )
             return [("final", self.position_contracts, intent.tp_price)]
+        if tp_plan == "MIDDLE_RUNNER":
+            return [("middle", partial_contracts, float(partial_tp_price)), ("runner", final_contracts, intent.tp_price)]
         return [("partial", partial_contracts, float(partial_tp_price)), ("final", final_contracts, intent.tp_price)]
 
     async def _place_reduce_only_take_profit_orders(self, intent: TradeIntent, specs: list[tuple[str, Decimal, float]]) -> list[str]:
@@ -568,6 +616,25 @@ class Trader:
                 if attempt < retry_count and retry_interval_seconds > 0:
                     await asyncio.sleep(retry_interval_seconds)
         return False, None, last_error or "protective_sl_retries_exhausted"
+
+    async def place_middle_runner_protective_stop_with_retries(
+        self,
+        side: PositionSide,
+        contracts: Decimal,
+        stop_price: float,
+        retry_count: int,
+        retry_interval_seconds: float,
+    ) -> tuple[bool, str | None, str]:
+        ok, order_id, message = await self.place_near_tp_protective_stop_with_retries(
+            side,
+            contracts,
+            stop_price,
+            retry_count=retry_count,
+            retry_interval_seconds=retry_interval_seconds,
+        )
+        if ok:
+            self.middle_runner_protective_sl_order_id = order_id
+        return ok, order_id, message
 
     async def _cancel_unverified_near_tp_algo(self, algo_id: str, *, phase: str) -> None:
         try:
@@ -756,6 +823,9 @@ class Trader:
             logger.warning("NEAR_TP_MARKET_EXIT_SUCCESS | cleanup=cancel_reduce_only_tp_failed")
         if self.near_tp_protective_sl_order_id:
             await self.cancel_near_tp_protective_stop(self.near_tp_protective_sl_order_id)
+        middle_runner_sl_order_id = getattr(self, "middle_runner_protective_sl_order_id", None)
+        if middle_runner_sl_order_id:
+            await self.cancel_middle_runner_protective_stop(middle_runner_sl_order_id)
 
     def _tp_price_summary(self, specs: list[tuple[str, Decimal, float]]) -> str:
         if len(specs) == 1:
@@ -803,6 +873,16 @@ class Trader:
             logger.warning("NEAR_TP_PROTECTIVE_SL_CANCEL_ON_FLAT | algoId=%s failed=%s", order_id, exc)
             return False
 
+    async def cancel_middle_runner_protective_stop(self, order_id: str | None) -> bool:
+        if not order_id:
+            return True
+        ok = await self.cancel_near_tp_protective_stop(order_id)
+        if ok and getattr(self, "middle_runner_protective_sl_order_id", None) == order_id:
+            self.middle_runner_protective_sl_order_id = None
+        if ok:
+            logger.warning("MIDDLE_RUNNER_SL_CANCELLED | algoId=%s", order_id)
+        return ok
+
     async def fetch_usdt_equity(self) -> float:
         res = await self.request("GET", "/api/v5/account/balance?ccy=USDT")
         data = res.get("data", [])
@@ -848,6 +928,7 @@ class Trader:
     def mark_flat(self) -> None:
         self.position_contracts = Decimal("0")
         self.tp_order_id = None
+        self.middle_runner_protective_sl_order_id = None
 
     async def set_leverage(self) -> None:
         body = {"instId": self.symbol, "lever": str(self.leverage), "mgnMode": self.td_mode}

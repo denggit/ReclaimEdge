@@ -384,6 +384,48 @@ class AddLayerGateTest(unittest.TestCase):
         self.assertIn("reason=near_tp_protected", "\n".join(logs.output))
         self.assertNotIn("reason=avg_improvement", "\n".join(logs.output))
 
+    def test_middle_runner_active_blocks_add_long_but_not_open(self) -> None:
+        open_strat = strategy()
+        open_strat.state.middle_runner_active = True
+        opened = open_strat._maybe_open_or_add_long(99.70, NOW_MS, boll(), cvd())
+        self.assertIsNotNone(opened)
+        self.assertEqual(opened.intent_type, "OPEN_LONG")
+
+        strat = strategy()
+        strat.state = long_state(
+            layers=2,
+            last_order_ts_ms=NOW_MS - 60 * 60 * 1000,
+            total_entry_qty=100.0,
+            total_entry_notional=10_000.0,
+            middle_runner_active=True,
+            middle_runner_add_disabled=True,
+        )
+        with self.assertLogs("src.strategies.boll_cvd_reclaim_strategy", level="INFO") as logs:
+            result = strat._maybe_open_or_add_long(99.70, NOW_MS, boll(), cvd())
+        self.assertIsNone(result)
+        self.assertIn("reason=middle_runner_active", "\n".join(logs.output))
+
+    def test_middle_runner_active_blocks_add_short_but_not_open(self) -> None:
+        open_strat = strategy()
+        open_strat.state.middle_runner_active = True
+        opened = open_strat._maybe_open_or_add_short(100.30, NOW_MS, boll(), cvd())
+        self.assertIsNotNone(opened)
+        self.assertEqual(opened.intent_type, "OPEN_SHORT")
+
+        strat = strategy()
+        strat.state = short_state(
+            layers=2,
+            last_order_ts_ms=NOW_MS - 60 * 60 * 1000,
+            total_entry_qty=100.0,
+            total_entry_notional=10_000.0,
+            middle_runner_active=True,
+            middle_runner_add_disabled=True,
+        )
+        with self.assertLogs("src.strategies.boll_cvd_reclaim_strategy", level="INFO") as logs:
+            result = strat._maybe_open_or_add_short(100.30, NOW_MS, boll(), cvd())
+        self.assertIsNone(result)
+        self.assertIn("reason=middle_runner_active", "\n".join(logs.output))
+
 
 if __name__ == "__main__":
     unittest.main()

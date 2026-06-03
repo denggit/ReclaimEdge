@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+import os
 from decimal import Decimal
 from pathlib import Path
 from types import MethodType
+from unittest.mock import patch
 
-from scripts.run_boll_cvd_live import mark_partial_tp_consumed_if_position_reduced
+from scripts.run_boll_cvd_live import mark_middle_runner_active_if_position_reduced, mark_partial_tp_consumed_if_position_reduced
 from src.execution.trader import PositionSnapshot, Trader
 from src.indicators.cvd_tracker import CvdSnapshot
 from src.monitors.boll_band_breakout_monitor import BollSnapshot
@@ -34,8 +36,8 @@ def strategy(**config_overrides) -> BollCvdReclaimStrategy:
     )
 
 
-def boll(middle: float = 110.0, upper: float = 120.0, lower: float = 90.0) -> BollSnapshot:
-    return BollSnapshot("ETH-USDT-SWAP", 1_000, 100.0, middle, upper, lower, 0.1, 0.1, True, True)
+def boll(middle: float = 110.0, upper: float = 120.0, lower: float = 90.0, candle_ts_ms: int = 1_000) -> BollSnapshot:
+    return BollSnapshot("ETH-USDT-SWAP", candle_ts_ms, 100.0, middle, upper, lower, 0.1, 0.1, True, True)
 
 
 def cvd() -> CvdSnapshot:
@@ -102,6 +104,39 @@ def intent(**overrides) -> TradeIntent:
 
 
 class SplitTakeProfitStrategyTest(unittest.TestCase):
+    def test_middle_runner_config_defaults_and_env_clamp(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            config = BollCvdReclaimStrategyConfig.from_env()
+        self.assertFalse(config.middle_runner_enabled)
+        self.assertEqual(config.middle_runner_first_close_ratio, 0.8)
+        self.assertTrue(config.split_tp_enabled)
+
+        with patch.dict(
+            os.environ,
+            {
+                "MIDDLE_RUNNER_ENABLED": "true",
+                "MIDDLE_RUNNER_FIRST_CLOSE_RATIO": "0.99",
+                "MIDDLE_RUNNER_EXTENSION_TRIGGER_RATIO": "0.6",
+                "NEAR_TP_ENABLED": "false",
+                "SPLIT_TP_ENABLED": "false",
+            },
+            clear=True,
+        ):
+            config = BollCvdReclaimStrategyConfig.from_env()
+        self.assertTrue(config.middle_runner_enabled)
+        self.assertEqual(config.middle_runner_first_close_ratio, 0.95)
+        self.assertEqual(config.middle_runner_extension_trigger_ratio, 0.6)
+        self.assertFalse(config.split_tp_enabled)
+
+        with patch.dict(os.environ, {"MIDDLE_RUNNER_FIRST_CLOSE_RATIO": "0.01"}, clear=True):
+            config = BollCvdReclaimStrategyConfig.from_env()
+        self.assertEqual(config.middle_runner_first_close_ratio, 0.1)
+
+    def test_middle_runner_and_near_tp_env_conflict_raises(self) -> None:
+        with patch.dict(os.environ, {"MIDDLE_RUNNER_ENABLED": "true", "NEAR_TP_ENABLED": "true"}, clear=True):
+            with self.assertRaises(RuntimeError):
+                BollCvdReclaimStrategyConfig.from_env()
+
     def test_long_tp_switches_to_upper_when_middle_net_profit_below_threshold(self) -> None:
         strat = strategy(breakeven_fee_buffer_pct=0.001, tp_min_net_profit_pct=0.002)
         strat.state.avg_entry_price = 100.0
@@ -251,6 +286,148 @@ class SplitTakeProfitStrategyTest(unittest.TestCase):
         self.assertEqual(partial_ratio, 0.0)
         self.assertIsNone(partial_tp)
 
+    def test_split_tp_enabled_false_keeps_single_tp(self) -> None:
+        strat = strategy(split_tp_enabled=False)
+        strat.state.avg_entry_price = 100.0
+
+        partial_tp, partial_ratio, plan = strat._select_tp_plan("LONG", 110.0, 4)
+
+        self.assertEqual(plan, "SINGLE")
+        self.assertEqual(partial_ratio, 0.0)
+        self.assertIsNone(partial_tp)
+
+    def test_middle_runner_long_uses_middle_first_and_upper_runner(self) -> None:
+        strat = strategy(middle_runner_enabled=True, breakeven_fee_buffer_pct=0.001, tp_min_net_profit_pct=0.002)
+        strat.state.avg_entry_price = 100.0
+        bands = boll(middle=101.0, upper=110.0, lower=90.0)
+
+        intent_ = strat._open_position("LONG", "OPEN_LONG", 100.0, 2_000, bands, cvd(), "test")
+
+        self.assertEqual(intent_.tp_mode, "MIDDLE")
+        self.assertEqual(intent_.tp_plan, "MIDDLE_RUNNER")
+        self.assertEqual(intent_.partial_tp_price, 101.0)
+        self.assertEqual(intent_.partial_tp_ratio, 0.8)
+        self.assertEqual(intent_.tp_price, 110.0)
+        self.assertTrue(strat.state.middle_runner_pending)
+        self.assertAlmostEqual(strat.state.middle_runner_keep_ratio, 0.2)
+
+    def test_middle_runner_short_uses_middle_first_and_lower_runner(self) -> None:
+        strat = strategy(middle_runner_enabled=True, breakeven_fee_buffer_pct=0.001, tp_min_net_profit_pct=0.002)
+        strat.state.avg_entry_price = 100.0
+        bands = boll(middle=99.0, upper=110.0, lower=90.0)
+
+        intent_ = strat._open_position("SHORT", "OPEN_SHORT", 100.0, 2_000, bands, cvd(), "test")
+
+        self.assertEqual(intent_.tp_mode, "MIDDLE")
+        self.assertEqual(intent_.tp_plan, "MIDDLE_RUNNER")
+        self.assertEqual(intent_.partial_tp_price, 99.0)
+        self.assertEqual(intent_.partial_tp_ratio, 0.8)
+        self.assertEqual(intent_.tp_price, 90.0)
+
+    def test_middle_runner_not_used_when_final_tp_switches_outer_or_disabled(self) -> None:
+        enabled = strategy(middle_runner_enabled=True, breakeven_fee_buffer_pct=0.001, tp_min_net_profit_pct=0.002)
+        enabled.state.avg_entry_price = 100.0
+        tp_price, mode = enabled._select_tp_price("LONG", boll(middle=100.1, upper=110.0))
+        partial_tp, partial_ratio, plan = enabled._select_tp_plan("LONG", tp_price, 1, tp_mode=mode, boll=boll(middle=100.1, upper=110.0))
+        self.assertEqual(mode, "UPPER")
+        self.assertEqual(plan, "SINGLE")
+        self.assertIsNone(partial_tp)
+        self.assertEqual(partial_ratio, 0.0)
+
+        disabled = strategy(middle_runner_enabled=False)
+        disabled.state.avg_entry_price = 100.0
+        partial_tp, partial_ratio, plan = disabled._select_tp_plan("LONG", 101.0, 1, tp_mode="MIDDLE", boll=boll(middle=101.0, upper=110.0))
+        self.assertEqual(plan, "SINGLE")
+        self.assertIsNone(partial_tp)
+        self.assertEqual(partial_ratio, 0.0)
+
+    def test_middle_runner_sl_calculation_and_tightening(self) -> None:
+        long_strat = strategy(middle_runner_enabled=True, breakeven_fee_buffer_pct=0.001)
+        long_strat.state.avg_entry_price = 100.0
+        long_sl = long_strat._calculate_middle_runner_protective_sl("LONG", 103.0, boll(middle=102.0, lower=96.0))
+        self.assertAlmostEqual(long_sl or 0, max((100.1 + 102.0) / 2, (96.0 + 102.0) / 2))
+        self.assertEqual(long_strat._tighten_middle_runner_sl("LONG", 101.5, 100.5), 101.5)
+
+        short_strat = strategy(middle_runner_enabled=True, breakeven_fee_buffer_pct=0.001)
+        short_strat.state.avg_entry_price = 100.0
+        short_sl = short_strat._calculate_middle_runner_protective_sl("SHORT", 97.0, boll(middle=98.0, upper=104.0))
+        self.assertAlmostEqual(short_sl or 0, min((99.9 + 98.0) / 2, (104.0 + 98.0) / 2))
+        self.assertEqual(short_strat._tighten_middle_runner_sl("SHORT", 98.5, 99.5), 98.5)
+
+    def test_middle_runner_extension_trigger_moves_sl_to_middle(self) -> None:
+        long_strat = strategy(middle_runner_enabled=True, middle_runner_extension_trigger_ratio=0.6)
+        long_strat.state.middle_runner_active = True
+        new_sl = long_strat._apply_middle_runner_extension_trigger("LONG", 106.0, boll(middle=100.0, upper=110.0), 99.0)
+        self.assertEqual(new_sl, 100.0)
+        self.assertTrue(long_strat.state.middle_runner_extension_triggered)
+
+        short_strat = strategy(middle_runner_enabled=True, middle_runner_extension_trigger_ratio=0.6)
+        short_strat.state.middle_runner_active = True
+        new_sl = short_strat._apply_middle_runner_extension_trigger("SHORT", 94.0, boll(middle=100.0, lower=90.0), 101.0)
+        self.assertEqual(new_sl, 100.0)
+        self.assertTrue(short_strat.state.middle_runner_extension_triggered)
+
+    def test_middle_runner_pending_and_active_new_candle_updates(self) -> None:
+        strat = strategy(middle_runner_enabled=True, breakeven_fee_buffer_pct=0.001, tp_min_net_profit_pct=0.002)
+        strat.state = StrategyPositionState(
+            side="LONG",
+            layers=1,
+            last_entry_price=100.0,
+            total_entry_qty=1.0,
+            total_entry_notional=100.0,
+            avg_entry_price=100.0,
+            tp_price=110.0,
+            tp_mode="MIDDLE",
+            tp_plan="MIDDLE_RUNNER",
+            partial_tp_price=101.0,
+            partial_tp_ratio=0.8,
+            middle_runner_pending=True,
+            middle_runner_first_close_ratio=0.8,
+            middle_runner_keep_ratio=0.2,
+            last_tp_update_candle_ts_ms=1_000,
+        )
+
+        pending_intent = strat._maybe_update_tp(100.0, 2_000, boll(middle=102.0, upper=112.0, lower=92.0, candle_ts_ms=2_000), cvd())
+        self.assertIsNotNone(pending_intent)
+        self.assertEqual(pending_intent.partial_tp_price, 102.0)
+        self.assertEqual(pending_intent.tp_price, 112.0)
+
+        strat.state.middle_runner_pending = False
+        strat.state.middle_runner_active = True
+        strat.state.middle_runner_protective_sl_price = 101.5
+        active_intent = strat._maybe_update_tp(106.0, 3_000, boll(middle=103.0, upper=113.0, lower=93.0, candle_ts_ms=3_000), cvd())
+        self.assertIsNotNone(active_intent)
+        self.assertEqual(active_intent.tp_price, 113.0)
+        self.assertGreaterEqual(active_intent.middle_runner_protective_sl_price or 0, 101.5)
+
+    def test_near_tp_skips_middle_runner_pending_and_active(self) -> None:
+        strat = strategy(
+            near_tp_enabled=True,
+            middle_runner_enabled=True,
+            near_tp_min_progress_ratio=0.1,
+            near_tp_min_profit_pct=0.0,
+            near_tp_min_reduce_profit_pct=0.0,
+        )
+        base_state = dict(
+            side="LONG",
+            layers=1,
+            total_entry_qty=1.0,
+            total_entry_notional=100.0,
+            avg_entry_price=100.0,
+            tp_price=110.0,
+            tp_plan="MIDDLE_RUNNER",
+            middle_runner_first_close_ratio=0.8,
+            middle_runner_keep_ratio=0.2,
+        )
+
+        strat.state = StrategyPositionState(**base_state, middle_runner_pending=True)
+        self.assertIsNone(strat._maybe_near_tp_reduce(109.0, 2_000, boll(), cvd()))
+        self.assertFalse(strat.state.near_tp_armed)
+
+        strat.state = StrategyPositionState(**base_state, middle_runner_active=True)
+        self.assertIsNone(strat._maybe_near_tp_reduce(109.0, 3_000, boll(), cvd()))
+        self.assertFalse(strat.state.near_tp_armed)
+
 
 class SplitTakeProfitTraderTest(unittest.IsolatedAsyncioTestCase):
     def make_trader(self) -> Trader:
@@ -271,6 +448,14 @@ class SplitTakeProfitTraderTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(specs, [("partial", Decimal("2.00"), 108.0), ("final", Decimal("2.00"), 110.0)])
+
+    def test_build_middle_runner_order_specs_uses_first_and_runner_labels(self) -> None:
+        trader = self.make_trader()
+        specs = trader._build_take_profit_order_specs(
+            intent(partial_tp_price=105.0, partial_tp_ratio=0.8, tp_plan="MIDDLE_RUNNER", tp_price=110.0)
+        )
+
+        self.assertEqual(specs, [("middle", Decimal("3.20"), 105.0), ("runner", Decimal("0.80"), 110.0)])
 
     async def test_replace_take_profit_places_two_reduce_only_orders_for_split_plan(self) -> None:
         trader = self.make_trader()
@@ -372,6 +557,57 @@ class SplitTakeProfitLifecycleTest(unittest.TestCase):
         self.assertEqual(payload["last_partial_tp_price"], 108.0)
         self.assertEqual(payload["last_tp_plan"], "SPLIT_PARTIAL_FINAL")
         self.assertTrue(payload["partial_tp_consumed"])
+
+    def test_mark_middle_runner_active_when_position_reduced_to_keep_ratio(self) -> None:
+        strat = strategy(middle_runner_enabled=True)
+        strat.state = StrategyPositionState(
+            side="LONG",
+            layers=1,
+            total_entry_qty=1.0,
+            total_entry_notional=100.0,
+            avg_entry_price=100.0,
+            tp_price=110.0,
+            tp_plan="MIDDLE_RUNNER",
+            partial_tp_price=105.0,
+            partial_tp_ratio=0.8,
+            middle_runner_pending=True,
+            middle_runner_first_close_ratio=0.8,
+            middle_runner_keep_ratio=0.2,
+            middle_runner_first_tp_price=105.0,
+            middle_runner_final_tp_price=110.0,
+        )
+        position = PositionSnapshot("LONG", Decimal("2"), 100.0, 0.2, Decimal("2"))
+
+        activated = mark_middle_runner_active_if_position_reduced(strat, position)
+
+        self.assertTrue(activated)
+        self.assertTrue(strat.state.middle_runner_active)
+        self.assertFalse(strat.state.middle_runner_pending)
+        self.assertTrue(strat.state.middle_runner_add_disabled)
+        self.assertTrue(strat.state.partial_tp_consumed)
+        self.assertEqual(strat.state.tp_plan, "SINGLE")
+
+    def test_middle_runner_partial_size_mismatch_disables_add_without_activation(self) -> None:
+        strat = strategy(middle_runner_enabled=True)
+        strat.state = StrategyPositionState(
+            side="LONG",
+            layers=1,
+            total_entry_qty=1.0,
+            total_entry_notional=100.0,
+            avg_entry_price=100.0,
+            tp_plan="MIDDLE_RUNNER",
+            middle_runner_pending=True,
+            middle_runner_first_close_ratio=0.8,
+            middle_runner_keep_ratio=0.2,
+        )
+        position = PositionSnapshot("LONG", Decimal("5"), 100.0, 0.5, Decimal("5"))
+
+        activated = mark_middle_runner_active_if_position_reduced(strat, position)
+
+        self.assertFalse(activated)
+        self.assertFalse(strat.state.middle_runner_active)
+        self.assertTrue(strat.state.middle_runner_pending)
+        self.assertTrue(strat.state.middle_runner_add_disabled)
 
 
 if __name__ == "__main__":

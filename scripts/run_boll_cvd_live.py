@@ -360,6 +360,17 @@ def restore_strategy_from_saved_state(strategy: BollCvdReclaimStrategy, saved_st
         near_tp_protective_sl_price=getattr(saved_state, "near_tp_protective_sl_price", None),
         near_tp_protective_sl_order_id=getattr(saved_state, "near_tp_protective_sl_order_id", None),
         near_tp_add_disabled=getattr(saved_state, "near_tp_add_disabled", False),
+        middle_runner_enabled_for_position=getattr(saved_state, "middle_runner_enabled_for_position", False),
+        middle_runner_pending=getattr(saved_state, "middle_runner_pending", False),
+        middle_runner_active=getattr(saved_state, "middle_runner_active", False),
+        middle_runner_first_close_ratio=getattr(saved_state, "middle_runner_first_close_ratio", 0.0),
+        middle_runner_keep_ratio=getattr(saved_state, "middle_runner_keep_ratio", 0.0),
+        middle_runner_first_tp_price=getattr(saved_state, "middle_runner_first_tp_price", None),
+        middle_runner_final_tp_price=getattr(saved_state, "middle_runner_final_tp_price", None),
+        middle_runner_protective_sl_price=getattr(saved_state, "middle_runner_protective_sl_price", None),
+        middle_runner_protective_sl_order_id=getattr(saved_state, "middle_runner_protective_sl_order_id", None),
+        middle_runner_extension_triggered=getattr(saved_state, "middle_runner_extension_triggered", False),
+        middle_runner_add_disabled=getattr(saved_state, "middle_runner_add_disabled", False),
     )
     logger.warning(
         "Recovered strategy state from local disk | position_id=%s side=%s layers=%s avg_entry=%.4f tp=%s partial_tp=%s tp_plan=%s partial_tp_consumed=%s",
@@ -420,6 +431,78 @@ def mark_partial_tp_consumed_if_position_reduced(strategy: BollCvdReclaimStrateg
         partial_tp_ratio,
     )
     return True
+
+
+def mark_middle_runner_active_if_position_reduced(strategy: BollCvdReclaimStrategy, position: PositionSnapshot) -> bool:
+    state = strategy.state
+    if not getattr(state, "middle_runner_pending", False):
+        return False
+    if getattr(state, "middle_runner_active", False):
+        return False
+    if not position.has_position or position.side != state.side:
+        return False
+    total_entry_qty = float(getattr(state, "total_entry_qty", 0.0) or 0.0)
+    keep_ratio = float(getattr(state, "middle_runner_keep_ratio", 0.0) or 0.0)
+    if total_entry_qty <= 0 or keep_ratio <= 0 or keep_ratio >= 1:
+        logger.warning(
+            "MIDDLE_RUNNER_ORDER_WARNING | reason=activation_size_unknown side=%s total_entry_qty=%.8f keep_ratio=%.6f okx_eth_qty=%.8f",
+            state.side,
+            total_entry_qty,
+            keep_ratio,
+            position.eth_qty,
+        )
+        return False
+
+    expected_qty = total_entry_qty * keep_ratio
+    tolerance = max(total_entry_qty * 0.03, expected_qty * 0.10, 0.000001)
+    if abs(float(position.eth_qty) - expected_qty) > tolerance:
+        reduction_ratio = 1 - (float(position.eth_qty) / total_entry_qty)
+        if reduction_ratio > 0.05:
+            state.middle_runner_add_disabled = True
+            logger.warning(
+                "MIDDLE_RUNNER_ORDER_WARNING | reason=partial_size_mismatch_add_disabled side=%s old_qty=%.8f new_qty=%.8f expected_qty=%.8f tolerance=%.8f reduction_ratio=%.6f keep_ratio=%.6f",
+                state.side,
+                total_entry_qty,
+                position.eth_qty,
+                expected_qty,
+                tolerance,
+                reduction_ratio,
+                keep_ratio,
+            )
+        return False
+
+    state.middle_runner_pending = False
+    state.middle_runner_active = True
+    state.middle_runner_add_disabled = True
+    state.partial_tp_consumed = True
+    state.partial_tp_price = None
+    state.partial_tp_ratio = 0.0
+    state.tp_plan = "SINGLE"
+    logger.warning(
+        "MIDDLE_RUNNER_ACTIVATED | side=%s old_qty=%.8f new_qty=%.8f expected_qty=%.8f first_close_ratio=%.4f keep_ratio=%.4f final_tp_price=%s add_disabled=true",
+        state.side,
+        total_entry_qty,
+        position.eth_qty,
+        expected_qty,
+        getattr(state, "middle_runner_first_close_ratio", 0.0),
+        keep_ratio,
+        getattr(state, "middle_runner_final_tp_price", None),
+    )
+    return True
+
+
+def middle_runner_activation_boll(strategy: BollCvdReclaimStrategy):
+    state = strategy.state
+    middle = getattr(state, "middle_runner_first_tp_price", None)
+    final = getattr(state, "middle_runner_final_tp_price", None) or getattr(state, "tp_price", None)
+    if middle is None or final is None:
+        return None
+    width = abs(float(final) - float(middle))
+    if width <= 0:
+        return None
+    upper = float(final) if state.side == "LONG" else float(middle) + width
+    lower = float(middle) - width if state.side == "LONG" else float(final)
+    return type("MiddleRunnerBoll", (), {"middle": float(middle), "upper": upper, "lower": lower})()
 
 
 def position_log_key(position: PositionSnapshot) -> tuple[str, str, float]:
@@ -870,9 +953,33 @@ async def execution_worker(
                     current_position_id = execution_state.current_position_id
                     cash_before_position = execution_state.cash_before_position
                     execution_state.last_order_ts_ms = command.intent.ts_ms
+                    if getattr(command.intent, "middle_runner_active", False):
+                        if getattr(result, "protective_sl_order_id", None):
+                            strategy.state.middle_runner_protective_sl_order_id = result.protective_sl_order_id
+                        if _parse_optional_float(getattr(result, "protective_sl_price", "")) is not None:
+                            strategy.state.middle_runner_protective_sl_price = _parse_optional_float(result.protective_sl_price)
                     strategy_state_for_save = copy.deepcopy(strategy.state)
                     equity = account_snapshot.equity
                 journal.record_tp_update(position_id=current_position_id, intent=command.intent, result=result, equity=equity)
+                if (
+                    (getattr(command.intent, "middle_runner_active", False) or getattr(command.intent, "middle_runner_pending", False))
+                    and hasattr(journal, "append")
+                ):
+                    journal.append(
+                        "MIDDLE_RUNNER_TP_UPDATED",
+                        {
+                            "side": command.intent.side,
+                            "first_tp_price": getattr(command.intent, "partial_tp_price", None),
+                            "final_tp_price": command.intent.tp_price,
+                            "protective_sl_price": getattr(result, "protective_sl_price", "") or getattr(command.intent, "middle_runner_protective_sl_price", None),
+                            "protective_sl_order_id": getattr(result, "protective_sl_order_id", None),
+                            "boll_lower": command.intent.boll_lower,
+                            "boll_middle": command.intent.boll_middle,
+                            "boll_upper": command.intent.boll_upper,
+                            "reason": command.intent.reason,
+                        },
+                        position_id=current_position_id,
+                    )
                 state_store.save(LiveStateStore.from_strategy_state(position_id=current_position_id, symbol=trader.symbol, strategy_state=strategy_state_for_save, cash_before_position=cash_before_position))
                 logger.warning(
                     "LIVE TP update success | side=%s layer=%s price=%.4f contracts=%s tp_price=%s tp_mode=%s tp_plan=%s partial_tp=%s avg_entry=%.4f breakeven=%.4f tp_order_id=%s",
@@ -1022,6 +1129,23 @@ async def execution_worker(
                     equity=equity,
                     extra={"symbol": trader.symbol},
                 )
+                if getattr(command.intent, "tp_plan", "SINGLE") == "MIDDLE_RUNNER" and hasattr(journal, "append"):
+                    journal.append(
+                        "MIDDLE_RUNNER_PLANNED",
+                        {
+                            "side": command.intent.side,
+                            "layers": command.intent.layer_index,
+                            "avg_entry_price": command.intent.avg_entry_price,
+                            "first_tp_price": getattr(command.intent, "partial_tp_price", None),
+                            "final_tp_price": command.intent.tp_price,
+                            "first_close_ratio": getattr(command.intent, "partial_tp_ratio", 0.0),
+                            "keep_ratio": getattr(command.intent, "middle_runner_keep_ratio", 0.0),
+                            "boll_lower": command.intent.boll_lower,
+                            "boll_middle": command.intent.boll_middle,
+                            "boll_upper": command.intent.boll_upper,
+                        },
+                        position_id=current_position_id or new_position_id or "",
+                    )
                 state_store.save(LiveStateStore.from_strategy_state(position_id=current_position_id, symbol=trader.symbol, strategy_state=strategy_state_for_save, cash_before_position=cash_before_position))
                 logger.warning(
                     "LIVE entry success | intent_type=%s side=%s layer=%s price=%.4f contracts=%s tp_price=%s tp_mode=%s tp_plan=%s partial_tp=%s avg_entry=%.4f breakeven=%.4f order_id=%s tp_order_id=%s",
@@ -1189,6 +1313,8 @@ async def account_position_sync_worker(
             cash_transfer_payload: dict[str, Any] | None = None
             cash_drift_payload: dict[str, Any] | None = None
             save_state_payload: tuple[str | None, StrategyPositionState, float | None] | None = None
+            middle_runner_sl_payload: dict[str, Any] | None = None
+            middle_runner_activation_payload: dict[str, Any] | None = None
             clear_state = False
             flat_previous_halt_reason: str | None = None
             async with state_lock:
@@ -1212,6 +1338,7 @@ async def account_position_sync_worker(
                         "last_tp_plan": getattr(strategy.state, "tp_plan", "SINGLE"),
                         "partial_tp_consumed": getattr(strategy.state, "partial_tp_consumed", False),
                         "near_tp_protective_sl_order_id": getattr(strategy.state, "near_tp_protective_sl_order_id", None),
+                        "middle_runner_protective_sl_order_id": getattr(strategy.state, "middle_runner_protective_sl_order_id", None),
                     }
                     execution_state.trading_halted = True
                     last_flat_detected_monotonic = now
@@ -1317,8 +1444,40 @@ async def account_position_sync_worker(
                 if not flat_transition_detected and position.has_position:
                     trader.position_contracts = position.contracts
                     if pending_order_count == 0:
+                        middle_runner_activated = mark_middle_runner_active_if_position_reduced(strategy, position)
                         mark_partial_tp_consumed_if_position_reduced(strategy, position)
                         sync_strategy_cost_from_position(strategy, position)
+                        if middle_runner_activated:
+                            config = getattr(strategy, "config", None)
+                            if bool(getattr(config, "middle_runner_disable_add_after_partial", True)):
+                                strategy.state.middle_runner_add_disabled = True
+                            middle_runner_activation_payload = {
+                                "position_id": execution_state.current_position_id,
+                                "side": position.side,
+                                "layers": strategy.state.layers,
+                                "avg_entry_price": strategy.state.avg_entry_price,
+                                "first_tp_price": getattr(strategy.state, "middle_runner_first_tp_price", None),
+                                "final_tp_price": getattr(strategy.state, "middle_runner_final_tp_price", None),
+                                "first_close_ratio": getattr(strategy.state, "middle_runner_first_close_ratio", 0.0),
+                                "keep_ratio": getattr(strategy.state, "middle_runner_keep_ratio", 0.0),
+                                "reason": "partial_tp_filled",
+                            }
+                            if bool(getattr(config, "middle_runner_protective_sl_enabled", True)):
+                                runner_boll = middle_runner_activation_boll(strategy)
+                                current_price = getattr(runner_boll, "middle", 0.0) if runner_boll is not None else 0.0
+                                protective_sl = (
+                                    strategy._calculate_middle_runner_protective_sl(position.side, current_price, runner_boll)
+                                    if runner_boll is not None and position.side is not None
+                                    else None
+                                )
+                                strategy.state.middle_runner_protective_sl_price = protective_sl
+                                middle_runner_sl_payload = {
+                                    "position_id": execution_state.current_position_id,
+                                    "side": position.side,
+                                    "contracts": position.contracts,
+                                    "protective_sl_price": protective_sl,
+                                    "old_sl_order_id": getattr(strategy.state, "middle_runner_protective_sl_order_id", None),
+                                }
                         if (
                             execution_state.trading_halted
                             and execution_state.halt_reason == "near_tp_protected_sync_failed"
@@ -1383,6 +1542,12 @@ async def account_position_sync_worker(
                         await trader.cancel_near_tp_protective_stop(protective_sl_order_id)
                     except Exception:
                         logger.warning("NEAR_TP_PROTECTIVE_SL_CANCEL_ON_FLAT | algoId=%s failed_unhandled", protective_sl_order_id)
+                middle_runner_sl_order_id = pending_flat_payload.get("middle_runner_protective_sl_order_id")
+                if middle_runner_sl_order_id:
+                    try:
+                        await trader.cancel_middle_runner_protective_stop(middle_runner_sl_order_id)
+                    except Exception:
+                        logger.warning("MIDDLE_RUNNER_CANCELLED | reason=flat_sl_cancel_failed algoId=%s", middle_runner_sl_order_id)
                 async with state_lock:
                     flat_previous_halt_reason = execution_state.halt_reason if execution_state.trading_halted else None
                     account_snapshot.position = position
@@ -1421,8 +1586,96 @@ async def account_position_sync_worker(
                 journal.record_cash_transfer(**cash_transfer_payload)
             if cash_drift_payload is not None:
                 journal.record_account_cash_drift(**cash_drift_payload)
+            middle_runner_activation_recorded = False
+            if middle_runner_sl_payload is not None:
+                sl_price = middle_runner_sl_payload.get("protective_sl_price")
+                sl_order_id = None
+                sl_ok = False
+                sl_message = "protective_sl_price_missing"
+                if sl_price is not None and middle_runner_sl_payload.get("side") is not None:
+                    sl_ok, sl_order_id, sl_message = await trader.place_middle_runner_protective_stop_with_retries(
+                        middle_runner_sl_payload["side"],
+                        middle_runner_sl_payload["contracts"],
+                        float(sl_price),
+                        retry_count=int(os.getenv("NEAR_TP_PROTECTIVE_SL_RETRY_COUNT", "3")),
+                        retry_interval_seconds=float(os.getenv("NEAR_TP_PROTECTIVE_SL_RETRY_INTERVAL_SECONDS", "1")),
+                    )
+                if sl_ok:
+                    old_sl_order_id = middle_runner_sl_payload.get("old_sl_order_id")
+                    if old_sl_order_id and old_sl_order_id != sl_order_id:
+                        await trader.cancel_middle_runner_protective_stop(old_sl_order_id)
+                    async with state_lock:
+                        strategy.state.middle_runner_protective_sl_order_id = sl_order_id
+                        strategy.state.middle_runner_protective_sl_price = float(sl_price)
+                        save_state_payload = (execution_state.current_position_id, copy.deepcopy(strategy.state), execution_state.cash_before_position)
+                    if hasattr(journal, "append"):
+                        journal.append(
+                            "MIDDLE_RUNNER_ACTIVATED",
+                            {
+                                **(middle_runner_activation_payload or {}),
+                                "side": middle_runner_sl_payload.get("side"),
+                                "protective_sl_price": sl_price,
+                                "protective_sl_order_id": sl_order_id,
+                                "reason": "partial_tp_filled",
+                            },
+                            position_id=middle_runner_sl_payload.get("position_id"),
+                        )
+                        middle_runner_activation_recorded = True
+                    logger.warning(
+                        "MIDDLE_RUNNER_ACTIVATED | position_id=%s side=%s protective_sl_price=%s protective_sl_order_id=%s",
+                        middle_runner_sl_payload.get("position_id"),
+                        middle_runner_sl_payload.get("side"),
+                        sl_price,
+                        sl_order_id,
+                    )
+                else:
+                    side = middle_runner_sl_payload.get("side")
+                    exit_ok, exit_message = (False, "side_missing")
+                    if side is not None:
+                        exit_ok, exit_message = await trader.market_exit_remaining_position_with_retries(
+                            side,
+                            retry_count=int(os.getenv("NEAR_TP_SL_FAIL_MARKET_EXIT_RETRY_COUNT", "3")),
+                        )
+                    async with state_lock:
+                        execution_state.trading_halted = True
+                        execution_state.halt_reason = "middle_runner_protective_sl_failure"
+                    if hasattr(journal, "append"):
+                        journal.append(
+                            "MIDDLE_RUNNER_ORDER_WARNING",
+                            {
+                                "side": side,
+                                "protective_sl_price": sl_price,
+                                "reason": f"protective_sl_failed:{sl_message};market_exit_ok={exit_ok};{exit_message}",
+                            },
+                            position_id=middle_runner_sl_payload.get("position_id"),
+                        )
+                    logger.error(
+                        "MIDDLE_RUNNER_ORDER_WARNING | reason=protective_sl_failed side=%s sl_price=%s sl_message=%s market_exit_ok=%s market_exit_message=%s",
+                        side,
+                        sl_price,
+                        sl_message,
+                        exit_ok,
+                        exit_message,
+                    )
+            if (
+                middle_runner_activation_payload is not None
+                and not middle_runner_activation_recorded
+                and middle_runner_sl_payload is None
+                and hasattr(journal, "append")
+            ):
+                journal.append(
+                    "MIDDLE_RUNNER_ACTIVATED",
+                    {
+                        **middle_runner_activation_payload,
+                        "protective_sl_price": None,
+                        "protective_sl_order_id": None,
+                        "reason": "partial_tp_filled_protective_sl_disabled",
+                    },
+                    position_id=middle_runner_activation_payload.get("position_id"),
+                )
             if record_flat_payload is not None:
                 record_flat_payload.pop("near_tp_protective_sl_order_id", None)
+                record_flat_payload.pop("middle_runner_protective_sl_order_id", None)
                 journal.record_flat(**record_flat_payload)
                 if rolling_loss_guard is not None and rolling_loss_guard.state is not None and rolling_loss_guard.state.enabled:
                     guard_now_ms = utc_ms()

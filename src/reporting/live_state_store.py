@@ -41,6 +41,17 @@ class LivePositionState:
     near_tp_protective_sl_price: float | None = None
     near_tp_protective_sl_order_id: str | None = None
     near_tp_add_disabled: bool = False
+    middle_runner_enabled_for_position: bool = False
+    middle_runner_pending: bool = False
+    middle_runner_active: bool = False
+    middle_runner_first_close_ratio: float = 0.0
+    middle_runner_keep_ratio: float = 0.0
+    middle_runner_first_tp_price: float | None = None
+    middle_runner_final_tp_price: float | None = None
+    middle_runner_protective_sl_price: float | None = None
+    middle_runner_protective_sl_order_id: str | None = None
+    middle_runner_extension_triggered: bool = False
+    middle_runner_add_disabled: bool = False
     cash_before_position: float | None = None
     updated_at: str = ""
 
@@ -111,6 +122,17 @@ class LiveStateStore:
             near_tp_protective_sl_price=getattr(strategy_state, "near_tp_protective_sl_price", None),
             near_tp_protective_sl_order_id=getattr(strategy_state, "near_tp_protective_sl_order_id", None),
             near_tp_add_disabled=bool(getattr(strategy_state, "near_tp_add_disabled", False)),
+            middle_runner_enabled_for_position=bool(getattr(strategy_state, "middle_runner_enabled_for_position", False)),
+            middle_runner_pending=bool(getattr(strategy_state, "middle_runner_pending", False)),
+            middle_runner_active=bool(getattr(strategy_state, "middle_runner_active", False)),
+            middle_runner_first_close_ratio=float(getattr(strategy_state, "middle_runner_first_close_ratio", 0.0) or 0.0),
+            middle_runner_keep_ratio=float(getattr(strategy_state, "middle_runner_keep_ratio", 0.0) or 0.0),
+            middle_runner_first_tp_price=getattr(strategy_state, "middle_runner_first_tp_price", None),
+            middle_runner_final_tp_price=getattr(strategy_state, "middle_runner_final_tp_price", None),
+            middle_runner_protective_sl_price=getattr(strategy_state, "middle_runner_protective_sl_price", None),
+            middle_runner_protective_sl_order_id=getattr(strategy_state, "middle_runner_protective_sl_order_id", None),
+            middle_runner_extension_triggered=bool(getattr(strategy_state, "middle_runner_extension_triggered", False)),
+            middle_runner_add_disabled=bool(getattr(strategy_state, "middle_runner_add_disabled", False)),
             cash_before_position=cash_before_position,
         )
 
@@ -119,5 +141,7 @@ def _normalize_tp_plan(tp_plan: str) -> str:
     if tp_plan == "SPLIT_50_50":
         return "SPLIT_PARTIAL_FINAL"
     if tp_plan == "SPLIT_PARTIAL_FINAL":
+        return tp_plan
+    if tp_plan == "MIDDLE_RUNNER":
         return tp_plan
     return "SINGLE"
