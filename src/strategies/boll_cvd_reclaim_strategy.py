@@ -757,10 +757,10 @@ class BollCvdReclaimStrategy:
             tp_price = boll.upper if self.state.side == "LONG" else boll.lower
             tp_mode = "UPPER" if self.state.side == "LONG" else "LOWER"
             partial_tp_price, partial_tp_ratio, tp_plan = None, 0.0, "SINGLE"
-            protective_sl = self._calculate_middle_runner_protective_sl(self.state.side, price, boll)
-            if protective_sl is not None and old_runner_sl is not None:
-                protective_sl = self._tighten_middle_runner_sl(self.state.side, old_runner_sl, protective_sl)
-            protective_sl = self._apply_middle_runner_extension_trigger(self.state.side, price, boll, protective_sl)
+            calculated_sl = self._calculate_middle_runner_protective_sl(self.state.side, price, boll)
+            protective_sl = self._tighten_optional_middle_runner_sl(self.state.side, old_runner_sl, calculated_sl)
+            extension_sl = self._apply_middle_runner_extension_trigger(self.state.side, price, boll, protective_sl)
+            protective_sl = self._tighten_optional_middle_runner_sl(self.state.side, old_runner_sl, extension_sl)
             self.state.middle_runner_final_tp_price = tp_price
             self.state.middle_runner_protective_sl_price = protective_sl
         elif self.state.near_tp_protected or self.state.near_tp_add_disabled:
@@ -771,6 +771,8 @@ class BollCvdReclaimStrategy:
                 tp_price = boll.upper if self.state.side == "LONG" else boll.lower
             if tp_plan == "MIDDLE_RUNNER":
                 self._set_middle_runner_planned(partial_tp_price, tp_price)
+            elif self.state.middle_runner_pending and not self.state.middle_runner_active:
+                self._reset_middle_runner_state()
         self.state.last_tp_update_ts_ms = ts_ms
         self.state.last_tp_update_candle_ts_ms = boll.candle_ts_ms
 
@@ -1096,6 +1098,13 @@ class BollCvdReclaimStrategy:
         if side == "LONG":
             return max(old_sl, new_sl)
         return min(old_sl, new_sl)
+
+    def _tighten_optional_middle_runner_sl(self, side: PositionSide, old_sl: float | None, new_sl: float | None) -> float | None:
+        if new_sl is None:
+            return old_sl
+        if old_sl is None:
+            return new_sl
+        return self._tighten_middle_runner_sl(side, old_sl, new_sl)
 
     def _apply_middle_runner_extension_trigger(
         self,
