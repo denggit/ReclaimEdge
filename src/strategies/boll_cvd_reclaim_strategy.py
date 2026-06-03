@@ -40,6 +40,7 @@ class BollCvdReclaimStrategyConfig:
     max_entry_distance_from_extreme_pct: float = 0.002
     max_armed_seconds: int = 900
     breakeven_fee_buffer_pct: float = 0.001
+    tp_min_net_profit_pct: float = 0.002
     min_outside_pct: float = 0.001
     split_tp_min_layers: int = 4
     split_tp_path_ratio: float = 0.8
@@ -81,6 +82,7 @@ class BollCvdReclaimStrategyConfig:
             max_entry_distance_from_extreme_pct=float(os.getenv("MAX_ENTRY_DISTANCE_FROM_EXTREME_PCT", "0.002")),
             max_armed_seconds=int(os.getenv("MAX_ARMED_SECONDS", "900")),
             breakeven_fee_buffer_pct=float(os.getenv("BREAKEVEN_FEE_BUFFER_PCT", "0.001")),
+            tp_min_net_profit_pct=float(os.getenv("TP_MIN_NET_PROFIT_PCT", "0.002")),
             min_outside_pct=float(os.getenv("BOLL_MIN_OUTSIDE_PCT", "0.001")),
             split_tp_min_layers=int(os.getenv("SPLIT_TP_MIN_LAYERS", "4")),
             split_tp_path_ratio=float(os.getenv("SPLIT_TP_PATH_RATIO", "0.8")),
@@ -586,7 +588,7 @@ class BollCvdReclaimStrategy:
         tp_price, tp_mode = self._select_tp_price(side, boll)
         partial_tp_price, partial_tp_ratio, tp_plan = self._select_tp_plan(side, tp_price, next_layer)
         if tp_mode != "MIDDLE":
-            reason = f"{reason} + 中轨不足覆盖含手续费盈亏平衡，TP切换到{tp_mode}"
+            reason = f"{reason} + 中轨净利润不足阈值，TP切换到{tp_mode}"
         if tp_plan == "SPLIT_PARTIAL_FINAL":
             reason = f"{reason} + 总层数>= {self.config.split_tp_min_layers}，启用分批止盈"
         self.state.side = side
@@ -878,13 +880,17 @@ class BollCvdReclaimStrategy:
         if self.state.avg_entry_price <= 0:
             return boll.middle, "MIDDLE"
         fee = self.config.breakeven_fee_buffer_pct
+        min_net_profit = self.config.tp_min_net_profit_pct
+        required_profit_pct = fee + min_net_profit
         if side == "LONG":
             self.state.breakeven_price = self.state.avg_entry_price * (1 + fee)
-            if self.state.breakeven_price > boll.middle:
+            middle_required_price = self.state.avg_entry_price * (1 + required_profit_pct)
+            if boll.middle < middle_required_price:
                 return boll.upper, "UPPER"
             return boll.middle, "MIDDLE"
         self.state.breakeven_price = self.state.avg_entry_price * (1 - fee)
-        if self.state.breakeven_price < boll.middle:
+        middle_required_price = self.state.avg_entry_price * (1 - required_profit_pct)
+        if boll.middle > middle_required_price:
             return boll.lower, "LOWER"
         return boll.middle, "MIDDLE"
 

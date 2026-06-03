@@ -20,20 +20,22 @@ from src.strategies.boll_cvd_reclaim_strategy import (
 )
 
 
-def strategy() -> BollCvdReclaimStrategy:
+def strategy(**config_overrides) -> BollCvdReclaimStrategy:
+    config_values = dict(
+        split_tp_min_layers=4,
+        split_tp_path_ratio=0.8,
+        split_tp_partial_ratio=0.5,
+        split_tp_min_profit_pct=0.004,
+    )
+    config_values.update(config_overrides)
     return BollCvdReclaimStrategy(
-        BollCvdReclaimStrategyConfig(
-            split_tp_min_layers=4,
-            split_tp_path_ratio=0.8,
-            split_tp_partial_ratio=0.5,
-            split_tp_min_profit_pct=0.004,
-        ),
+        BollCvdReclaimStrategyConfig(**config_values),
         SimplePositionSizer(SimplePositionSizerConfig()),
     )
 
 
-def boll() -> BollSnapshot:
-    return BollSnapshot("ETH-USDT-SWAP", 1_000, 100.0, 110.0, 120.0, 90.0, 0.1, 0.1, True, True)
+def boll(middle: float = 110.0, upper: float = 120.0, lower: float = 90.0) -> BollSnapshot:
+    return BollSnapshot("ETH-USDT-SWAP", 1_000, 100.0, middle, upper, lower, 0.1, 0.1, True, True)
 
 
 def cvd() -> CvdSnapshot:
@@ -100,6 +102,74 @@ def intent(**overrides) -> TradeIntent:
 
 
 class SplitTakeProfitStrategyTest(unittest.TestCase):
+    def test_long_tp_switches_to_upper_when_middle_net_profit_below_threshold(self) -> None:
+        strat = strategy(breakeven_fee_buffer_pct=0.001, tp_min_net_profit_pct=0.002)
+        strat.state.avg_entry_price = 100.0
+
+        tp_price, mode = strat._select_tp_price("LONG", boll(middle=100.25, upper=110.0))
+
+        self.assertEqual(mode, "UPPER")
+        self.assertEqual(tp_price, 110.0)
+        self.assertAlmostEqual(strat.state.breakeven_price, 100.1)
+
+    def test_long_tp_uses_middle_at_or_above_min_net_profit_threshold(self) -> None:
+        strat = strategy(breakeven_fee_buffer_pct=0.001, tp_min_net_profit_pct=0.002)
+        strat.state.avg_entry_price = 100.0
+
+        tp_price, mode = strat._select_tp_price("LONG", boll(middle=100.30, upper=110.0))
+        self.assertEqual(mode, "MIDDLE")
+        self.assertAlmostEqual(tp_price, 100.30)
+
+        tp_price, mode = strat._select_tp_price("LONG", boll(middle=100.31, upper=110.0))
+        self.assertEqual(mode, "MIDDLE")
+        self.assertAlmostEqual(tp_price, 100.31)
+
+    def test_short_tp_switches_to_lower_when_middle_net_profit_below_threshold(self) -> None:
+        strat = strategy(breakeven_fee_buffer_pct=0.001, tp_min_net_profit_pct=0.002)
+        strat.state.avg_entry_price = 100.0
+
+        tp_price, mode = strat._select_tp_price("SHORT", boll(middle=99.75, lower=90.0))
+
+        self.assertEqual(mode, "LOWER")
+        self.assertEqual(tp_price, 90.0)
+        self.assertAlmostEqual(strat.state.breakeven_price, 99.9)
+
+    def test_short_tp_uses_middle_at_or_below_min_net_profit_threshold(self) -> None:
+        strat = strategy(breakeven_fee_buffer_pct=0.001, tp_min_net_profit_pct=0.002)
+        strat.state.avg_entry_price = 100.0
+
+        tp_price, mode = strat._select_tp_price("SHORT", boll(middle=99.70, lower=90.0))
+        self.assertEqual(mode, "MIDDLE")
+        self.assertAlmostEqual(tp_price, 99.70)
+
+        tp_price, mode = strat._select_tp_price("SHORT", boll(middle=99.69, lower=90.0))
+        self.assertEqual(mode, "MIDDLE")
+        self.assertAlmostEqual(tp_price, 99.69)
+
+    def test_long_split_tp_uses_upper_when_final_tp_switches_to_upper(self) -> None:
+        strat = strategy(breakeven_fee_buffer_pct=0.001, tp_min_net_profit_pct=0.002)
+        strat.state.avg_entry_price = 100.0
+
+        tp_price, mode = strat._select_tp_price("LONG", boll(middle=100.25, upper=110.0))
+        partial_tp, partial_ratio, plan = strat._select_tp_plan("LONG", tp_price, 4)
+
+        self.assertEqual(mode, "UPPER")
+        self.assertEqual(plan, "SPLIT_PARTIAL_FINAL")
+        self.assertEqual(partial_ratio, 0.5)
+        self.assertAlmostEqual(partial_tp or 0, 108.0)
+
+    def test_short_split_tp_uses_lower_when_final_tp_switches_to_lower(self) -> None:
+        strat = strategy(breakeven_fee_buffer_pct=0.001, tp_min_net_profit_pct=0.002)
+        strat.state.avg_entry_price = 100.0
+
+        tp_price, mode = strat._select_tp_price("SHORT", boll(middle=99.75, lower=90.0))
+        partial_tp, partial_ratio, plan = strat._select_tp_plan("SHORT", tp_price, 4)
+
+        self.assertEqual(mode, "LOWER")
+        self.assertEqual(plan, "SPLIT_PARTIAL_FINAL")
+        self.assertEqual(partial_ratio, 0.5)
+        self.assertAlmostEqual(partial_tp or 0, 92.0)
+
     def test_long_split_tp_uses_80_pct_path_when_min_profit_is_inside_final_tp(self) -> None:
         strat = strategy()
         strat.state.avg_entry_price = 100.0
