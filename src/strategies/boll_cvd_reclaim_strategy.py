@@ -29,8 +29,10 @@ class BollCvdReclaimStrategyConfig:
     min_buy_ratio: float = 0.55
     min_sell_ratio: float = 0.55
     add_layer_gap_pct: float = 0.003
-    add_layer_gap_pct_layer_9_10: float = 0.004
-    add_layer_gap_pct_layer_11_plus: float = 0.005
+    add_layer_gap_pct_layer_7_8: float = 0.004
+    add_layer_gap_pct_layer_9_10: float = 0.006
+    add_layer_gap_pct_layer_11_plus: float = 0.008
+    add_min_avg_improvement_pct: float = 0.0012
     max_layers: int = 3
     order_cooldown_seconds: int = 10
     first_add_block_seconds: int = 1800
@@ -71,8 +73,10 @@ class BollCvdReclaimStrategyConfig:
             min_buy_ratio=float(os.getenv("CVD_MIN_BUY_RATIO", "0.55")),
             min_sell_ratio=float(os.getenv("CVD_MIN_SELL_RATIO", "0.55")),
             add_layer_gap_pct=float(os.getenv("ADD_LAYER_GAP_PCT", "0.003")),
-            add_layer_gap_pct_layer_9_10=float(os.getenv("ADD_LAYER_GAP_PCT_LAYER_9_10", "0.004")),
-            add_layer_gap_pct_layer_11_plus=float(os.getenv("ADD_LAYER_GAP_PCT_LAYER_11_PLUS", "0.005")),
+            add_layer_gap_pct_layer_7_8=float(os.getenv("ADD_LAYER_GAP_PCT_LAYER_7_8", "0.004")),
+            add_layer_gap_pct_layer_9_10=float(os.getenv("ADD_LAYER_GAP_PCT_LAYER_9_10", "0.006")),
+            add_layer_gap_pct_layer_11_plus=float(os.getenv("ADD_LAYER_GAP_PCT_LAYER_11_PLUS", "0.008")),
+            add_min_avg_improvement_pct=float(os.getenv("ADD_MIN_AVG_IMPROVEMENT_PCT", "0.0012")),
             max_layers=int(os.getenv("MAX_LAYERS", "3")),
             order_cooldown_seconds=int(os.getenv("ORDER_COOLDOWN_SECONDS", "10")),
             first_add_block_seconds=int(os.getenv("FIRST_ADD_BLOCK_SECONDS", "1800")),
@@ -419,6 +423,29 @@ class BollCvdReclaimStrategy:
             required_price,
             gap_pct * 100,
         )
+        avg_improvement_ok, improvement_pct, projected_avg = self._add_avg_improvement_passed("LONG", price, target_layer)
+        if not avg_improvement_ok:
+            logger.info(
+                "ADD_SKIPPED | reason=avg_improvement side=LONG price=%.4f layers=%s target_layer=%s avg_entry=%.4f projected_avg_entry=%.4f improvement_pct=%.6f required_improvement_pct=%.6f",
+                price,
+                self.state.layers,
+                target_layer,
+                self.state.avg_entry_price,
+                projected_avg,
+                improvement_pct,
+                self.config.add_min_avg_improvement_pct,
+            )
+            return None
+        logger.info(
+            "ADD_AVG_IMPROVEMENT_PASSED | side=LONG price=%.4f layers=%s target_layer=%s avg_entry=%.4f projected_avg_entry=%.4f improvement_pct=%.6f required_improvement_pct=%.6f",
+            price,
+            self.state.layers,
+            target_layer,
+            self.state.avg_entry_price,
+            projected_avg,
+            improvement_pct,
+            self.config.add_min_avg_improvement_pct,
+        )
         return self._open_position(
             "LONG",
             "ADD_LONG",
@@ -426,7 +453,7 @@ class BollCvdReclaimStrategy:
             ts_ms,
             boll,
             cvd,
-            f"距离上一多仓超过{gap_pct * 100:.2f}% + 新出轨深度达标后低点附近再次跌不动",
+            f"距离上一多仓超过{gap_pct * 100:.2f}% + 补仓后均价改善{improvement_pct * 100:.2f}% + 新出轨深度达标后低点附近再次跌不动",
         )
 
     def _maybe_open_or_add_short(self, price: float, ts_ms: int, boll: BollSnapshot, cvd: CvdSnapshot) -> TradeIntent | None:
@@ -467,6 +494,29 @@ class BollCvdReclaimStrategy:
             required_price,
             gap_pct * 100,
         )
+        avg_improvement_ok, improvement_pct, projected_avg = self._add_avg_improvement_passed("SHORT", price, target_layer)
+        if not avg_improvement_ok:
+            logger.info(
+                "ADD_SKIPPED | reason=avg_improvement side=SHORT price=%.4f layers=%s target_layer=%s avg_entry=%.4f projected_avg_entry=%.4f improvement_pct=%.6f required_improvement_pct=%.6f",
+                price,
+                self.state.layers,
+                target_layer,
+                self.state.avg_entry_price,
+                projected_avg,
+                improvement_pct,
+                self.config.add_min_avg_improvement_pct,
+            )
+            return None
+        logger.info(
+            "ADD_AVG_IMPROVEMENT_PASSED | side=SHORT price=%.4f layers=%s target_layer=%s avg_entry=%.4f projected_avg_entry=%.4f improvement_pct=%.6f required_improvement_pct=%.6f",
+            price,
+            self.state.layers,
+            target_layer,
+            self.state.avg_entry_price,
+            projected_avg,
+            improvement_pct,
+            self.config.add_min_avg_improvement_pct,
+        )
         return self._open_position(
             "SHORT",
             "ADD_SHORT",
@@ -474,7 +524,7 @@ class BollCvdReclaimStrategy:
             ts_ms,
             boll,
             cvd,
-            f"距离上一空仓超过{gap_pct * 100:.2f}% + 新出轨深度达标后高点附近再次涨不动",
+            f"距离上一空仓超过{gap_pct * 100:.2f}% + 补仓后均价改善{improvement_pct * 100:.2f}% + 新出轨深度达标后高点附近再次涨不动",
         )
 
     def _add_layer_gap_pct_for_target_layer(self, target_layer: int) -> float:
@@ -482,6 +532,8 @@ class BollCvdReclaimStrategy:
             return self.config.add_layer_gap_pct_layer_11_plus
         if target_layer >= 9:
             return self.config.add_layer_gap_pct_layer_9_10
+        if target_layer >= 7:
+            return self.config.add_layer_gap_pct_layer_7_8
         return self.config.add_layer_gap_pct
 
     def _add_gap_passed(self, side: PositionSide, price: float, target_layer: int) -> tuple[bool, float, float]:
@@ -496,6 +548,28 @@ class BollCvdReclaimStrategy:
 
         required_price = last * (1 + gap_pct)
         return price >= required_price, gap_pct, required_price
+
+    def _add_avg_improvement_passed(self, side: PositionSide, price: float, target_layer: int) -> tuple[bool, float, float]:
+        required = self.config.add_min_avg_improvement_pct
+        if required <= 0:
+            return True, 0.0, self.state.avg_entry_price
+
+        old_qty = self.state.total_entry_qty
+        old_notional = self.state.total_entry_notional
+        old_avg = self.state.avg_entry_price
+        size = self.sizer.calculate(price, layer_index=target_layer)
+        add_qty = size.eth_qty
+        if old_qty <= 0 or old_notional <= 0 or old_avg <= 0 or add_qty <= 0:
+            return False, 0.0, old_avg
+
+        projected_qty = old_qty + add_qty
+        projected_notional = old_notional + price * add_qty
+        projected_avg = projected_notional / projected_qty
+        if side == "LONG":
+            improvement_pct = (old_avg - projected_avg) / old_avg
+        else:
+            improvement_pct = (projected_avg - old_avg) / old_avg
+        return improvement_pct >= required, improvement_pct, projected_avg
 
     def _add_timing_passed(self, side: PositionSide, price: float, ts_ms: int) -> tuple[bool, str]:
         last = self.state.last_entry_price

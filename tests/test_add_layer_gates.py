@@ -91,11 +91,15 @@ def short_state(**overrides) -> StrategyPositionState:
 
 
 class AddLayerGateTest(unittest.TestCase):
-    def test_add_gap_target_layer_2_to_8_uses_0_3_pct(self) -> None:
+    def test_add_gap_target_layer_2_to_6_uses_0_3_pct(self) -> None:
         strat = strategy()
-        strat.state = long_state(layers=7)
 
-        gap_ok, gap_pct, required_price = strat._add_gap_passed("LONG", 99.70, 8)
+        for target_layer in range(2, 7):
+            with self.subTest(target_layer=target_layer):
+                self.assertAlmostEqual(strat._add_layer_gap_pct_for_target_layer(target_layer), 0.003)
+
+        strat.state = long_state(layers=5)
+        gap_ok, gap_pct, required_price = strat._add_gap_passed("LONG", 99.70, 6)
         result = strat._maybe_open_or_add_long(99.70, NOW_MS, boll(), cvd())
 
         self.assertTrue(gap_ok)
@@ -103,14 +107,18 @@ class AddLayerGateTest(unittest.TestCase):
         self.assertAlmostEqual(required_price, 99.70)
         self.assertIsNotNone(result)
         self.assertEqual(result.intent_type, "ADD_LONG")
-        self.assertEqual(result.layer_index, 8)
+        self.assertEqual(result.layer_index, 6)
         self.assertIn("0.30%", result.reason)
 
-    def test_add_gap_target_layer_9_uses_0_4_pct(self) -> None:
+    def test_add_gap_target_layer_7_to_8_uses_0_4_pct(self) -> None:
         strat = strategy()
-        strat.state = long_state(layers=8)
 
-        gap_ok, gap_pct, required_price = strat._add_gap_passed("LONG", 99.70, 9)
+        for target_layer in range(7, 9):
+            with self.subTest(target_layer=target_layer):
+                self.assertAlmostEqual(strat._add_layer_gap_pct_for_target_layer(target_layer), 0.004)
+
+        strat.state = long_state(layers=6)
+        gap_ok, gap_pct, required_price = strat._add_gap_passed("LONG", 99.70, 7)
         blocked = strat._maybe_open_or_add_long(99.70, NOW_MS, boll(), cvd())
 
         self.assertFalse(gap_ok)
@@ -118,53 +126,90 @@ class AddLayerGateTest(unittest.TestCase):
         self.assertAlmostEqual(required_price, 99.60)
         self.assertIsNone(blocked)
 
-        strat.state = long_state(layers=8)
+        strat.state = long_state(layers=6)
         allowed = strat._maybe_open_or_add_long(99.60, NOW_MS, boll(), cvd())
 
         self.assertIsNotNone(allowed)
         self.assertEqual(allowed.intent_type, "ADD_LONG")
-        self.assertEqual(allowed.layer_index, 9)
+        self.assertEqual(allowed.layer_index, 7)
         self.assertIn("0.40%", allowed.reason)
 
-    def test_add_gap_target_layer_11_uses_0_5_pct(self) -> None:
+    def test_add_gap_target_layer_9_to_10_uses_0_6_pct(self) -> None:
         strat = strategy()
-        strat.state = long_state(layers=10)
 
-        gap_ok, gap_pct, required_price = strat._add_gap_passed("LONG", 99.60, 11)
-        blocked = strat._maybe_open_or_add_long(99.60, NOW_MS, boll(), cvd())
+        for target_layer in range(9, 11):
+            with self.subTest(target_layer=target_layer):
+                self.assertAlmostEqual(strat._add_layer_gap_pct_for_target_layer(target_layer), 0.006)
+
+        strat.state = long_state(layers=8)
+        gap_ok, gap_pct, required_price = strat._add_gap_passed("LONG", 99.50, 9)
+        blocked = strat._maybe_open_or_add_long(99.50, NOW_MS, boll(), cvd())
 
         self.assertFalse(gap_ok)
-        self.assertAlmostEqual(gap_pct, 0.005)
-        self.assertAlmostEqual(required_price, 99.50)
+        self.assertAlmostEqual(gap_pct, 0.006)
+        self.assertAlmostEqual(required_price, 99.40)
+        self.assertIsNone(blocked)
+
+        strat.state = long_state(layers=8)
+        allowed = strat._maybe_open_or_add_long(99.40, NOW_MS, boll(), cvd())
+
+        self.assertIsNotNone(allowed)
+        self.assertEqual(allowed.intent_type, "ADD_LONG")
+        self.assertEqual(allowed.layer_index, 9)
+        self.assertIn("0.60%", allowed.reason)
+
+    def test_add_gap_target_layer_11_plus_uses_0_8_pct(self) -> None:
+        strat = strategy()
+
+        for target_layer in (11, 12, 20):
+            with self.subTest(target_layer=target_layer):
+                self.assertAlmostEqual(strat._add_layer_gap_pct_for_target_layer(target_layer), 0.008)
+
+        strat.state = long_state(layers=10)
+
+        gap_ok, gap_pct, required_price = strat._add_gap_passed("LONG", 99.30, 11)
+        blocked = strat._maybe_open_or_add_long(99.30, NOW_MS, boll(), cvd())
+
+        self.assertFalse(gap_ok)
+        self.assertAlmostEqual(gap_pct, 0.008)
+        self.assertAlmostEqual(required_price, 99.20)
         self.assertIsNone(blocked)
 
         strat.state = long_state(layers=10)
-        allowed = strat._maybe_open_or_add_long(99.50, NOW_MS, boll(), cvd())
+        allowed = strat._maybe_open_or_add_long(99.20, NOW_MS, boll(), cvd())
 
         self.assertIsNotNone(allowed)
         self.assertEqual(allowed.intent_type, "ADD_LONG")
         self.assertEqual(allowed.layer_index, 11)
-        self.assertIn("0.50%", allowed.reason)
+        self.assertIn("0.80%", allowed.reason)
 
     def test_short_add_gap_tiers_are_symmetric(self) -> None:
         strat = strategy()
-        strat.state = short_state(layers=8)
 
-        gap_ok, gap_pct, required_price = strat._add_gap_passed("SHORT", 100.30, 9)
-        blocked = strat._maybe_open_or_add_short(100.30, NOW_MS, boll(), cvd())
+        cases = [
+            (1, 2, 100.20, 100.30, 0.003),
+            (6, 7, 100.30, 100.40, 0.004),
+            (8, 9, 100.50, 100.60, 0.006),
+            (10, 11, 100.70, 100.80, 0.008),
+        ]
+        for layers, target_layer, blocked_price, allowed_price, expected_gap in cases:
+            with self.subTest(target_layer=target_layer):
+                strat.state = short_state(layers=layers)
+                gap_ok, gap_pct, required_price = strat._add_gap_passed("SHORT", blocked_price, target_layer)
+                blocked = strat._maybe_open_or_add_short(blocked_price, NOW_MS, boll(), cvd())
 
-        self.assertFalse(gap_ok)
-        self.assertAlmostEqual(gap_pct, 0.004)
-        self.assertAlmostEqual(required_price, 100.40)
-        self.assertIsNone(blocked)
+                self.assertFalse(gap_ok)
+                self.assertAlmostEqual(gap_pct, expected_gap)
+                self.assertAlmostEqual(required_price, allowed_price)
+                self.assertIsNone(blocked)
 
-        strat.state = short_state(layers=8)
-        allowed = strat._maybe_open_or_add_short(100.40, NOW_MS, boll(), cvd())
+                strat.state = short_state(layers=layers)
+                allowed = strat._maybe_open_or_add_short(allowed_price, NOW_MS, boll(), cvd())
 
-        self.assertIsNotNone(allowed)
-        self.assertEqual(allowed.intent_type, "ADD_SHORT")
-        self.assertEqual(allowed.layer_index, 9)
-        self.assertIn("0.40%", allowed.reason)
+                self.assertIsNotNone(allowed)
+                self.assertEqual(allowed.intent_type, "ADD_SHORT")
+                self.assertEqual(allowed.layer_index, target_layer)
+                self.assertIn(f"{expected_gap * 100:.2f}%", allowed.reason)
 
     def test_first_add_block_prevents_add_within_30_minutes(self) -> None:
         strat = strategy()
@@ -225,20 +270,95 @@ class AddLayerGateTest(unittest.TestCase):
         strat = strategy(add_min_interval_bypass_gap_pct=0.003)
         strat.state = long_state(layers=10, last_order_ts_ms=NOW_MS - 5 * 60 * 1000)
 
-        blocked = strat._maybe_open_or_add_long(99.60, NOW_MS, boll(), cvd())
+        blocked = strat._maybe_open_or_add_long(99.40, NOW_MS, boll(), cvd())
 
         self.assertIsNone(blocked)
         self.assertEqual(strat.state.layers, 10)
 
         strat.state = long_state(layers=10, last_order_ts_ms=NOW_MS - 5 * 60 * 1000)
-        allowed = strat._maybe_open_or_add_long(99.50, NOW_MS, boll(), cvd())
+        allowed = strat._maybe_open_or_add_long(99.20, NOW_MS, boll(), cvd())
 
         self.assertIsNotNone(allowed)
         self.assertEqual(allowed.intent_type, "ADD_LONG")
         self.assertEqual(allowed.layer_index, 11)
 
-    def test_open_long_not_affected_by_first_add_block(self) -> None:
+    def test_long_add_blocked_when_avg_improvement_below_0_12_pct(self) -> None:
         strat = strategy()
+        strat.state = long_state(
+            layers=1,
+            total_entry_qty=100.0,
+            total_entry_notional=10_000.0,
+            avg_entry_price=100.0,
+        )
+
+        passed, improvement_pct, projected_avg = strat._add_avg_improvement_passed("LONG", 99.70, 2)
+        result = strat._maybe_open_or_add_long(99.70, NOW_MS, boll(), cvd())
+
+        self.assertFalse(passed)
+        self.assertLess(improvement_pct, 0.0012)
+        self.assertGreater(projected_avg, 99.88)
+        self.assertIsNone(result)
+        self.assertEqual(strat.state.layers, 1)
+
+    def test_long_add_allowed_when_avg_improvement_meets_0_12_pct(self) -> None:
+        strat = strategy()
+        strat.state = long_state(
+            layers=1,
+            total_entry_qty=100.0,
+            total_entry_notional=10_000.0,
+            avg_entry_price=100.0,
+        )
+
+        passed, improvement_pct, _ = strat._add_avg_improvement_passed("LONG", 99.0, 2)
+        result = strat._maybe_open_or_add_long(99.0, NOW_MS, boll(), cvd())
+
+        self.assertTrue(passed)
+        self.assertGreaterEqual(improvement_pct, 0.0012)
+        self.assertIsNotNone(result)
+        self.assertEqual(result.intent_type, "ADD_LONG")
+        self.assertEqual(result.layer_index, 2)
+        self.assertIn("补仓后均价改善", result.reason)
+
+    def test_short_add_blocked_when_avg_improvement_below_0_12_pct(self) -> None:
+        strat = strategy()
+        strat.state = short_state(
+            layers=1,
+            total_entry_qty=100.0,
+            total_entry_notional=10_000.0,
+            avg_entry_price=100.0,
+        )
+
+        passed, improvement_pct, projected_avg = strat._add_avg_improvement_passed("SHORT", 100.30, 2)
+        result = strat._maybe_open_or_add_short(100.30, NOW_MS, boll(), cvd())
+
+        self.assertFalse(passed)
+        self.assertLess(improvement_pct, 0.0012)
+        self.assertLess(projected_avg, 100.12)
+        self.assertIsNone(result)
+        self.assertEqual(strat.state.layers, 1)
+
+    def test_short_add_allowed_when_avg_improvement_meets_0_12_pct(self) -> None:
+        strat = strategy()
+        strat.state = short_state(
+            layers=1,
+            total_entry_qty=100.0,
+            total_entry_notional=10_000.0,
+            avg_entry_price=100.0,
+        )
+
+        passed, improvement_pct, _ = strat._add_avg_improvement_passed("SHORT", 101.0, 2)
+        result = strat._maybe_open_or_add_short(101.0, NOW_MS, boll(), cvd())
+
+        self.assertTrue(passed)
+        self.assertGreaterEqual(improvement_pct, 0.0012)
+        self.assertIsNotNone(result)
+        self.assertEqual(result.intent_type, "ADD_SHORT")
+        self.assertEqual(result.layer_index, 2)
+        self.assertIn("补仓后均价改善", result.reason)
+
+    def test_open_long_not_affected_by_first_add_block_or_avg_improvement_gate(self) -> None:
+        strat = strategy(add_min_avg_improvement_pct=1.0)
+        strat.state.last_order_ts_ms = NOW_MS
 
         result = strat._maybe_open_or_add_long(99.70, NOW_MS, boll(), cvd())
 
@@ -251,13 +371,18 @@ class AddLayerGateTest(unittest.TestCase):
         strat.state = long_state(
             layers=2,
             last_order_ts_ms=NOW_MS - 60 * 60 * 1000,
+            total_entry_qty=100.0,
+            total_entry_notional=10_000.0,
             near_tp_add_disabled=True,
         )
 
-        result = strat._maybe_open_or_add_long(99.50, NOW_MS, boll(), cvd())
+        with self.assertLogs("src.strategies.boll_cvd_reclaim_strategy", level="INFO") as logs:
+            result = strat._maybe_open_or_add_long(99.70, NOW_MS, boll(), cvd())
 
         self.assertIsNone(result)
         self.assertEqual(strat.state.layers, 2)
+        self.assertIn("reason=near_tp_protected", "\n".join(logs.output))
+        self.assertNotIn("reason=avg_improvement", "\n".join(logs.output))
 
 
 if __name__ == "__main__":
