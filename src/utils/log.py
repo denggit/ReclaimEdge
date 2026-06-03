@@ -6,7 +6,8 @@
 默认行为：
 - 写入文件，不输出到 console；
 - 每天一个日志文件；
-- 默认保留最近 7 天日志，过期文件在启动和日期切换时由 TimedRotatingFileHandler 清理。
+- 默认保留最近 7 天日志，过期文件在启动和日期切换时由 TimedRotatingFileHandler 清理；
+- 默认启用异步日志队列，业务线程只入队，后台线程写文件，降低 tick path I/O 阻塞。
 
 可用环境变量：
 - LOG_LEVEL=INFO
@@ -16,19 +17,29 @@
 - LOG_TO_FILE=true
 - LOG_RETENTION_DAYS=7
 - LOG_BACKUP_COUNT=7
+- LOG_ASYNC_ENABLED=true
+- LOG_ASYNC_QUEUE_MAXSIZE=10000
+- LOG_ASYNC_DROP_BELOW_LEVEL=ERROR
+- LOG_HOT_PATH_THROTTLE_ENABLED=true
+- LOG_ARMED_EXTREME_UPDATE_THROTTLE_SECONDS=1
+- LOG_ADD_SKIPPED_THROTTLE_SECONDS=5
 """
 from __future__ import annotations
 
+import atexit
 import datetime as dt
 import logging
 import logging.handlers
 import os
+import queue as queue_module
 import re
 import sys
+import time
 from pathlib import Path
 
 _setup_done = False
 _env_loaded_for_logging = False
+_queue_listener: logging.handlers.QueueListener | None = None
 
 
 def _load_dotenv_for_logging() -> None:
@@ -93,6 +104,20 @@ def _int_env(name: str, default: int, minimum: int | None = None) -> int:
     return value
 
 
+def _float_env(name: str, default: float, minimum: float | None = None) -> float:
+    raw = os.environ.get(name)
+    if raw is None or str(raw).strip() == "":
+        value = default
+    else:
+        try:
+            value = float(str(raw).strip())
+        except ValueError:
+            value = default
+    if minimum is not None:
+        value = max(value, minimum)
+    return value
+
+
 def _get_log_level_from_env(default_level: int = logging.INFO) -> int:
     log_level_str = os.environ.get("LOG_LEVEL", "").upper()
     if not log_level_str:
@@ -108,6 +133,103 @@ def _get_log_level_from_env(default_level: int = logging.INFO) -> int:
         "FATAL": logging.CRITICAL,
     }
     return level_map.get(log_level_str, default_level)
+
+
+def _log_level_from_text(text: str, default_level: int) -> int:
+    level_map = {
+        "DEBUG": logging.DEBUG,
+        "INFO": logging.INFO,
+        "WARNING": logging.WARNING,
+        "WARN": logging.WARNING,
+        "ERROR": logging.ERROR,
+        "CRITICAL": logging.CRITICAL,
+        "FATAL": logging.CRITICAL,
+    }
+    return level_map.get(text.strip().upper(), default_level)
+
+
+class NonBlockingQueueHandler(logging.handlers.QueueHandler):
+    """QueueHandler that never blocks the caller when the log queue is full.
+
+    This is important for live tick paths. When the queue is full, low-priority
+    records are dropped. High-priority records can also be dropped if configured
+    this way; by default we avoid blocking even for ERROR/CRITICAL because trading
+    latency is more important than perfect log retention during overload.
+    """
+
+    def __init__(self, log_queue: queue_module.Queue[logging.LogRecord], *, drop_below_level: int = logging.ERROR):
+        super().__init__(log_queue)
+        self.drop_below_level = drop_below_level
+        self.dropped_count = 0
+
+    def enqueue(self, record: logging.LogRecord) -> None:
+        try:
+            self.queue.put_nowait(record)
+        except queue_module.Full:
+            self.dropped_count += 1
+            return
+
+
+class HotPathThrottleFilter(logging.Filter):
+    """Throttle noisy INFO logs emitted from tick-path strategy code.
+
+    The filter is intentionally based on record.msg templates, so it does not call
+    record.getMessage() and does not force string formatting on the hot path.
+    Business logic and strategy state updates are untouched; only repetitive log
+    records are dropped before they reach the file writer.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.enabled = _bool_env("LOG_HOT_PATH_THROTTLE_ENABLED", True)
+        self.armed_extreme_update_interval_seconds = _float_env(
+            "LOG_ARMED_EXTREME_UPDATE_THROTTLE_SECONDS",
+            1.0,
+            minimum=0.0,
+        )
+        self.add_skipped_interval_seconds = _float_env(
+            "LOG_ADD_SKIPPED_THROTTLE_SECONDS",
+            5.0,
+            minimum=0.0,
+        )
+        self._last_by_key: dict[str, float] = {}
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if not self.enabled or record.levelno >= logging.WARNING:
+            return True
+
+        msg = str(record.msg)
+        key: str | None = None
+        interval = 0.0
+
+        if msg.startswith("LOWER_ARMED_EXTREME_UPDATED"):
+            key = "LOWER_ARMED_EXTREME_UPDATED"
+            interval = self.armed_extreme_update_interval_seconds
+        elif msg.startswith("UPPER_ARMED_EXTREME_UPDATED"):
+            key = "UPPER_ARMED_EXTREME_UPDATED"
+            interval = self.armed_extreme_update_interval_seconds
+        elif msg.startswith("ADD_SKIPPED | reason=add_gap"):
+            key = "ADD_SKIPPED:add_gap"
+            interval = self.add_skipped_interval_seconds
+        elif msg.startswith("ADD_SKIPPED | reason=avg_improvement"):
+            key = "ADD_SKIPPED:avg_improvement"
+            interval = self.add_skipped_interval_seconds
+        elif msg.startswith("ADD_SKIPPED | reason=add_interval"):
+            key = "ADD_SKIPPED:add_interval"
+            interval = self.add_skipped_interval_seconds
+        elif msg.startswith("ADD_SKIPPED | reason=first_add_block"):
+            key = "ADD_SKIPPED:first_add_block"
+            interval = self.add_skipped_interval_seconds
+
+        if key is None or interval <= 0:
+            return True
+
+        now = time.monotonic()
+        last = self._last_by_key.get(key)
+        if last is not None and now - last < interval:
+            return False
+        self._last_by_key[key] = now
+        return True
 
 
 def _cleanup_expired_daily_logs(log_dir: str, log_file_name: str, retention_days: int) -> None:
@@ -138,6 +260,18 @@ def _cleanup_expired_daily_logs(log_dir: str, log_file_name: str, retention_days
                 pass
 
 
+def _stop_queue_listener() -> None:
+    global _queue_listener
+    listener = _queue_listener
+    if listener is None:
+        return
+    try:
+        listener.stop()
+    except Exception:
+        pass
+    _queue_listener = None
+
+
 def setup_logging(log_level: int | None = None, log_dir: str = "logs") -> None:
     """
     配置根日志记录器。
@@ -146,7 +280,7 @@ def setup_logging(log_level: int | None = None, log_dir: str = "logs") -> None:
         log_level: 日志级别，如果为 None 则从 LOG_LEVEL 读取，默认为 INFO。
         log_dir: 日志目录，默认 logs，可被 LOG_DIR 覆盖。
     """
-    global _setup_done
+    global _setup_done, _queue_listener
     if _setup_done:
         return
 
@@ -154,6 +288,8 @@ def setup_logging(log_level: int | None = None, log_dir: str = "logs") -> None:
 
     if log_level is None:
         log_level = _get_log_level_from_env(logging.INFO)
+
+    _stop_queue_listener()
 
     root_logger = logging.getLogger()
     for handler in root_logger.handlers[:]:
@@ -165,6 +301,9 @@ def setup_logging(log_level: int | None = None, log_dir: str = "logs") -> None:
 
     log_to_console = _bool_env("LOG_TO_CONSOLE", False)
     log_to_file = _bool_env("LOG_TO_FILE", True)
+    log_async_enabled = _bool_env("LOG_ASYNC_ENABLED", True)
+    async_queue_maxsize = _int_env("LOG_ASYNC_QUEUE_MAXSIZE", 10000, minimum=100)
+    async_drop_below_level = _log_level_from_text(os.environ.get("LOG_ASYNC_DROP_BELOW_LEVEL", "ERROR"), logging.ERROR)
     effective_log_dir = os.environ.get("LOG_DIR", log_dir)
     log_file_name = os.environ.get("LOG_FILE_NAME", "app.log")
     retention_days = _int_env("LOG_RETENTION_DAYS", 7, minimum=1)
@@ -179,11 +318,12 @@ def setup_logging(log_level: int | None = None, log_dir: str = "logs") -> None:
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
+    target_handlers: list[logging.Handler] = []
     if log_to_console:
         console_handler = logging.StreamHandler(sys.stdout)
         console_handler.setLevel(log_level)
         console_handler.setFormatter(formatter)
-        root_logger.addHandler(console_handler)
+        target_handlers.append(console_handler)
 
     if log_to_file:
         os.makedirs(effective_log_dir, exist_ok=True)
@@ -199,7 +339,22 @@ def setup_logging(log_level: int | None = None, log_dir: str = "logs") -> None:
         file_handler.suffix = "%Y-%m-%d"
         file_handler.setLevel(log_level)
         file_handler.setFormatter(formatter)
-        root_logger.addHandler(file_handler)
+        target_handlers.append(file_handler)
+
+    hot_path_filter = HotPathThrottleFilter()
+    if log_async_enabled:
+        log_queue: queue_module.Queue[logging.LogRecord] = queue_module.Queue(maxsize=async_queue_maxsize)
+        queue_handler = NonBlockingQueueHandler(log_queue, drop_below_level=async_drop_below_level)
+        queue_handler.setLevel(log_level)
+        queue_handler.addFilter(hot_path_filter)
+        root_logger.addHandler(queue_handler)
+        _queue_listener = logging.handlers.QueueListener(log_queue, *target_handlers, respect_handler_level=True)
+        _queue_listener.start()
+        atexit.register(_stop_queue_listener)
+    else:
+        for handler in target_handlers:
+            handler.addFilter(hot_path_filter)
+            root_logger.addHandler(handler)
 
     numba_log_level_str = os.environ.get("NUMBA_LOG_LEVEL", "").upper()
     if numba_log_level_str:
@@ -220,14 +375,17 @@ def setup_logging(log_level: int | None = None, log_dir: str = "logs") -> None:
         logging.getLogger(module_name).setLevel(logging.WARNING)
 
     root_logger.info(
-        "日志系统初始化完成 | log_dir=%s log_file=%s console=%s file=%s level=%s retention_days=%s backup_count=%s",
+        "日志系统初始化完成 | log_dir=%s log_file=%s console=%s file=%s async=%s async_queue_maxsize=%s level=%s retention_days=%s backup_count=%s hot_path_throttle=%s",
         os.path.abspath(effective_log_dir),
         log_file_name,
         log_to_console,
         log_to_file,
+        log_async_enabled,
+        async_queue_maxsize if log_async_enabled else 0,
         logging.getLevelName(log_level),
         retention_days,
         backup_count,
+        hot_path_filter.enabled,
     )
     root_logger.debug("Numba日志级别: %s", numba_log_level)
 
