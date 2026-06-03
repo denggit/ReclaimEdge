@@ -256,27 +256,83 @@ class AddLayerGateTest(unittest.TestCase):
         self.assertIsNone(result)
         self.assertEqual(strat.state.layers, 2)
 
-    def test_add_interval_bypassed_when_gap_ge_0_5_pct(self) -> None:
+    def test_add_interval_target_layer_2_blocks_when_gap_below_dynamic_bypass(self) -> None:
         strat = strategy()
         strat.state = long_state(layers=2, last_order_ts_ms=NOW_MS - 5 * 60 * 1000)
 
-        result = strat._maybe_open_or_add_long(99.50, NOW_MS, boll(), cvd())
+        gap_ok, gap_pct, _ = strat._add_gap_passed("LONG", 99.50, 2)
+        passed, reason = strat._add_timing_passed("LONG", 99.50, NOW_MS, 2)
+
+        self.assertTrue(gap_ok)
+        self.assertAlmostEqual(gap_pct, 0.003)
+        self.assertFalse(passed)
+        self.assertEqual(reason, "add_interval")
+
+    def test_add_interval_target_layer_2_bypassed_when_gap_reaches_dynamic_bypass(self) -> None:
+        strat = strategy()
+        strat.state = long_state(layers=2, last_order_ts_ms=NOW_MS - 5 * 60 * 1000)
+
+        gap_ok, gap_pct, _ = strat._add_gap_passed("LONG", 99.39, 2)
+        passed, reason = strat._add_timing_passed("LONG", 99.39, NOW_MS, 2)
+
+        self.assertTrue(gap_ok)
+        self.assertAlmostEqual(gap_pct, 0.003)
+        self.assertTrue(passed)
+        self.assertEqual(reason, "ok")
+
+    def test_add_interval_target_layer_9_blocks_when_gap_below_dynamic_bypass(self) -> None:
+        strat = strategy()
+        strat.state = long_state(layers=8, last_order_ts_ms=NOW_MS - 5 * 60 * 1000)
+
+        gap_ok, gap_pct, _ = strat._add_gap_passed("LONG", 99.30, 9)
+        passed, reason = strat._add_timing_passed("LONG", 99.30, NOW_MS, 9)
+
+        self.assertTrue(gap_ok)
+        self.assertAlmostEqual(gap_pct, 0.006)
+        self.assertFalse(passed)
+        self.assertEqual(reason, "add_interval")
+
+    def test_add_interval_target_layer_9_bypassed_when_gap_reaches_dynamic_bypass(self) -> None:
+        strat = strategy()
+        strat.state = long_state(layers=8, last_order_ts_ms=NOW_MS - 5 * 60 * 1000)
+
+        gap_ok, gap_pct, _ = strat._add_gap_passed("LONG", 98.79, 9)
+        passed, reason = strat._add_timing_passed("LONG", 98.79, NOW_MS, 9)
+
+        self.assertTrue(gap_ok)
+        self.assertAlmostEqual(gap_pct, 0.006)
+        self.assertTrue(passed)
+        self.assertEqual(reason, "ok")
+
+    def test_add_interval_bypass_gap_uses_double_target_layer_gap(self) -> None:
+        strat = strategy()
+
+        self.assertAlmostEqual(strat._add_min_interval_bypass_gap_pct_for_target_layer(2), 0.006)
+        self.assertAlmostEqual(strat._add_min_interval_bypass_gap_pct_for_target_layer(7), 0.008)
+        self.assertAlmostEqual(strat._add_min_interval_bypass_gap_pct_for_target_layer(9), 0.012)
+        self.assertAlmostEqual(strat._add_min_interval_bypass_gap_pct_for_target_layer(11), 0.016)
+
+    def test_add_interval_bypassed_when_gap_reaches_target_layer_gap_times_2(self) -> None:
+        strat = strategy()
+        strat.state = long_state(layers=2, last_order_ts_ms=NOW_MS - 5 * 60 * 1000)
+
+        result = strat._maybe_open_or_add_long(99.39, NOW_MS, boll(), cvd())
 
         self.assertIsNotNone(result)
         self.assertEqual(result.intent_type, "ADD_LONG")
         self.assertEqual(result.layer_index, 3)
 
-    def test_interval_bypass_does_not_skip_tier_gap(self) -> None:
+    def test_legacy_interval_bypass_config_does_not_control_dynamic_bypass(self) -> None:
         strat = strategy(add_min_interval_bypass_gap_pct=0.003)
         strat.state = long_state(layers=10, last_order_ts_ms=NOW_MS - 5 * 60 * 1000)
 
-        blocked = strat._maybe_open_or_add_long(99.40, NOW_MS, boll(), cvd())
+        blocked = strat._maybe_open_or_add_long(99.20, NOW_MS, boll(), cvd())
 
         self.assertIsNone(blocked)
         self.assertEqual(strat.state.layers, 10)
 
         strat.state = long_state(layers=10, last_order_ts_ms=NOW_MS - 5 * 60 * 1000)
-        allowed = strat._maybe_open_or_add_long(99.20, NOW_MS, boll(), cvd())
+        allowed = strat._maybe_open_or_add_long(98.39, NOW_MS, boll(), cvd())
 
         self.assertIsNotNone(allowed)
         self.assertEqual(allowed.intent_type, "ADD_LONG")

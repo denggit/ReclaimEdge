@@ -440,7 +440,7 @@ class BollCvdReclaimStrategy:
         if self.state.last_entry_price is None:
             return None
         target_layer = self.state.layers + 1
-        timing_ok, timing_reason = self._add_timing_passed("LONG", price, ts_ms)
+        timing_ok, timing_reason = self._add_timing_passed("LONG", price, ts_ms, target_layer)
         if not timing_ok:
             self._log_add_timing_skipped("LONG", timing_reason, price, ts_ms, target_layer)
             return None
@@ -514,7 +514,7 @@ class BollCvdReclaimStrategy:
         if self.state.last_entry_price is None:
             return None
         target_layer = self.state.layers + 1
-        timing_ok, timing_reason = self._add_timing_passed("SHORT", price, ts_ms)
+        timing_ok, timing_reason = self._add_timing_passed("SHORT", price, ts_ms, target_layer)
         if not timing_ok:
             self._log_add_timing_skipped("SHORT", timing_reason, price, ts_ms, target_layer)
             return None
@@ -581,6 +581,9 @@ class BollCvdReclaimStrategy:
             return self.config.add_layer_gap_pct_layer_7_8
         return self.config.add_layer_gap_pct
 
+    def _add_min_interval_bypass_gap_pct_for_target_layer(self, target_layer: int) -> float:
+        return self._add_layer_gap_pct_for_target_layer(target_layer) * 2
+
     def _add_gap_passed(self, side: PositionSide, price: float, target_layer: int) -> tuple[bool, float, float]:
         gap_pct = self._add_layer_gap_pct_for_target_layer(target_layer)
         last = self.state.last_entry_price
@@ -616,7 +619,7 @@ class BollCvdReclaimStrategy:
             improvement_pct = (projected_avg - old_avg) / old_avg
         return improvement_pct >= required, improvement_pct, projected_avg
 
-    def _add_timing_passed(self, side: PositionSide, price: float, ts_ms: int) -> tuple[bool, str]:
+    def _add_timing_passed(self, side: PositionSide, price: float, ts_ms: int, target_layer: int) -> tuple[bool, str]:
         last = self.state.last_entry_price
         if last is None or last <= 0:
             return False, "missing_last_entry"
@@ -629,9 +632,10 @@ class BollCvdReclaimStrategy:
 
         if self.state.layers >= 2:
             adverse_gap_pct = self._adverse_gap_pct(side, price)
+            bypass_gap_pct = self._add_min_interval_bypass_gap_pct_for_target_layer(target_layer)
             if (
                 elapsed_seconds < self.config.add_min_interval_seconds
-                and adverse_gap_pct < self.config.add_min_interval_bypass_gap_pct
+                and adverse_gap_pct < bypass_gap_pct
             ):
                 return False, "add_interval"
 
@@ -665,6 +669,7 @@ class BollCvdReclaimStrategy:
             return
         if reason == "add_interval":
             adverse_gap_pct = self._adverse_gap_pct(side, price)
+            bypass_gap_pct = self._add_min_interval_bypass_gap_pct_for_target_layer(target_layer)
             logger.info(
                 "ADD_SKIPPED | reason=add_interval side=%s price=%.4f layers=%s target_layer=%s last_entry=%.4f elapsed_seconds=%.1f required_seconds=%s adverse_gap_pct=%.4f%% bypass_gap_pct=%.4f%%",
                 side,
@@ -675,7 +680,7 @@ class BollCvdReclaimStrategy:
                 elapsed_seconds,
                 self.config.add_min_interval_seconds,
                 adverse_gap_pct * 100,
-                self.config.add_min_interval_bypass_gap_pct * 100,
+                bypass_gap_pct * 100,
             )
             return
         logger.info(
