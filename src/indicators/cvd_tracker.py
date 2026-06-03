@@ -23,6 +23,7 @@ class CvdTrackerConfig:
     burst_baseline_seconds: float = 60.0
     burst_min_move_ratio: float = 2.5
     burst_min_volume_ratio: float = 2.0
+    burst_min_abs_range_pct: float = 0.0015
 
     @classmethod
     def from_env(cls) -> "CvdTrackerConfig":
@@ -34,6 +35,7 @@ class CvdTrackerConfig:
             burst_baseline_seconds=float(os.getenv("BURST_BASELINE_SECONDS", "60")),
             burst_min_move_ratio=float(os.getenv("BURST_MIN_MOVE_RATIO", "2.5")),
             burst_min_volume_ratio=float(os.getenv("BURST_MIN_VOLUME_RATIO", "2.0")),
+            burst_min_abs_range_pct=float(os.getenv("BURST_MIN_ABS_RANGE_PCT", "0.0015")),
         )
 
 
@@ -92,12 +94,14 @@ class CvdTracker:
     CVD update is a live hot path. Do not add per-tick sorting,
     full-window scans, or nested loops.
 
-    Burst detection is relative, not absolute:
+    Burst detection is both relative and absolute:
     - recent short-window price range must be N times larger than previous
       baseline short-window ranges
+    - recent short-window price range must also clear an absolute minimum
     - recent volume intensity must be N times larger than baseline intensity
 
-    This blocks slow grinding moves that crawl along the BOLL band.
+    This blocks slow grinding moves that crawl along the BOLL band and low-range
+    noise bursts that only look large because the baseline was too quiet.
     """
 
     def __init__(self, config: CvdTrackerConfig):
@@ -196,7 +200,9 @@ class CvdTracker:
         burst_vps = burst_volume / max(self.config.burst_window_seconds, 0.001)
         baseline_vps = self._baseline_volume_per_second()
         burst_volume_ratio = burst_vps / baseline_vps if baseline_vps > 0 else 0.0
-        enough_move = burst_move_ratio >= self.config.burst_min_move_ratio
+        enough_relative_move = burst_move_ratio >= self.config.burst_min_move_ratio
+        enough_abs_range = burst_range_pct >= self.config.burst_min_abs_range_pct
+        enough_move = enough_relative_move and enough_abs_range
         enough_volume = burst_volume_ratio >= self.config.burst_min_volume_ratio
 
         cross_positive = previous_fast_cvd <= 0 < fast_cvd
