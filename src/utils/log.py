@@ -19,7 +19,6 @@
 - LOG_BACKUP_COUNT=7
 - LOG_ASYNC_ENABLED=true
 - LOG_ASYNC_QUEUE_MAXSIZE=10000
-- LOG_ASYNC_DROP_BELOW_LEVEL=ERROR
 - LOG_HOT_PATH_THROTTLE_ENABLED=true
 - LOG_ARMED_EXTREME_UPDATE_THROTTLE_SECONDS=1
 - LOG_ADD_SKIPPED_THROTTLE_SECONDS=5
@@ -27,6 +26,7 @@
 from __future__ import annotations
 
 import atexit
+import copy
 import datetime as dt
 import logging
 import logging.handlers
@@ -135,32 +135,23 @@ def _get_log_level_from_env(default_level: int = logging.INFO) -> int:
     return level_map.get(log_level_str, default_level)
 
 
-def _log_level_from_text(text: str, default_level: int) -> int:
-    level_map = {
-        "DEBUG": logging.DEBUG,
-        "INFO": logging.INFO,
-        "WARNING": logging.WARNING,
-        "WARN": logging.WARNING,
-        "ERROR": logging.ERROR,
-        "CRITICAL": logging.CRITICAL,
-        "FATAL": logging.CRITICAL,
-    }
-    return level_map.get(text.strip().upper(), default_level)
-
-
 class NonBlockingQueueHandler(logging.handlers.QueueHandler):
     """QueueHandler that never blocks the caller when the log queue is full.
 
-    This is important for live tick paths. When the queue is full, low-priority
-    records are dropped. High-priority records can also be dropped if configured
-    this way; by default we avoid blocking even for ERROR/CRITICAL because trading
-    latency is more important than perfect log retention during overload.
+    Unlike stdlib QueueHandler.prepare(), this handler does not format the message
+    in the caller thread. Formatting and file I/O are left to QueueListener target
+    handlers, which keeps the live tick path lighter.
     """
 
-    def __init__(self, log_queue: queue_module.Queue[logging.LogRecord], *, drop_below_level: int = logging.ERROR):
+    def __init__(self, log_queue: queue_module.Queue[logging.LogRecord]):
         super().__init__(log_queue)
-        self.drop_below_level = drop_below_level
         self.dropped_count = 0
+
+    def prepare(self, record: logging.LogRecord) -> logging.LogRecord:
+        # Queue is in-process, so records do not need to be pickle-safe. Copy the
+        # record to avoid target handlers mutating the caller's LogRecord, but keep
+        # msg/args/exc_info intact so formatting happens in the listener thread.
+        return copy.copy(record)
 
     def enqueue(self, record: logging.LogRecord) -> None:
         try:
@@ -303,7 +294,6 @@ def setup_logging(log_level: int | None = None, log_dir: str = "logs") -> None:
     log_to_file = _bool_env("LOG_TO_FILE", True)
     log_async_enabled = _bool_env("LOG_ASYNC_ENABLED", True)
     async_queue_maxsize = _int_env("LOG_ASYNC_QUEUE_MAXSIZE", 10000, minimum=100)
-    async_drop_below_level = _log_level_from_text(os.environ.get("LOG_ASYNC_DROP_BELOW_LEVEL", "ERROR"), logging.ERROR)
     effective_log_dir = os.environ.get("LOG_DIR", log_dir)
     log_file_name = os.environ.get("LOG_FILE_NAME", "app.log")
     retention_days = _int_env("LOG_RETENTION_DAYS", 7, minimum=1)
@@ -344,7 +334,7 @@ def setup_logging(log_level: int | None = None, log_dir: str = "logs") -> None:
     hot_path_filter = HotPathThrottleFilter()
     if log_async_enabled:
         log_queue: queue_module.Queue[logging.LogRecord] = queue_module.Queue(maxsize=async_queue_maxsize)
-        queue_handler = NonBlockingQueueHandler(log_queue, drop_below_level=async_drop_below_level)
+        queue_handler = NonBlockingQueueHandler(log_queue)
         queue_handler.setLevel(log_level)
         queue_handler.addFilter(hot_path_filter)
         root_logger.addHandler(queue_handler)
