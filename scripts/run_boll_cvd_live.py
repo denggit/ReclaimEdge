@@ -53,6 +53,9 @@ logger = get_logger(__name__)
 
 SPLIT_TP_PLANS = {"SPLIT_PARTIAL_FINAL", "SPLIT_50_50"}
 POSITION_MANAGEMENT_INTENTS = {"UPDATE_TP", "NEAR_TP_REDUCE", "MARKET_EXIT_RUNNER"}
+THREE_STAGE_RESTART_DIRTY_HALT_REASON = "three_stage_post_tp1_sl_cancel_failed_on_tp2_restart"
+THREE_STAGE_RUNTIME_DIRTY_HALT_REASON = "three_stage_post_tp1_sl_dirty_state_blocked"
+THREE_STAGE_CANCEL_PENDING_HALT_REASON = "three_stage_post_tp1_sl_cancel_pending_on_tp2"
 
 
 def live_trading_enabled() -> bool:
@@ -639,10 +642,22 @@ def three_stage_post_tp1_boll(strategy: BollCvdReclaimStrategy):
     return type("ThreeStagePostTp1Boll", (), {"middle": float(middle), "upper": upper, "lower": lower})()
 
 
-def three_stage_post_tp1_current_price(account_snapshot: AccountSnapshot, position: PositionSnapshot, post_tp1_boll: Any) -> tuple[float, str]:
+def three_stage_post_tp1_current_price(account_snapshot: AccountSnapshot, position: PositionSnapshot, post_tp1_boll: Any, now_ms: int) -> tuple[float, str]:
     latest_price = getattr(account_snapshot, "latest_market_price", None)
+    latest_ts_ms = int(getattr(account_snapshot, "latest_market_price_ts_ms", 0) or 0)
+    max_age_seconds = float(os.getenv("LATEST_MARKET_PRICE_MAX_AGE_SECONDS", "30"))
+    max_age_ms = max(int(max_age_seconds * 1000), 0)
     if latest_price is not None and float(latest_price) > 0:
-        return float(latest_price), "latest_market_price"
+        age_ms = now_ms - latest_ts_ms if latest_ts_ms > 0 else max_age_ms + 1
+        if latest_ts_ms > 0 and age_ms <= max_age_ms:
+            return float(latest_price), "latest_market_price"
+        logger.warning(
+            "THREE_STAGE_POST_TP1_SL_PRICE_FALLBACK | reason=latest_market_price_stale latest_price=%.4f latest_ts_ms=%s age_ms=%s max_age_ms=%s",
+            float(latest_price),
+            latest_ts_ms,
+            age_ms,
+            max_age_ms,
+        )
     if position.avg_entry_price > 0:
         logger.warning(
             "THREE_STAGE_POST_TP1_SL_PRICE_FALLBACK | reason=latest_market_price_missing fallback=position_avg_entry avg_entry=%.4f boll_middle=%.4f",
@@ -797,6 +812,98 @@ class ExecutionState:
     halt_reason: str | None = None
     halt_until_ts_ms: int | None = None
 
+
+def three_stage_dirty_post_tp1_sl_after_tp2(state: StrategyPositionState) -> bool:
+    return bool(
+        getattr(state, "trend_runner_active", False)
+        and getattr(state, "three_stage_tp2_consumed", False)
+        and getattr(state, "three_stage_post_tp1_protective_sl_order_id", None)
+    )
+
+
+def three_stage_dirty_post_tp1_payload(
+    *,
+    strategy: BollCvdReclaimStrategy,
+    execution_state: ExecutionState,
+    reason: str,
+) -> dict[str, Any]:
+    state = strategy.state
+    return {
+        "position_id": execution_state.current_position_id,
+        "side": getattr(state, "side", None),
+        "protective_sl_order_id": getattr(state, "three_stage_post_tp1_protective_sl_order_id", None),
+        "protective_sl_price": getattr(state, "three_stage_post_tp1_protective_sl_price", None),
+        "trend_runner_active": getattr(state, "trend_runner_active", False),
+        "three_stage_tp2_consumed": getattr(state, "three_stage_tp2_consumed", False),
+        "trading_halted": True,
+        "halt_reason": execution_state.halt_reason,
+        "reason": reason,
+    }
+
+
+def append_three_stage_dirty_post_tp1_event(
+    *,
+    event_name: str,
+    strategy: BollCvdReclaimStrategy,
+    execution_state: ExecutionState,
+    journal: LiveTradeJournal,
+    state_store: LiveStateStore,
+    trader_symbol: str,
+    reason: str,
+) -> None:
+    payload = three_stage_dirty_post_tp1_payload(strategy=strategy, execution_state=execution_state, reason=reason)
+    if hasattr(journal, "append"):
+        journal.append(event_name, payload, position_id=execution_state.current_position_id)
+    state_store.save(
+        LiveStateStore.from_strategy_state(
+            position_id=execution_state.current_position_id,
+            symbol=trader_symbol,
+            strategy_state=strategy.state,
+            cash_before_position=execution_state.cash_before_position,
+        )
+    )
+    logger.error(
+        "%s | position_id=%s side=%s protective_sl_order_id=%s protective_sl_price=%s trend_runner_active=%s three_stage_tp2_consumed=%s trading_halted=true halt_reason=%s manual_intervention_required=true",
+        event_name,
+        execution_state.current_position_id,
+        payload.get("side"),
+        payload.get("protective_sl_order_id"),
+        payload.get("protective_sl_price"),
+        payload.get("trend_runner_active"),
+        payload.get("three_stage_tp2_consumed"),
+        execution_state.halt_reason,
+    )
+
+
+def apply_three_stage_startup_safety_gate(
+    *,
+    strategy: BollCvdReclaimStrategy,
+    execution_state: ExecutionState,
+    saved_state: Any,
+    startup_position: PositionSnapshot,
+    journal: LiveTradeJournal,
+    state_store: LiveStateStore,
+    trader_symbol: str,
+) -> bool:
+    if not startup_position.has_position:
+        return False
+    if saved_state is None:
+        return False
+    if not three_stage_dirty_post_tp1_sl_after_tp2(strategy.state):
+        return False
+    execution_state.trading_halted = True
+    execution_state.halt_reason = THREE_STAGE_RESTART_DIRTY_HALT_REASON
+    execution_state.halt_until_ts_ms = None
+    append_three_stage_dirty_post_tp1_event(
+        event_name="THREE_STAGE_TP1_PROTECTIVE_SL_CANCEL_FAILED_ON_TP2_RESTORED",
+        strategy=strategy,
+        execution_state=execution_state,
+        journal=journal,
+        state_store=state_store,
+        trader_symbol=trader_symbol,
+        reason="restart_restored_dirty_post_tp1_sl_after_tp2_manual_intervention_required",
+    )
+    return True
 
 @dataclass(frozen=True)
 class TradeCommand:
@@ -1062,6 +1169,37 @@ async def execution_worker(
                     queue_oldest_command_age_seconds(execution_queue),
                 )
                 last_backlog_log = now
+
+            dirty_post_tp1_sl_blocked = False
+            dirty_post_tp1_sl_should_record = False
+            async with state_lock:
+                if three_stage_dirty_post_tp1_sl_after_tp2(strategy.state):
+                    dirty_post_tp1_sl_blocked = True
+                    dirty_post_tp1_sl_should_record = not (
+                        execution_state.trading_halted
+                        and execution_state.halt_reason == THREE_STAGE_RUNTIME_DIRTY_HALT_REASON
+                    )
+                    execution_state.trading_halted = True
+                    execution_state.halt_reason = THREE_STAGE_RUNTIME_DIRTY_HALT_REASON
+                    execution_state.halt_until_ts_ms = None
+            if dirty_post_tp1_sl_blocked:
+                if dirty_post_tp1_sl_should_record:
+                    append_three_stage_dirty_post_tp1_event(
+                        event_name="THREE_STAGE_DIRTY_POST_TP1_SL_BLOCKED_RUNNER_UPDATE",
+                        strategy=strategy,
+                        execution_state=execution_state,
+                        journal=journal,
+                        state_store=state_store,
+                        trader_symbol=trader.symbol,
+                        reason="dirty_post_tp1_sl_after_tp2_blocks_runner_update_manual_intervention_required",
+                    )
+                logger.warning(
+                    "EXECUTION_SKIPPED | reason=three_stage_dirty_post_tp1_sl intent_type=%s side=%s tick_ts_ms=%s",
+                    command.intent.intent_type,
+                    command.intent.side,
+                    command.tick_ts_ms,
+                )
+                continue
 
             async with state_lock:
                 rolling_management_allowed = (
@@ -1748,7 +1886,7 @@ async def account_position_sync_worker(
                                     current_price = None
                                     price_source = "missing"
                                     if post_tp1_boll is not None and position.side is not None:
-                                        current_price, price_source = three_stage_post_tp1_current_price(account_snapshot, position, post_tp1_boll)
+                                        current_price, price_source = three_stage_post_tp1_current_price(account_snapshot, position, post_tp1_boll, utc_ms())
                                         base_sl = strategy._calculate_three_stage_post_tp1_protective_sl(position.side, current_price, post_tp1_boll)
                                         extension_sl = strategy._apply_three_stage_post_tp1_extension_trigger(position.side, current_price, post_tp1_boll, base_sl)
                                         protective_sl = strategy._tighten_optional_three_stage_post_tp1_sl(position.side, base_sl, extension_sl)
@@ -1770,10 +1908,21 @@ async def account_position_sync_worker(
                                     "side": position.side,
                                     "protective_sl_order_id": old_post_tp1_sl_order_id,
                                     "protective_sl_price": getattr(strategy.state, "three_stage_post_tp1_protective_sl_price", None),
+                                    "pending_halt_applied": False,
+                                    "existing_halt_reason": execution_state.halt_reason if execution_state.trading_halted else None,
                                 }
                                 if old_post_tp1_sl_order_id:
-                                    execution_state.trading_halted = True
-                                    execution_state.halt_reason = "three_stage_post_tp1_sl_cancel_pending_on_tp2"
+                                    if not execution_state.trading_halted:
+                                        execution_state.trading_halted = True
+                                        execution_state.halt_reason = THREE_STAGE_CANCEL_PENDING_HALT_REASON
+                                        three_stage_post_tp1_cancel_payload["pending_halt_applied"] = True
+                                    else:
+                                        logger.error(
+                                            "THREE_STAGE_TP1_PROTECTIVE_SL_CANCEL_PENDING_ON_TP2 | position_id=%s algoId=%s existing_halt_reason=%s pending_halt_not_applied=true",
+                                            execution_state.current_position_id,
+                                            old_post_tp1_sl_order_id,
+                                            execution_state.halt_reason,
+                                        )
                             three_stage_event_payload = {
                                 "event": three_stage_event,
                                 "position_id": execution_state.current_position_id,
@@ -1994,8 +2143,9 @@ async def account_position_sync_worker(
                         strategy.state.three_stage_post_tp1_protective_sl_price = None
                         strategy.state.three_stage_post_tp1_protected = False
                         if (
-                            execution_state.trading_halted
-                            and execution_state.halt_reason == "three_stage_post_tp1_sl_cancel_pending_on_tp2"
+                            three_stage_post_tp1_cancel_payload.get("pending_halt_applied")
+                            and execution_state.trading_halted
+                            and execution_state.halt_reason == THREE_STAGE_CANCEL_PENDING_HALT_REASON
                         ):
                             execution_state.trading_halted = False
                             execution_state.halt_reason = None
@@ -2441,6 +2591,15 @@ async def main() -> None:
         now_ms=utc_ms(),
         journal=journal,
         email_sender=email_sender,
+    )
+    apply_three_stage_startup_safety_gate(
+        strategy=strategy,
+        execution_state=execution_state,
+        saved_state=saved_state,
+        startup_position=startup_position,
+        journal=journal,
+        state_store=state_store,
+        trader_symbol=trader.symbol,
     )
     strategy_tick_queue: asyncio.Queue[MarketTickEvent] = asyncio.Queue(maxsize=int(os.getenv("STRATEGY_TICK_QUEUE_MAXSIZE", "20000")))
     execution_queue: asyncio.Queue[TradeCommand] = asyncio.Queue(maxsize=int(os.getenv("EXECUTION_QUEUE_MAXSIZE", "1000")))
