@@ -475,22 +475,23 @@ class Trader:
         except Exception:
             logger.exception("Failed to refresh position before replacing TP")
             if managed_core_contracts is not None and managed_core_contracts > 0:
-                core_contracts_for_tp = managed_core_contracts
-                net_contracts_for_sl = managed_core_contracts
-                logger.warning(
-                    "REPLACE_TP_POSITION_FETCH_FAILED_FALLBACK | using managed_core_contracts as both core and net; sidecar may be unprotected core=%s",
+                logger.error(
+                    "REPLACE_TP_NET_POSITION_FETCH_FAILED | cannot determine net position for global SL; refusing to proceed with managed_core_contracts as fallback; sidecar may be unprotected manual_intervention_required=true core=%s",
                     self.decimal_to_str(managed_core_contracts),
                 )
-            else:
-                return LiveTradeResult(
-                    False,
-                    intent.intent_type,
-                    None,
-                    None,
-                    "0",
-                    self.price_to_str(intent.tp_price),
-                    "failed to fetch position and no managed_core_contracts",
+                raise RuntimeError(
+                    "failed_to_fetch_net_position_for_global_sl: "
+                    "cannot use managed_core_contracts as net position for SL in Sidecar mode"
                 )
+            return LiveTradeResult(
+                False,
+                intent.intent_type,
+                None,
+                None,
+                "0",
+                self.price_to_str(intent.tp_price),
+                "failed to fetch position and no managed_core_contracts",
+            )
 
         self.position_contracts = core_contracts_for_tp
 

@@ -1316,6 +1316,14 @@ class BollCvdReclaimStrategy:
     def _maybe_near_tp_reduce(self, price: float, ts_ms: int, boll: BollSnapshot, cvd: CvdSnapshot) -> TradeIntent | None:
         if not self.config.near_tp_enabled:
             return None
+        if self.state.sidecar_enabled_for_position:
+            logger.info(
+                "NEAR_TP_REDUCE_SKIPPED | reason=sidecar_enabled side=%s price=%.4f sidecar_open_qty=%.8f",
+                self.state.side,
+                price,
+                self.state.sidecar_open_qty,
+            )
+            return None
         if self.state.side is None or self.state.tp_price is None:
             return None
         if self.state.avg_entry_price <= 0 or price <= 0:

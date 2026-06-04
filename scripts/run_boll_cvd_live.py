@@ -928,6 +928,39 @@ async def monitor_sidecar_orders_once(
             strategy_state.sidecar_legs[index] = mark_sidecar_leg_tp_filled(leg, ts_ms)
             journal.append("SIDECAR_TP_FILLED", {**dict(leg), **status}, position_id=position_id)
             changed = True
+            # Sidecar TP filled reduces OKX net position → existing global SL orders
+            # may now exceed current net position. Must halt for manual reconciliation.
+            active_global_sl_orders: list[str] = []
+            for sl_field in (
+                "near_tp_protective_sl_order_id",
+                "middle_runner_protective_sl_order_id",
+                "three_stage_post_tp1_protective_sl_order_id",
+                "trend_runner_sl_order_id",
+            ):
+                sl_order_id = getattr(strategy_state, sl_field, None) or getattr(trader, sl_field, None)
+                if sl_order_id:
+                    active_global_sl_orders.append(f"{sl_field}={sl_order_id}")
+            if active_global_sl_orders:
+                execution_state.trading_halted = True
+                execution_state.halt_reason = "sidecar_tp_filled_requires_global_sl_reconcile"
+                strategy_state.sidecar_dirty = True
+                strategy_state.sidecar_halt_reason = "sidecar_tp_filled_requires_global_sl_reconcile"
+                journal.append(
+                    "SIDECAR_TP_FILLED_REQUIRES_GLOBAL_SL_RECONCILE",
+                    {
+                        "active_global_sl_orders": active_global_sl_orders,
+                        "trading_halted": True,
+                        "halt_reason": "sidecar_tp_filled_requires_global_sl_reconcile",
+                        "manual_intervention_required": True,
+                    },
+                    position_id=position_id,
+                )
+                logger.error(
+                    "SIDECAR_TP_FILLED_REQUIRES_GLOBAL_SL_RECONCILE | position_id=%s leg_id=%s active_global_sl_orders=%s trading_halted=true halt_reason=sidecar_tp_filled_requires_global_sl_reconcile manual_intervention_required=true",
+                    position_id,
+                    leg.get("leg_id"),
+                    active_global_sl_orders,
+                )
             continue
         if order_status in {"CANCELED", "NOT_FOUND", "UNKNOWN"} and core_active:
             execution_state.trading_halted = True
@@ -1782,6 +1815,32 @@ async def execution_worker(
             )
             if entry_intent is not command.intent:
                 command = replace(command, intent=entry_intent)
+
+            # Guard: Sidecar enabled position must never execute NEAR_TP_REDUCE
+            if command.intent.intent_type == "NEAR_TP_REDUCE" and getattr(strategy.state, "sidecar_enabled_for_position", False):
+                logger.error(
+                    "SIDECAR_BLOCKS_NEAR_TP_REDUCE | sidecar_enabled_for_position=True; NEAR_TP_REDUCE would reduce sidecar portion of OKX net position trading_halted=true halt_reason=sidecar_blocks_near_tp_reduce",
+                )
+                async with state_lock:
+                    execution_state.trading_halted = True
+                    execution_state.halt_reason = "sidecar_blocks_near_tp_reduce"
+                    strategy.state.sidecar_dirty = True
+                    strategy.state.sidecar_halt_reason = "sidecar_blocks_near_tp_reduce"
+                    current_position_id = execution_state.current_position_id
+                if hasattr(journal, "append"):
+                    journal.append(
+                        "SIDECAR_BLOCKS_NEAR_TP_REDUCE",
+                        {
+                            "sidecar_enabled_for_position": True,
+                            "trading_halted": True,
+                            "halt_reason": "sidecar_blocks_near_tp_reduce",
+                            "intent_type": command.intent.intent_type,
+                            "side": command.intent.side,
+                            "manual_intervention_required": True,
+                        },
+                        position_id=current_position_id,
+                    )
+                continue
 
             result = await trader.execute_intent(command.intent)
             if not result.ok:
