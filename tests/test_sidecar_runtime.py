@@ -9,6 +9,7 @@ import asyncio
 
 from scripts.run_boll_cvd_live import (
     ExecutionState,
+    SidecarPreCoreReconcileResult,
     apply_main_tp_startup_recovery,
     apply_sidecar_startup_recovery,
     execute_sidecar_after_core_entry,
@@ -756,7 +757,7 @@ async def test_sidecar_tp_filled_reconciled_before_core_view() -> None:
     strategy = type("S", (), {"state": state})()
 
     # Act: pre-core reconciliation
-    changed = await reconcile_sidecar_orders_before_core_view(
+    result = await reconcile_sidecar_orders_before_core_view(
         trader=trader,
         strategy=strategy,
         execution_state=execution,
@@ -768,7 +769,9 @@ async def test_sidecar_tp_filled_reconciled_before_core_view() -> None:
     )
 
     # Assert: sidecar state was updated
-    assert changed
+    assert isinstance(result, SidecarPreCoreReconcileResult)
+    assert result.queried
+    assert result.changed
     assert state.sidecar_legs[0]["status"] == "TP_FILLED"
     assert sidecar_open_qty(state.sidecar_legs) == pytest.approx(0.0)
 
@@ -848,7 +851,7 @@ async def test_sidecar_tp_filled_with_active_global_sl_still_halts_pre_core() ->
 
     strategy = type("S", (), {"state": state})()
 
-    changed = await reconcile_sidecar_orders_before_core_view(
+    result = await reconcile_sidecar_orders_before_core_view(
         trader=trader,
         strategy=strategy,
         execution_state=execution,
@@ -859,7 +862,9 @@ async def test_sidecar_tp_filled_with_active_global_sl_still_halts_pre_core() ->
         state_lock=state_lock,
     )
 
-    assert changed
+    assert isinstance(result, SidecarPreCoreReconcileResult)
+    assert result.queried
+    assert result.changed
     # Leg must be marked TP_FILLED
     assert state.sidecar_legs[0]["status"] == "TP_FILLED"
     # Trading must be halted
@@ -875,5 +880,268 @@ async def test_sidecar_tp_filled_with_active_global_sl_still_halts_pre_core() ->
     assert "three_stage_post_tp1_protective_sl_order_id" in str(
         reconcile_entry[1].get("active_global_sl_orders", [])
     )
+    # state_store.save must be called
+    assert len(store.saved) > 0
+
+
+# ---------------------------------------------------------------------------
+# Tests: Problem 1 — sidecar leg append delayed until after TP placement
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_sidecar_leg_not_in_state_before_tp_placement() -> None:
+    """The leg must not appear in strategy_state.sidecar_legs with
+    status=OPEN + tp_order_id=None while TP is being placed.
+
+    After TP succeeds the leg is appended with tp_order_id set.
+    """
+    state = sidecar_state()
+    execution = ExecutionState("pos-1", 1000.0)
+    trader = Trader()
+    journal = Journal()
+    store = Store()
+
+    ok = await execute_sidecar_after_core_entry(
+        trader=trader, strategy_state=state, execution_state=execution,
+        intent=intent(), journal=journal, state_store=store,
+        trader_symbol="ETH-USDT-SWAP",
+    )
+
+    assert ok
+    # After successful execution the leg must be OPEN with tp_order_id set
+    assert len(state.sidecar_legs) == 1
+    assert state.sidecar_legs[0]["status"] == "OPEN"
+    assert state.sidecar_legs[0]["tp_order_id"] == "sidecar-tp"
+    assert state.sidecar_legs[0]["tp_order_id"] is not None
+    # No OPEN leg should ever have tp_order_id=None
+    for leg in state.sidecar_legs:
+        if leg["status"] == "OPEN":
+            assert leg.get("tp_order_id") is not None, \
+                "OPEN leg must have non-None tp_order_id"
+
+
+class FailingTpTrader(Trader):
+    """Trader whose place_sidecar_fixed_take_profit always raises."""
+
+    async def place_sidecar_fixed_take_profit(self, *, side, contracts, tp_price, client_order_id=None):  # type: ignore[no-untyped-def]
+        raise RuntimeError("tp place simulated failure")
+
+
+@pytest.mark.asyncio
+async def test_sidecar_tp_failure_appends_unknown_halted_not_open() -> None:
+    """When TP placement fails, the leg must be appended as UNKNOWN_HALTED,
+    not OPEN.  An OPEN leg with tp_order_id=None must never be exposed.
+    """
+    state = sidecar_state()
+    execution = ExecutionState("pos-1", 1000.0)
+    trader = FailingTpTrader()
+    journal = Journal()
+    store = Store()
+
+    ok = await execute_sidecar_after_core_entry(
+        trader=trader, strategy_state=state, execution_state=execution,
+        intent=intent(), journal=journal, state_store=store,
+        trader_symbol="ETH-USDT-SWAP",
+    )
+
+    assert not ok
+    assert execution.trading_halted
+    assert execution.halt_reason == "sidecar_tp_place_failed"
+    assert state.sidecar_dirty
+    assert state.sidecar_halt_reason == "sidecar_tp_place_failed"
+
+    # The leg must be UNKNOWN_HALTED, not OPEN
+    assert len(state.sidecar_legs) == 1
+    assert state.sidecar_legs[0]["status"] == "UNKNOWN_HALTED"
+    assert state.sidecar_legs[0]["warning_recorded"] is True
+
+    # No OPEN leg should exist with tp_order_id=None
+    for leg in state.sidecar_legs:
+        assert leg["status"] != "OPEN", \
+            "No OPEN leg should be appended when TP placement fails"
+        if leg["status"] == "OPEN":
+            assert leg.get("tp_order_id") is not None
+
+    event_names = [e[0] for e in journal.events]
+    assert "SIDECAR_TP_PLACE_FAILED" in event_names
+    assert "SIDECAR_LEG_OPENED" not in event_names
+
+
+# ---------------------------------------------------------------------------
+# Tests: Problem 2 — pre-core reconcile queried vs changed semantics
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_pre_core_reconcile_queried_true_when_no_changes() -> None:
+    """When OPEN sidecar legs exist and we fetch order status, but all
+    orders are still OPEN (no state changes), the pre-core reconcile
+    returns queried=True, changed=False.
+
+    This prevents account_position_sync_worker from calling
+    monitor_sidecar_orders_once again in the same sync cycle.
+    """
+    state = sidecar_state()
+    state.sidecar_legs = [
+        {
+            "leg_id": "leg-1",
+            "status": "OPEN",
+            "tp_order_id": "tp-1",
+            "qty": 0.1,
+            "contracts": "1",
+            "created_ts_ms": 1,
+            "updated_ts_ms": 1,
+        }
+    ]
+    refresh_sidecar_state_totals(state)
+
+    trader = Trader()
+    trader.status_by_order["tp-1"] = "OPEN"  # still OPEN, no change
+    execution = ExecutionState("pos-1", 1000.0)
+    journal = Journal()
+    store = Store()
+    state_lock = asyncio.Lock()
+
+    strategy = type("S", (), {"state": state})()
+
+    result = await reconcile_sidecar_orders_before_core_view(
+        trader=trader,
+        strategy=strategy,
+        execution_state=execution,
+        journal=journal,
+        state_store=store,
+        trader_symbol="ETH-USDT-SWAP",
+        ts_ms=2,
+        state_lock=state_lock,
+    )
+
+    assert isinstance(result, SidecarPreCoreReconcileResult)
+    assert result.queried is True, \
+        "pre-core reconcile queried OPEN sidecar orders → queried must be True"
+    assert result.changed is False, \
+        "No order status changed → changed must be False"
+    # No journal events should be emitted
+    assert len(journal.events) == 0
+    # No state save should happen
+    assert len(store.saved) == 0
+
+
+@pytest.mark.asyncio
+async def test_pre_core_reconcile_skips_when_pending_orders() -> None:
+    """When execution_state.pending_order_count > 0, pre-core reconcile
+    must return queried=False, changed=False and not query any orders.
+    """
+    state = sidecar_state()
+    state.sidecar_legs = [
+        {
+            "leg_id": "leg-1",
+            "status": "OPEN",
+            "tp_order_id": "tp-1",
+            "qty": 0.1,
+            "contracts": "1",
+            "created_ts_ms": 1,
+            "updated_ts_ms": 1,
+        }
+    ]
+    refresh_sidecar_state_totals(state)
+
+    trader = Trader()
+    trader.status_by_order["tp-1"] = "FILLED"  # would be detected if queried
+    execution = ExecutionState("pos-1", 1000.0)
+    execution.pending_order_count = 1  # pending order should block
+    journal = Journal()
+    store = Store()
+    state_lock = asyncio.Lock()
+
+    strategy = type("S", (), {"state": state})()
+
+    result = await reconcile_sidecar_orders_before_core_view(
+        trader=trader,
+        strategy=strategy,
+        execution_state=execution,
+        journal=journal,
+        state_store=store,
+        trader_symbol="ETH-USDT-SWAP",
+        ts_ms=2,
+        state_lock=state_lock,
+    )
+
+    assert isinstance(result, SidecarPreCoreReconcileResult)
+    assert result.queried is False, \
+        "pending_order_count > 0 → queried must be False"
+    assert result.changed is False
+    # The TP_FILLED must NOT have been detected
+    assert state.sidecar_legs[0]["status"] == "OPEN"
+
+
+# ---------------------------------------------------------------------------
+# Tests: Problem 3 — pre-core SL check uses trader fallback
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_pre_core_reconcile_sl_on_trader_triggers_halt() -> None:
+    """When sidecar TP_FILLED is discovered and the only active global SL
+    order is on the trader instance (not strategy.state), the pre-core
+    reconcile must still halt — matching monitor_sidecar_orders_once
+    behaviour.
+    """
+    state = sidecar_state()
+    state.sidecar_legs = [
+        {
+            "leg_id": "leg-1",
+            "status": "OPEN",
+            "tp_order_id": "tp-1",
+            "qty": 0.1,
+            "contracts": "1",
+            "created_ts_ms": 1,
+            "updated_ts_ms": 1,
+        }
+    ]
+    refresh_sidecar_state_totals(state)
+    # strategy.state has NO SL order ids
+    for sl_field in (
+        "near_tp_protective_sl_order_id",
+        "middle_runner_protective_sl_order_id",
+        "three_stage_post_tp1_protective_sl_order_id",
+        "trend_runner_sl_order_id",
+    ):
+        setattr(state, sl_field, None)
+
+    trader = Trader()
+    trader.status_by_order["tp-1"] = "FILLED"
+    # SL is only on the trader
+    trader.trend_runner_sl_order_id = "trader-sl"
+
+    execution = ExecutionState("pos-1", 1000.0)
+    journal = Journal()
+    store = Store()
+    state_lock = asyncio.Lock()
+
+    strategy = type("S", (), {"state": state})()
+
+    result = await reconcile_sidecar_orders_before_core_view(
+        trader=trader,
+        strategy=strategy,
+        execution_state=execution,
+        journal=journal,
+        state_store=store,
+        trader_symbol="ETH-USDT-SWAP",
+        ts_ms=2,
+        state_lock=state_lock,
+    )
+
+    assert result.changed
+    assert result.queried
+    # Leg must be marked TP_FILLED
+    assert state.sidecar_legs[0]["status"] == "TP_FILLED"
+    # Trading must be halted
+    assert execution.trading_halted
+    assert execution.halt_reason == "sidecar_tp_filled_requires_global_sl_reconcile"
+    # Journal must record the halt
+    event_names = [e[0] for e in journal.events]
+    assert "SIDECAR_TP_FILLED" in event_names
+    assert "SIDECAR_TP_FILLED_REQUIRES_GLOBAL_SL_RECONCILE" in event_names
     # state_store.save must be called
     assert len(store.saved) > 0

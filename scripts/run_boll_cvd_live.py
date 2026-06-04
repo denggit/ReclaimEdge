@@ -859,9 +859,12 @@ async def execute_sidecar_after_core_entry(
         tp_order_id=None,
         ts_ms=int(intent.ts_ms),
     )
-    strategy_state.sidecar_legs.append(leg)
-    journal.append("SIDECAR_LEG_OPENED", dict(leg), position_id=position_id)
 
+    # ── Place sidecar TP BEFORE appending leg to state ─────────────────
+    # The leg must never appear in strategy_state.sidecar_legs with
+    # status=OPEN + tp_order_id=None.  If the pre-core reconcile runs
+    # concurrently it would flag that intermediate state as dirty and
+    # halt the position unnecessarily.
     try:
         tp_order_id = await trader.place_sidecar_fixed_take_profit(
             side=intent.side,
@@ -870,11 +873,12 @@ async def execute_sidecar_after_core_entry(
             client_order_id=sidecar_client_order_id(position_id, intent.layer_index, intent.ts_ms),
         )
     except Exception as exc:
+        # TP placement failed → append UNKNOWN_HALTED leg, not OPEN
+        leg["status"] = SidecarLegStatus.UNKNOWN_HALTED.value
+        leg["warning_recorded"] = True
+        strategy_state.sidecar_legs.append(leg)
         execution_state.trading_halted = True
         execution_state.halt_reason = "sidecar_tp_place_failed"
-        leg["status"] = SidecarLegStatus.UNKNOWN_HALTED.value
-        leg["updated_ts_ms"] = int(intent.ts_ms)
-        leg["warning_recorded"] = True
         strategy_state.sidecar_dirty = True
         strategy_state.sidecar_halt_reason = "sidecar_tp_place_failed"
         refresh_sidecar_state_totals(strategy_state, int(os.getenv("SIDECAR_MAX_LEGS", "10")))
@@ -883,10 +887,13 @@ async def execute_sidecar_after_core_entry(
         logger.error("SIDECAR_TP_PLACE_FAILED | position_id=%s leg_id=%s error=%s manual_intervention_required=true", position_id, leg.get("leg_id"), exc)
         return False
 
+    # TP placed successfully → now append leg to state with tp_order_id set
     leg["tp_order_id"] = tp_order_id
     leg["updated_ts_ms"] = int(intent.ts_ms)
+    strategy_state.sidecar_legs.append(leg)
     refresh_sidecar_state_totals(strategy_state, int(os.getenv("SIDECAR_MAX_LEGS", "10")))
     state_store.save(LiveStateStore.from_strategy_state(position_id=position_id, symbol=trader_symbol, strategy_state=strategy_state, cash_before_position=execution_state.cash_before_position))
+    journal.append("SIDECAR_LEG_OPENED", dict(leg), position_id=position_id)
     journal.append("SIDECAR_TP_PLACED", dict(leg), position_id=position_id)
     return True
 
@@ -901,7 +908,7 @@ async def reconcile_sidecar_orders_before_core_view(
     trader_symbol: str,
     ts_ms: int,
     state_lock: asyncio.Lock,
-) -> bool:
+) -> SidecarPreCoreReconcileResult:
     """Reconcile sidecar TP order status BEFORE constructing core_position view.
 
     When Sidecar is enabled and OPEN sidecar legs exist, this must be called
@@ -910,11 +917,20 @@ async def reconcile_sidecar_orders_before_core_view(
     would cause core_position to be understated, which can incorrectly trigger
     TP progress markers or pollute strategy average entry.
 
-    Returns True if any sidecar state was modified and saved.
+    Returns SidecarPreCoreReconcileResult:
+      - queried: True if we performed any REST order status fetch for OPEN legs.
+      - changed: True if any sidecar state was modified and saved.
+
     Sets trading_halted if unrecoverable state is detected.
     """
+    # Pending orders mean core position is in flux — do not reconcile sidecar
+    # orders or advance core state.  Return False / False to allow the caller
+    # to fall through safely without blocking the sync cycle.
+    if execution_state.pending_order_count > 0:
+        return SidecarPreCoreReconcileResult(queried=False, changed=False)
+
     if not getattr(strategy.state, "sidecar_enabled_for_position", False):
-        return False
+        return SidecarPreCoreReconcileResult(queried=False, changed=False)
 
     # --- Phase 1: handle dirty / missing TP orders under lock (no network) ---
     dirty_changed = False
@@ -954,7 +970,7 @@ async def reconcile_sidecar_orders_before_core_view(
         cash_before_position = execution_state.cash_before_position
 
     if not open_legs:
-        return dirty_changed
+        return SidecarPreCoreReconcileResult(queried=False, changed=dirty_changed)
 
     # --- Phase 2: query order status (outside lock) ---
     leg_updates: list[tuple[int, str, dict[str, Any], str]] = []
@@ -965,7 +981,8 @@ async def reconcile_sidecar_orders_before_core_view(
             leg_updates.append((index, order_status, status, leg_id))
 
     if not leg_updates:
-        return dirty_changed
+        # We queried open legs but found no status changes.
+        return SidecarPreCoreReconcileResult(queried=True, changed=False)
 
     # --- Phase 3: apply updates under lock ---
     changed = dirty_changed
@@ -994,7 +1011,13 @@ async def reconcile_sidecar_orders_before_core_view(
                     "three_stage_post_tp1_protective_sl_order_id",
                     "trend_runner_sl_order_id",
                 ):
-                    sl_order_id = getattr(strategy.state, sl_field, None)
+                    # Use trader fallback (same as monitor_sidecar_orders_once)
+                    # because SL orders may have been placed by startup recovery
+                    # or by a previous session and only tracked on the trader.
+                    sl_order_id = (
+                        getattr(strategy.state, sl_field, None)
+                        or getattr(trader, sl_field, None)
+                    )
                     if sl_order_id:
                         active_global_sl_orders.append(f"{sl_field}={sl_order_id}")
                 if active_global_sl_orders:
@@ -1052,7 +1075,7 @@ async def reconcile_sidecar_orders_before_core_view(
                 cash_before_position=cash_before_position,
             ))
 
-    return changed
+    return SidecarPreCoreReconcileResult(queried=True, changed=changed)
 
 
 async def monitor_sidecar_orders_once(
@@ -1322,6 +1345,12 @@ class AccountSnapshot:
     version: int = 0
     latest_market_price: float | None = None
     latest_market_price_ts_ms: int = 0
+
+
+@dataclass(frozen=True)
+class SidecarPreCoreReconcileResult:
+    queried: bool
+    changed: bool
 
 
 @dataclass
@@ -2552,7 +2581,7 @@ async def account_position_sync_worker(
             # Reconcile sidecar orders NOW so that refresh_sidecar_state_totals
             # and build_core_position_view inside the main state_lock block
             # always see up-to-date sidecar_open_qty.
-            sidecar_reconciled_this_sync = await reconcile_sidecar_orders_before_core_view(
+            _sidecar_pre_core_result = await reconcile_sidecar_orders_before_core_view(
                 trader=trader,
                 strategy=strategy,
                 execution_state=execution_state,
@@ -2562,6 +2591,8 @@ async def account_position_sync_worker(
                 ts_ms=utc_ms(),
                 state_lock=state_lock,
             )
+            sidecar_reconciled_this_sync = _sidecar_pre_core_result.queried
+            sidecar_state_changed_this_sync = _sidecar_pre_core_result.changed
             # ── End pre-core reconciliation ──────────────────────────────
             async with state_lock:
                 pending_order_count = execution_state.pending_order_count
