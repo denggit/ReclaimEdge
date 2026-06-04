@@ -29,6 +29,7 @@ class LivePositionState:
     breakeven_price: float = 0.0
     tp_mode: str = "MIDDLE"
     last_order_ts_ms: int = 0
+    first_entry_ts_ms: int = 0
     last_tp_update_ts_ms: int = 0
     last_tp_update_candle_ts_ms: int = 0
     near_tp_armed: bool = False
@@ -134,6 +135,7 @@ class LiveStateStore:
             breakeven_price=float(strategy_state.breakeven_price or 0.0),
             tp_mode=strategy_state.tp_mode,
             last_order_ts_ms=int(strategy_state.last_order_ts_ms or 0),
+            first_entry_ts_ms=int(getattr(strategy_state, "first_entry_ts_ms", 0) or 0),
             last_tp_update_ts_ms=int(strategy_state.last_tp_update_ts_ms or 0),
             last_tp_update_candle_ts_ms=int(getattr(strategy_state, "last_tp_update_candle_ts_ms", 0) or 0),
             near_tp_armed=bool(getattr(strategy_state, "near_tp_armed", False)),

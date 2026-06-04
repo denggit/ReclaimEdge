@@ -27,7 +27,7 @@ from scripts.run_boll_cvd_live import (  # noqa: E402
 from src.execution.trader import LiveTradeResult, PositionSnapshot, Trader  # noqa: E402
 from src.indicators.cvd_tracker import CvdSnapshot  # noqa: E402
 from src.monitors.boll_band_breakout_monitor import BollSnapshot  # noqa: E402
-from src.reporting.live_state_store import LivePositionState  # noqa: E402
+from src.reporting.live_state_store import LivePositionState, LiveStateStore  # noqa: E402
 from src.risk.simple_position_sizer import PositionSize, SimplePositionSizer, SimplePositionSizerConfig  # noqa: E402
 from src.strategies.boll_cvd_reclaim_strategy import (  # noqa: E402
     BollCvdReclaimStrategy,
@@ -35,6 +35,7 @@ from src.strategies.boll_cvd_reclaim_strategy import (  # noqa: E402
     StrategyPositionState,
     TradeIntent,
 )
+from src.strategies.boll_cvd_shock_reclaim_strategy import BollCvdShockReclaimStrategy  # noqa: E402
 
 
 def boll() -> BollSnapshot:
@@ -1195,6 +1196,33 @@ class NearTpRunnerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state_store.clear_calls, 1)
         self.assertFalse(strat.state.near_tp_protected)
         self.assertFalse(strat.state.near_tp_add_disabled)
+
+    def test_saved_state_restores_first_entry_clock_for_first_add_block(self) -> None:
+        state = StrategyPositionState(
+            side="LONG",
+            layers=2,
+            last_entry_price=99.0,
+            tp_price=110.0,
+            last_order_ts_ms=600_000,
+            first_entry_ts_ms=1_000,
+            total_entry_qty=1.0,
+            total_entry_notional=100.0,
+            avg_entry_price=100.0,
+            breakeven_price=100.1,
+        )
+        saved = LiveStateStore.from_strategy_state(
+            position_id="pos-1",
+            symbol="ETH-USDT-SWAP",
+            strategy_state=state,
+            cash_before_position=None,
+        )
+        strat = BollCvdShockReclaimStrategy(BollCvdReclaimStrategyConfig(), SimplePositionSizer(SimplePositionSizerConfig()))
+
+        restore_strategy_from_saved_state(strat, saved)
+
+        self.assertEqual(strat.state.first_entry_ts_ms, 1_000)
+        self.assertEqual(strat.state.last_order_ts_ms, 600_000)
+        self.assertEqual(strat._first_entry_elapsed_seconds(601_000), 600.0)
 
 
 if __name__ == "__main__":

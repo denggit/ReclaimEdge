@@ -240,6 +240,7 @@ class StrategyPositionState:
     last_entry_price: Optional[float] = None
     tp_price: Optional[float] = None
     last_order_ts_ms: int = 0
+    first_entry_ts_ms: int = 0
     last_tp_update_ts_ms: int = 0
     last_tp_update_candle_ts_ms: int = 0
     lower_armed: bool = False

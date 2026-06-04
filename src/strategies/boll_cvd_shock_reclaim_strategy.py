@@ -99,7 +99,7 @@ class BollCvdShockReclaimStrategy(BollCvdReclaimStrategy):
             # Keep the first-entry clock stable. The first-add block must not be
             # reset by an early 5x-distance add; until this original 30m window
             # ends, every extra add still needs the same 5x distance exception.
-            setattr(self.state, "first_entry_ts_ms", ts_ms)
+            self.state.first_entry_ts_ms = ts_ms
         return intent
 
     def _add_timing_passed(self, side: PositionSide, price: float, ts_ms: int, target_layer: int) -> tuple[bool, str]:

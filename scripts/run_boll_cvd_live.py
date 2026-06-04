@@ -343,6 +343,7 @@ def restore_strategy_from_saved_state(strategy: BollCvdReclaimStrategy, saved_st
         tp_plan=tp_plan,
         partial_tp_consumed=getattr(saved_state, "partial_tp_consumed", False),
         last_order_ts_ms=saved_state.last_order_ts_ms,
+        first_entry_ts_ms=getattr(saved_state, "first_entry_ts_ms", 0),
         last_tp_update_ts_ms=saved_state.last_tp_update_ts_ms,
         last_tp_update_candle_ts_ms=saved_state.last_tp_update_candle_ts_ms,
         total_entry_qty=saved_state.total_entry_qty,
@@ -584,6 +585,16 @@ def mark_three_stage_progress_if_position_reduced(strategy: BollCvdReclaimStrate
         )
         return "TP1_TP2" if event == "TP1" else "TP2"
     return event
+
+
+def append_three_stage_progress_journal_events(journal: Any, payload: dict[str, Any]) -> None:
+    event = payload.get("event")
+    position_id = payload.get("position_id")
+    if event in {"TP1", "TP1_TP2"}:
+        journal.append("THREE_STAGE_TP1_FILLED", dict(payload), position_id=position_id)
+    if event in {"TP2", "TP1_TP2"}:
+        journal.append("THREE_STAGE_TP2_FILLED", dict(payload), position_id=position_id)
+        journal.append("TREND_RUNNER_ACTIVATED", dict(payload), position_id=position_id)
 
 
 def middle_runner_activation_boll(strategy: BollCvdReclaimStrategy):
@@ -1789,10 +1800,7 @@ async def account_position_sync_worker(
             if cash_drift_payload is not None:
                 journal.record_account_cash_drift(**cash_drift_payload)
             if three_stage_event_payload is not None and hasattr(journal, "append"):
-                event_name = "THREE_STAGE_TP1_FILLED" if three_stage_event_payload.get("event") == "TP1" else "THREE_STAGE_TP2_FILLED"
-                journal.append(event_name, dict(three_stage_event_payload), position_id=three_stage_event_payload.get("position_id"))
-                if event_name == "THREE_STAGE_TP2_FILLED":
-                    journal.append("TREND_RUNNER_ACTIVATED", dict(three_stage_event_payload), position_id=three_stage_event_payload.get("position_id"))
+                append_three_stage_progress_journal_events(journal, three_stage_event_payload)
             middle_runner_activation_recorded = False
             if middle_runner_sl_payload is not None:
                 sl_price = middle_runner_sl_payload.get("protective_sl_price")

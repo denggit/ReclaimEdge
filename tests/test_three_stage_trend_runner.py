@@ -5,7 +5,7 @@ import unittest
 from decimal import Decimal
 from unittest.mock import patch
 
-from scripts.run_boll_cvd_live import mark_three_stage_progress_if_position_reduced
+from scripts.run_boll_cvd_live import append_three_stage_progress_journal_events, mark_three_stage_progress_if_position_reduced
 from src.execution.trader import PositionSnapshot, Trader
 from src.indicators.cvd_tracker import CvdSnapshot
 from src.monitors.boll_band_breakout_monitor import BollSnapshot
@@ -94,6 +94,14 @@ def intent(**overrides) -> TradeIntent:
     )
     values.update(overrides)
     return TradeIntent(**values)  # type: ignore[arg-type]
+
+
+class RecordingJournal:
+    def __init__(self) -> None:
+        self.events = []
+
+    def append(self, event_name: str, payload: dict, position_id: str | None = None) -> None:
+        self.events.append((event_name, dict(payload), position_id))
 
 
 class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
@@ -374,6 +382,23 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
         self.assertEqual(strat.state.trend_runner_trend_start_ts_ms, 30_000)
         self.assertIsNone(strat.state.trend_runner_tp_price)
         self.assertIsNone(strat.state.trend_runner_sl_price)
+
+    def test_tp1_tp2_journal_event_records_both_tp_legs_and_activation(self) -> None:
+        journal = RecordingJournal()
+        payload = {
+            "event": "TP1_TP2",
+            "position_id": "pos-1",
+            "tp_plan": "THREE_STAGE_RUNNER",
+            "trend_runner_active": True,
+        }
+
+        append_three_stage_progress_journal_events(journal, payload)
+
+        self.assertEqual(
+            [event_name for event_name, _payload, _position_id in journal.events],
+            ["THREE_STAGE_TP1_FILLED", "THREE_STAGE_TP2_FILLED", "TREND_RUNNER_ACTIVATED"],
+        )
+        self.assertEqual([position_id for _event_name, _payload, position_id in journal.events], ["pos-1", "pos-1", "pos-1"])
 
     def test_tp2_sync_does_not_activate_when_remaining_above_tight_tolerance(self) -> None:
         strat = strategy()
