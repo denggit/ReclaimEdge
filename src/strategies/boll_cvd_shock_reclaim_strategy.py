@@ -9,7 +9,9 @@ from src.risk.simple_position_sizer import SimplePositionSizer
 from src.strategies.boll_cvd_reclaim_strategy import (
     BollCvdReclaimStrategy,
     BollCvdReclaimStrategyConfig,
+    PositionSide,
     TradeIntent,
+    TradeIntentType,
 )
 from src.utils.log import get_logger
 
@@ -28,6 +30,7 @@ class BollCvdShockReclaimStrategy(BollCvdReclaimStrategy):
     def __init__(self, config: BollCvdReclaimStrategyConfig, sizer: SimplePositionSizer):
         super().__init__(config, sizer)
         self.switch_grace_seconds = float(os.getenv("BOLL_SWITCH_GRACE_SECONDS", "300"))
+        self.first_add_block_bypass_multiplier = float(os.getenv("FIRST_ADD_BLOCK_BYPASS_MULTIPLIER", "5"))
         self._last_switch_on_ts_ms: int = 0
         self._last_switch_on_candle_ts_ms: int = 0
         self._last_lower_outside_no_burst_log_monotonic: float = 0.0
@@ -75,6 +78,94 @@ class BollCvdShockReclaimStrategy(BollCvdReclaimStrategy):
                 intents.append(intent)
 
         return intents
+
+    def _open_position(
+        self,
+        side: PositionSide,
+        intent_type: TradeIntentType,
+        price: float,
+        ts_ms: int,
+        boll: BollSnapshot,
+        cvd: CvdSnapshot,
+        reason: str,
+    ) -> TradeIntent:
+        previous_layers = self.state.layers
+        intent = super()._open_position(side, intent_type, price, ts_ms, boll, cvd, reason)
+        if previous_layers <= 0:
+            # Keep the first-entry clock stable. The first-add block must not be
+            # reset by an early 5x-distance add; until this original 30m window
+            # ends, every extra add still needs the same 5x distance exception.
+            setattr(self.state, "first_entry_ts_ms", ts_ms)
+        return intent
+
+    def _add_timing_passed(self, side: PositionSide, price: float, ts_ms: int, target_layer: int) -> tuple[bool, str]:
+        last = self.state.last_entry_price
+        if last is None or last <= 0:
+            return False, "missing_last_entry"
+
+        first_elapsed_seconds = self._first_entry_elapsed_seconds(ts_ms)
+        if self.state.layers >= 1 and first_elapsed_seconds < self.config.first_add_block_seconds:
+            adverse_gap_pct = self._adverse_gap_pct(side, price)
+            required_gap_pct = self._first_add_block_required_gap_pct_for_target_layer(target_layer)
+            if adverse_gap_pct < required_gap_pct:
+                return False, "first_add_block"
+            logger.warning(
+                "FIRST_ADD_BLOCK_BYPASSED | side=%s price=%.4f layers=%s target_layer=%s last_entry=%.4f first_elapsed_seconds=%.1f required_seconds=%s adverse_gap_pct=%.4f%% required_gap_pct=%.4f%% multiplier=%.2f",
+                side,
+                price,
+                self.state.layers,
+                target_layer,
+                last,
+                first_elapsed_seconds,
+                self.config.first_add_block_seconds,
+                adverse_gap_pct * 100,
+                required_gap_pct * 100,
+                self.first_add_block_bypass_multiplier,
+            )
+            return True, "first_add_block_bypassed"
+
+        if self.state.layers == 1:
+            return True, "ok"
+
+        if self.state.layers >= 2:
+            elapsed_seconds = self._add_elapsed_seconds(ts_ms)
+            adverse_gap_pct = self._adverse_gap_pct(side, price)
+            bypass_gap_pct = self._add_min_interval_bypass_gap_pct_for_target_layer(target_layer)
+            if elapsed_seconds < self.config.add_min_interval_seconds and adverse_gap_pct < bypass_gap_pct:
+                return False, "add_interval"
+
+        return True, "ok"
+
+    def _first_entry_elapsed_seconds(self, ts_ms: int) -> float:
+        first_entry_ts_ms = int(getattr(self.state, "first_entry_ts_ms", 0) or 0)
+        if first_entry_ts_ms <= 0:
+            first_entry_ts_ms = int(self.state.last_order_ts_ms or 0)
+        return max((ts_ms - first_entry_ts_ms) / 1000, 0.0)
+
+    def _first_add_block_required_gap_pct_for_target_layer(self, target_layer: int) -> float:
+        return self._add_layer_gap_pct_for_target_layer(target_layer) * self.first_add_block_bypass_multiplier
+
+    def _log_add_timing_skipped(self, side: PositionSide, reason: str, price: float, ts_ms: int, target_layer: int) -> None:
+        if reason == "first_add_block":
+            last = self.state.last_entry_price if self.state.last_entry_price is not None else 0.0
+            first_elapsed_seconds = self._first_entry_elapsed_seconds(ts_ms)
+            adverse_gap_pct = self._adverse_gap_pct(side, price)
+            required_gap_pct = self._first_add_block_required_gap_pct_for_target_layer(target_layer)
+            logger.info(
+                "ADD_SKIPPED | reason=first_add_block side=%s price=%.4f layers=%s target_layer=%s last_entry=%.4f first_elapsed_seconds=%.1f required_seconds=%s adverse_gap_pct=%.4f%% required_gap_pct=%.4f%% multiplier=%.2f",
+                side,
+                price,
+                self.state.layers,
+                target_layer,
+                last,
+                first_elapsed_seconds,
+                self.config.first_add_block_seconds,
+                adverse_gap_pct * 100,
+                required_gap_pct * 100,
+                self.first_add_block_bypass_multiplier,
+            )
+            return
+        super()._log_add_timing_skipped(side, reason, price, ts_ms, target_layer)
 
     def _switch_eligible(self, ts_ms: int, boll: BollSnapshot) -> bool:
         if boll.alert_switch_on:
