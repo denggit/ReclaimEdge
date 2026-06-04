@@ -580,3 +580,125 @@ def test_intent_already_has_managed_core_contracts_not_overwritten() -> None:
 
     assert result is intent_t
     assert result.managed_core_contracts == "99"
+
+
+# ---------------------------------------------------------------------------
+# Tests: Sidecar TP_FILLED + active global SL halt
+# ---------------------------------------------------------------------------
+_GLOBAL_SL_FIELDS = [
+    "near_tp_protective_sl_order_id",
+    "middle_runner_protective_sl_order_id",
+    "three_stage_post_tp1_protective_sl_order_id",
+    "trend_runner_sl_order_id",
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sl_field", _GLOBAL_SL_FIELDS)
+async def test_sidecar_tp_filled_with_active_global_sl_halts(sl_field: str) -> None:
+    """Sidecar TP_FILLED + any active global protective SL order -> halt for manual reconcile."""
+    state = sidecar_state()
+    state.sidecar_legs = [{"leg_id": "leg-1", "status": "OPEN", "tp_order_id": "tp-1", "qty": 0.1, "contracts": "1", "created_ts_ms": 1, "updated_ts_ms": 1}]
+    refresh_sidecar_state_totals(state)
+    setattr(state, sl_field, "old-sl-001")
+
+    trader = Trader()
+    trader.status_by_order["tp-1"] = "FILLED"
+    execution = ExecutionState("pos-1", 1000.0)
+    journal = Journal()
+    store = Store()
+
+    await monitor_sidecar_orders_once(
+        trader=trader,
+        strategy_state=state,
+        execution_state=execution,
+        journal=journal,
+        state_store=store,
+        trader_symbol="ETH-USDT-SWAP",
+        core_position=PositionSnapshot("LONG", Decimal("5"), 3000, 0.5, Decimal("5")),
+        position_id="pos-1",
+        cash_before_position=1000.0,
+        ts_ms=2,
+    )
+
+    # Leg must be marked TP_FILLED
+    assert state.sidecar_legs[0]["status"] == "TP_FILLED"
+    # Trading must be halted with the correct reason
+    assert execution.trading_halted
+    assert execution.halt_reason == "sidecar_tp_filled_requires_global_sl_reconcile"
+    # Journal must record the event
+    event_names = [e[0] for e in journal.events]
+    assert "SIDECAR_TP_FILLED" in event_names
+    assert "SIDECAR_TP_FILLED_REQUIRES_GLOBAL_SL_RECONCILE" in event_names
+    reconcile_entry = journal.events[event_names.index("SIDECAR_TP_FILLED_REQUIRES_GLOBAL_SL_RECONCILE")]
+    assert sl_field in str(reconcile_entry[1].get("active_global_sl_orders", []))
+    # state_store.save must be called
+    assert len(store.saved) > 0
+
+
+@pytest.mark.asyncio
+async def test_sidecar_tp_filled_without_global_sl_does_not_halt() -> None:
+    """Sidecar TP_FILLED without any active global SL: no halt, just update leg status."""
+    state = sidecar_state()
+    state.sidecar_legs = [{"leg_id": "leg-1", "status": "OPEN", "tp_order_id": "tp-1", "qty": 0.1, "contracts": "1", "created_ts_ms": 1, "updated_ts_ms": 1}]
+    refresh_sidecar_state_totals(state)
+    # No global SL order_ids set
+
+    trader = Trader()
+    trader.status_by_order["tp-1"] = "FILLED"
+    execution = ExecutionState("pos-1", 1000.0)
+    journal = Journal()
+
+    await monitor_sidecar_orders_once(
+        trader=trader,
+        strategy_state=state,
+        execution_state=execution,
+        journal=journal,
+        state_store=Store(),
+        trader_symbol="ETH-USDT-SWAP",
+        core_position=PositionSnapshot("LONG", Decimal("5"), 3000, 0.5, Decimal("5")),
+        position_id="pos-1",
+        cash_before_position=1000.0,
+        ts_ms=2,
+    )
+
+    assert state.sidecar_legs[0]["status"] == "TP_FILLED"
+    assert not execution.trading_halted
+    event_names = [e[0] for e in journal.events]
+    assert "SIDECAR_TP_FILLED" in event_names
+    assert "SIDECAR_TP_FILLED_REQUIRES_GLOBAL_SL_RECONCILE" not in event_names
+
+
+@pytest.mark.asyncio
+async def test_sidecar_tp_filled_global_sl_on_trader_also_halts() -> None:
+    """SL order_id on trader instance (not just strategy_state) also triggers halt."""
+    state = sidecar_state()
+    state.sidecar_legs = [{"leg_id": "leg-1", "status": "OPEN", "tp_order_id": "tp-1", "qty": 0.1, "contracts": "1", "created_ts_ms": 1, "updated_ts_ms": 1}]
+    refresh_sidecar_state_totals(state)
+
+    trader = Trader()
+    trader.status_by_order["tp-1"] = "FILLED"
+    # Set SL on trader (monitor_sidecar_orders_once checks getattr(trader, sl_field, None) as fallback)
+    trader.trend_runner_sl_order_id = "trader-sl-001"
+    execution = ExecutionState("pos-1", 1000.0)
+    journal = Journal()
+    store = Store()
+
+    await monitor_sidecar_orders_once(
+        trader=trader,
+        strategy_state=state,
+        execution_state=execution,
+        journal=journal,
+        state_store=store,
+        trader_symbol="ETH-USDT-SWAP",
+        core_position=PositionSnapshot("LONG", Decimal("5"), 3000, 0.5, Decimal("5")),
+        position_id="pos-1",
+        cash_before_position=1000.0,
+        ts_ms=2,
+    )
+
+    assert execution.trading_halted
+    assert execution.halt_reason == "sidecar_tp_filled_requires_global_sl_reconcile"
+    event_names = [e[0] for e in journal.events]
+    assert "SIDECAR_TP_FILLED_REQUIRES_GLOBAL_SL_RECONCILE" in event_names
+    assert len(store.saved) > 0

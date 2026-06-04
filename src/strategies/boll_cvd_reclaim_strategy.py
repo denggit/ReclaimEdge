@@ -338,6 +338,7 @@ class StrategyPositionState:
     sidecar_legs: list[dict] = field(default_factory=list)
     sidecar_dirty: bool = False
     sidecar_halt_reason: str | None = None
+    near_tp_sidecar_skip_logged: bool = False
     core_contracts: str | None = None
     core_eth_qty: float = 0.0
     tp_order_id: str | None = None
@@ -1317,12 +1318,14 @@ class BollCvdReclaimStrategy:
         if not self.config.near_tp_enabled:
             return None
         if self.state.sidecar_enabled_for_position:
-            logger.info(
-                "NEAR_TP_REDUCE_SKIPPED | reason=sidecar_enabled side=%s price=%.4f sidecar_open_qty=%.8f",
-                self.state.side,
-                price,
-                self.state.sidecar_open_qty,
-            )
+            if not self.state.near_tp_sidecar_skip_logged:
+                logger.info(
+                    "NEAR_TP_REDUCE_SKIPPED | reason=sidecar_enabled side=%s price=%.4f sidecar_open_qty=%.8f",
+                    self.state.side,
+                    price,
+                    self.state.sidecar_open_qty,
+                )
+                self.state.near_tp_sidecar_skip_logged = True
             return None
         if self.state.side is None or self.state.tp_price is None:
             return None
@@ -1529,6 +1532,7 @@ class BollCvdReclaimStrategy:
         self.state.near_tp_protective_sl_price = None
         self.state.near_tp_protective_sl_order_id = None
         self.state.near_tp_add_disabled = False
+        self.state.near_tp_sidecar_skip_logged = False
 
     def _reset_middle_runner_state(self) -> None:
         self.state.middle_runner_enabled_for_position = False

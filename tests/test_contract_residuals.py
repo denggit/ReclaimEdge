@@ -71,51 +71,74 @@ def make_trader(**overrides) -> Trader:
 
 
 # ============================================================
-# Test 1: Split TP contracts exactly sum to core contracts
+# Test 1: Split TP _build_take_profit_order_specs exact sum (calls production)
 # ============================================================
-def test_split_tp_exact_sum_to_core_contracts() -> None:
-    """Split TP partial + final must exactly sum to core_contracts (no 0.01 residual)."""
+def test_split_tp_build_specs_exact_sum_to_core_contracts() -> None:
+    """Split TP via _build_take_profit_order_specs: partial + final must exactly sum to core."""
     trader = make_trader(position_contracts=Decimal("10.01"))
-    # core_contracts = 10.01
-    # partial_ratio = 0.60
-    # partial = round_down(10.01 * 0.60) = round_down(6.006) = 6.00
-    # final = 10.01 - 6.00 = 4.01
-    partial_contracts = trader.round_contracts_down(Decimal("10.01") * Decimal("0.60"))
-    final_contracts = Decimal("10.01") - partial_contracts
-
-    assert partial_contracts == Decimal("6.00"), f"partial should be 6.00, got {partial_contracts}"
-    assert final_contracts == Decimal("4.01"), f"final should be 4.01, got {final_contracts}"
-    assert partial_contracts + final_contracts == Decimal("10.01"), (
-        f"partial + final must equal 10.01, got {partial_contracts + final_contracts}"
+    intent = make_intent(
+        tp_plan="SPLIT_PARTIAL_FINAL",
+        partial_tp_price=3060.0,
+        partial_tp_ratio=0.60,
     )
 
+    specs = trader._build_take_profit_order_specs(intent)
+    total = sum(contracts for _, contracts, _ in specs)
 
-# ============================================================
-# Test 2: Three-Stage TP1 + TP2 + runner exactly sum to core contracts
-# ============================================================
-def test_three_stage_exact_sum_to_core_contracts() -> None:
-    """Three-Stage TP1 + TP2 + runner must exactly sum to core_contracts."""
-    trader = make_trader(position_contracts=Decimal("10.01"))
-    ta = Decimal("10.01")
-
-    tp1_ratio = Decimal("0.60")
-    tp2_ratio = Decimal("0.20")
-    runner_ratio = Decimal("1") - tp1_ratio - tp2_ratio  # 0.20
-
-    tp1 = trader.round_contracts_down(ta * tp1_ratio)
-    tp2 = trader.round_contracts_down(ta * tp2_ratio)
-    # runner = core - tp1 - tp2 (exact residual, not rounded down)
-    runner = ta - tp1 - tp2
-
-    total = tp1 + tp2 + runner
-    assert total == ta, f"tp1 + tp2 + runner must equal {ta}, got total={total} tp1={tp1} tp2={tp2} runner={runner}"
-
-    # Each component must be >= min_contracts or fallback to single TP
-    assert tp1 >= Decimal("0.01")
-    assert tp2 >= Decimal("0.01")
-    assert runner >= Decimal("0.01") or runner == Decimal("0"), (
-        f"runner must be >= 0.01 or 0 (fallback), got {runner}"
+    assert total == Decimal("10.01"), (
+        f"partial + final must equal 10.01, got total={total} specs={specs}"
     )
+    # Should not fallback to single (which returns only "final")
+    labels = [label for label, _, _ in specs]
+    assert "partial" in labels, f"should have partial TP, got labels={labels}"
+    assert "final" in labels, f"should have final TP, got labels={labels}"
+    # Verify no 0.01 residual: partial should be round_down(10.01*0.6) = 6.00
+    partial = next(c for l, c, _ in specs if l == "partial")
+    assert partial == Decimal("6.00"), f"partial should be 6.00, got {partial}"
+    final = next(c for l, c, _ in specs if l == "final")
+    assert final == Decimal("4.01"), f"final should be 4.01, got {final}"
+
+
+# ============================================================
+# Test 2: Three-Stage _build_three_stage_order_specs exact sum (calls production)
+# ============================================================
+def test_three_stage_build_specs_exact_sum_to_core_contracts() -> None:
+    """Three-Stage via _build_three_stage_order_specs: TP1 + TP2 + runner must exactly sum to core."""
+    trader = make_trader(position_contracts=Decimal("10.01"))
+
+    # _build_three_stage_order_specs is called when tp_plan="THREE_STAGE_RUNNER"
+    # It reads three_stage_tp1_price, three_stage_tp2_price, ratios from the intent
+    intent = make_intent(
+        tp_plan="THREE_STAGE_RUNNER",
+        tp_price=3200.0,
+        three_stage_tp1_price=3050.0,
+        three_stage_tp1_ratio=0.60,
+        three_stage_tp2_price=3100.0,
+        three_stage_tp2_ratio=0.20,
+        three_stage_runner_ratio=0.20,
+    )
+
+    specs = trader._build_three_stage_order_specs(intent)
+    # specs returns TP1 and TP2 only; runner is implicit
+    placed = sum(contracts for _, contracts, _ in specs)
+    runner = trader.position_contracts - placed
+
+    # Total must equal core
+    assert placed + runner == Decimal("10.01"), (
+        f"tp1 + tp2 + runner must equal 10.01, got placed={placed} runner={runner}"
+    )
+    # Runner must be >= min_contracts
+    assert runner >= trader.min_contracts, (
+        f"runner must be >= 0.01, got {runner}"
+    )
+    # TP1 should be round_down(10.01 * 0.60) = 6.00
+    tp1 = next(c for l, c, _ in specs if l == "tp1_middle")
+    assert tp1 == Decimal("6.00"), f"tp1 should be 6.00, got {tp1}"
+    # TP2 should be round_down(10.01 * 0.20) = 2.00
+    tp2 = next(c for l, c, _ in specs if l == "tp2_outer")
+    assert tp2 == Decimal("2.00"), f"tp2 should be 2.00, got {tp2}"
+    # Runner should be 10.01 - 6.00 - 2.00 = 2.01
+    assert runner == Decimal("2.01"), f"runner should be 2.01, got {runner}"
 
 
 # ============================================================
@@ -234,9 +257,6 @@ async def test_replace_tp_fetch_fails_raises_runtime_error() -> None:
 
     async def mock_cancel_existing():
         return None
-
-    # Override any SL placement path
-    original_place_sl = getattr(trader, "place_near_tp_protective_stop_with_retries", None)
 
     trader.fetch_position_snapshot = mock_fetch_snapshot
     trader.fetch_pending_orders = mock_fetch_pending

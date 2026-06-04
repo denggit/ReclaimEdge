@@ -439,6 +439,7 @@ def restore_strategy_from_saved_state(strategy: BollCvdReclaimStrategy, saved_st
         sidecar_legs=list(getattr(saved_state, "sidecar_legs", []) or []),
         sidecar_dirty=getattr(saved_state, "sidecar_dirty", False),
         sidecar_halt_reason=getattr(saved_state, "sidecar_halt_reason", None),
+        near_tp_sidecar_skip_logged=getattr(saved_state, "near_tp_sidecar_skip_logged", False),
         core_contracts=getattr(saved_state, "core_contracts", None),
         core_eth_qty=getattr(saved_state, "core_eth_qty", 0.0),
     )
@@ -1827,6 +1828,7 @@ async def execution_worker(
                     strategy.state.sidecar_dirty = True
                     strategy.state.sidecar_halt_reason = "sidecar_blocks_near_tp_reduce"
                     current_position_id = execution_state.current_position_id
+                    cash_before_position = execution_state.cash_before_position
                 if hasattr(journal, "append"):
                     journal.append(
                         "SIDECAR_BLOCKS_NEAR_TP_REDUCE",
@@ -1840,6 +1842,14 @@ async def execution_worker(
                         },
                         position_id=current_position_id,
                     )
+                state_store.save(
+                    LiveStateStore.from_strategy_state(
+                        position_id=current_position_id,
+                        symbol=trader.symbol,
+                        strategy_state=strategy.state,
+                        cash_before_position=cash_before_position,
+                    )
+                )
                 continue
 
             result = await trader.execute_intent(command.intent)
