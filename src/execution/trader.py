@@ -529,7 +529,7 @@ class Trader:
             )
         trend_runner_sl_price = getattr(intent, "trend_runner_sl_price", None) or getattr(intent, "three_stage_runner_sl_price", None)
         if (
-            (getattr(intent, "trend_runner_active", False) or getattr(intent, "tp_plan", "SINGLE") == "THREE_STAGE_RUNNER")
+            getattr(intent, "trend_runner_active", False)
             and trend_runner_sl_price is not None
         ):
             old_sl_order_id = getattr(intent, "trend_runner_sl_order_id", None) or self.trend_runner_sl_order_id
@@ -613,10 +613,9 @@ class Trader:
     def _build_three_stage_order_specs(self, intent: TradeIntent) -> list[tuple[str, Decimal, float]]:
         tp1_price = getattr(intent, "three_stage_tp1_price", None)
         tp2_price = getattr(intent, "three_stage_tp2_price", None)
-        runner_tp = getattr(intent, "three_stage_runner_tp_price", None) or intent.tp_price
         tp1_ratio = Decimal(str(getattr(intent, "three_stage_tp1_ratio", 0.0)))
         tp2_ratio = Decimal(str(getattr(intent, "three_stage_tp2_ratio", 0.0)))
-        if tp1_price is None or tp2_price is None or runner_tp is None or tp1_ratio <= 0 or tp2_ratio <= 0:
+        if tp1_price is None or tp2_price is None or tp1_ratio <= 0 or tp2_ratio <= 0:
             return [("final", self.position_contracts, intent.tp_price)]
         tp1_contracts = self.round_contracts_down(self.position_contracts * tp1_ratio)
         tp2_contracts = self.round_contracts_down(self.position_contracts * tp2_ratio)
@@ -634,7 +633,6 @@ class Trader:
         return [
             ("tp1_middle", tp1_contracts, float(tp1_price)),
             ("tp2_outer", tp2_contracts, float(tp2_price)),
-            ("runner", runner_contracts, float(runner_tp)),
         ]
 
     def _trend_runner_sl_contracts(self, intent: TradeIntent) -> Decimal:

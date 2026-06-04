@@ -561,10 +561,13 @@ def mark_three_stage_progress_if_position_reduced(strategy: BollCvdReclaimStrate
         state.trend_runner_trend_start_ts_ms = ts_ms
         state.trend_runner_adjust_count = 0
         state.trend_runner_last_update_candle_ts_ms = 0
+        state.trend_runner_tp_price = None
+        state.trend_runner_sl_price = None
+        state.trend_runner_tp_order_id = None
+        state.trend_runner_sl_order_id = None
         state.tp_plan = "SINGLE"
         state.partial_tp_price = None
         state.partial_tp_ratio = 0.0
-        state.tp_price = state.trend_runner_tp_price or state.three_stage_runner_initial_tp_price or state.tp_price
         logger.warning(
             "TREND_RUNNER_ACTIVATED | side=%s old_qty=%.8f new_qty=%.8f remaining_ratio=%.6f runner_ratio=%.6f tp2_ratio=%.4f runner_tp=%s runner_sl=%s trend_start_ts_ms=%s",
             state.side,
@@ -1264,12 +1267,6 @@ async def execution_worker(
                     current_position_id = execution_state.current_position_id
                     cash_before_position = execution_state.cash_before_position
                     execution_state.last_order_ts_ms = command.intent.ts_ms
-                    if getattr(command.intent, "tp_plan", "SINGLE") == "THREE_STAGE_RUNNER":
-                        strategy.state.trend_runner_tp_order_id = result.tp_order_id
-                        if getattr(result, "protective_sl_order_id", None):
-                            strategy.state.trend_runner_sl_order_id = result.protective_sl_order_id
-                        if _parse_optional_float(getattr(result, "protective_sl_price", "")) is not None:
-                            strategy.state.trend_runner_sl_price = _parse_optional_float(result.protective_sl_price)
                     strategy_state_for_save = copy.deepcopy(strategy.state)
                     equity = account_snapshot.equity
                 journal.record_entry(

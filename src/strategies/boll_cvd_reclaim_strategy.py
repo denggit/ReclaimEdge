@@ -808,7 +808,7 @@ class BollCvdReclaimStrategy:
         if tp_plan == "MIDDLE_RUNNER":
             tp_price = boll.upper if side == "LONG" else boll.lower
         if tp_plan == "THREE_STAGE_RUNNER":
-            tp_price = self._calculate_runner_initial_tp(side, boll)
+            tp_price = boll.upper if side == "LONG" else boll.lower
         if tp_mode != "MIDDLE":
             reason = f"{reason} + 中轨净利润不足阈值，TP切换到{tp_mode}"
         if tp_plan == "SPLIT_PARTIAL_FINAL":
@@ -849,14 +849,14 @@ class BollCvdReclaimStrategy:
         )
         if tp_plan == "THREE_STAGE_RUNNER":
             logger.warning(
-                "THREE_STAGE_RUNNER_PLANNED | side=%s tp1=%.4f tp1_ratio=%.4f tp2=%.4f tp2_ratio=%.4f runner_tp=%.4f runner_sl=%.4f runner_ratio=%.4f",
+                "THREE_STAGE_RUNNER_PLANNED | side=%s tp1=%.4f tp1_ratio=%.4f tp2=%.4f tp2_ratio=%.4f runner_tp=%s runner_sl=%s runner_ratio=%.4f",
                 side,
                 self.state.three_stage_tp1_price or 0.0,
                 self.state.three_stage_tp1_ratio,
                 self.state.three_stage_tp2_price or 0.0,
                 self.state.three_stage_tp2_ratio,
-                self.state.trend_runner_tp_price or 0.0,
-                self.state.trend_runner_sl_price or 0.0,
+                f"{self.state.trend_runner_tp_price:.4f}" if self.state.trend_runner_tp_price is not None else "-",
+                f"{self.state.trend_runner_sl_price:.4f}" if self.state.trend_runner_sl_price is not None else "-",
                 self.state.three_stage_runner_ratio,
             )
         return self._intent(intent_type, side, price, next_layer, tp_price, reason, size, boll, cvd, ts_ms)
@@ -864,7 +864,11 @@ class BollCvdReclaimStrategy:
     def _maybe_update_tp(self, price: float, ts_ms: int, boll: BollSnapshot, cvd: CvdSnapshot) -> TradeIntent | None:
         if self.state.side is None or self.state.layers <= 0:
             return None
-        if self.state.last_tp_update_candle_ts_ms == boll.candle_ts_ms:
+        trend_runner_needs_initial_orders = (
+            self.state.trend_runner_active
+            and (self.state.trend_runner_tp_price is None or self.state.trend_runner_sl_price is None)
+        )
+        if self.state.last_tp_update_candle_ts_ms == boll.candle_ts_ms and not trend_runner_needs_initial_orders:
             return None
 
         old_runner_sl = self.state.middle_runner_protective_sl_price
@@ -918,7 +922,7 @@ class BollCvdReclaimStrategy:
             if tp_plan == "MIDDLE_RUNNER":
                 tp_price = boll.upper if self.state.side == "LONG" else boll.lower
             if tp_plan == "THREE_STAGE_RUNNER":
-                tp_price = self._calculate_runner_initial_tp(self.state.side, boll)
+                tp_price = boll.upper if self.state.side == "LONG" else boll.lower
             if tp_plan == "MIDDLE_RUNNER":
                 self._set_middle_runner_planned(partial_tp_price, tp_price)
             elif tp_plan == "THREE_STAGE_RUNNER":
@@ -1450,12 +1454,10 @@ class BollCvdReclaimStrategy:
 
     def _set_three_stage_runner_planned(self, side: PositionSide, boll: BollSnapshot) -> None:
         tp1_ratio, tp2_ratio, runner_ratio = self._normalized_three_stage_ratios()
-        runner_tp = self._calculate_runner_initial_tp(side, boll)
-        runner_sl = boll.middle
         self.state.three_stage_runner_enabled_for_position = True
         self.state.three_stage_tp1_price = boll.middle
         self.state.three_stage_tp2_price = boll.upper if side == "LONG" else boll.lower
-        self.state.three_stage_runner_initial_tp_price = runner_tp
+        self.state.three_stage_runner_initial_tp_price = None
         self.state.three_stage_tp1_ratio = tp1_ratio
         self.state.three_stage_tp2_ratio = tp2_ratio
         self.state.three_stage_runner_ratio = runner_ratio
@@ -1465,8 +1467,8 @@ class BollCvdReclaimStrategy:
         self.state.trend_runner_trend_start_ts_ms = 0
         self.state.trend_runner_adjust_count = 0
         self.state.trend_runner_last_update_candle_ts_ms = 0
-        self.state.trend_runner_tp_price = runner_tp
-        self.state.trend_runner_sl_price = runner_sl
+        self.state.trend_runner_tp_price = None
+        self.state.trend_runner_sl_price = None
         self.state.trend_runner_tp_order_id = None
         self.state.trend_runner_sl_order_id = None
         self.state.trend_runner_exit_reason = None

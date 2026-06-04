@@ -90,9 +90,7 @@ def intent(**overrides) -> TradeIntent:
         three_stage_tp1_ratio=0.6,
         three_stage_tp2_price=110.0,
         three_stage_tp2_ratio=0.2,
-        three_stage_runner_tp_price=111.1,
         three_stage_runner_ratio=0.2,
-        three_stage_runner_sl_price=101.0,
     )
     values.update(overrides)
     return TradeIntent(**values)  # type: ignore[arg-type]
@@ -111,9 +109,14 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
         self.assertEqual(got.three_stage_tp1_ratio, 0.6)
         self.assertEqual(got.three_stage_tp2_price, 110.0)
         self.assertEqual(got.three_stage_tp2_ratio, 0.2)
-        self.assertAlmostEqual(got.three_stage_runner_tp_price or 0, 111.1)
-        self.assertEqual(got.three_stage_runner_sl_price, 101.0)
+        self.assertIsNone(got.three_stage_runner_tp_price)
+        self.assertIsNone(got.three_stage_runner_sl_price)
         self.assertEqual(got.three_stage_runner_ratio, 0.2)
+        self.assertFalse(got.trend_runner_active)
+        self.assertFalse(strat.state.trend_runner_active)
+        self.assertIsNone(strat.state.trend_runner_tp_price)
+        self.assertIsNone(strat.state.trend_runner_sl_price)
+        self.assertEqual(got.tp_price, 110.0)
 
     def test_middle_tp_mode_enables_three_stage_runner_short(self) -> None:
         strat = strategy()
@@ -125,8 +128,10 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
         self.assertEqual(got.tp_plan, "THREE_STAGE_RUNNER")
         self.assertEqual(got.three_stage_tp1_price, 99.0)
         self.assertEqual(got.three_stage_tp2_price, 90.0)
-        self.assertAlmostEqual(got.three_stage_runner_tp_price or 0, 89.1)
-        self.assertEqual(got.three_stage_runner_sl_price, 99.0)
+        self.assertIsNone(got.three_stage_runner_tp_price)
+        self.assertIsNone(got.three_stage_runner_sl_price)
+        self.assertFalse(got.trend_runner_active)
+        self.assertEqual(got.tp_price, 90.0)
 
     def test_outer_tp_mode_does_not_enable_three_stage_or_split(self) -> None:
         strat = strategy()
@@ -273,23 +278,66 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
             three_stage_tp1_ratio=0.6,
             three_stage_tp2_ratio=0.2,
             three_stage_runner_ratio=0.2,
-            trend_runner_tp_price=111.1,
-            trend_runner_sl_price=101.0,
         )
 
         event = mark_three_stage_progress_if_position_reduced(strat, PositionSnapshot("LONG", Decimal("4"), 100.0, 0.4, Decimal("4")), 10_000)
         self.assertEqual(event, "TP1")
         self.assertTrue(strat.state.three_stage_tp1_consumed)
         self.assertFalse(strat.state.trend_runner_active)
+        self.assertIsNone(strat.state.trend_runner_tp_price)
+        self.assertIsNone(strat.state.trend_runner_sl_price)
 
         event = mark_three_stage_progress_if_position_reduced(strat, PositionSnapshot("LONG", Decimal("2"), 100.0, 0.2, Decimal("2")), 20_000)
         self.assertEqual(event, "TP2")
         self.assertTrue(strat.state.three_stage_tp2_consumed)
         self.assertTrue(strat.state.trend_runner_active)
         self.assertEqual(strat.state.trend_runner_trend_start_ts_ms, 20_000)
+        self.assertIsNone(strat.state.trend_runner_tp_price)
+        self.assertIsNone(strat.state.trend_runner_sl_price)
+
+        update = strat._maybe_update_tp(110.0, 20_100, boll(middle=101.0, upper=110.0, lower=90.0), cvd())
+
+        self.assertIsNotNone(update)
+        self.assertEqual(update.intent_type, "UPDATE_TP")
+        self.assertTrue(update.trend_runner_active)
+        self.assertAlmostEqual(update.trend_runner_tp_price or 0, 111.1)
+        self.assertEqual(update.trend_runner_sl_price, 101.0)
+        self.assertEqual(update.tp_price, 111.1)
 
 
-class ThreeStageTrendRunnerTraderTest(unittest.TestCase):
+class RecordingTrader(Trader):
+    def __init__(self, side: str = "LONG") -> None:
+        self.symbol = "ETH-USDT-SWAP"
+        self.td_mode = "isolated"
+        self.pos_side_mode = "net"
+        self.position_contracts = Decimal("10")
+        self.contract_precision = Decimal("0.01")
+        self.min_contracts = Decimal("0.01")
+        self.tp_order_id = None
+        self.trend_runner_sl_order_id = None
+        self.side = side
+        self.placed_specs = []
+        self.trend_stop_calls = 0
+
+    async def fetch_position_snapshot(self) -> PositionSnapshot:
+        return PositionSnapshot(self.side, self.position_contracts, 100.0, float(self.position_contracts * Decimal("0.1")), self.position_contracts)
+
+    async def cancel_existing_reduce_only_orders(self) -> None:
+        return None
+
+    async def _place_reduce_only_take_profit_orders(self, intent_: TradeIntent, specs):  # type: ignore[no-untyped-def]
+        self.placed_specs = specs
+        return [f"ord-{label}" for label, _contracts, _price in specs]
+
+    async def place_trend_runner_protective_stop_with_retries(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+        self.trend_stop_calls += 1
+        return True, "algo-runner", "protective_sl_placed"
+
+    async def cancel_trend_runner_protective_stop(self, order_id: str | None) -> bool:
+        return True
+
+
+class ThreeStageTrendRunnerTraderTest(unittest.IsolatedAsyncioTestCase):
     def test_build_three_stage_order_specs(self) -> None:
         trader = Trader.__new__(Trader)
         trader.position_contracts = Decimal("10")
@@ -303,9 +351,60 @@ class ThreeStageTrendRunnerTraderTest(unittest.TestCase):
             [
                 ("tp1_middle", Decimal("6.00"), 101.0),
                 ("tp2_outer", Decimal("2.00"), 110.0),
-                ("runner", Decimal("2.00"), 111.1),
             ],
         )
+
+    async def test_initial_three_stage_long_does_not_place_middle_sell_stop_below_middle(self) -> None:
+        trader = RecordingTrader("LONG")
+
+        result = await trader.replace_take_profit(
+            intent(price=90.0, three_stage_runner_sl_price=101.0, trend_runner_active=False)
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(trader.trend_stop_calls, 0)
+        self.assertFalse(result.protective_sl_ok)
+        self.assertEqual([label for label, _contracts, _price in trader.placed_specs], ["tp1_middle", "tp2_outer"])
+
+    async def test_initial_three_stage_short_does_not_place_middle_buy_stop_above_middle(self) -> None:
+        trader = RecordingTrader("SHORT")
+
+        result = await trader.replace_take_profit(
+            intent(
+                side="SHORT",
+                price=110.0,
+                tp_price=90.0,
+                three_stage_tp1_price=99.0,
+                three_stage_tp2_price=90.0,
+                three_stage_runner_sl_price=99.0,
+                trend_runner_active=False,
+            )
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(trader.trend_stop_calls, 0)
+        self.assertFalse(result.protective_sl_ok)
+        self.assertEqual([label for label, _contracts, _price in trader.placed_specs], ["tp1_middle", "tp2_outer"])
+
+    async def test_active_trend_runner_places_runner_tp_and_sl(self) -> None:
+        trader = RecordingTrader("LONG")
+        trader.position_contracts = Decimal("2")
+
+        result = await trader.replace_take_profit(
+            intent(
+                intent_type="UPDATE_TP",
+                tp_plan="SINGLE",
+                tp_price=111.1,
+                trend_runner_active=True,
+                trend_runner_tp_price=111.1,
+                trend_runner_sl_price=101.0,
+            )
+        )
+
+        self.assertTrue(result.ok)
+        self.assertTrue(result.protective_sl_ok)
+        self.assertEqual(trader.trend_stop_calls, 1)
+        self.assertEqual(trader.placed_specs, [("final", Decimal("2"), 111.1)])
 
 
 if __name__ == "__main__":
