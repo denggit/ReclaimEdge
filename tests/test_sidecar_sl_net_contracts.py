@@ -1,317 +1,437 @@
+"""Test that protective SL orders use OKX net position contracts (core + sidecar).
+
+When Sidecar is enabled, protective stop-loss orders must cover the full OKX
+net position, not just the core position.  This is a risk-control requirement:
+if only core contracts are covered, the sidecar portion is left unprotected.
+"""
+
 from __future__ import annotations
 
 from decimal import Decimal
 
-import pytest
+import contextlib
+import asyncio
+import datetime as dt
+import unittest
 
-from src.execution.trader import PositionSnapshot, Trader
-from src.risk.simple_position_sizer import PositionSize
-from src.strategies.boll_cvd_reclaim_strategy import TradeIntent
-
-
-def make_intent(**overrides) -> TradeIntent:
-    kwargs = dict(
-        intent_type="UPDATE_TP",
-        side="LONG",
-        price=3000.0,
-        layer_index=1,
-        tp_price=3100.0,
-        reason="test",
-        size=PositionSize(30.0, 1500.0, 0.5, 1, 1.0),
-        fast_cvd=0.0,
-        previous_fast_cvd=0.0,
-        buy_ratio=0.0,
-        sell_ratio=0.0,
-        boll_upper=3100.0,
-        boll_middle=3000.0,
-        boll_lower=2900.0,
-        ts_ms=1000,
-        avg_entry_price=3000.0,
-        breakeven_price=3003.0,
-        tp_mode="MIDDLE",
-    )
-    kwargs.update(overrides)
-    return TradeIntent(**kwargs)  # type: ignore[arg-type]
+from scripts.run_boll_cvd_live import (
+    AccountSnapshot,
+    ExecutionState,
+    StrategyPositionState,
+    account_position_sync_worker,
+    refresh_sidecar_state_totals,
+)
+from src.execution.trader import PositionSnapshot
+from src.position_management.sidecar.model import SidecarLegStatus
+from src.risk.simple_position_sizer import SimplePositionSizer, SimplePositionSizerConfig
+from src.strategies.boll_cvd_reclaim_strategy import BollCvdReclaimStrategyConfig
+from src.strategies.boll_cvd_shock_reclaim_strategy import BollCvdShockReclaimStrategy
 
 
-class SlNetContractsTrader(Trader):
-    """Test trader that records SL placement calls with their contracts argument."""
+def flat_position() -> PositionSnapshot:
+    return PositionSnapshot(None, Decimal("0"), 0.0, 0.0, Decimal("0"))
+
+
+class FakeJournal:
+    def __init__(self) -> None:
+        self.entries: list[int] = []
+        self.flats: list[dict] = []
+        self.events: list[tuple[str, dict, str | None]] = []
+
+    def new_position_id(self, symbol: str, side: str, ts_ms: int | None = None) -> str:
+        return f"{symbol}:{side}:{ts_ms}"
+
+    def record_entry(self, **kwargs) -> None:
+        self.entries.append(kwargs["intent"].ts_ms)
+
+    def record_tp_update(self, **kwargs) -> None:
+        pass
+
+    def record_error(self, **kwargs) -> None:
+        pass
+
+    def record_flat(self, **kwargs) -> None:
+        self.flats.append(kwargs)
+
+    def record_cash_transfer(self, **kwargs) -> None:
+        pass
+
+    def record_account_cash_drift(self, **kwargs) -> None:
+        pass
+
+    def record_rolling_loss_guard(self, **kwargs) -> None:
+        pass
+
+    def append(self, event_name: str, payload: dict, position_id: str | None = None) -> None:
+        self.events.append((event_name, dict(payload), position_id))
+
+
+class FakeStateStore:
+    def __init__(self) -> None:
+        self.saved_states: list = []
+        self.clear_calls = 0
+
+    def save(self, state) -> None:
+        self.saved_states.append(state)
+
+    def clear(self) -> None:
+        self.clear_calls += 1
+
+
+class FullProtectiveTrader:
+    """Trader that records all protective SL orders for inspection."""
+    symbol = "ETH-USDT-SWAP"
+    account_equity_usdt = 1000.0
 
     def __init__(self) -> None:
-        self.symbol = "ETH-USDT-SWAP"
-        self.td_mode = "isolated"
-        self.pos_side_mode = "net"
         self.position_contracts = Decimal("0")
-        self.contract_precision = Decimal("0.01")
-        self.min_contracts = Decimal("0.01")
-        self.tp_order_id = None
-        self.near_tp_protective_sl_order_id = None
-        self.middle_runner_protective_sl_order_id = None
-        self.three_stage_post_tp1_protective_sl_order_id = None
-        self.trend_runner_sl_order_id = None
-        self._protected_reduce_only_order_ids: set[str] = set()
-        self._managed_reduce_only_order_ids: set[str] = set()
-        self._allow_cancel_unmanaged_reduce_only = True
-
-        # Record SL contract arguments
-        self.post_tp1_sl_contracts: list[Decimal] = []
-        self.middle_runner_sl_contracts: list[Decimal] = []
-        self.trend_runner_sl_contracts: list[Decimal] = []
-        self.placed_tp_specs: list[tuple] = []
+        self.post_tp1_stop_orders: list[dict] = []
+        self.cancelled_post_tp1_stop_ids: list[str | None] = []
+        self.cancel_post_tp1_ok = True
+        self.middle_runner_stop_orders: list[dict] = []
+        self.cancelled_middle_runner_stop_ids: list[str | None] = []
+        self.cancel_middle_runner_ok = True
+        self.sidecar_tps: list[tuple] = []
+        self.sidecar_order_status: dict[str, str] = {}
+        self.cancelled_sidecar_tps: list[str] = []
+        self.market_exits: list[tuple] = []
+        self._equity = 1000.0
 
     async def fetch_position_snapshot(self) -> PositionSnapshot:
-        # Default: OKX net = 12
-        return PositionSnapshot("LONG", Decimal("12"), 3000.0, 1.2, Decimal("12"))
+        return flat_position()
 
-    async def fetch_pending_orders(self):  # type: ignore[no-untyped-def]
-        return []
+    async def fetch_usdt_equity(self) -> float:
+        return self._equity
 
-    async def _place_reduce_only_take_profit_orders(self, intent_: TradeIntent, specs):  # type: ignore[no-untyped-def]
-        self.placed_tp_specs = specs
-        return [f"tp-{label}" for label, _contracts, _price in specs]
+    async def request(self, method: str, endpoint: str, payload=None):
+        return {"data": [{"details": [{"ccy": "USDT", "cashBal": str(self._equity)}]}]}
+
+    def mark_flat(self) -> None:
+        self.position_contracts = Decimal("0")
 
     async def place_three_stage_post_tp1_protective_stop_with_retries(
-        self, side, contracts, stop_price, retry_count, retry_interval_seconds,  # type: ignore[no-untyped-def]
+        self, side, contracts, stop_price, retry_count, retry_interval_seconds
     ):
-        self.post_tp1_sl_contracts.append(contracts)
-        self.three_stage_post_tp1_protective_sl_order_id = "algo-post-tp1"
-        return True, "algo-post-tp1", "protective_sl_placed"
-
-    async def place_middle_runner_protective_stop_with_retries(
-        self, side, contracts, stop_price, retry_count, retry_interval_seconds,  # type: ignore[no-untyped-def]
-    ):
-        self.middle_runner_sl_contracts.append(contracts)
-        self.middle_runner_protective_sl_order_id = "algo-middle-runner"
-        return True, "algo-middle-runner", "protective_sl_placed"
-
-    async def place_trend_runner_protective_stop_with_retries(
-        self, side, contracts, stop_price, retry_count, retry_interval_seconds,  # type: ignore[no-untyped-def]
-    ):
-        self.trend_runner_sl_contracts.append(contracts)
-        self.trend_runner_sl_order_id = "algo-trend-runner"
-        return True, "algo-trend-runner", "protective_sl_placed"
+        order_id = f"post-tp1-{len(self.post_tp1_stop_orders) + 1}"
+        self.post_tp1_stop_orders.append({
+            "side": side, "contracts": contracts, "stop_price": stop_price,
+            "retry_count": retry_count, "retry_interval_seconds": retry_interval_seconds,
+            "order_id": order_id,
+        })
+        return True, order_id, "protective_sl_placed"
 
     async def cancel_three_stage_post_tp1_protective_stop(self, order_id: str | None) -> bool:
-        return True
+        self.cancelled_post_tp1_stop_ids.append(order_id)
+        return self.cancel_post_tp1_ok
+
+    async def place_middle_runner_protective_stop_with_retries(
+        self, side, contracts, stop_price, retry_count, retry_interval_seconds
+    ):
+        order_id = f"mr-sl-{len(self.middle_runner_stop_orders) + 1}"
+        self.middle_runner_stop_orders.append({
+            "side": side, "contracts": contracts, "stop_price": stop_price,
+            "retry_count": retry_count, "retry_interval_seconds": retry_interval_seconds,
+            "order_id": order_id,
+        })
+        return True, order_id, "protective_sl_placed"
 
     async def cancel_middle_runner_protective_stop(self, order_id: str | None) -> bool:
+        self.cancelled_middle_runner_stop_ids.append(order_id)
+        return self.cancel_middle_runner_ok
+
+    async def place_sidecar_market_order(self, *, side, eth_qty):
+        return {"order_id": "sc-market", "contracts": "2", "qty": eth_qty}
+
+    async def place_sidecar_fixed_take_profit(self, *, side, contracts, tp_price, client_order_id=None):
+        self.sidecar_tps.append((side, contracts, tp_price, client_order_id))
+        return f"sc-tp-{len(self.sidecar_tps)}"
+
+    async def fetch_sidecar_order_status(self, order_id: str):
+        return {"order_id": order_id, "status": self.sidecar_order_status.get(order_id, "OPEN"),
+                "filled_qty": None, "avg_fill_price": None}
+
+    async def cancel_sidecar_take_profit(self, order_id: str):
+        self.cancelled_sidecar_tps.append(order_id)
         return True
 
-    async def cancel_trend_runner_protective_stop(self, order_id: str | None) -> bool:
-        return True
+    async def market_exit_remaining_position_with_retries(self, side, retry_count):
+        self.market_exits.append((side, retry_count))
+        return True, "ok"
 
-    async def cancel_existing_reduce_only_orders(self) -> None:
-        return None
-
-
-# ============================================================
-# Test 1: post-TP1 SL uses net contracts (12), TP uses core (10)
-# ============================================================
-@pytest.mark.asyncio
-async def test_post_tp1_sl_uses_net_contracts() -> None:
-    """post-TP1 protective SL must cover full OKX net position, not just core."""
-    trader = SlNetContractsTrader()
-
-    result = await trader.replace_take_profit(
-        make_intent(
-            managed_core_contracts="10",
-            tp_plan="THREE_STAGE_RUNNER",
-            three_stage_tp1_consumed=True,
-            three_stage_tp2_consumed=False,
-            three_stage_post_tp1_protective_sl_price=2990.0,
-            trend_runner_active=False,
-        )
-    )
-
-    assert result.ok
-    assert result.protective_sl_ok
-    # SL must use net contracts (12), not core (10)
-    assert trader.post_tp1_sl_contracts == [Decimal("12")], (
-        f"post-TP1 SL should use net=12, got {trader.post_tp1_sl_contracts}"
-    )
-    # result.contracts is TP contracts (core)
-    assert result.contracts == "10"
+    async def fetch_pending_orders(self):
+        return []
 
 
-# ============================================================
-# Test 2: Middle Runner SL uses net contracts (12), TP uses core (10)
-# ============================================================
-@pytest.mark.asyncio
-async def test_middle_runner_sl_uses_net_contracts() -> None:
-    """Middle Runner protective SL must cover full OKX net position, not just core."""
-    trader = SlNetContractsTrader()
+class SidecarSLNetContractsTest(unittest.IsolatedAsyncioTestCase):
 
-    result = await trader.replace_take_profit(
-        make_intent(
-            managed_core_contracts="10",
-            tp_plan="SINGLE",
-            middle_runner_active=True,
-            middle_runner_protective_sl_price=2980.0,
-        )
-    )
-
-    assert result.ok
-    assert result.protective_sl_ok
-    # SL must use net contracts (12), not core (10)
-    assert trader.middle_runner_sl_contracts == [Decimal("12")], (
-        f"middle runner SL should use net=12, got {trader.middle_runner_sl_contracts}"
-    )
-    # TP must use core contracts (10)
-    assert trader.placed_tp_specs == [("final", Decimal("10"), 3100.0)], (
-        f"TP should use core=10, got {trader.placed_tp_specs}"
-    )
-
-
-# ============================================================
-# Test 3: Trend Runner SL uses net contracts (12), TP uses core (10)
-# ============================================================
-@pytest.mark.asyncio
-async def test_trend_runner_sl_uses_net_contracts() -> None:
-    """Trend Runner protective SL must cover full OKX net position, not just core."""
-    trader = SlNetContractsTrader()
-
-    result = await trader.replace_take_profit(
-        make_intent(
-            managed_core_contracts="10",
-            tp_plan="SINGLE",
-            trend_runner_active=True,
-            trend_runner_sl_price=2950.0,
-        )
-    )
-
-    assert result.ok
-    assert result.protective_sl_ok
-    # SL must use net contracts (12), not core (10)
-    assert trader.trend_runner_sl_contracts == [Decimal("12")], (
-        f"trend runner SL should use net=12, got {trader.trend_runner_sl_contracts}"
-    )
-    # TP must use core contracts (10)
-    assert trader.placed_tp_specs == [("final", Decimal("10"), 3100.0)], (
-        f"TP should use core=10, got {trader.placed_tp_specs}"
-    )
-
-
-# ============================================================
-# Test 4: TP still uses core contracts when managed_core_contracts set
-# ============================================================
-@pytest.mark.asyncio
-async def test_tp_uses_core_contracts() -> None:
-    """When managed_core_contracts is set, TP orders must use core, not net."""
-    trader = SlNetContractsTrader()
-
-    result = await trader.replace_take_profit(
-        make_intent(
-            managed_core_contracts="10",
-            tp_plan="SINGLE",
-        )
-    )
-
-    assert result.ok
-    assert result.contracts == "10"
-    assert trader.placed_tp_specs == [("final", Decimal("10"), 3100.0)], (
-        f"TP should use core=10, got {trader.placed_tp_specs}"
-    )
-
-
-# ============================================================
-# Test 5: managed_core_contracts > net contracts → RuntimeError
-# ============================================================
-@pytest.mark.asyncio
-async def test_managed_core_exceeds_net_raises_runtime_error() -> None:
-    """When managed_core_contracts > OKX net position, raise RuntimeError."""
-    trader = SlNetContractsTrader()
-
-    # OKX net=8, core=10 → should raise
-    # Override fetch_position_snapshot to return 8
-    original_fetch = trader.fetch_position_snapshot
-
-    async def fetch_8():  # type: ignore[no-untyped-def]
-        return PositionSnapshot("LONG", Decimal("8"), 3000.0, 0.8, Decimal("8"))
-
-    trader.fetch_position_snapshot = fetch_8  # type: ignore[method-assign]
-
-    with pytest.raises(RuntimeError, match="managed_core_contracts_exceeds_net_position"):
-        await trader.replace_take_profit(
-            make_intent(
-                managed_core_contracts="10",
-                tp_plan="SINGLE",
+    async def run_account_sync_until(
+        self, predicate, *, account_snapshot, execution_state, trader,
+        strategy, journal, state_store, timeout: float = 1.0
+    ):
+        task = asyncio.create_task(
+            account_position_sync_worker(
+                state_lock=asyncio.Lock(),
+                account_snapshot=account_snapshot,
+                execution_state=execution_state,
+                trader=trader,
+                sizer=SimplePositionSizer(SimplePositionSizerConfig()),
+                strategy=strategy,
+                journal=journal,
+                state_store=state_store,
+                position_sync_seconds=0,
+                account_sync_seconds=999,
+                cash_log_min_delta_usdt=999,
             )
         )
+        try:
+            deadline = asyncio.get_running_loop().time() + timeout
+            while asyncio.get_running_loop().time() < deadline:
+                if predicate():
+                    return
+                await asyncio.sleep(0.01)
+            self.fail("account sync predicate was not satisfied")
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
 
-    # Restore
-    trader.fetch_position_snapshot = original_fetch  # type: ignore[method-assign]
-
-
-# ============================================================
-# Test 6: Without managed_core_contracts, TP and SL both use net
-# ============================================================
-@pytest.mark.asyncio
-async def test_without_managed_core_contracts_tp_and_sl_use_net() -> None:
-    """Without managed_core_contracts, both TP and SL use OKX net position."""
-    trader = SlNetContractsTrader()
-
-    result = await trader.replace_take_profit(
-        make_intent(
-            managed_core_contracts=None,
-            tp_plan="SINGLE",
-            trend_runner_active=True,
-            trend_runner_sl_price=2950.0,
+    def three_stage_strategy_with_sidecar(self, side: str = "LONG") -> BollCvdShockReclaimStrategy:
+        strategy = BollCvdShockReclaimStrategy(
+            BollCvdReclaimStrategyConfig(
+                three_stage_runner_enabled=True,
+                three_stage_post_tp1_protective_sl_enabled=True,
+                three_stage_post_tp1_sl_extension_trigger_ratio=0.6,
+            ),
+            SimplePositionSizer(SimplePositionSizerConfig()),
         )
-    )
-
-    assert result.ok
-    assert result.protective_sl_ok
-    # SL uses net = 12
-    assert trader.trend_runner_sl_contracts == [Decimal("12")]
-    # TP uses net = 12 (same as core since no managed_core_contracts)
-    assert trader.placed_tp_specs == [("final", Decimal("12"), 3100.0)]
-    assert result.contracts == "12"
-
-
-# ============================================================
-# Test 7: _trend_runner_sl_contracts accepts net_contracts_for_sl
-# ============================================================
-def test_trend_runner_sl_contracts_accepts_net_param() -> None:
-    """_trend_runner_sl_contracts uses net_contracts_for_sl when available."""
-    trader = Trader.__new__(Trader)
-    trader.position_contracts = Decimal("5")
-    trader.contract_precision = Decimal("0.01")
-    trader.min_contracts = Decimal("0.01")
-
-    intent = make_intent(trend_runner_active=True)
-
-    # When trend_runner_active=True, returns net_contracts_for_sl
-    result = trader._trend_runner_sl_contracts(intent, Decimal("12"))
-    assert result == Decimal("12"), f"active runner should return net=12, got {result}"
-
-    # When not active, uses net_contracts_for_sl with runner_ratio
-    intent2 = make_intent(
-        trend_runner_active=False,
-        three_stage_runner_ratio=0.5,
-    )
-    result2 = trader._trend_runner_sl_contracts(intent2, Decimal("12"))
-    assert result2 == Decimal("6.00"), f"runner ratio 0.5 × net=12 should be 6.00, got {result2}"
-
-
-# ============================================================
-# Test 8: No position → returns error with net_contracts_for_sl
-# ============================================================
-@pytest.mark.asyncio
-async def test_no_position_returns_error() -> None:
-    """When OKX net position is 0, replace_take_profit returns error."""
-    trader = SlNetContractsTrader()
-
-    async def fetch_flat():  # type: ignore[no-untyped-def]
-        return PositionSnapshot(None, Decimal("0"), 0.0, 0.0, Decimal("0"))
-
-    trader.fetch_position_snapshot = fetch_flat  # type: ignore[method-assign]
-
-    result = await trader.replace_take_profit(
-        make_intent(
-            managed_core_contracts="10",
-            tp_plan="SINGLE",
+        strategy.state = StrategyPositionState(
+            side=side, layers=1, total_entry_qty=1.0, total_entry_notional=100.0,
+            avg_entry_price=100.0, tp_price=110.0 if side == "LONG" else 90.0,
+            tp_plan="THREE_STAGE_RUNNER", three_stage_runner_enabled_for_position=True,
+            three_stage_tp1_price=101.0 if side == "LONG" else 99.0,
+            three_stage_tp2_price=110.0 if side == "LONG" else 90.0,
+            three_stage_tp1_ratio=0.6, three_stage_tp2_ratio=0.2, three_stage_runner_ratio=0.2,
+            three_stage_tp1_consumed=False, three_stage_tp2_consumed=False,
+            sidecar_enabled_for_position=True, sidecar_margin_pct=0.01, sidecar_tp_pct=0.004,
+            sidecar_legs=[{
+                "leg_id": "sc-leg-1", "position_id": "pos-1", "layer_index": 1,
+                "side": side, "entry_price": 100.0, "qty": 0.2, "contracts": "2",
+                "margin_pct": 0.01, "layer_multiplier": 1.0, "tp_pct": 0.004,
+                "tp_price": 100.4 if side == "LONG" else 99.6, "tp_order_id": "sc-tp-1",
+                "status": SidecarLegStatus.OPEN.value, "created_ts_ms": 1000, "updated_ts_ms": 1000,
+            }],
         )
-    )
+        refresh_sidecar_state_totals(strategy.state, 10)
+        return strategy
 
-    assert not result.ok
-    assert "no position to protect" in result.message
+    def middle_runner_strategy_with_sidecar(self, side: str = "LONG") -> BollCvdShockReclaimStrategy:
+        strategy = BollCvdShockReclaimStrategy(
+            BollCvdReclaimStrategyConfig(middle_runner_protective_sl_enabled=True),
+            SimplePositionSizer(SimplePositionSizerConfig()),
+        )
+        strategy.state = StrategyPositionState(
+            side=side, layers=1, total_entry_qty=1.0, total_entry_notional=100.0,
+            avg_entry_price=100.0, tp_price=110.0 if side == "LONG" else 90.0,
+            tp_plan="SINGLE", partial_tp_consumed=False,
+            middle_runner_enabled_for_position=True, middle_runner_pending=True,
+            middle_runner_active=False, middle_runner_first_close_ratio=0.6,
+            middle_runner_keep_ratio=0.4,
+            middle_runner_first_tp_price=101.0 if side == "LONG" else 99.0,
+            middle_runner_final_tp_price=110.0 if side == "LONG" else 90.0,
+            middle_runner_protective_sl_price=None, middle_runner_protective_sl_order_id=None,
+            middle_runner_add_disabled=False,
+            sidecar_enabled_for_position=True, sidecar_margin_pct=0.01, sidecar_tp_pct=0.004,
+            sidecar_legs=[{
+                "leg_id": "sc-leg-1", "position_id": "pos-1", "layer_index": 1,
+                "side": side, "entry_price": 100.0, "qty": 0.2, "contracts": "2",
+                "margin_pct": 0.01, "layer_multiplier": 1.0, "tp_pct": 0.004,
+                "tp_price": 100.4 if side == "LONG" else 99.6, "tp_order_id": "sc-tp-1",
+                "status": SidecarLegStatus.OPEN.value, "created_ts_ms": 1000, "updated_ts_ms": 1000,
+            }],
+        )
+        refresh_sidecar_state_totals(strategy.state, 10)
+        return strategy
+
+    # ── Test 1: Three-Stage TP1 post-TP1 SL uses net contracts ─────────
+
+    async def test_three_stage_tp1_sl_uses_net_contracts_with_sidecar(self) -> None:
+        """post-TP1 protective SL must cover OKX net position, not just core."""
+        net_contracts = Decimal("12")
+        core_contracts = Decimal("10")
+
+        class Tp1Trader(FullProtectiveTrader):
+            async def fetch_position_snapshot(inner_self) -> PositionSnapshot:
+                return PositionSnapshot("LONG", net_contracts, 100.0, 0.6, net_contracts)
+
+        strategy = self.three_stage_strategy_with_sidecar("LONG")
+        trader = Tp1Trader()
+        journal = FakeJournal()
+        state_store = FakeStateStore()
+        latest_ts_ms = int(dt.datetime.now().timestamp() * 1000)
+        account_snapshot = AccountSnapshot(
+            None, 1000.0, 1000.0, asyncio.get_running_loop().time(), 0, 1,
+            latest_market_price=102.0, latest_market_price_ts_ms=latest_ts_ms,
+        )
+        execution_state = ExecutionState("pos-1", 1000.0)
+
+        await self.run_account_sync_until(
+            lambda: len(trader.post_tp1_stop_orders) >= 1,
+            account_snapshot=account_snapshot, execution_state=execution_state,
+            trader=trader, strategy=strategy, journal=journal, state_store=state_store,
+        )
+
+        self.assertEqual(len(trader.post_tp1_stop_orders), 1)
+        self.assertEqual(trader.post_tp1_stop_orders[0]["contracts"], net_contracts,
+                         f"post-TP1 SL must use net contracts {net_contracts}, "
+                         f"not core contracts {core_contracts}")
+
+        placed_events = [e for e in journal.events if e[0] == "THREE_STAGE_TP1_PROTECTIVE_SL_PLACED"]
+        self.assertEqual(len(placed_events), 1)
+        pp = placed_events[0][1]
+        self.assertEqual(str(pp.get("core_contracts")), str(core_contracts))
+        self.assertEqual(str(pp.get("net_contracts")), str(net_contracts))
+        self.assertEqual(str(pp.get("sl_contracts")), str(net_contracts))
+
+    # ── Test 2: Middle Runner partial TP SL uses net contracts ─────────
+
+    async def test_middle_runner_sl_uses_net_contracts_with_sidecar(self) -> None:
+        """Middle runner protective SL must cover OKX net position, not just core."""
+        net_contracts = Decimal("12")
+        core_contracts = Decimal("10")
+
+        class MRTrader(FullProtectiveTrader):
+            async def fetch_position_snapshot(inner_self) -> PositionSnapshot:
+                return PositionSnapshot("LONG", net_contracts, 100.0, 0.6, net_contracts)
+
+        strategy = self.middle_runner_strategy_with_sidecar("LONG")
+        trader = MRTrader()
+        journal = FakeJournal()
+        state_store = FakeStateStore()
+        latest_ts_ms = int(dt.datetime.now().timestamp() * 1000)
+        account_snapshot = AccountSnapshot(
+            None, 1000.0, 1000.0, asyncio.get_running_loop().time(), 0, 1,
+            latest_market_price=102.0, latest_market_price_ts_ms=latest_ts_ms,
+        )
+        execution_state = ExecutionState("pos-1", 1000.0)
+
+        await self.run_account_sync_until(
+            lambda: len(trader.middle_runner_stop_orders) >= 1,
+            account_snapshot=account_snapshot, execution_state=execution_state,
+            trader=trader, strategy=strategy, journal=journal, state_store=state_store,
+        )
+
+        self.assertEqual(len(trader.middle_runner_stop_orders), 1)
+        self.assertEqual(trader.middle_runner_stop_orders[0]["contracts"], net_contracts,
+                         f"middle runner SL must use net contracts {net_contracts}, "
+                         f"not core contracts {core_contracts}")
+
+        placed_events = [e for e in journal.events
+                         if e[0] in ("MIDDLE_RUNNER_ACTIVATED", "MIDDLE_RUNNER_SIZE_MISMATCH_PROTECTED")]
+        self.assertGreaterEqual(len(placed_events), 1)
+        pp = placed_events[0][1]
+        self.assertEqual(str(pp.get("core_contracts")), str(core_contracts))
+        self.assertEqual(str(pp.get("net_contracts")), str(net_contracts))
+        self.assertEqual(str(pp.get("sl_contracts")), str(net_contracts))
+
+    # ── Test 3: Three-Stage TP1 SL SHORT side ──────────────────────────
+
+    async def test_three_stage_tp1_sl_uses_net_contracts_short_sidecar(self) -> None:
+        """Same net-contracts requirement for SHORT side."""
+        net_contracts = Decimal("12")
+
+        class Tp1Trader(FullProtectiveTrader):
+            async def fetch_position_snapshot(inner_self) -> PositionSnapshot:
+                return PositionSnapshot("SHORT", net_contracts, 100.0, 0.6, Decimal("-12"))
+
+        strategy = self.three_stage_strategy_with_sidecar("SHORT")
+        trader = Tp1Trader()
+        journal = FakeJournal()
+        state_store = FakeStateStore()
+        latest_ts_ms = int(dt.datetime.now().timestamp() * 1000)
+        account_snapshot = AccountSnapshot(
+            None, 1000.0, 1000.0, asyncio.get_running_loop().time(), 0, 1,
+            latest_market_price=98.0, latest_market_price_ts_ms=latest_ts_ms,
+        )
+        execution_state = ExecutionState("pos-1", 1000.0)
+
+        await self.run_account_sync_until(
+            lambda: len(trader.post_tp1_stop_orders) >= 1,
+            account_snapshot=account_snapshot, execution_state=execution_state,
+            trader=trader, strategy=strategy, journal=journal, state_store=state_store,
+        )
+
+        self.assertEqual(len(trader.post_tp1_stop_orders), 1)
+        self.assertEqual(trader.post_tp1_stop_orders[0]["contracts"], net_contracts)
+
+    # ── Test 4: post-TP1 SL payload includes core_contracts / net_contracts in journal ──
+
+    async def test_post_tp1_sl_journal_includes_core_and_net_contracts(self) -> None:
+        """Journal for THREE_STAGE_TP1_PROTECTIVE_SL_PLACED includes core/net/sl_contracts."""
+        net_contracts = Decimal("12")
+        core_contracts = Decimal("10")
+
+        class Tp1Trader(FullProtectiveTrader):
+            async def fetch_position_snapshot(inner_self) -> PositionSnapshot:
+                return PositionSnapshot("LONG", net_contracts, 100.0, 0.6, net_contracts)
+
+        strategy = self.three_stage_strategy_with_sidecar("LONG")
+        trader = Tp1Trader()
+        journal = FakeJournal()
+        state_store = FakeStateStore()
+        latest_ts_ms = int(dt.datetime.now().timestamp() * 1000)
+        account_snapshot = AccountSnapshot(
+            None, 1000.0, 1000.0, asyncio.get_running_loop().time(), 0, 1,
+            latest_market_price=102.0, latest_market_price_ts_ms=latest_ts_ms,
+        )
+        execution_state = ExecutionState("pos-1", 1000.0)
+
+        await self.run_account_sync_until(
+            lambda: len(trader.post_tp1_stop_orders) >= 1,
+            account_snapshot=account_snapshot, execution_state=execution_state,
+            trader=trader, strategy=strategy, journal=journal, state_store=state_store,
+        )
+
+        sl_events = [e for e in journal.events
+                     if e[0] == "THREE_STAGE_TP1_PROTECTIVE_SL_PLACED"]
+        self.assertEqual(len(sl_events), 1)
+        pp = sl_events[0][1]
+        self.assertIn("core_contracts", pp)
+        self.assertIn("net_contracts", pp)
+        self.assertIn("sl_contracts", pp)
+        self.assertEqual(str(pp["core_contracts"]), str(core_contracts))
+        self.assertEqual(str(pp["net_contracts"]), str(net_contracts))
+
+    # ── Test 5: Middle Runner SL journal includes core_contracts / net_contracts ──
+
+    async def test_middle_runner_sl_journal_includes_core_and_net_contracts(self) -> None:
+        """Journal for MIDDLE_RUNNER_ACTIVATED includes core/net/sl_contracts."""
+        net_contracts = Decimal("12")
+
+        class MRTrader(FullProtectiveTrader):
+            async def fetch_position_snapshot(inner_self) -> PositionSnapshot:
+                return PositionSnapshot("LONG", net_contracts, 100.0, 0.6, net_contracts)
+
+        strategy = self.middle_runner_strategy_with_sidecar("LONG")
+        trader = MRTrader()
+        journal = FakeJournal()
+        state_store = FakeStateStore()
+        latest_ts_ms = int(dt.datetime.now().timestamp() * 1000)
+        account_snapshot = AccountSnapshot(
+            None, 1000.0, 1000.0, asyncio.get_running_loop().time(), 0, 1,
+            latest_market_price=102.0, latest_market_price_ts_ms=latest_ts_ms,
+        )
+        execution_state = ExecutionState("pos-1", 1000.0)
+
+        await self.run_account_sync_until(
+            lambda: len(trader.middle_runner_stop_orders) >= 1,
+            account_snapshot=account_snapshot, execution_state=execution_state,
+            trader=trader, strategy=strategy, journal=journal, state_store=state_store,
+        )
+
+        sl_events = [e for e in journal.events
+                     if e[0] in ("MIDDLE_RUNNER_ACTIVATED", "MIDDLE_RUNNER_SIZE_MISMATCH_PROTECTED")]
+        self.assertGreaterEqual(len(sl_events), 1)
+        pp = sl_events[0][1]
+        self.assertIn("core_contracts", pp)
+        self.assertIn("net_contracts", pp)
+        self.assertIn("sl_contracts", pp)

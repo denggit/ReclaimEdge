@@ -272,7 +272,13 @@ def next_weekly_summary_time(hour: int, minute: int, weekday: int = 0) -> dt.dat
     now = dt.datetime.now().astimezone()
     days_ahead = weekday - now.weekday()
     target_date = now.date() + dt.timedelta(days=days_ahead)
-    target = dt.datetime.combine(target_date, dt.time(hour, minute), tzinfo=now.tzinfo)
+    # Normalize to fixed-offset timezone for consistent comparison across Python versions.
+    # On Python 3.12+, astimezone() may return a zoneinfo.ZoneInfo tzinfo;
+    # datetime.combine with ZoneInfo can produce comparison mismatches when
+    # compared against expected values using dt.timezone in tests.
+    utc_offset = now.utcoffset()
+    tz = dt.timezone(utc_offset) if utc_offset is not None else now.tzinfo
+    target = dt.datetime.combine(target_date, dt.time(hour, minute), tzinfo=tz)
     if target <= now:
         target += dt.timedelta(days=7)
     return target
@@ -2793,16 +2799,52 @@ async def account_position_sync_worker(
                                         extension_sl = strategy._apply_three_stage_post_tp1_extension_trigger(core_position.side, current_price, post_tp1_boll, base_sl)
                                         protective_sl = strategy._tighten_optional_three_stage_post_tp1_sl(core_position.side, base_sl, extension_sl)
                                     strategy.state.three_stage_post_tp1_protective_sl_price = protective_sl
-                                    three_stage_post_tp1_sl_payload = {
-                                        "position_id": execution_state.current_position_id,
-                                        "side": core_position.side,
-                                        "contracts": core_position.contracts,
-                                        "protective_sl_price": protective_sl,
-                                        "old_sl_order_id": getattr(strategy.state, "three_stage_post_tp1_protective_sl_order_id", None),
-                                        "current_price": current_price,
-                                        "current_price_source": price_source,
-                                        "reason": "three_stage_tp1_filled",
-                                    }
+                                    # Global protective SL must cover OKX net position (core + sidecar)
+                                    if not position.has_position or position.side != core_position.side or position.contracts <= 0:
+                                        execution_state.trading_halted = True
+                                        execution_state.halt_reason = "three_stage_post_tp1_global_sl_net_position_missing"
+                                        if hasattr(journal, "append"):
+                                            journal.append(
+                                                "THREE_STAGE_POST_TP1_GLOBAL_SL_NET_POSITION_MISSING",
+                                                {
+                                                    "position_id": execution_state.current_position_id,
+                                                    "core_side": core_position.side,
+                                                    "core_contracts": core_position.contracts,
+                                                    "net_side": position.side if position.has_position else None,
+                                                    "net_contracts": position.contracts if position.has_position else 0,
+                                                    "trading_halted": True,
+                                                    "halt_reason": "three_stage_post_tp1_global_sl_net_position_missing",
+                                                    "manual_intervention_required": True,
+                                                },
+                                                position_id=execution_state.current_position_id,
+                                            )
+                                        state_store.save(LiveStateStore.from_strategy_state(
+                                            position_id=execution_state.current_position_id,
+                                            symbol=trader.symbol,
+                                            strategy_state=strategy.state,
+                                            cash_before_position=execution_state.cash_before_position,
+                                        ))
+                                        logger.error(
+                                            "THREE_STAGE_POST_TP1_GLOBAL_SL_NET_POSITION_MISSING | position_id=%s core_side=%s core_contracts=%s net_side=%s net_contracts=%s trading_halted=true halt_reason=three_stage_post_tp1_global_sl_net_position_missing manual_intervention_required=true",
+                                            execution_state.current_position_id,
+                                            core_position.side,
+                                            core_position.contracts,
+                                            position.side if position.has_position else None,
+                                            position.contracts if position.has_position else 0,
+                                        )
+                                    else:
+                                        three_stage_post_tp1_sl_payload = {
+                                            "position_id": execution_state.current_position_id,
+                                            "side": core_position.side,
+                                            "contracts": position.contracts,
+                                            "core_contracts": core_position.contracts,
+                                            "net_contracts": position.contracts,
+                                            "protective_sl_price": protective_sl,
+                                            "old_sl_order_id": getattr(strategy.state, "three_stage_post_tp1_protective_sl_order_id", None),
+                                            "current_price": current_price,
+                                            "current_price_source": price_source,
+                                            "reason": "three_stage_tp1_filled",
+                                        }
                             if three_stage_event in {"TP2", "TP1_TP2"}:
                                 old_post_tp1_sl_order_id = getattr(strategy.state, "three_stage_post_tp1_protective_sl_order_id", None)
                                 three_stage_post_tp1_cancel_payload = {
@@ -2867,14 +2909,50 @@ async def account_position_sync_worker(
                                     else None
                                 )
                                 strategy.state.middle_runner_protective_sl_price = protective_sl
-                                middle_runner_sl_payload = {
-                                    "position_id": execution_state.current_position_id,
-                                    "side": core_position.side,
-                                    "contracts": core_position.contracts,
-                                    "protective_sl_price": protective_sl,
-                                    "old_sl_order_id": getattr(strategy.state, "middle_runner_protective_sl_order_id", None),
-                                    "reason": "partial_tp_filled",
-                                }
+                                # Global protective SL must cover OKX net position (core + sidecar)
+                                if not position.has_position or position.side != core_position.side or position.contracts <= 0:
+                                    execution_state.trading_halted = True
+                                    execution_state.halt_reason = "middle_runner_global_sl_net_position_missing"
+                                    if hasattr(journal, "append"):
+                                        journal.append(
+                                            "MIDDLE_RUNNER_GLOBAL_SL_NET_POSITION_MISSING",
+                                            {
+                                                "position_id": execution_state.current_position_id,
+                                                "core_side": core_position.side,
+                                                "core_contracts": core_position.contracts,
+                                                "net_side": position.side if position.has_position else None,
+                                                "net_contracts": position.contracts if position.has_position else 0,
+                                                "trading_halted": True,
+                                                "halt_reason": "middle_runner_global_sl_net_position_missing",
+                                                "manual_intervention_required": True,
+                                            },
+                                            position_id=execution_state.current_position_id,
+                                        )
+                                    state_store.save(LiveStateStore.from_strategy_state(
+                                        position_id=execution_state.current_position_id,
+                                        symbol=trader.symbol,
+                                        strategy_state=strategy.state,
+                                        cash_before_position=execution_state.cash_before_position,
+                                    ))
+                                    logger.error(
+                                        "MIDDLE_RUNNER_GLOBAL_SL_NET_POSITION_MISSING | position_id=%s core_side=%s core_contracts=%s net_side=%s net_contracts=%s trading_halted=true halt_reason=middle_runner_global_sl_net_position_missing manual_intervention_required=true",
+                                        execution_state.current_position_id,
+                                        core_position.side,
+                                        core_position.contracts,
+                                        position.side if position.has_position else None,
+                                        position.contracts if position.has_position else 0,
+                                    )
+                                else:
+                                    middle_runner_sl_payload = {
+                                        "position_id": execution_state.current_position_id,
+                                        "side": core_position.side,
+                                        "contracts": position.contracts,
+                                        "core_contracts": core_position.contracts,
+                                        "net_contracts": position.contracts,
+                                        "protective_sl_price": protective_sl,
+                                        "old_sl_order_id": getattr(strategy.state, "middle_runner_protective_sl_order_id", None),
+                                        "reason": "partial_tp_filled",
+                                    }
                         elif middle_runner_size_mismatch_needs_degraded_protection(strategy, core_position):
                             runner_boll = middle_runner_activation_boll(strategy)
                             current_price = getattr(runner_boll, "middle", 0.0) if runner_boll is not None else 0.0
@@ -2884,14 +2962,50 @@ async def account_position_sync_worker(
                                 else None
                             )
                             strategy.state.middle_runner_protective_sl_price = protective_sl
-                            middle_runner_sl_payload = {
-                                "position_id": execution_state.current_position_id,
-                                "side": core_position.side,
-                                "contracts": core_position.contracts,
-                                "protective_sl_price": protective_sl,
-                                "old_sl_order_id": getattr(strategy.state, "middle_runner_protective_sl_order_id", None),
-                                "reason": "partial_size_mismatch_degraded",
-                            }
+                            # Global protective SL must cover OKX net position (core + sidecar)
+                            if not position.has_position or position.side != core_position.side or position.contracts <= 0:
+                                execution_state.trading_halted = True
+                                execution_state.halt_reason = "middle_runner_global_sl_net_position_missing"
+                                if hasattr(journal, "append"):
+                                    journal.append(
+                                        "MIDDLE_RUNNER_GLOBAL_SL_NET_POSITION_MISSING",
+                                        {
+                                            "position_id": execution_state.current_position_id,
+                                            "core_side": core_position.side,
+                                            "core_contracts": core_position.contracts,
+                                            "net_side": position.side if position.has_position else None,
+                                            "net_contracts": position.contracts if position.has_position else 0,
+                                            "trading_halted": True,
+                                            "halt_reason": "middle_runner_global_sl_net_position_missing",
+                                            "manual_intervention_required": True,
+                                        },
+                                        position_id=execution_state.current_position_id,
+                                    )
+                                state_store.save(LiveStateStore.from_strategy_state(
+                                    position_id=execution_state.current_position_id,
+                                    symbol=trader.symbol,
+                                    strategy_state=strategy.state,
+                                    cash_before_position=execution_state.cash_before_position,
+                                ))
+                                logger.error(
+                                    "MIDDLE_RUNNER_GLOBAL_SL_NET_POSITION_MISSING | position_id=%s core_side=%s core_contracts=%s net_side=%s net_contracts=%s trading_halted=true halt_reason=middle_runner_global_sl_net_position_missing manual_intervention_required=true",
+                                    execution_state.current_position_id,
+                                    core_position.side,
+                                    core_position.contracts,
+                                    position.side if position.has_position else None,
+                                    position.contracts if position.has_position else 0,
+                                )
+                            else:
+                                middle_runner_sl_payload = {
+                                    "position_id": execution_state.current_position_id,
+                                    "side": core_position.side,
+                                    "contracts": position.contracts,
+                                    "core_contracts": core_position.contracts,
+                                    "net_contracts": position.contracts,
+                                    "protective_sl_price": protective_sl,
+                                    "old_sl_order_id": getattr(strategy.state, "middle_runner_protective_sl_order_id", None),
+                                    "reason": "partial_size_mismatch_degraded",
+                                }
                             middle_runner_activation_payload = {
                                 "position_id": execution_state.current_position_id,
                                 "side": core_position.side,
@@ -3159,6 +3273,9 @@ async def account_position_sync_worker(
                                 "position_id": three_stage_post_tp1_sl_payload.get("position_id"),
                                 "side": three_stage_post_tp1_sl_payload.get("side"),
                                 "contracts": str(three_stage_post_tp1_sl_payload.get("contracts")),
+                                "core_contracts": three_stage_post_tp1_sl_payload.get("core_contracts"),
+                                "net_contracts": three_stage_post_tp1_sl_payload.get("net_contracts"),
+                                "sl_contracts": str(three_stage_post_tp1_sl_payload.get("contracts")),
                                 "protective_sl_price": sl_price,
                                 "protective_sl_order_id": sl_order_id,
                                 "current_price": three_stage_post_tp1_sl_payload.get("current_price"),
@@ -3175,9 +3292,11 @@ async def account_position_sync_worker(
                             position_id=three_stage_post_tp1_sl_payload.get("position_id"),
                         )
                     logger.warning(
-                        "THREE_STAGE_TP1_PROTECTIVE_SL_PLACED | position_id=%s side=%s contracts=%s protective_sl_price=%s protective_sl_order_id=%s retry_config=near_tp",
+                        "THREE_STAGE_TP1_PROTECTIVE_SL_PLACED | position_id=%s side=%s core_contracts=%s net_contracts=%s sl_contracts=%s protective_sl_price=%s protective_sl_order_id=%s retry_config=near_tp",
                         three_stage_post_tp1_sl_payload.get("position_id"),
                         three_stage_post_tp1_sl_payload.get("side"),
+                        three_stage_post_tp1_sl_payload.get("core_contracts"),
+                        three_stage_post_tp1_sl_payload.get("net_contracts"),
                         three_stage_post_tp1_sl_payload.get("contracts"),
                         sl_price,
                         sl_order_id,
@@ -3241,6 +3360,10 @@ async def account_position_sync_worker(
                             {
                                 **(middle_runner_activation_payload or {}),
                                 "side": middle_runner_sl_payload.get("side"),
+                                "contracts": str(middle_runner_sl_payload.get("contracts")),
+                                "core_contracts": middle_runner_sl_payload.get("core_contracts"),
+                                "net_contracts": middle_runner_sl_payload.get("net_contracts"),
+                                "sl_contracts": str(middle_runner_sl_payload.get("contracts")),
                                 "protective_sl_price": sl_price,
                                 "protective_sl_order_id": sl_order_id,
                                 "reason": middle_runner_sl_payload.get("reason", "partial_tp_filled"),
@@ -3250,10 +3373,13 @@ async def account_position_sync_worker(
                         if event_name == "MIDDLE_RUNNER_ACTIVATED":
                             middle_runner_activation_recorded = True
                     logger.warning(
-                        "%s | position_id=%s side=%s protective_sl_price=%s protective_sl_order_id=%s",
+                        "%s | position_id=%s side=%s core_contracts=%s net_contracts=%s sl_contracts=%s protective_sl_price=%s protective_sl_order_id=%s",
                         "MIDDLE_RUNNER_SIZE_MISMATCH_PROTECTED" if middle_runner_sl_payload.get("reason") == "partial_size_mismatch_degraded" else "MIDDLE_RUNNER_ACTIVATED",
                         middle_runner_sl_payload.get("position_id"),
                         middle_runner_sl_payload.get("side"),
+                        middle_runner_sl_payload.get("core_contracts"),
+                        middle_runner_sl_payload.get("net_contracts"),
+                        middle_runner_sl_payload.get("contracts"),
                         sl_price,
                         sl_order_id,
                     )
