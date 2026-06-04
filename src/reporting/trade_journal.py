@@ -26,6 +26,14 @@ class JournalEvent:
     payload: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class UnclosedPositionMatch:
+    position_id: str
+    cash_before_position: float | None
+    first_event_ts_iso: str
+    last_event_ts_iso: str
+
+
 class LiveTradeJournal:
     """Append-only JSONL journal for live trading review and daily reports."""
 
@@ -42,8 +50,89 @@ class LiveTradeJournal:
         self.summary_path.parent.mkdir(parents=True, exist_ok=True)
 
     def new_position_id(self, symbol: str, side: str, ts_ms: int | None = None) -> str:
+        if ts_ms is None:
+            # Startup recovery calls this without ts_ms. If the local live_state.json
+            # was lost but the journal still has an unclosed matching position,
+            # reuse that position_id so reports do not create an orphan incomplete
+            # record for the same real OKX position.
+            unclosed = self.find_latest_unclosed_position(symbol, side)
+            if unclosed is not None:
+                return unclosed.position_id
         seed = ts_ms if ts_ms is not None else int(datetime.now(timezone.utc).timestamp() * 1000)
         return f"{symbol}:{side}:{seed}:{uuid.uuid4().hex[:8]}"
+
+    def find_latest_unclosed_position(self, symbol: str, side: str) -> UnclosedPositionMatch | None:
+        grouped = group_position_events(self.load_events())
+        desired_symbol = str(symbol or "")
+        desired_side = str(side or "").upper()
+        best: UnclosedPositionMatch | None = None
+        best_ts: datetime | None = None
+
+        for position_id, items in grouped.items():
+            if position_id == "UNKNOWN":
+                continue
+            if any(event.event_type == "FLAT" for event in items):
+                continue
+
+            lifecycle_events = [event for event in items if event.event_type in {"ENTRY", "STARTUP_RECOVERY"}]
+            if not lifecycle_events:
+                continue
+            if not any(self._event_matches_position(event, desired_symbol, desired_side) for event in lifecycle_events):
+                continue
+
+            last_event = items[-1]
+            last_ts = self._parse_event_ts(last_event.ts_iso)
+            if best is not None and last_ts is not None and best_ts is not None and last_ts <= best_ts:
+                continue
+            if best is not None and (last_ts is None or best_ts is None) and last_event.ts_iso <= best.last_event_ts_iso:
+                continue
+
+            best = UnclosedPositionMatch(
+                position_id=position_id,
+                cash_before_position=self._unclosed_position_cash_before(lifecycle_events),
+                first_event_ts_iso=items[0].ts_iso,
+                last_event_ts_iso=last_event.ts_iso,
+            )
+            best_ts = last_ts
+
+        return best
+
+    @classmethod
+    def _event_matches_position(cls, event: JournalEvent, symbol: str, side: str) -> bool:
+        payload = event.payload
+        event_symbol = str(payload.get("symbol") or "ETH-USDT-SWAP")
+        event_side = str(payload.get("side") or "").upper()
+        return event_symbol == symbol and event_side == side
+
+    @classmethod
+    def _unclosed_position_cash_before(cls, lifecycle_events: list[JournalEvent]) -> float | None:
+        for event in lifecycle_events:
+            if event.event_type == "ENTRY":
+                value = cls._payload_float(event.payload.get("cash_before_position"))
+                if value is not None:
+                    return value
+        for event in lifecycle_events:
+            if event.event_type == "STARTUP_RECOVERY":
+                value = cls._payload_float(event.payload.get("cash"))
+                if value is not None:
+                    return value
+        return None
+
+    @staticmethod
+    def _payload_float(value: Any) -> float | None:
+        try:
+            if value is None:
+                return None
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _parse_event_ts(ts_iso: str) -> datetime | None:
+        try:
+            return datetime.fromisoformat(ts_iso)
+        except Exception:
+            return None
 
     def append(self, event_type: str, payload: dict[str, Any], position_id: str | None = None) -> None:
         event = JournalEvent(
@@ -196,19 +285,34 @@ class LiveTradeJournal:
             },
         )
 
-    def record_startup_recovery(self, *, position_id: str, symbol: str, side: str, contracts: str, eth_qty: float, avg_entry: float, cash: float | None, equity: float | None) -> None:
+    def record_startup_recovery(
+        self,
+        *,
+        position_id: str,
+        symbol: str,
+        side: str,
+        contracts: str,
+        eth_qty: float,
+        avg_entry: float,
+        cash: float | None,
+        equity: float | None,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        payload = {
+            "symbol": symbol,
+            "side": side,
+            "contracts": contracts,
+            "eth_qty": eth_qty,
+            "avg_entry": avg_entry,
+            "cash": cash,
+            "equity": equity,
+            "note": "Recovered existing OKX position. Earlier entry details may be incomplete.",
+        }
+        if extra:
+            payload.update(extra)
         self.append(
             "STARTUP_RECOVERY",
-            {
-                "symbol": symbol,
-                "side": side,
-                "contracts": contracts,
-                "eth_qty": eth_qty,
-                "avg_entry": avg_entry,
-                "cash": cash,
-                "equity": equity,
-                "note": "Recovered existing OKX position. Earlier entry details may be incomplete.",
-            },
+            payload,
             position_id=position_id,
         )
 
