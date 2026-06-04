@@ -304,6 +304,39 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
         self.assertEqual(update.trend_runner_sl_price, 101.0)
         self.assertEqual(update.tp_price, 111.1)
 
+    def test_waiting_tp2_new_candle_does_not_reset_three_stage_state(self) -> None:
+        strat = strategy()
+        strat.state = StrategyPositionState(
+            side="LONG",
+            layers=1,
+            total_entry_qty=1.0,
+            total_entry_notional=100.0,
+            avg_entry_price=100.0,
+            tp_price=110.0,
+            tp_mode="MIDDLE",
+            tp_plan="THREE_STAGE_RUNNER",
+            partial_tp_consumed=True,
+            three_stage_runner_enabled_for_position=True,
+            three_stage_tp1_price=101.0,
+            three_stage_tp2_price=110.0,
+            three_stage_tp1_ratio=0.6,
+            three_stage_tp2_ratio=0.2,
+            three_stage_runner_ratio=0.2,
+            three_stage_tp1_consumed=True,
+            three_stage_tp2_consumed=False,
+            trend_runner_active=False,
+            last_tp_update_candle_ts_ms=1_000,
+        )
+
+        got = strat._maybe_update_tp(105.0, 2_000, boll(middle=102.0, upper=112.0, lower=92.0, candle_ts_ms=2_000), cvd())
+
+        self.assertIsNone(got)
+        self.assertTrue(strat.state.three_stage_runner_enabled_for_position)
+        self.assertTrue(strat.state.three_stage_tp1_consumed)
+        self.assertFalse(strat.state.three_stage_tp2_consumed)
+        self.assertFalse(strat.state.trend_runner_active)
+        self.assertEqual(strat.state.three_stage_tp2_price, 110.0)
+
 
 class RecordingTrader(Trader):
     def __init__(self, side: str = "LONG") -> None:

@@ -870,6 +870,14 @@ class BollCvdReclaimStrategy:
         )
         if self.state.last_tp_update_candle_ts_ms == boll.candle_ts_ms and not trend_runner_needs_initial_orders:
             return None
+        if self._three_stage_waiting_tp2():
+            logger.info(
+                "TP_UPDATE_SKIPPED | reason=three_stage_waiting_tp2 side=%s candle_ts=%s tp2_price=%s",
+                self.state.side,
+                boll.candle_ts_ms,
+                self.state.three_stage_tp2_price,
+            )
+            return None
 
         old_runner_sl = self.state.middle_runner_protective_sl_price
         old_trend_runner_tp = self.state.trend_runner_tp_price
@@ -929,7 +937,11 @@ class BollCvdReclaimStrategy:
                 self._set_three_stage_runner_planned(self.state.side, boll)
             elif self.state.middle_runner_pending and not self.state.middle_runner_active:
                 self._reset_middle_runner_state()
-            elif self.state.three_stage_runner_enabled_for_position and not self.state.trend_runner_active:
+            elif (
+                self.state.three_stage_runner_enabled_for_position
+                and not self.state.trend_runner_active
+                and not self._three_stage_waiting_tp2()
+            ):
                 self._reset_three_stage_runner_state()
         self.state.last_tp_update_ts_ms = ts_ms
         self.state.last_tp_update_candle_ts_ms = boll.candle_ts_ms
@@ -1675,6 +1687,14 @@ class BollCvdReclaimStrategy:
         if self.state.middle_runner_active or self.state.trend_runner_active:
             return False
         return True
+
+    def _three_stage_waiting_tp2(self) -> bool:
+        return bool(
+            self.state.three_stage_runner_enabled_for_position
+            and self.state.three_stage_tp1_consumed
+            and not self.state.three_stage_tp2_consumed
+            and not self.state.trend_runner_active
+        )
 
     def _middle_runner_plan_allowed(self, tp_mode: TpMode | None, boll: BollSnapshot | None) -> bool:
         if not self.config.middle_runner_enabled:
