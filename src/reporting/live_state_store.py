@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from src.position_management.sidecar.model import trim_sidecar_legs_for_state
+
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_STATE_PATH = ROOT / "data" / "trade_journal" / "live_state.json"
 
@@ -83,6 +85,16 @@ class LivePositionState:
     trend_runner_reverse_extreme_price: float | None = None
     trend_runner_reverse_fast_cvd_start: float = 0.0
     trend_runner_reverse_samples: list | None = None
+    sidecar_enabled_for_position: bool = False
+    sidecar_margin_pct: float = 0.0
+    sidecar_tp_pct: float = 0.0
+    sidecar_total_qty: float = 0.0
+    sidecar_open_qty: float = 0.0
+    sidecar_total_notional: float = 0.0
+    sidecar_realized_qty: float = 0.0
+    sidecar_legs: list | None = None
+    sidecar_dirty: bool = False
+    sidecar_halt_reason: str | None = None
     cash_before_position: float | None = None
     updated_at: str = ""
 
@@ -195,6 +207,19 @@ class LiveStateStore:
             trend_runner_reverse_extreme_price=getattr(strategy_state, "trend_runner_reverse_extreme_price", None),
             trend_runner_reverse_fast_cvd_start=float(getattr(strategy_state, "trend_runner_reverse_fast_cvd_start", 0.0) or 0.0),
             trend_runner_reverse_samples=list(getattr(strategy_state, "trend_runner_reverse_samples", []) or []),
+            sidecar_enabled_for_position=bool(getattr(strategy_state, "sidecar_enabled_for_position", False)),
+            sidecar_margin_pct=float(getattr(strategy_state, "sidecar_margin_pct", 0.0) or 0.0),
+            sidecar_tp_pct=float(getattr(strategy_state, "sidecar_tp_pct", 0.0) or 0.0),
+            sidecar_total_qty=float(getattr(strategy_state, "sidecar_total_qty", 0.0) or 0.0),
+            sidecar_open_qty=float(getattr(strategy_state, "sidecar_open_qty", 0.0) or 0.0),
+            sidecar_total_notional=float(getattr(strategy_state, "sidecar_total_notional", 0.0) or 0.0),
+            sidecar_realized_qty=float(getattr(strategy_state, "sidecar_realized_qty", 0.0) or 0.0),
+            sidecar_legs=trim_sidecar_legs_for_state(
+                list(getattr(strategy_state, "sidecar_legs", []) or []),
+                int(os.getenv("SIDECAR_MAX_LEGS", "10")),
+            ),
+            sidecar_dirty=bool(getattr(strategy_state, "sidecar_dirty", False)),
+            sidecar_halt_reason=getattr(strategy_state, "sidecar_halt_reason", None),
             cash_before_position=cash_before_position,
         )
 

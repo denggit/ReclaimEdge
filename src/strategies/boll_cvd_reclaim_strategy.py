@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal, Optional
 
 from src.indicators.cvd_tracker import CvdSnapshot
 from src.monitors.boll_band_breakout_monitor import BollSnapshot
+from src.position_management.sidecar.model import trim_sidecar_legs_for_state
 from src.risk.simple_position_sizer import PositionSize, SimplePositionSizer
 from src.utils.log import get_logger
 
@@ -242,6 +243,7 @@ class TradeIntent:
     trend_runner_sl_order_id: str | None = None
     trend_runner_exit_reason: str | None = None
     trend_runner_adjust_count: int = 0
+    protected_order_ids: tuple[str, ...] = ()
 
 
 @dataclass
@@ -324,6 +326,16 @@ class StrategyPositionState:
     trend_runner_reverse_extreme_price: float | None = None
     trend_runner_reverse_fast_cvd_start: float = 0.0
     trend_runner_reverse_samples: list = None
+    sidecar_enabled_for_position: bool = False
+    sidecar_margin_pct: float = 0.0
+    sidecar_tp_pct: float = 0.0
+    sidecar_total_qty: float = 0.0
+    sidecar_open_qty: float = 0.0
+    sidecar_total_notional: float = 0.0
+    sidecar_realized_qty: float = 0.0
+    sidecar_legs: list[dict] = field(default_factory=list)
+    sidecar_dirty: bool = False
+    sidecar_halt_reason: str | None = None
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -818,6 +830,25 @@ class BollCvdReclaimStrategy:
     ) -> TradeIntent:
         next_layer = self.state.layers + 1
         size = self.sizer.calculate(price, layer_index=next_layer)
+        if next_layer == 1:
+            self.state.sidecar_enabled_for_position = bool(getattr(self.sizer.config, "sidecar_enabled", False))
+            self.state.sidecar_margin_pct = (
+                float(getattr(self.sizer.config, "sidecar_margin_pct", 0.0) or 0.0)
+                if self.state.sidecar_enabled_for_position
+                else 0.0
+            )
+            self.state.sidecar_tp_pct = (
+                float(getattr(self.sizer.config, "sidecar_tp_pct", 0.0) or 0.0)
+                if self.state.sidecar_enabled_for_position
+                else 0.0
+            )
+            self.state.sidecar_total_qty = 0.0
+            self.state.sidecar_open_qty = 0.0
+            self.state.sidecar_total_notional = 0.0
+            self.state.sidecar_realized_qty = 0.0
+            self.state.sidecar_legs = []
+            self.state.sidecar_dirty = False
+            self.state.sidecar_halt_reason = None
         self._update_position_cost(price, size.eth_qty)
         self.state.partial_tp_consumed = False
         self._reset_near_tp_state()
@@ -1981,7 +2012,24 @@ class BollCvdReclaimStrategy:
             trend_runner_sl_order_id=self.state.trend_runner_sl_order_id,
             trend_runner_exit_reason=self.state.trend_runner_exit_reason,
             trend_runner_adjust_count=self.state.trend_runner_adjust_count,
+            protected_order_ids=self._protected_order_ids(),
         )
+
+    def _protected_order_ids(self) -> tuple[str, ...]:
+        ids: list[str] = []
+        max_legs = int(getattr(self.sizer.config, "sidecar_max_legs", 10) or 10)
+        for leg in trim_sidecar_legs_for_state(self.state.sidecar_legs, max_legs):
+            if leg.get("status") == "OPEN" and leg.get("tp_order_id"):
+                ids.append(str(leg["tp_order_id"]))
+        for order_id in (
+            self.state.near_tp_protective_sl_order_id,
+            self.state.middle_runner_protective_sl_order_id,
+            self.state.three_stage_post_tp1_protective_sl_order_id,
+            self.state.trend_runner_sl_order_id,
+        ):
+            if order_id:
+                ids.append(str(order_id))
+        return tuple(dict.fromkeys(ids))
 
     def _cooldown_ok(self, ts_ms: int) -> bool:
         return ts_ms - self.state.last_order_ts_ms >= self.config.order_cooldown_seconds * 1000

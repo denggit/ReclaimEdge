@@ -93,6 +93,9 @@ class Trader:
         self.trend_runner_sl_order_id: str | None = None
         self.position_contracts = Decimal("0")
         self.account_equity_usdt: float = 0.0
+        self._protected_reduce_only_order_ids: set[str] = set()
+        self._managed_reduce_only_order_ids: set[str] = set()
+        self._allow_cancel_unmanaged_reduce_only = True
         self._session: aiohttp.ClientSession | None = None
         self._timeout_seconds = float(os.getenv("OKX_PRIVATE_REST_TIMEOUT_SECONDS", "10"))
 
@@ -529,7 +532,7 @@ class Trader:
                 protective_sl_ok=True,
             )
 
-        await self.cancel_existing_reduce_only_orders()
+        await self._cancel_existing_take_profit_orders_for_intent(intent)
 
         specs = self._build_take_profit_order_specs(intent)
         placed_order_ids: list[str] = []
@@ -540,7 +543,7 @@ class Trader:
             if len(specs) <= 1:
                 raise
             logger.exception("Failed to place split take-profit orders; falling back to one full-size final TP")
-            await self.cancel_existing_reduce_only_orders()
+            await self._cancel_existing_take_profit_orders_for_intent(intent)
             fallback_specs = [("final", self.position_contracts, intent.tp_price)]
             placed_order_ids = await self._place_reduce_only_take_profit_orders(intent, fallback_specs)
             specs = fallback_specs
@@ -649,6 +652,39 @@ class Trader:
             protective_sl_price=protective_sl_price_text,
             protective_sl_ok=protective_sl_ok,
         )
+
+    async def _cancel_existing_take_profit_orders_for_intent(self, intent: TradeIntent) -> None:
+        self._protected_reduce_only_order_ids = self._protected_order_ids_from_intent(intent)
+        self._managed_reduce_only_order_ids = self._split_order_ids(self.tp_order_id)
+        self._allow_cancel_unmanaged_reduce_only = False
+        try:
+            await self.cancel_existing_reduce_only_orders()
+        finally:
+            self._protected_reduce_only_order_ids = set()
+            self._managed_reduce_only_order_ids = set()
+            self._allow_cancel_unmanaged_reduce_only = True
+
+    def _protected_order_ids_from_intent(self, intent: TradeIntent) -> set[str]:
+        ids = set(getattr(intent, "protected_order_ids", ()) or ())
+        for value in (
+            getattr(intent, "near_tp_protective_sl_order_id", None),
+            getattr(intent, "middle_runner_protective_sl_order_id", None),
+            getattr(intent, "three_stage_post_tp1_protective_sl_order_id", None),
+            getattr(intent, "trend_runner_sl_order_id", None),
+            self.near_tp_protective_sl_order_id,
+            self.middle_runner_protective_sl_order_id,
+            self.three_stage_post_tp1_protective_sl_order_id,
+            self.trend_runner_sl_order_id,
+        ):
+            if value:
+                ids.add(str(value))
+        return ids
+
+    @staticmethod
+    def _split_order_ids(value: str | None) -> set[str]:
+        if not value:
+            return set()
+        return {item.strip() for item in str(value).split(",") if item.strip()}
 
     def _build_take_profit_order_specs(self, intent: TradeIntent) -> list[tuple[str, Decimal, float]]:
         partial_tp_price = getattr(intent, "partial_tp_price", None)
@@ -1078,6 +1114,9 @@ class Trader:
 
     async def cancel_existing_reduce_only_orders(self) -> None:
         orders = await self.fetch_pending_orders()
+        protected_order_ids = set(getattr(self, "_protected_reduce_only_order_ids", set()) or set())
+        managed_order_ids = set(getattr(self, "_managed_reduce_only_order_ids", set()) or set())
+        allow_unmanaged = bool(getattr(self, "_allow_cancel_unmanaged_reduce_only", True))
         for item in orders:
             if item.get("instId") != self.symbol:
                 continue
@@ -1085,12 +1124,102 @@ class Trader:
                 continue
             ord_id = item.get("ordId")
             if not ord_id:
+                raise RuntimeError("reduce_only_order_identity_unknown")
+            ord_id = str(ord_id)
+            if ord_id in protected_order_ids:
+                logger.info("Protected reduce-only order skipped | ordId=%s", ord_id)
                 continue
+            if managed_order_ids and ord_id not in managed_order_ids:
+                raise RuntimeError("reduce_only_order_identity_unknown")
+            if not managed_order_ids and not allow_unmanaged:
+                raise RuntimeError("reduce_only_order_identity_unknown")
             try:
                 await self.request("POST", "/api/v5/trade/cancel-order", {"instId": self.symbol, "ordId": ord_id})
                 logger.info("Canceled existing reduce-only order | ordId=%s", ord_id)
             except Exception:
                 logger.exception("Failed to cancel existing reduce-only order | ordId=%s", ord_id)
+
+    async def place_sidecar_market_order(self, *, side: PositionSide, eth_qty: float) -> dict[str, Any]:
+        contracts = self.eth_qty_to_contracts(Decimal(str(eth_qty)))
+        order_side = "buy" if side == "LONG" else "sell"
+        body: dict[str, Any] = {
+            "instId": self.symbol,
+            "tdMode": self.td_mode,
+            "side": order_side,
+            "ordType": "market",
+            "sz": self.decimal_to_str(contracts),
+        }
+        pos_side = self.pos_side(side)
+        if pos_side:
+            body["posSide"] = pos_side
+        res = await self.request("POST", "/api/v5/trade/order", body)
+        return {
+            "order_id": self.extract_order_id(res),
+            "contracts": self.decimal_to_str(contracts),
+            "qty": float(contracts * self.contract_multiplier),
+        }
+
+    async def place_sidecar_fixed_take_profit(
+        self,
+        *,
+        side: PositionSide,
+        contracts: str | Decimal,
+        tp_price: float,
+        client_order_id: str | None = None,
+    ) -> str:
+        body = self._reduce_only_tp_order_body(side, Decimal(str(contracts)), float(tp_price))
+        if client_order_id:
+            body["clOrdId"] = client_order_id[:32]
+        res = await self.request("POST", "/api/v5/trade/order", body)
+        order_id = self.extract_order_id(res)
+        logger.warning(
+            "SIDECAR_TP_PLACED | side=%s contracts=%s tp_price=%s ordId=%s",
+            side,
+            self.decimal_to_str(Decimal(str(contracts))),
+            self.price_to_str(float(tp_price)),
+            order_id,
+        )
+        return order_id
+
+    async def cancel_sidecar_take_profit(self, order_id: str | None) -> bool:
+        if not order_id:
+            return True
+        try:
+            await self.request("POST", "/api/v5/trade/cancel-order", {"instId": self.symbol, "ordId": order_id})
+            logger.warning("SIDECAR_TP_CANCELLED | ordId=%s", order_id)
+            return True
+        except Exception as exc:
+            text = str(exc).lower()
+            if "not found" in text or "not exist" in text or "does not exist" in text or "already" in text:
+                logger.info("SIDECAR_TP_CANCELLED | ordId=%s already_absent message=%s", order_id, exc)
+                return True
+            logger.error("SIDECAR_TP_CANCEL_FAILED | ordId=%s error=%s", order_id, exc)
+            return False
+
+    async def fetch_sidecar_order_status(self, order_id: str) -> dict[str, Any]:
+        try:
+            res = await self.request("GET", f"/api/v5/trade/order?instId={self.symbol}&ordId={order_id}")
+        except Exception:
+            return {"order_id": order_id, "status": "UNKNOWN", "filled_qty": None, "avg_fill_price": None}
+        data = res.get("data", [])
+        if not data:
+            return {"order_id": order_id, "status": "NOT_FOUND", "filled_qty": None, "avg_fill_price": None}
+        item = data[0]
+        state = str(item.get("state") or "").lower()
+        if state in {"live", "partially_filled"}:
+            status = "OPEN"
+        elif state == "filled":
+            status = "FILLED"
+        elif state in {"canceled", "cancelled"}:
+            status = "CANCELED"
+        else:
+            status = "UNKNOWN"
+        return {
+            "order_id": order_id,
+            "status": status,
+            "filled_qty": _optional_float(item.get("accFillSz")),
+            "avg_fill_price": _optional_float(item.get("avgPx")),
+        }
 
     async def fetch_pending_orders(self) -> list[dict[str, Any]]:
         res = await self.request("GET", f"/api/v5/trade/orders-pending?instId={self.symbol}")
@@ -1279,3 +1408,12 @@ class Trader:
         if not math.isfinite(price):
             raise RuntimeError(f"Invalid price: {price}")
         return f"{price:.2f}"
+
+
+def _optional_float(value: Any) -> float | None:
+    try:
+        if value in {None, ""}:
+            return None
+        return float(value)
+    except Exception:
+        return None
