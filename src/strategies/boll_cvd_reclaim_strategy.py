@@ -77,6 +77,8 @@ class BollCvdReclaimStrategyConfig:
     three_stage_tp1_ratio: float = 0.60
     three_stage_tp2_ratio: float = 0.20
     three_stage_runner_ratio: float = 0.20
+    three_stage_post_tp1_protective_sl_enabled: bool = True
+    three_stage_post_tp1_sl_extension_trigger_ratio: float = 0.6
     runner_dynamic_enabled: bool = True
     # Reserved for future timer-based updates; current runner TP/SL refreshes are driven by 15m BOLL candle_ts_ms.
     runner_dynamic_update_seconds: int = 900
@@ -157,6 +159,8 @@ class BollCvdReclaimStrategyConfig:
             three_stage_tp1_ratio=float(os.getenv("THREE_STAGE_TP1_RATIO", "0.60")),
             three_stage_tp2_ratio=float(os.getenv("THREE_STAGE_TP2_RATIO", "0.20")),
             three_stage_runner_ratio=float(os.getenv("THREE_STAGE_RUNNER_RATIO", "0.20")),
+            three_stage_post_tp1_protective_sl_enabled=_env_bool("THREE_STAGE_POST_TP1_PROTECTIVE_SL_ENABLED", True),
+            three_stage_post_tp1_sl_extension_trigger_ratio=float(os.getenv("THREE_STAGE_POST_TP1_SL_EXTENSION_TRIGGER_RATIO", "0.6")),
             runner_dynamic_enabled=_env_bool("RUNNER_DYNAMIC_ENABLED", True),
             runner_dynamic_update_seconds=int(os.getenv("RUNNER_DYNAMIC_UPDATE_SECONDS", "900")),
             runner_tp_initial_outer_extra_pct=float(os.getenv("RUNNER_TP_INITIAL_OUTER_EXTRA_PCT", "0.010")),
@@ -225,6 +229,12 @@ class TradeIntent:
     three_stage_runner_tp_price: float | None = None
     three_stage_runner_ratio: float = 0.0
     three_stage_runner_sl_price: float | None = None
+    three_stage_tp1_consumed: bool = False
+    three_stage_tp2_consumed: bool = False
+    three_stage_post_tp1_protective_sl_price: float | None = None
+    three_stage_post_tp1_protective_sl_order_id: str | None = None
+    three_stage_post_tp1_sl_extension_triggered: bool = False
+    three_stage_post_tp1_protected: bool = False
     trend_runner_active: bool = False
     trend_runner_tp_price: float | None = None
     trend_runner_sl_price: float | None = None
@@ -284,6 +294,8 @@ class StrategyPositionState:
     middle_runner_protective_sl_order_id: str | None = None
     middle_runner_extension_triggered: bool = False
     middle_runner_add_disabled: bool = False
+    middle_runner_size_mismatch_protected: bool = False
+    middle_runner_size_mismatch_warning_ts_ms: int = 0
     three_stage_runner_enabled_for_position: bool = False
     three_stage_tp1_price: float | None = None
     three_stage_tp2_price: float | None = None
@@ -293,6 +305,10 @@ class StrategyPositionState:
     three_stage_runner_ratio: float = 0.0
     three_stage_tp1_consumed: bool = False
     three_stage_tp2_consumed: bool = False
+    three_stage_post_tp1_protective_sl_price: float | None = None
+    three_stage_post_tp1_protective_sl_order_id: str | None = None
+    three_stage_post_tp1_sl_extension_triggered: bool = False
+    three_stage_post_tp1_protected: bool = False
     trend_runner_active: bool = False
     trend_runner_trend_start_ts_ms: int = 0
     trend_runner_adjust_count: int = 0
@@ -875,14 +891,42 @@ class BollCvdReclaimStrategy:
         if self.state.last_tp_update_candle_ts_ms == boll.candle_ts_ms and not trend_runner_needs_initial_orders:
             return None
         if self._three_stage_waiting_tp2():
+            old_post_tp1_sl = self.state.three_stage_post_tp1_protective_sl_price
+            if self.config.three_stage_post_tp1_protective_sl_enabled:
+                calculated_sl = self._calculate_three_stage_post_tp1_protective_sl(self.state.side, price, boll)
+                protective_sl = self._tighten_optional_three_stage_post_tp1_sl(self.state.side, old_post_tp1_sl, calculated_sl)
+                extension_sl = self._apply_three_stage_post_tp1_extension_trigger(self.state.side, price, boll, protective_sl)
+                protective_sl = self._tighten_optional_three_stage_post_tp1_sl(self.state.side, old_post_tp1_sl, extension_sl)
+                self.state.three_stage_post_tp1_protective_sl_price = protective_sl
+            else:
+                protective_sl = old_post_tp1_sl
+            self.state.last_tp_update_ts_ms = ts_ms
+            self.state.last_tp_update_candle_ts_ms = boll.candle_ts_ms
+            post_tp1_sl_changed = (
+                protective_sl is not None
+                and (
+                    old_post_tp1_sl is None
+                    or abs(protective_sl - old_post_tp1_sl) / protective_sl >= 0.0001
+                )
+            )
+            if post_tp1_sl_changed:
+                size = self.sizer.calculate(price, layer_index=self.state.layers)
+                logger.warning(
+                    "THREE_STAGE_TP1_PROTECTIVE_SL_UPDATE_SIGNAL | side=%s old_sl=%s new_sl=%.4f candle_ts=%s tp2_price=%s",
+                    self.state.side,
+                    f"{old_post_tp1_sl:.4f}" if old_post_tp1_sl is not None else "-",
+                    protective_sl,
+                    boll.candle_ts_ms,
+                    self.state.three_stage_tp2_price,
+                )
+                return self._intent("UPDATE_TP", self.state.side, price, self.state.layers, self.state.tp_price or self.state.three_stage_tp2_price or price, "three_stage_post_tp1_protective_sl_update", size, boll, cvd, ts_ms)
             logger.info(
-                "TP_UPDATE_SKIPPED | reason=three_stage_waiting_tp2 side=%s candle_ts=%s tp2_price=%s",
+                "TP_UPDATE_SKIPPED | reason=three_stage_waiting_tp2 side=%s candle_ts=%s tp2_price=%s protective_sl=%s",
                 self.state.side,
                 boll.candle_ts_ms,
                 self.state.three_stage_tp2_price,
+                protective_sl,
             )
-            self.state.last_tp_update_ts_ms = ts_ms
-            self.state.last_tp_update_candle_ts_ms = boll.candle_ts_ms
             return None
 
         old_runner_sl = self.state.middle_runner_protective_sl_price
@@ -925,6 +969,28 @@ class BollCvdReclaimStrategy:
             protective_sl = self._tighten_optional_middle_runner_sl(self.state.side, old_runner_sl, extension_sl)
             self.state.middle_runner_final_tp_price = tp_price
             self.state.middle_runner_protective_sl_price = protective_sl
+        elif self.state.middle_runner_pending:
+            logger.info(
+                "TP_UPDATE_SKIPPED | reason=middle_runner_plan_locked side=%s candle_ts=%s first_tp=%s final_tp=%s",
+                self.state.side,
+                boll.candle_ts_ms,
+                self.state.middle_runner_first_tp_price,
+                self.state.middle_runner_final_tp_price,
+            )
+            self.state.last_tp_update_ts_ms = ts_ms
+            self.state.last_tp_update_candle_ts_ms = boll.candle_ts_ms
+            return None
+        elif self.state.three_stage_runner_enabled_for_position and not self.state.trend_runner_active:
+            logger.info(
+                "TP_UPDATE_SKIPPED | reason=three_stage_plan_locked side=%s candle_ts=%s tp1=%s tp2=%s",
+                self.state.side,
+                boll.candle_ts_ms,
+                self.state.three_stage_tp1_price,
+                self.state.three_stage_tp2_price,
+            )
+            self.state.last_tp_update_ts_ms = ts_ms
+            self.state.last_tp_update_candle_ts_ms = boll.candle_ts_ms
+            return None
         elif self.state.near_tp_protected or self.state.near_tp_add_disabled:
             partial_tp_price, partial_tp_ratio, tp_plan = None, 0.0, "SINGLE"
         else:
@@ -1431,6 +1497,8 @@ class BollCvdReclaimStrategy:
         self.state.middle_runner_protective_sl_order_id = None
         self.state.middle_runner_extension_triggered = False
         self.state.middle_runner_add_disabled = False
+        self.state.middle_runner_size_mismatch_protected = False
+        self.state.middle_runner_size_mismatch_warning_ts_ms = 0
 
     def _reset_three_stage_runner_state(self) -> None:
         self.state.three_stage_runner_enabled_for_position = False
@@ -1442,6 +1510,10 @@ class BollCvdReclaimStrategy:
         self.state.three_stage_runner_ratio = 0.0
         self.state.three_stage_tp1_consumed = False
         self.state.three_stage_tp2_consumed = False
+        self.state.three_stage_post_tp1_protective_sl_price = None
+        self.state.three_stage_post_tp1_protective_sl_order_id = None
+        self.state.three_stage_post_tp1_sl_extension_triggered = False
+        self.state.three_stage_post_tp1_protected = False
         self.state.trend_runner_active = False
         self.state.trend_runner_trend_start_ts_ms = 0
         self.state.trend_runner_adjust_count = 0
@@ -1474,6 +1546,8 @@ class BollCvdReclaimStrategy:
         self.state.middle_runner_protective_sl_order_id = None
         self.state.middle_runner_extension_triggered = False
         self.state.middle_runner_add_disabled = False
+        self.state.middle_runner_size_mismatch_protected = False
+        self.state.middle_runner_size_mismatch_warning_ts_ms = 0
 
     def _set_three_stage_runner_planned(self, side: PositionSide, boll: BollSnapshot) -> None:
         tp1_ratio, tp2_ratio, runner_ratio = self._normalized_three_stage_ratios()
@@ -1486,6 +1560,10 @@ class BollCvdReclaimStrategy:
         self.state.three_stage_runner_ratio = runner_ratio
         self.state.three_stage_tp1_consumed = False
         self.state.three_stage_tp2_consumed = False
+        self.state.three_stage_post_tp1_protective_sl_price = None
+        self.state.three_stage_post_tp1_protective_sl_order_id = None
+        self.state.three_stage_post_tp1_sl_extension_triggered = False
+        self.state.three_stage_post_tp1_protected = False
         self.state.trend_runner_active = False
         self.state.trend_runner_trend_start_ts_ms = 0
         self.state.trend_runner_adjust_count = 0
@@ -1617,6 +1695,96 @@ class BollCvdReclaimStrategy:
         self.state.middle_runner_extension_triggered = True
         return new_sl
 
+    def _calculate_three_stage_post_tp1_protective_sl(self, side: PositionSide, current_price: float, boll: BollSnapshot) -> float | None:
+        avg_entry = self.state.avg_entry_price
+        tp1_price = self.state.three_stage_tp1_price
+        tp1_ratio = float(self.state.three_stage_tp1_ratio or 0.0)
+        if avg_entry <= 0 or current_price <= 0 or tp1_price is None or tp1_ratio <= 0 or tp1_ratio >= 1:
+            return None
+        fee = self.config.breakeven_fee_buffer_pct
+        if side == "LONG":
+            post_tp1_breakeven = avg_entry - tp1_ratio * (float(tp1_price) - avg_entry) / (1 - tp1_ratio)
+            post_tp1_breakeven_buffered = post_tp1_breakeven * (1 + fee)
+            candidate_1 = (post_tp1_breakeven_buffered + boll.middle) / 2
+            candidate_2 = (boll.lower + boll.middle) / 2
+            protective_sl = max(candidate_1, candidate_2)
+            if protective_sl >= current_price:
+                logger.warning(
+                    "THREE_STAGE_POST_TP1_SL_WARNING | reason=long_sl_not_below_current side=LONG current_price=%.4f protective_sl_price=%.4f avg_entry=%.4f tp1_price=%.4f tp1_ratio=%.4f boll_middle=%.4f boll_lower=%.4f",
+                    current_price,
+                    protective_sl,
+                    avg_entry,
+                    float(tp1_price),
+                    tp1_ratio,
+                    boll.middle,
+                    boll.lower,
+                )
+                return None
+            return protective_sl
+
+        post_tp1_breakeven = avg_entry + tp1_ratio * (avg_entry - float(tp1_price)) / (1 - tp1_ratio)
+        post_tp1_breakeven_buffered = post_tp1_breakeven * (1 - fee)
+        candidate_1 = (post_tp1_breakeven_buffered + boll.middle) / 2
+        candidate_2 = (boll.upper + boll.middle) / 2
+        protective_sl = min(candidate_1, candidate_2)
+        if protective_sl <= current_price:
+            logger.warning(
+                "THREE_STAGE_POST_TP1_SL_WARNING | reason=short_sl_not_above_current side=SHORT current_price=%.4f protective_sl_price=%.4f avg_entry=%.4f tp1_price=%.4f tp1_ratio=%.4f boll_middle=%.4f boll_upper=%.4f",
+                current_price,
+                protective_sl,
+                avg_entry,
+                float(tp1_price),
+                tp1_ratio,
+                boll.middle,
+                boll.upper,
+            )
+            return None
+        return protective_sl
+
+    def _tighten_three_stage_post_tp1_sl(self, side: PositionSide, old_sl: float, new_sl: float) -> float:
+        if side == "LONG":
+            return max(old_sl, new_sl)
+        return min(old_sl, new_sl)
+
+    def _tighten_optional_three_stage_post_tp1_sl(self, side: PositionSide, old_sl: float | None, new_sl: float | None) -> float | None:
+        if new_sl is None:
+            return old_sl
+        if old_sl is None:
+            return new_sl
+        return self._tighten_three_stage_post_tp1_sl(side, old_sl, new_sl)
+
+    def _apply_three_stage_post_tp1_extension_trigger(
+        self,
+        side: PositionSide,
+        current_price: float,
+        boll: BollSnapshot,
+        protective_sl: float | None,
+    ) -> float | None:
+        ratio = min(max(self.config.three_stage_post_tp1_sl_extension_trigger_ratio, 0.0), 1.0)
+        if side == "LONG":
+            trigger_price = boll.middle + (boll.upper - boll.middle) * ratio
+            if current_price < trigger_price:
+                return protective_sl
+            new_sl = boll.middle if protective_sl is None else max(protective_sl, boll.middle)
+        else:
+            trigger_price = boll.middle - (boll.middle - boll.lower) * ratio
+            if current_price > trigger_price:
+                return protective_sl
+            new_sl = boll.middle if protective_sl is None else min(protective_sl, boll.middle)
+        if not self.state.three_stage_post_tp1_sl_extension_triggered:
+            logger.warning(
+                "THREE_STAGE_POST_TP1_EXTENSION_TRIGGERED | side=%s current_price=%.4f extension_trigger_price=%.4f protective_sl_price=%.4f boll_middle=%.4f boll_upper=%.4f boll_lower=%.4f",
+                side,
+                current_price,
+                trigger_price,
+                new_sl,
+                boll.middle,
+                boll.upper,
+                boll.lower,
+            )
+        self.state.three_stage_post_tp1_sl_extension_triggered = True
+        return new_sl
+
     def _select_tp_price(self, side: PositionSide, boll: BollSnapshot) -> tuple[float, TpMode]:
         if self.state.avg_entry_price <= 0:
             return boll.middle, "MIDDLE"
@@ -1695,7 +1863,13 @@ class BollCvdReclaimStrategy:
             return False
         if self.state.partial_tp_consumed:
             return False
-        if self.state.middle_runner_active or self.state.trend_runner_active:
+        if (
+            self.state.middle_runner_enabled_for_position
+            or self.state.middle_runner_pending
+            or self.state.middle_runner_active
+            or self.state.tp_plan == "MIDDLE_RUNNER"
+            or self.state.trend_runner_active
+        ):
             return False
         return True
 
@@ -1717,6 +1891,13 @@ class BollCvdReclaimStrategy:
         if self.state.partial_tp_consumed:
             return False
         if self.state.middle_runner_active:
+            return False
+        if (
+            self.state.three_stage_runner_enabled_for_position
+            or self.state.tp_plan == "THREE_STAGE_RUNNER"
+            or self.state.three_stage_tp1_consumed
+            or self.state.three_stage_tp2_consumed
+        ):
             return False
         return True
 
@@ -1787,6 +1968,12 @@ class BollCvdReclaimStrategy:
             three_stage_runner_tp_price=self.state.trend_runner_tp_price,
             three_stage_runner_ratio=self.state.three_stage_runner_ratio,
             three_stage_runner_sl_price=self.state.trend_runner_sl_price,
+            three_stage_tp1_consumed=self.state.three_stage_tp1_consumed,
+            three_stage_tp2_consumed=self.state.three_stage_tp2_consumed,
+            three_stage_post_tp1_protective_sl_price=self.state.three_stage_post_tp1_protective_sl_price,
+            three_stage_post_tp1_protective_sl_order_id=self.state.three_stage_post_tp1_protective_sl_order_id,
+            three_stage_post_tp1_sl_extension_triggered=self.state.three_stage_post_tp1_sl_extension_triggered,
+            three_stage_post_tp1_protected=self.state.three_stage_post_tp1_protected,
             trend_runner_active=self.state.trend_runner_active,
             trend_runner_tp_price=self.state.trend_runner_tp_price,
             trend_runner_sl_price=self.state.trend_runner_sl_price,

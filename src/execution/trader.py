@@ -89,6 +89,7 @@ class Trader:
         self.tp_order_id: str | None = None
         self.near_tp_protective_sl_order_id: str | None = None
         self.middle_runner_protective_sl_order_id: str | None = None
+        self.three_stage_post_tp1_protective_sl_order_id: str | None = None
         self.trend_runner_sl_order_id: str | None = None
         self.position_contracts = Decimal("0")
         self.account_equity_usdt: float = 0.0
@@ -470,6 +471,64 @@ class Trader:
         if self.position_contracts <= 0:
             return LiveTradeResult(False, intent.intent_type, None, None, "0", self.price_to_str(intent.tp_price), "no position to protect")
 
+        post_tp1_sl_price = getattr(intent, "three_stage_post_tp1_protective_sl_price", None)
+        if (
+            intent.intent_type == "UPDATE_TP"
+            and getattr(intent, "tp_plan", "SINGLE") == "THREE_STAGE_RUNNER"
+            and getattr(intent, "three_stage_tp1_consumed", False)
+            and not getattr(intent, "three_stage_tp2_consumed", False)
+            and not getattr(intent, "trend_runner_active", False)
+            and post_tp1_sl_price is not None
+        ):
+            old_sl_order_id = getattr(intent, "three_stage_post_tp1_protective_sl_order_id", None) or self.three_stage_post_tp1_protective_sl_order_id
+            sl_ok, sl_order_id, sl_message = await self.place_three_stage_post_tp1_protective_stop_with_retries(
+                intent.side,
+                self.position_contracts,
+                float(post_tp1_sl_price),
+                retry_count=int(os.getenv("NEAR_TP_PROTECTIVE_SL_RETRY_COUNT", "3")),
+                retry_interval_seconds=float(os.getenv("NEAR_TP_PROTECTIVE_SL_RETRY_INTERVAL_SECONDS", "1")),
+            )
+            protective_sl_price_text = self.price_to_str(float(post_tp1_sl_price))
+            if not sl_ok:
+                return LiveTradeResult(
+                    False,
+                    intent.intent_type,
+                    None,
+                    self.tp_order_id,
+                    self.decimal_to_str(self.position_contracts),
+                    self.price_to_str(intent.tp_price),
+                    f"three_stage_post_tp1_protective_sl_failed: {sl_message}",
+                    entry_filled=False,
+                    tp_ok=True,
+                    protective_sl_price=protective_sl_price_text,
+                    protective_sl_ok=False,
+                )
+            self.three_stage_post_tp1_protective_sl_order_id = sl_order_id
+            if old_sl_order_id and old_sl_order_id != sl_order_id:
+                await self.cancel_three_stage_post_tp1_protective_stop(old_sl_order_id)
+            logger.warning(
+                "THREE_STAGE_TP1_PROTECTIVE_SL_UPDATED | side=%s contracts=%s protective_sl_price=%s old_sl_order_id=%s new_sl_order_id=%s retry_config=near_tp",
+                intent.side,
+                self.decimal_to_str(self.position_contracts),
+                protective_sl_price_text,
+                old_sl_order_id,
+                sl_order_id,
+            )
+            return LiveTradeResult(
+                True,
+                intent.intent_type,
+                None,
+                self.tp_order_id,
+                self.decimal_to_str(self.position_contracts),
+                self.price_to_str(intent.tp_price),
+                "three_stage_post_tp1_protective_sl_updated",
+                entry_filled=False,
+                tp_ok=True,
+                protective_sl_order_id=sl_order_id,
+                protective_sl_price=protective_sl_price_text,
+                protective_sl_ok=True,
+            )
+
         await self.cancel_existing_reduce_only_orders()
 
         specs = self._build_take_profit_order_specs(intent)
@@ -796,6 +855,25 @@ class Trader:
             self.trend_runner_sl_order_id = order_id
         return ok, order_id, message
 
+    async def place_three_stage_post_tp1_protective_stop_with_retries(
+        self,
+        side: PositionSide,
+        contracts: Decimal,
+        stop_price: float,
+        retry_count: int,
+        retry_interval_seconds: float,
+    ) -> tuple[bool, str | None, str]:
+        ok, order_id, message = await self.place_near_tp_protective_stop_with_retries(
+            side,
+            contracts,
+            stop_price,
+            retry_count=retry_count,
+            retry_interval_seconds=retry_interval_seconds,
+        )
+        if ok:
+            self.three_stage_post_tp1_protective_sl_order_id = order_id
+        return ok, order_id, message
+
     async def _cancel_unverified_near_tp_algo(self, algo_id: str, *, phase: str) -> None:
         try:
             ok = await self.cancel_near_tp_protective_stop(algo_id)
@@ -986,6 +1064,9 @@ class Trader:
         middle_runner_sl_order_id = getattr(self, "middle_runner_protective_sl_order_id", None)
         if middle_runner_sl_order_id:
             await self.cancel_middle_runner_protective_stop(middle_runner_sl_order_id)
+        three_stage_post_tp1_sl_order_id = getattr(self, "three_stage_post_tp1_protective_sl_order_id", None)
+        if three_stage_post_tp1_sl_order_id:
+            await self.cancel_three_stage_post_tp1_protective_stop(three_stage_post_tp1_sl_order_id)
         trend_runner_sl_order_id = getattr(self, "trend_runner_sl_order_id", None)
         if trend_runner_sl_order_id:
             await self.cancel_trend_runner_protective_stop(trend_runner_sl_order_id)
@@ -1056,6 +1137,16 @@ class Trader:
             logger.warning("TREND_RUNNER_SL_CANCELLED | algoId=%s", order_id)
         return ok
 
+    async def cancel_three_stage_post_tp1_protective_stop(self, order_id: str | None) -> bool:
+        if not order_id:
+            return True
+        ok = await self.cancel_near_tp_protective_stop(order_id)
+        if ok and getattr(self, "three_stage_post_tp1_protective_sl_order_id", None) == order_id:
+            self.three_stage_post_tp1_protective_sl_order_id = None
+        if ok:
+            logger.warning("THREE_STAGE_TP1_PROTECTIVE_SL_CANCELLED | algoId=%s", order_id)
+        return ok
+
     async def fetch_usdt_equity(self) -> float:
         res = await self.request("GET", "/api/v5/account/balance?ccy=USDT")
         data = res.get("data", [])
@@ -1101,7 +1192,9 @@ class Trader:
     def mark_flat(self) -> None:
         self.position_contracts = Decimal("0")
         self.tp_order_id = None
+        self.near_tp_protective_sl_order_id = None
         self.middle_runner_protective_sl_order_id = None
+        self.three_stage_post_tp1_protective_sl_order_id = None
         self.trend_runner_sl_order_id = None
 
     async def set_leverage(self) -> None:

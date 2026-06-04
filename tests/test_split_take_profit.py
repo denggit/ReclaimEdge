@@ -8,7 +8,11 @@ from pathlib import Path
 from types import MethodType
 from unittest.mock import patch
 
-from scripts.run_boll_cvd_live import mark_middle_runner_active_if_position_reduced, mark_partial_tp_consumed_if_position_reduced
+from scripts.run_boll_cvd_live import (
+    mark_middle_runner_active_if_position_reduced,
+    mark_partial_tp_consumed_if_position_reduced,
+    middle_runner_size_mismatch_needs_degraded_protection,
+)
 from src.execution.trader import PositionSnapshot, Trader
 from src.indicators.cvd_tracker import CvdSnapshot
 from src.monitors.boll_band_breakout_monitor import BollSnapshot
@@ -388,9 +392,10 @@ class SplitTakeProfitStrategyTest(unittest.TestCase):
         )
 
         pending_intent = strat._maybe_update_tp(100.0, 2_000, boll(middle=102.0, upper=112.0, lower=92.0, candle_ts_ms=2_000), cvd())
-        self.assertIsNotNone(pending_intent)
-        self.assertEqual(pending_intent.partial_tp_price, 102.0)
-        self.assertEqual(pending_intent.tp_price, 112.0)
+        self.assertIsNone(pending_intent)
+        self.assertEqual(strat.state.partial_tp_price, 101.0)
+        self.assertEqual(strat.state.tp_price, 110.0)
+        self.assertTrue(strat.state.middle_runner_pending)
 
         strat.state.middle_runner_pending = False
         strat.state.middle_runner_active = True
@@ -400,8 +405,8 @@ class SplitTakeProfitStrategyTest(unittest.TestCase):
         self.assertEqual(active_intent.tp_price, 113.0)
         self.assertGreaterEqual(active_intent.middle_runner_protective_sl_price or 0, 101.5)
 
-    def test_middle_runner_pending_resets_when_new_candle_switches_to_outer_tp(self) -> None:
-        strat = strategy(middle_runner_enabled=True, breakeven_fee_buffer_pct=0.001, tp_min_net_profit_pct=0.002)
+    def test_middle_runner_pending_does_not_migrate_to_three_stage_after_env_change(self) -> None:
+        strat = strategy(middle_runner_enabled=False, three_stage_runner_enabled=True, breakeven_fee_buffer_pct=0.001, tp_min_net_profit_pct=0.002)
         strat.state = StrategyPositionState(
             side="LONG",
             layers=1,
@@ -425,12 +430,12 @@ class SplitTakeProfitStrategyTest(unittest.TestCase):
 
         update_intent = strat._maybe_update_tp(100.0, 2_000, boll(middle=100.1, upper=111.0, lower=90.0, candle_ts_ms=2_000), cvd())
 
-        self.assertIsNotNone(update_intent)
-        self.assertFalse(update_intent.middle_runner_pending)
-        self.assertFalse(strat.state.middle_runner_pending)
-        self.assertFalse(strat.state.middle_runner_enabled_for_position)
-        self.assertEqual(strat.state.middle_runner_keep_ratio, 0.0)
-        self.assertNotEqual(strat.state.tp_plan, "MIDDLE_RUNNER")
+        self.assertIsNone(update_intent)
+        self.assertTrue(strat.state.middle_runner_pending)
+        self.assertTrue(strat.state.middle_runner_enabled_for_position)
+        self.assertEqual(strat.state.middle_runner_keep_ratio, 0.2)
+        self.assertEqual(strat.state.tp_plan, "MIDDLE_RUNNER")
+        self.assertFalse(strat._three_stage_runner_plan_allowed("MIDDLE", boll(middle=100.1, upper=111.0, lower=90.0)))
 
     def test_middle_runner_active_keeps_old_sl_when_new_sl_calculation_returns_none(self) -> None:
         strat = strategy(middle_runner_enabled=True, breakeven_fee_buffer_pct=0.001, tp_min_net_profit_pct=0.002)
@@ -670,6 +675,7 @@ class SplitTakeProfitLifecycleTest(unittest.TestCase):
         self.assertFalse(strat.state.middle_runner_active)
         self.assertTrue(strat.state.middle_runner_pending)
         self.assertTrue(strat.state.middle_runner_add_disabled)
+        self.assertTrue(middle_runner_size_mismatch_needs_degraded_protection(strat, position))
 
 
 if __name__ == "__main__":

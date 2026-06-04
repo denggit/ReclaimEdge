@@ -376,6 +376,8 @@ def restore_strategy_from_saved_state(strategy: BollCvdReclaimStrategy, saved_st
         middle_runner_protective_sl_order_id=getattr(saved_state, "middle_runner_protective_sl_order_id", None),
         middle_runner_extension_triggered=getattr(saved_state, "middle_runner_extension_triggered", False),
         middle_runner_add_disabled=getattr(saved_state, "middle_runner_add_disabled", False),
+        middle_runner_size_mismatch_protected=getattr(saved_state, "middle_runner_size_mismatch_protected", False),
+        middle_runner_size_mismatch_warning_ts_ms=getattr(saved_state, "middle_runner_size_mismatch_warning_ts_ms", 0),
         three_stage_runner_enabled_for_position=getattr(saved_state, "three_stage_runner_enabled_for_position", False),
         three_stage_tp1_price=getattr(saved_state, "three_stage_tp1_price", None),
         three_stage_tp2_price=getattr(saved_state, "three_stage_tp2_price", None),
@@ -385,6 +387,10 @@ def restore_strategy_from_saved_state(strategy: BollCvdReclaimStrategy, saved_st
         three_stage_runner_ratio=getattr(saved_state, "three_stage_runner_ratio", 0.0),
         three_stage_tp1_consumed=getattr(saved_state, "three_stage_tp1_consumed", False),
         three_stage_tp2_consumed=getattr(saved_state, "three_stage_tp2_consumed", False),
+        three_stage_post_tp1_protective_sl_price=getattr(saved_state, "three_stage_post_tp1_protective_sl_price", None),
+        three_stage_post_tp1_protective_sl_order_id=getattr(saved_state, "three_stage_post_tp1_protective_sl_order_id", None),
+        three_stage_post_tp1_sl_extension_triggered=getattr(saved_state, "three_stage_post_tp1_sl_extension_triggered", False),
+        three_stage_post_tp1_protected=getattr(saved_state, "three_stage_post_tp1_protected", False),
         trend_runner_active=getattr(saved_state, "trend_runner_active", False),
         trend_runner_trend_start_ts_ms=getattr(saved_state, "trend_runner_trend_start_ts_ms", 0),
         trend_runner_adjust_count=getattr(saved_state, "trend_runner_adjust_count", 0),
@@ -492,16 +498,20 @@ def mark_middle_runner_active_if_position_reduced(strategy: BollCvdReclaimStrate
         reduction_ratio = 1 - (float(position.eth_qty) / total_entry_qty)
         if reduction_ratio > 0.05:
             state.middle_runner_add_disabled = True
-            logger.warning(
-                "MIDDLE_RUNNER_ORDER_WARNING | reason=partial_size_mismatch_add_disabled side=%s old_qty=%.8f new_qty=%.8f expected_qty=%.8f tolerance=%.8f reduction_ratio=%.6f keep_ratio=%.6f",
-                state.side,
-                total_entry_qty,
-                position.eth_qty,
-                expected_qty,
-                tolerance,
-                reduction_ratio,
-                keep_ratio,
-            )
+            now_ms = int(time.time() * 1000)
+            last_warning_ms = int(getattr(state, "middle_runner_size_mismatch_warning_ts_ms", 0) or 0)
+            if last_warning_ms <= 0 or now_ms - last_warning_ms >= 60_000:
+                state.middle_runner_size_mismatch_warning_ts_ms = now_ms
+                logger.warning(
+                    "MIDDLE_RUNNER_ORDER_WARNING | reason=partial_size_mismatch_add_disabled side=%s old_qty=%.8f new_qty=%.8f expected_qty=%.8f tolerance=%.8f reduction_ratio=%.6f keep_ratio=%.6f",
+                    state.side,
+                    total_entry_qty,
+                    position.eth_qty,
+                    expected_qty,
+                    tolerance,
+                    reduction_ratio,
+                    keep_ratio,
+                )
         return False
 
     state.middle_runner_pending = False
@@ -613,6 +623,39 @@ def middle_runner_activation_boll(strategy: BollCvdReclaimStrategy):
     upper = float(final) if state.side == "LONG" else float(middle) + width
     lower = float(middle) - width if state.side == "LONG" else float(final)
     return type("MiddleRunnerBoll", (), {"middle": float(middle), "upper": upper, "lower": lower})()
+
+
+def three_stage_post_tp1_boll(strategy: BollCvdReclaimStrategy):
+    state = strategy.state
+    middle = getattr(state, "three_stage_tp1_price", None)
+    outer = getattr(state, "three_stage_tp2_price", None)
+    if middle is None or outer is None:
+        return None
+    width = abs(float(outer) - float(middle))
+    if width <= 0:
+        return None
+    upper = float(outer) if state.side == "LONG" else float(middle) + width
+    lower = float(middle) - width if state.side == "LONG" else float(outer)
+    return type("ThreeStagePostTp1Boll", (), {"middle": float(middle), "upper": upper, "lower": lower})()
+
+
+def middle_runner_size_mismatch_needs_degraded_protection(strategy: BollCvdReclaimStrategy, position: PositionSnapshot) -> bool:
+    state = strategy.state
+    if not getattr(state, "middle_runner_pending", False):
+        return False
+    if getattr(state, "middle_runner_active", False):
+        return False
+    if getattr(state, "middle_runner_size_mismatch_protected", False):
+        return False
+    if not getattr(state, "middle_runner_add_disabled", False):
+        return False
+    if not position.has_position or position.side != state.side:
+        return False
+    total_entry_qty = float(getattr(state, "total_entry_qty", 0.0) or 0.0)
+    if total_entry_qty <= 0:
+        return False
+    reduction_ratio = 1 - (float(position.eth_qty) / total_entry_qty)
+    return reduction_ratio >= 0.5
 
 
 def position_log_key(position: PositionSnapshot) -> tuple[str, str, float]:
@@ -1074,6 +1117,12 @@ async def execution_worker(
                         if _parse_optional_float(getattr(result, "protective_sl_price", "")) is not None:
                             strategy.state.trend_runner_sl_price = _parse_optional_float(result.protective_sl_price)
                         strategy.state.trend_runner_tp_order_id = result.tp_order_id
+                    if getattr(command.intent, "three_stage_post_tp1_protective_sl_price", None) is not None and getattr(command.intent, "three_stage_tp1_consumed", False):
+                        if getattr(result, "protective_sl_order_id", None):
+                            strategy.state.three_stage_post_tp1_protective_sl_order_id = result.protective_sl_order_id
+                        if _parse_optional_float(getattr(result, "protective_sl_price", "")) is not None:
+                            strategy.state.three_stage_post_tp1_protective_sl_price = _parse_optional_float(result.protective_sl_price)
+                        strategy.state.three_stage_post_tp1_protected = bool(getattr(result, "protective_sl_ok", False))
                     strategy_state_for_save = copy.deepcopy(strategy.state)
                     equity = account_snapshot.equity
                 journal.record_tp_update(position_id=current_position_id, intent=command.intent, result=result, equity=equity)
@@ -1111,6 +1160,31 @@ async def execution_worker(
                             "boll_middle": command.intent.boll_middle,
                             "boll_upper": command.intent.boll_upper,
                             "reason": command.intent.reason,
+                        },
+                        position_id=current_position_id,
+                    )
+                if (
+                    getattr(command.intent, "three_stage_post_tp1_protective_sl_price", None) is not None
+                    and getattr(command.intent, "three_stage_tp1_consumed", False)
+                    and not getattr(command.intent, "trend_runner_active", False)
+                    and hasattr(journal, "append")
+                ):
+                    journal.append(
+                        "THREE_STAGE_TP1_PROTECTIVE_SL_UPDATED",
+                        {
+                            "side": command.intent.side,
+                            "contracts": result.contracts,
+                            "protective_sl_price": getattr(result, "protective_sl_price", "") or getattr(command.intent, "three_stage_post_tp1_protective_sl_price", None),
+                            "protective_sl_order_id": getattr(result, "protective_sl_order_id", None),
+                            "old_protective_sl_order_id": getattr(command.intent, "three_stage_post_tp1_protective_sl_order_id", None),
+                            "avg_entry_price": command.intent.avg_entry_price,
+                            "tp1_price": getattr(command.intent, "three_stage_tp1_price", None),
+                            "tp1_ratio": getattr(command.intent, "three_stage_tp1_ratio", 0.0),
+                            "tp2_price": getattr(command.intent, "three_stage_tp2_price", None),
+                            "tp2_ratio": getattr(command.intent, "three_stage_tp2_ratio", 0.0),
+                            "runner_ratio": getattr(command.intent, "three_stage_runner_ratio", 0.0),
+                            "reason": command.intent.reason,
+                            "retry_config": "NEAR_TP_PROTECTIVE_SL_RETRY_COUNT/NEAR_TP_PROTECTIVE_SL_RETRY_INTERVAL_SECONDS",
                         },
                         position_id=current_position_id,
                     )
@@ -1502,6 +1576,8 @@ async def account_position_sync_worker(
             save_state_payload: tuple[str | None, StrategyPositionState, float | None] | None = None
             middle_runner_sl_payload: dict[str, Any] | None = None
             middle_runner_activation_payload: dict[str, Any] | None = None
+            three_stage_post_tp1_sl_payload: dict[str, Any] | None = None
+            three_stage_post_tp1_cancel_payload: dict[str, Any] | None = None
             three_stage_event_payload: dict[str, Any] | None = None
             clear_state = False
             flat_previous_halt_reason: str | None = None
@@ -1527,6 +1603,7 @@ async def account_position_sync_worker(
                         "partial_tp_consumed": getattr(strategy.state, "partial_tp_consumed", False),
                         "near_tp_protective_sl_order_id": getattr(strategy.state, "near_tp_protective_sl_order_id", None),
                         "middle_runner_protective_sl_order_id": getattr(strategy.state, "middle_runner_protective_sl_order_id", None),
+                        "three_stage_post_tp1_protective_sl_order_id": getattr(strategy.state, "three_stage_post_tp1_protective_sl_order_id", None),
                         "trend_runner_sl_order_id": getattr(strategy.state, "trend_runner_sl_order_id", None),
                         "trend_runner_exit_reason": getattr(strategy.state, "trend_runner_exit_reason", None),
                     }
@@ -1639,6 +1716,32 @@ async def account_position_sync_worker(
                         mark_partial_tp_consumed_if_position_reduced(strategy, position)
                         sync_strategy_cost_from_position(strategy, position)
                         if three_stage_event is not None:
+                            if three_stage_event in {"TP1", "TP1_TP2"} and three_stage_event != "TP1_TP2":
+                                config = getattr(strategy, "config", None)
+                                if bool(getattr(config, "three_stage_post_tp1_protective_sl_enabled", True)):
+                                    post_tp1_boll = three_stage_post_tp1_boll(strategy)
+                                    current_price = getattr(post_tp1_boll, "middle", 0.0) if post_tp1_boll is not None else 0.0
+                                    protective_sl = (
+                                        strategy._calculate_three_stage_post_tp1_protective_sl(position.side, current_price, post_tp1_boll)
+                                        if post_tp1_boll is not None and position.side is not None
+                                        else None
+                                    )
+                                    strategy.state.three_stage_post_tp1_protective_sl_price = protective_sl
+                                    three_stage_post_tp1_sl_payload = {
+                                        "position_id": execution_state.current_position_id,
+                                        "side": position.side,
+                                        "contracts": position.contracts,
+                                        "protective_sl_price": protective_sl,
+                                        "old_sl_order_id": getattr(strategy.state, "three_stage_post_tp1_protective_sl_order_id", None),
+                                        "reason": "three_stage_tp1_filled",
+                                    }
+                            if three_stage_event in {"TP2", "TP1_TP2"}:
+                                three_stage_post_tp1_cancel_payload = {
+                                    "position_id": execution_state.current_position_id,
+                                    "side": position.side,
+                                    "protective_sl_order_id": getattr(strategy.state, "three_stage_post_tp1_protective_sl_order_id", None),
+                                    "protective_sl_price": getattr(strategy.state, "three_stage_post_tp1_protective_sl_price", None),
+                                }
                             three_stage_event_payload = {
                                 "event": three_stage_event,
                                 "position_id": execution_state.current_position_id,
@@ -1687,7 +1790,36 @@ async def account_position_sync_worker(
                                     "contracts": position.contracts,
                                     "protective_sl_price": protective_sl,
                                     "old_sl_order_id": getattr(strategy.state, "middle_runner_protective_sl_order_id", None),
+                                    "reason": "partial_tp_filled",
                                 }
+                        elif middle_runner_size_mismatch_needs_degraded_protection(strategy, position):
+                            runner_boll = middle_runner_activation_boll(strategy)
+                            current_price = getattr(runner_boll, "middle", 0.0) if runner_boll is not None else 0.0
+                            protective_sl = (
+                                strategy._calculate_middle_runner_protective_sl(position.side, current_price, runner_boll)
+                                if runner_boll is not None and position.side is not None
+                                else None
+                            )
+                            strategy.state.middle_runner_protective_sl_price = protective_sl
+                            middle_runner_sl_payload = {
+                                "position_id": execution_state.current_position_id,
+                                "side": position.side,
+                                "contracts": position.contracts,
+                                "protective_sl_price": protective_sl,
+                                "old_sl_order_id": getattr(strategy.state, "middle_runner_protective_sl_order_id", None),
+                                "reason": "partial_size_mismatch_degraded",
+                            }
+                            middle_runner_activation_payload = {
+                                "position_id": execution_state.current_position_id,
+                                "side": position.side,
+                                "layers": strategy.state.layers,
+                                "avg_entry_price": strategy.state.avg_entry_price,
+                                "first_tp_price": getattr(strategy.state, "middle_runner_first_tp_price", None),
+                                "final_tp_price": getattr(strategy.state, "middle_runner_final_tp_price", None),
+                                "first_close_ratio": getattr(strategy.state, "middle_runner_first_close_ratio", 0.0),
+                                "keep_ratio": getattr(strategy.state, "middle_runner_keep_ratio", 0.0),
+                                "reason": "partial_size_mismatch_degraded",
+                            }
                         if (
                             execution_state.trading_halted
                             and execution_state.halt_reason == "near_tp_protected_sync_failed"
@@ -1758,6 +1890,12 @@ async def account_position_sync_worker(
                         await trader.cancel_middle_runner_protective_stop(middle_runner_sl_order_id)
                     except Exception:
                         logger.warning("MIDDLE_RUNNER_CANCELLED | reason=flat_sl_cancel_failed algoId=%s", middle_runner_sl_order_id)
+                three_stage_post_tp1_sl_order_id = pending_flat_payload.get("three_stage_post_tp1_protective_sl_order_id")
+                if three_stage_post_tp1_sl_order_id:
+                    try:
+                        await trader.cancel_three_stage_post_tp1_protective_stop(three_stage_post_tp1_sl_order_id)
+                    except Exception:
+                        logger.warning("THREE_STAGE_TP1_PROTECTIVE_SL_CANCELLED | reason=flat_sl_cancel_failed algoId=%s", three_stage_post_tp1_sl_order_id)
                 trend_runner_sl_order_id = pending_flat_payload.get("trend_runner_sl_order_id")
                 if trend_runner_sl_order_id:
                     try:
@@ -1805,6 +1943,106 @@ async def account_position_sync_worker(
                 journal.record_account_cash_drift(**cash_drift_payload)
             if three_stage_event_payload is not None and hasattr(journal, "append"):
                 append_three_stage_progress_journal_events(journal, three_stage_event_payload)
+            if three_stage_post_tp1_cancel_payload is not None:
+                old_order_id = three_stage_post_tp1_cancel_payload.get("protective_sl_order_id")
+                cancel_ok = True
+                if old_order_id:
+                    cancel_ok = await trader.cancel_three_stage_post_tp1_protective_stop(old_order_id)
+                async with state_lock:
+                    strategy.state.three_stage_post_tp1_protective_sl_order_id = None
+                    strategy.state.three_stage_post_tp1_protective_sl_price = None
+                    strategy.state.three_stage_post_tp1_protected = False
+                    save_state_payload = (execution_state.current_position_id, copy.deepcopy(strategy.state), execution_state.cash_before_position)
+                if hasattr(journal, "append"):
+                    journal.append(
+                        "THREE_STAGE_TP1_PROTECTIVE_SL_CANCELLED_ON_TP2",
+                        {
+                            **three_stage_post_tp1_cancel_payload,
+                            "cancel_ok": cancel_ok,
+                            "reason": "three_stage_tp2_filled",
+                        },
+                        position_id=three_stage_post_tp1_cancel_payload.get("position_id"),
+                    )
+                logger.warning(
+                    "THREE_STAGE_TP1_PROTECTIVE_SL_CANCELLED_ON_TP2 | position_id=%s algoId=%s cancel_ok=%s",
+                    three_stage_post_tp1_cancel_payload.get("position_id"),
+                    old_order_id,
+                    cancel_ok,
+                )
+            if three_stage_post_tp1_sl_payload is not None:
+                sl_price = three_stage_post_tp1_sl_payload.get("protective_sl_price")
+                sl_order_id = None
+                sl_ok = False
+                sl_message = "protective_sl_price_missing"
+                if sl_price is not None and three_stage_post_tp1_sl_payload.get("side") is not None:
+                    sl_ok, sl_order_id, sl_message = await trader.place_three_stage_post_tp1_protective_stop_with_retries(
+                        three_stage_post_tp1_sl_payload["side"],
+                        three_stage_post_tp1_sl_payload["contracts"],
+                        float(sl_price),
+                        retry_count=int(os.getenv("NEAR_TP_PROTECTIVE_SL_RETRY_COUNT", "3")),
+                        retry_interval_seconds=float(os.getenv("NEAR_TP_PROTECTIVE_SL_RETRY_INTERVAL_SECONDS", "1")),
+                    )
+                if sl_ok:
+                    old_sl_order_id = three_stage_post_tp1_sl_payload.get("old_sl_order_id")
+                    if old_sl_order_id and old_sl_order_id != sl_order_id:
+                        await trader.cancel_three_stage_post_tp1_protective_stop(old_sl_order_id)
+                    async with state_lock:
+                        strategy.state.three_stage_post_tp1_protective_sl_order_id = sl_order_id
+                        strategy.state.three_stage_post_tp1_protective_sl_price = float(sl_price)
+                        strategy.state.three_stage_post_tp1_protected = True
+                        save_state_payload = (execution_state.current_position_id, copy.deepcopy(strategy.state), execution_state.cash_before_position)
+                    if hasattr(journal, "append"):
+                        journal.append(
+                            "THREE_STAGE_TP1_PROTECTIVE_SL_PLACED",
+                            {
+                                "position_id": three_stage_post_tp1_sl_payload.get("position_id"),
+                                "side": three_stage_post_tp1_sl_payload.get("side"),
+                                "contracts": str(three_stage_post_tp1_sl_payload.get("contracts")),
+                                "protective_sl_price": sl_price,
+                                "protective_sl_order_id": sl_order_id,
+                                "avg_entry_price": getattr(strategy.state, "avg_entry_price", None),
+                                "tp1_price": getattr(strategy.state, "three_stage_tp1_price", None),
+                                "tp1_ratio": getattr(strategy.state, "three_stage_tp1_ratio", 0.0),
+                                "tp2_price": getattr(strategy.state, "three_stage_tp2_price", None),
+                                "tp2_ratio": getattr(strategy.state, "three_stage_tp2_ratio", 0.0),
+                                "runner_ratio": getattr(strategy.state, "three_stage_runner_ratio", 0.0),
+                                "reason": "three_stage_tp1_filled",
+                                "retry_config": "NEAR_TP_PROTECTIVE_SL_RETRY_COUNT/NEAR_TP_PROTECTIVE_SL_RETRY_INTERVAL_SECONDS",
+                            },
+                            position_id=three_stage_post_tp1_sl_payload.get("position_id"),
+                        )
+                    logger.warning(
+                        "THREE_STAGE_TP1_PROTECTIVE_SL_PLACED | position_id=%s side=%s contracts=%s protective_sl_price=%s protective_sl_order_id=%s retry_config=near_tp",
+                        three_stage_post_tp1_sl_payload.get("position_id"),
+                        three_stage_post_tp1_sl_payload.get("side"),
+                        three_stage_post_tp1_sl_payload.get("contracts"),
+                        sl_price,
+                        sl_order_id,
+                    )
+                else:
+                    async with state_lock:
+                        execution_state.trading_halted = True
+                        execution_state.halt_reason = "three_stage_post_tp1_protective_sl_failure"
+                    if hasattr(journal, "append"):
+                        journal.append(
+                            "THREE_STAGE_POST_TP1_PROTECTIVE_SL_FAILED",
+                            {
+                                "position_id": three_stage_post_tp1_sl_payload.get("position_id"),
+                                "side": three_stage_post_tp1_sl_payload.get("side"),
+                                "protective_sl_price": sl_price,
+                                "reason": sl_message,
+                                "trading_halted": True,
+                                "retry_config": "NEAR_TP_PROTECTIVE_SL_RETRY_COUNT/NEAR_TP_PROTECTIVE_SL_RETRY_INTERVAL_SECONDS",
+                            },
+                            position_id=three_stage_post_tp1_sl_payload.get("position_id"),
+                        )
+                    logger.error(
+                        "THREE_STAGE_POST_TP1_PROTECTIVE_SL_FAILED | position_id=%s side=%s sl_price=%s sl_message=%s trading_halted=true retry_config=near_tp",
+                        three_stage_post_tp1_sl_payload.get("position_id"),
+                        three_stage_post_tp1_sl_payload.get("side"),
+                        sl_price,
+                        sl_message,
+                    )
             middle_runner_activation_recorded = False
             if middle_runner_sl_payload is not None:
                 sl_price = middle_runner_sl_payload.get("protective_sl_price")
@@ -1826,22 +2064,31 @@ async def account_position_sync_worker(
                     async with state_lock:
                         strategy.state.middle_runner_protective_sl_order_id = sl_order_id
                         strategy.state.middle_runner_protective_sl_price = float(sl_price)
+                        if middle_runner_sl_payload.get("reason") == "partial_size_mismatch_degraded":
+                            strategy.state.middle_runner_size_mismatch_protected = True
                         save_state_payload = (execution_state.current_position_id, copy.deepcopy(strategy.state), execution_state.cash_before_position)
                     if hasattr(journal, "append"):
+                        event_name = (
+                            "MIDDLE_RUNNER_SIZE_MISMATCH_PROTECTED"
+                            if middle_runner_sl_payload.get("reason") == "partial_size_mismatch_degraded"
+                            else "MIDDLE_RUNNER_ACTIVATED"
+                        )
                         journal.append(
-                            "MIDDLE_RUNNER_ACTIVATED",
+                            event_name,
                             {
                                 **(middle_runner_activation_payload or {}),
                                 "side": middle_runner_sl_payload.get("side"),
                                 "protective_sl_price": sl_price,
                                 "protective_sl_order_id": sl_order_id,
-                                "reason": "partial_tp_filled",
+                                "reason": middle_runner_sl_payload.get("reason", "partial_tp_filled"),
                             },
                             position_id=middle_runner_sl_payload.get("position_id"),
                         )
-                        middle_runner_activation_recorded = True
+                        if event_name == "MIDDLE_RUNNER_ACTIVATED":
+                            middle_runner_activation_recorded = True
                     logger.warning(
-                        "MIDDLE_RUNNER_ACTIVATED | position_id=%s side=%s protective_sl_price=%s protective_sl_order_id=%s",
+                        "%s | position_id=%s side=%s protective_sl_price=%s protective_sl_order_id=%s",
+                        "MIDDLE_RUNNER_SIZE_MISMATCH_PROTECTED" if middle_runner_sl_payload.get("reason") == "partial_size_mismatch_degraded" else "MIDDLE_RUNNER_ACTIVATED",
                         middle_runner_sl_payload.get("position_id"),
                         middle_runner_sl_payload.get("side"),
                         sl_price,
@@ -1895,6 +2142,7 @@ async def account_position_sync_worker(
             if record_flat_payload is not None:
                 record_flat_payload.pop("near_tp_protective_sl_order_id", None)
                 record_flat_payload.pop("middle_runner_protective_sl_order_id", None)
+                record_flat_payload.pop("three_stage_post_tp1_protective_sl_order_id", None)
                 record_flat_payload.pop("trend_runner_sl_order_id", None)
                 journal.record_flat(**record_flat_payload)
                 if rolling_loss_guard is not None and rolling_loss_guard.state is not None and rolling_loss_guard.state.enabled:

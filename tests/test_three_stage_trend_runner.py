@@ -124,6 +124,9 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
         self.assertFalse(strat.state.trend_runner_active)
         self.assertIsNone(strat.state.trend_runner_tp_price)
         self.assertIsNone(strat.state.trend_runner_sl_price)
+        self.assertIsNone(strat.state.three_stage_post_tp1_protective_sl_price)
+        self.assertIsNone(strat.state.three_stage_post_tp1_protective_sl_order_id)
+        self.assertFalse(strat.state.three_stage_post_tp1_protected)
         self.assertEqual(got.tp_price, 110.0)
 
     def test_middle_tp_mode_enables_three_stage_runner_short(self) -> None:
@@ -345,6 +348,10 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
         self.assertIsNone(strat.state.trend_runner_tp_price)
         self.assertIsNone(strat.state.trend_runner_sl_price)
 
+        strat.state.three_stage_post_tp1_protective_sl_order_id = "algo-post"
+        strat.state.three_stage_post_tp1_protective_sl_price = 100.2
+        strat.state.three_stage_post_tp1_protected = True
+
         update = strat._maybe_update_tp(110.0, 20_100, boll(middle=101.0, upper=110.0, lower=90.0), cvd())
 
         self.assertIsNotNone(update)
@@ -479,11 +486,15 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
         )
 
         bands = boll(middle=102.0, upper=112.0, lower=92.0, candle_ts_ms=2_000)
-        with self.assertLogs("src.strategies.boll_cvd_reclaim_strategy", level="INFO") as logs:
-            got = strat._maybe_update_tp(105.0, 2_000, bands, cvd())
+        got = strat._maybe_update_tp(105.0, 2_000, bands, cvd())
 
-        self.assertIsNone(got)
-        self.assertIn("reason=three_stage_waiting_tp2", "\n".join(logs.output))
+        self.assertIsNotNone(got)
+        self.assertEqual(got.intent_type, "UPDATE_TP")
+        self.assertEqual(got.reason, "three_stage_post_tp1_protective_sl_update")
+        self.assertEqual(got.tp_plan, "THREE_STAGE_RUNNER")
+        self.assertTrue(got.three_stage_tp1_consumed)
+        self.assertFalse(got.trend_runner_active)
+        self.assertIsNotNone(got.three_stage_post_tp1_protective_sl_price)
         self.assertEqual(strat.state.last_tp_update_ts_ms, 2_000)
         self.assertEqual(strat.state.last_tp_update_candle_ts_ms, 2_000)
         self.assertTrue(strat.state.three_stage_runner_enabled_for_position)
@@ -495,6 +506,62 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
         with self.assertNoLogs("src.strategies.boll_cvd_reclaim_strategy", level="INFO"):
             repeated = strat._maybe_update_tp(105.5, 2_500, bands, cvd())
         self.assertIsNone(repeated)
+
+    def test_post_tp1_protective_sl_calculation_tightening_and_extension(self) -> None:
+        long_strat = strategy(three_stage_post_tp1_sl_extension_trigger_ratio=0.6)
+        long_strat.state = StrategyPositionState(
+            side="LONG",
+            avg_entry_price=100.0,
+            three_stage_tp1_price=102.0,
+            three_stage_tp1_ratio=0.6,
+            three_stage_tp1_consumed=True,
+        )
+        long_sl = long_strat._calculate_three_stage_post_tp1_protective_sl("LONG", 105.0, boll(middle=102.0, upper=112.0, lower=92.0))
+        self.assertIsNotNone(long_sl)
+        self.assertGreater(long_strat._tighten_three_stage_post_tp1_sl("LONG", 100.5, 99.5), 100.0)
+        extension = long_strat._apply_three_stage_post_tp1_extension_trigger("LONG", 108.0, boll(middle=102.0, upper=112.0, lower=92.0), long_sl)
+        self.assertGreaterEqual(extension or 0, 102.0)
+        self.assertTrue(long_strat.state.three_stage_post_tp1_sl_extension_triggered)
+
+        short_strat = strategy(three_stage_post_tp1_sl_extension_trigger_ratio=0.6)
+        short_strat.state = StrategyPositionState(
+            side="SHORT",
+            avg_entry_price=100.0,
+            three_stage_tp1_price=98.0,
+            three_stage_tp1_ratio=0.6,
+            three_stage_tp1_consumed=True,
+        )
+        short_sl = short_strat._calculate_three_stage_post_tp1_protective_sl("SHORT", 95.0, boll(middle=98.0, upper=108.0, lower=88.0))
+        self.assertIsNotNone(short_sl)
+        self.assertLess(short_strat._tighten_three_stage_post_tp1_sl("SHORT", 99.5, 100.5), 100.0)
+        extension = short_strat._apply_three_stage_post_tp1_extension_trigger("SHORT", 92.0, boll(middle=98.0, upper=108.0, lower=88.0), short_sl)
+        self.assertLessEqual(extension or 999, 98.0)
+        self.assertTrue(short_strat.state.three_stage_post_tp1_sl_extension_triggered)
+
+    def test_three_stage_position_blocks_middle_runner_plan_after_env_change(self) -> None:
+        strat = strategy(three_stage_runner_enabled=False, middle_runner_enabled=True)
+        strat.state = StrategyPositionState(
+            side="LONG",
+            layers=1,
+            total_entry_qty=1.0,
+            total_entry_notional=100.0,
+            avg_entry_price=100.0,
+            tp_plan="THREE_STAGE_RUNNER",
+            three_stage_runner_enabled_for_position=True,
+            three_stage_tp1_price=101.0,
+            three_stage_tp2_price=110.0,
+            three_stage_tp1_ratio=0.6,
+            three_stage_tp2_ratio=0.2,
+            three_stage_runner_ratio=0.2,
+            last_tp_update_candle_ts_ms=1_000,
+        )
+
+        got = strat._maybe_update_tp(100.0, 2_000, boll(middle=102.0, upper=112.0, lower=92.0, candle_ts_ms=2_000), cvd())
+
+        self.assertIsNone(got)
+        self.assertEqual(strat.state.tp_plan, "THREE_STAGE_RUNNER")
+        self.assertTrue(strat.state.three_stage_runner_enabled_for_position)
+        self.assertFalse(strat._middle_runner_plan_allowed("MIDDLE", boll()))
 
 
 class RecordingTrader(Trader):
@@ -508,16 +575,21 @@ class RecordingTrader(Trader):
         self.tp_order_id = None
         self.near_tp_protective_sl_order_id = None
         self.middle_runner_protective_sl_order_id = None
+        self.three_stage_post_tp1_protective_sl_order_id = None
         self.trend_runner_sl_order_id = None
         self.side = side
         self.placed_specs = []
         self.trend_stop_calls = 0
+        self.post_tp1_stop_calls = 0
+        self.cancel_reduce_only_calls = 0
         self.cancelled_trend_runner_stop_ids = []
+        self.cancelled_post_tp1_stop_ids = []
 
     async def fetch_position_snapshot(self) -> PositionSnapshot:
         return PositionSnapshot(self.side, self.position_contracts, 100.0, float(self.position_contracts * Decimal("0.1")), self.position_contracts)
 
     async def cancel_existing_reduce_only_orders(self) -> None:
+        self.cancel_reduce_only_calls += 1
         return None
 
     async def market_exit_remaining_position_with_retries(self, side, retry_count):  # type: ignore[no-untyped-def]
@@ -533,10 +605,21 @@ class RecordingTrader(Trader):
         self.trend_stop_calls += 1
         return True, "algo-runner", "protective_sl_placed"
 
+    async def place_three_stage_post_tp1_protective_stop_with_retries(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+        self.post_tp1_stop_calls += 1
+        self.three_stage_post_tp1_protective_sl_order_id = "algo-post"
+        return True, "algo-post", "protective_sl_placed"
+
     async def cancel_trend_runner_protective_stop(self, order_id: str | None) -> bool:
         self.cancelled_trend_runner_stop_ids.append(order_id)
         if self.trend_runner_sl_order_id == order_id:
             self.trend_runner_sl_order_id = None
+        return True
+
+    async def cancel_three_stage_post_tp1_protective_stop(self, order_id: str | None) -> bool:
+        self.cancelled_post_tp1_stop_ids.append(order_id)
+        if self.three_stage_post_tp1_protective_sl_order_id == order_id:
+            self.three_stage_post_tp1_protective_sl_order_id = None
         return True
 
 
@@ -613,6 +696,30 @@ class ThreeStageTrendRunnerTraderTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.protective_sl_ok)
         self.assertEqual(trader.trend_stop_calls, 1)
         self.assertEqual(trader.placed_specs, [("final", Decimal("2"), 111.1)])
+
+    async def test_post_tp1_protective_sl_update_does_not_rebuild_tp2(self) -> None:
+        trader = RecordingTrader("LONG")
+        trader.position_contracts = Decimal("4")
+
+        result = await trader.replace_take_profit(
+            intent(
+                intent_type="UPDATE_TP",
+                tp_plan="THREE_STAGE_RUNNER",
+                tp_price=110.0,
+                three_stage_tp1_consumed=True,
+                three_stage_tp2_consumed=False,
+                three_stage_post_tp1_protective_sl_price=100.5,
+                three_stage_post_tp1_protective_sl_order_id="old-post",
+                trend_runner_active=False,
+            )
+        )
+
+        self.assertTrue(result.ok)
+        self.assertTrue(result.protective_sl_ok)
+        self.assertEqual(trader.post_tp1_stop_calls, 1)
+        self.assertEqual(trader.cancel_reduce_only_calls, 0)
+        self.assertEqual(trader.placed_specs, [])
+        self.assertEqual(trader.cancelled_post_tp1_stop_ids, ["old-post"])
 
     async def test_active_trend_runner_cancels_restored_sl_order_id_from_intent(self) -> None:
         trader = RecordingTrader("LONG")
