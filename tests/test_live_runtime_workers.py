@@ -133,6 +133,7 @@ class FakeJournal:
         self.flats = []
         self.cash_transfers = []
         self.cash_drifts = []
+        self.events = []
 
     def new_position_id(self, symbol: str, side: str, ts_ms: int | None = None) -> str:
         return f"{symbol}:{side}:{ts_ms}"
@@ -158,6 +159,9 @@ class FakeJournal:
 
     def record_account_cash_drift(self, **kwargs) -> None:  # type: ignore[no-untyped-def]
         self.cash_drifts.append(kwargs)
+
+    def append(self, event_name: str, payload: dict, position_id: str | None = None) -> None:
+        self.events.append((event_name, dict(payload), position_id))
 
 
 class FakeStateStore:
@@ -193,6 +197,9 @@ class FakeTrader:
         self.execute_delay = execute_delay
         self.position_delay = position_delay
         self.executed: list[int] = []
+        self.post_tp1_stop_orders = []
+        self.cancelled_post_tp1_stop_ids = []
+        self.cancel_post_tp1_ok = True
 
     async def execute_intent(self, trade_intent: TradeIntent) -> LiveTradeResult:
         if self.execute_delay:
@@ -214,6 +221,24 @@ class FakeTrader:
     def mark_flat(self) -> None:
         self.position_contracts = Decimal("0")
 
+    async def place_three_stage_post_tp1_protective_stop_with_retries(self, side, contracts, stop_price, retry_count, retry_interval_seconds):  # type: ignore[no-untyped-def]
+        order_id = f"post-tp1-{len(self.post_tp1_stop_orders) + 1}"
+        self.post_tp1_stop_orders.append(
+            {
+                "side": side,
+                "contracts": contracts,
+                "stop_price": stop_price,
+                "retry_count": retry_count,
+                "retry_interval_seconds": retry_interval_seconds,
+                "order_id": order_id,
+            }
+        )
+        return True, order_id, "protective_sl_placed"
+
+    async def cancel_three_stage_post_tp1_protective_stop(self, order_id: str | None) -> bool:
+        self.cancelled_post_tp1_stop_ids.append(order_id)
+        return self.cancel_post_tp1_ok
+
 
 class GuardedLock:
     def __init__(self) -> None:
@@ -231,6 +256,260 @@ class GuardedLock:
 
 
 class LiveRuntimeWorkerTest(unittest.IsolatedAsyncioTestCase):
+    def three_stage_strategy(self, side: str = "LONG") -> BollCvdShockReclaimStrategy:
+        strategy = BollCvdShockReclaimStrategy(
+            BollCvdReclaimStrategyConfig(
+                three_stage_runner_enabled=True,
+                three_stage_post_tp1_sl_extension_trigger_ratio=0.6,
+            ),
+            SimplePositionSizer(SimplePositionSizerConfig()),
+        )
+        strategy.state = StrategyPositionState(
+            side=side,  # type: ignore[arg-type]
+            layers=1,
+            total_entry_qty=1.0,
+            total_entry_notional=100.0,
+            avg_entry_price=100.0,
+            tp_price=110.0 if side == "LONG" else 90.0,
+            tp_plan="THREE_STAGE_RUNNER",
+            three_stage_runner_enabled_for_position=True,
+            three_stage_tp1_price=101.0 if side == "LONG" else 99.0,
+            three_stage_tp2_price=110.0 if side == "LONG" else 90.0,
+            three_stage_tp1_ratio=0.6,
+            three_stage_tp2_ratio=0.2,
+            three_stage_runner_ratio=0.2,
+        )
+        return strategy
+
+    async def run_account_sync_until(self, predicate, *, account_snapshot, execution_state, trader, strategy, journal, state_store, timeout: float = 0.5):  # type: ignore[no-untyped-def]
+        task = asyncio.create_task(
+            account_position_sync_worker(
+                state_lock=asyncio.Lock(),
+                account_snapshot=account_snapshot,
+                execution_state=execution_state,
+                trader=trader,
+                sizer=SimplePositionSizer(SimplePositionSizerConfig()),
+                strategy=strategy,
+                journal=journal,
+                state_store=state_store,
+                position_sync_seconds=0,
+                account_sync_seconds=999,
+                cash_log_min_delta_usdt=999,
+            )
+        )
+        try:
+            deadline = asyncio.get_running_loop().time() + timeout
+            while asyncio.get_running_loop().time() < deadline:
+                if predicate():
+                    return
+                await asyncio.sleep(0.01)
+            self.fail("account sync predicate was not satisfied")
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+    async def test_strategy_tick_worker_updates_latest_market_price(self) -> None:
+        processed = asyncio.Event()
+        strategy = FakeStrategy(processed=processed)
+        queue: asyncio.Queue[MarketTickEvent] = asyncio.Queue()
+        account_snapshot = AccountSnapshot(flat_position(), 100.0, 100.0, 0.0, 0, 0)
+        task = asyncio.create_task(
+            strategy_tick_worker(
+                strategy_tick_queue=queue,
+                execution_queue=asyncio.Queue(maxsize=1000),
+                state_lock=asyncio.Lock(),
+                account_snapshot=account_snapshot,
+                execution_state=ExecutionState(None, None),
+                cvd=FakeCvd(),  # type: ignore[arg-type]
+                strategy=strategy,  # type: ignore[arg-type]
+                heartbeat_seconds=1_000_000_000_000,
+                account_stale_warn_seconds=1_000_000_000_000,
+                strategy_lag_warn_seconds=1_000_000_000_000,
+            )
+        )
+        await queue.put(MarketTickEvent(TradeTick("ETH-USDT-SWAP", 106.4, 1.0, "buy", 12_345), boll()))
+        await asyncio.wait_for(processed.wait(), timeout=0.2)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+        self.assertEqual(account_snapshot.latest_market_price, 106.4)
+        self.assertEqual(account_snapshot.latest_market_price_ts_ms, 12_345)
+
+    async def test_three_stage_tp1_sync_places_long_post_tp1_sl_with_extension(self) -> None:
+        class Tp1Trader(FakeTrader):
+            async def fetch_position_snapshot(inner_self) -> PositionSnapshot:
+                return PositionSnapshot("LONG", Decimal("4"), 100.0, 0.4, Decimal("4"))
+
+        strategy = self.three_stage_strategy("LONG")
+        trader = Tp1Trader()
+        journal = FakeJournal()
+        state_store = RecordingStateStore()
+        account_snapshot = AccountSnapshot(None, 100.0, 100.0, asyncio.get_running_loop().time(), 0, 1, latest_market_price=106.4)
+        execution_state = ExecutionState("pos-1", 100.0)
+
+        await self.run_account_sync_until(
+            lambda: len(trader.post_tp1_stop_orders) == 1,
+            account_snapshot=account_snapshot,
+            execution_state=execution_state,
+            trader=trader,
+            strategy=strategy,
+            journal=journal,
+            state_store=state_store,
+        )
+
+        self.assertGreaterEqual(trader.post_tp1_stop_orders[0]["stop_price"], 101.0)
+        self.assertTrue(strategy.state.three_stage_post_tp1_sl_extension_triggered)
+        self.assertEqual(strategy.state.three_stage_post_tp1_protective_sl_order_id, "post-tp1-1")
+        self.assertIn("THREE_STAGE_TP1_PROTECTIVE_SL_PLACED", [event[0] for event in journal.events])
+
+    async def test_three_stage_tp1_sync_places_short_post_tp1_sl_with_extension(self) -> None:
+        class Tp1Trader(FakeTrader):
+            async def fetch_position_snapshot(inner_self) -> PositionSnapshot:
+                return PositionSnapshot("SHORT", Decimal("4"), 100.0, 0.4, Decimal("-4"))
+
+        strategy = self.three_stage_strategy("SHORT")
+        trader = Tp1Trader()
+        journal = FakeJournal()
+        state_store = RecordingStateStore()
+        account_snapshot = AccountSnapshot(None, 100.0, 100.0, asyncio.get_running_loop().time(), 0, 1, latest_market_price=93.6)
+        execution_state = ExecutionState("pos-1", 100.0)
+
+        await self.run_account_sync_until(
+            lambda: len(trader.post_tp1_stop_orders) == 1,
+            account_snapshot=account_snapshot,
+            execution_state=execution_state,
+            trader=trader,
+            strategy=strategy,
+            journal=journal,
+            state_store=state_store,
+        )
+
+        self.assertLessEqual(trader.post_tp1_stop_orders[0]["stop_price"], 99.0)
+        self.assertTrue(strategy.state.three_stage_post_tp1_sl_extension_triggered)
+        self.assertEqual(strategy.state.three_stage_post_tp1_protective_sl_order_id, "post-tp1-1")
+
+    async def test_three_stage_tp1_sync_falls_back_when_latest_market_price_missing(self) -> None:
+        class Tp1Trader(FakeTrader):
+            async def fetch_position_snapshot(inner_self) -> PositionSnapshot:
+                return PositionSnapshot("LONG", Decimal("4"), 100.0, 0.4, Decimal("4"))
+
+        strategy = self.three_stage_strategy("LONG")
+        trader = Tp1Trader()
+        journal = FakeJournal()
+        state_store = RecordingStateStore()
+        account_snapshot = AccountSnapshot(None, 100.0, 100.0, asyncio.get_running_loop().time(), 0, 1)
+        execution_state = ExecutionState("pos-1", 100.0)
+
+        with self.assertLogs("scripts.run_boll_cvd_live", level="WARNING") as logs:
+            await self.run_account_sync_until(
+                lambda: len(trader.post_tp1_stop_orders) == 1,
+                account_snapshot=account_snapshot,
+                execution_state=execution_state,
+                trader=trader,
+                strategy=strategy,
+                journal=journal,
+                state_store=state_store,
+            )
+
+        self.assertIn("THREE_STAGE_POST_TP1_SL_PRICE_FALLBACK", "\n".join(logs.output))
+        placed_payloads = [payload for event_name, payload, _position_id in journal.events if event_name == "THREE_STAGE_TP1_PROTECTIVE_SL_PLACED"]
+        self.assertEqual(placed_payloads[0]["reason"], "three_stage_tp1_filled")
+
+    async def test_three_stage_tp2_cancel_post_tp1_sl_success_clears_state(self) -> None:
+        class Tp2Trader(FakeTrader):
+            async def fetch_position_snapshot(inner_self) -> PositionSnapshot:
+                return PositionSnapshot("LONG", Decimal("2"), 100.0, 0.2, Decimal("2"))
+
+        strategy = self.three_stage_strategy("LONG")
+        strategy.state.partial_tp_consumed = True
+        strategy.state.three_stage_tp1_consumed = True
+        strategy.state.three_stage_post_tp1_protective_sl_order_id = "old-post"
+        strategy.state.three_stage_post_tp1_protective_sl_price = 101.0
+        strategy.state.three_stage_post_tp1_protected = True
+        trader = Tp2Trader()
+        journal = FakeJournal()
+        state_store = RecordingStateStore()
+        account_snapshot = AccountSnapshot(None, 100.0, 100.0, asyncio.get_running_loop().time(), 0, 1, latest_market_price=110.0)
+        execution_state = ExecutionState("pos-1", 100.0)
+
+        await self.run_account_sync_until(
+            lambda: any(event[0] == "THREE_STAGE_TP1_PROTECTIVE_SL_CANCELLED_ON_TP2" for event in journal.events),
+            account_snapshot=account_snapshot,
+            execution_state=execution_state,
+            trader=trader,
+            strategy=strategy,
+            journal=journal,
+            state_store=state_store,
+        )
+
+        self.assertEqual(trader.cancelled_post_tp1_stop_ids, ["old-post"])
+        self.assertIsNone(strategy.state.three_stage_post_tp1_protective_sl_order_id)
+        self.assertIsNone(strategy.state.three_stage_post_tp1_protective_sl_price)
+        self.assertFalse(strategy.state.three_stage_post_tp1_protected)
+        self.assertFalse(execution_state.trading_halted)
+
+    async def test_three_stage_tp2_cancel_post_tp1_sl_failure_preserves_state_and_halts(self) -> None:
+        class Tp2Trader(FakeTrader):
+            async def fetch_position_snapshot(inner_self) -> PositionSnapshot:
+                return PositionSnapshot("LONG", Decimal("2"), 100.0, 0.2, Decimal("2"))
+
+        strategy = self.three_stage_strategy("LONG")
+        strategy.state.partial_tp_consumed = True
+        strategy.state.three_stage_tp1_consumed = True
+        strategy.state.three_stage_post_tp1_protective_sl_order_id = "old-post"
+        strategy.state.three_stage_post_tp1_protective_sl_price = 101.0
+        strategy.state.three_stage_post_tp1_protected = True
+        trader = Tp2Trader()
+        trader.cancel_post_tp1_ok = False
+        journal = FakeJournal()
+        state_store = RecordingStateStore()
+        account_snapshot = AccountSnapshot(None, 100.0, 100.0, asyncio.get_running_loop().time(), 0, 1, latest_market_price=110.0)
+        execution_state = ExecutionState("pos-1", 100.0)
+
+        await self.run_account_sync_until(
+            lambda: execution_state.trading_halted,
+            account_snapshot=account_snapshot,
+            execution_state=execution_state,
+            trader=trader,
+            strategy=strategy,
+            journal=journal,
+            state_store=state_store,
+        )
+
+        self.assertEqual(trader.cancelled_post_tp1_stop_ids, ["old-post"])
+        self.assertEqual(strategy.state.three_stage_post_tp1_protective_sl_order_id, "old-post")
+        self.assertEqual(strategy.state.three_stage_post_tp1_protective_sl_price, 101.0)
+        self.assertTrue(strategy.state.three_stage_post_tp1_protected)
+        self.assertEqual(execution_state.halt_reason, "three_stage_post_tp1_sl_cancel_failed_on_tp2")
+        self.assertIn("THREE_STAGE_TP1_PROTECTIVE_SL_CANCEL_FAILED_ON_TP2", [event[0] for event in journal.events])
+        self.assertEqual(state_store.saved_states[-1].three_stage_post_tp1_protective_sl_order_id, "old-post")
+        self.assertEqual(trader.post_tp1_stop_orders, [])
+
+        blocked_strategy = FakeStrategy(processed=asyncio.Event())
+        queue: asyncio.Queue[MarketTickEvent] = asyncio.Queue()
+        tick_task = asyncio.create_task(
+            strategy_tick_worker(
+                strategy_tick_queue=queue,
+                execution_queue=asyncio.Queue(maxsize=1000),
+                state_lock=asyncio.Lock(),
+                account_snapshot=account_snapshot,
+                execution_state=execution_state,
+                cvd=FakeCvd(),  # type: ignore[arg-type]
+                strategy=blocked_strategy,  # type: ignore[arg-type]
+                heartbeat_seconds=1_000_000_000_000,
+                account_stale_warn_seconds=1_000_000_000_000,
+                strategy_lag_warn_seconds=1_000_000_000_000,
+            )
+        )
+        await queue.put(MarketTickEvent(TradeTick("ETH-USDT-SWAP", 111.0, 1.0, "buy", 99_999), boll()))
+        await asyncio.wait_for(queue.join(), timeout=0.2)
+        tick_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await tick_task
+        self.assertEqual(blocked_strategy.processed_ts, [])
+
     def test_restore_strategy_from_position_sets_conservative_first_entry_clock(self) -> None:
         strategy = BollCvdShockReclaimStrategy(BollCvdReclaimStrategyConfig(), SimplePositionSizer(SimplePositionSizerConfig()))
         position = PositionSnapshot("LONG", Decimal("3"), 100.5, 0.3, Decimal("3"))

@@ -639,6 +639,25 @@ def three_stage_post_tp1_boll(strategy: BollCvdReclaimStrategy):
     return type("ThreeStagePostTp1Boll", (), {"middle": float(middle), "upper": upper, "lower": lower})()
 
 
+def three_stage_post_tp1_current_price(account_snapshot: AccountSnapshot, position: PositionSnapshot, post_tp1_boll: Any) -> tuple[float, str]:
+    latest_price = getattr(account_snapshot, "latest_market_price", None)
+    if latest_price is not None and float(latest_price) > 0:
+        return float(latest_price), "latest_market_price"
+    if position.avg_entry_price > 0:
+        logger.warning(
+            "THREE_STAGE_POST_TP1_SL_PRICE_FALLBACK | reason=latest_market_price_missing fallback=position_avg_entry avg_entry=%.4f boll_middle=%.4f",
+            position.avg_entry_price,
+            float(getattr(post_tp1_boll, "middle", 0.0) or 0.0),
+        )
+        return float(position.avg_entry_price), "position_avg_entry"
+    fallback = float(getattr(post_tp1_boll, "middle", 0.0) or 0.0)
+    logger.warning(
+        "THREE_STAGE_POST_TP1_SL_PRICE_FALLBACK | reason=latest_market_price_and_avg_entry_missing fallback=boll_middle boll_middle=%.4f",
+        fallback,
+    )
+    return fallback, "boll_middle"
+
+
 def middle_runner_size_mismatch_needs_degraded_protection(strategy: BollCvdReclaimStrategy, position: PositionSnapshot) -> bool:
     state = strategy.state
     if not getattr(state, "middle_runner_pending", False):
@@ -764,6 +783,8 @@ class AccountSnapshot:
     updated_monotonic: float
     updated_ts_ms: int
     version: int = 0
+    latest_market_price: float | None = None
+    latest_market_price_ts_ms: int = 0
 
 
 @dataclass
@@ -907,6 +928,9 @@ async def strategy_tick_worker(
             if event.boll is None:
                 continue
             latest_tick_ts_ms = max(latest_tick_ts_ms, event.tick.ts_ms)
+            async with state_lock:
+                account_snapshot.latest_market_price = event.tick.price
+                account_snapshot.latest_market_price_ts_ms = event.tick.ts_ms
             now = time.monotonic()
             tick_lag_seconds = max(time.time() - event.tick.ts_ms / 1000, 0.0)
             queue_size = strategy_tick_queue.qsize()
@@ -1720,12 +1744,14 @@ async def account_position_sync_worker(
                                 config = getattr(strategy, "config", None)
                                 if bool(getattr(config, "three_stage_post_tp1_protective_sl_enabled", True)):
                                     post_tp1_boll = three_stage_post_tp1_boll(strategy)
-                                    current_price = getattr(post_tp1_boll, "middle", 0.0) if post_tp1_boll is not None else 0.0
-                                    protective_sl = (
-                                        strategy._calculate_three_stage_post_tp1_protective_sl(position.side, current_price, post_tp1_boll)
-                                        if post_tp1_boll is not None and position.side is not None
-                                        else None
-                                    )
+                                    protective_sl = None
+                                    current_price = None
+                                    price_source = "missing"
+                                    if post_tp1_boll is not None and position.side is not None:
+                                        current_price, price_source = three_stage_post_tp1_current_price(account_snapshot, position, post_tp1_boll)
+                                        base_sl = strategy._calculate_three_stage_post_tp1_protective_sl(position.side, current_price, post_tp1_boll)
+                                        extension_sl = strategy._apply_three_stage_post_tp1_extension_trigger(position.side, current_price, post_tp1_boll, base_sl)
+                                        protective_sl = strategy._tighten_optional_three_stage_post_tp1_sl(position.side, base_sl, extension_sl)
                                     strategy.state.three_stage_post_tp1_protective_sl_price = protective_sl
                                     three_stage_post_tp1_sl_payload = {
                                         "position_id": execution_state.current_position_id,
@@ -1733,15 +1759,21 @@ async def account_position_sync_worker(
                                         "contracts": position.contracts,
                                         "protective_sl_price": protective_sl,
                                         "old_sl_order_id": getattr(strategy.state, "three_stage_post_tp1_protective_sl_order_id", None),
+                                        "current_price": current_price,
+                                        "current_price_source": price_source,
                                         "reason": "three_stage_tp1_filled",
                                     }
                             if three_stage_event in {"TP2", "TP1_TP2"}:
+                                old_post_tp1_sl_order_id = getattr(strategy.state, "three_stage_post_tp1_protective_sl_order_id", None)
                                 three_stage_post_tp1_cancel_payload = {
                                     "position_id": execution_state.current_position_id,
                                     "side": position.side,
-                                    "protective_sl_order_id": getattr(strategy.state, "three_stage_post_tp1_protective_sl_order_id", None),
+                                    "protective_sl_order_id": old_post_tp1_sl_order_id,
                                     "protective_sl_price": getattr(strategy.state, "three_stage_post_tp1_protective_sl_price", None),
                                 }
+                                if old_post_tp1_sl_order_id:
+                                    execution_state.trading_halted = True
+                                    execution_state.halt_reason = "three_stage_post_tp1_sl_cancel_pending_on_tp2"
                             three_stage_event_payload = {
                                 "event": three_stage_event,
                                 "position_id": execution_state.current_position_id,
@@ -1947,28 +1979,69 @@ async def account_position_sync_worker(
                 old_order_id = three_stage_post_tp1_cancel_payload.get("protective_sl_order_id")
                 cancel_ok = True
                 if old_order_id:
-                    cancel_ok = await trader.cancel_three_stage_post_tp1_protective_stop(old_order_id)
-                async with state_lock:
-                    strategy.state.three_stage_post_tp1_protective_sl_order_id = None
-                    strategy.state.three_stage_post_tp1_protective_sl_price = None
-                    strategy.state.three_stage_post_tp1_protected = False
-                    save_state_payload = (execution_state.current_position_id, copy.deepcopy(strategy.state), execution_state.cash_before_position)
-                if hasattr(journal, "append"):
-                    journal.append(
-                        "THREE_STAGE_TP1_PROTECTIVE_SL_CANCELLED_ON_TP2",
-                        {
-                            **three_stage_post_tp1_cancel_payload,
-                            "cancel_ok": cancel_ok,
-                            "reason": "three_stage_tp2_filled",
-                        },
-                        position_id=three_stage_post_tp1_cancel_payload.get("position_id"),
+                    try:
+                        cancel_ok = await trader.cancel_three_stage_post_tp1_protective_stop(old_order_id)
+                    except Exception:
+                        cancel_ok = False
+                        logger.exception(
+                            "THREE_STAGE_TP1_PROTECTIVE_SL_CANCEL_FAILED_ON_TP2 | position_id=%s algoId=%s cancel_exception=true manual_intervention_required=true",
+                            three_stage_post_tp1_cancel_payload.get("position_id"),
+                            old_order_id,
+                        )
+                if cancel_ok:
+                    async with state_lock:
+                        strategy.state.three_stage_post_tp1_protective_sl_order_id = None
+                        strategy.state.three_stage_post_tp1_protective_sl_price = None
+                        strategy.state.three_stage_post_tp1_protected = False
+                        if (
+                            execution_state.trading_halted
+                            and execution_state.halt_reason == "three_stage_post_tp1_sl_cancel_pending_on_tp2"
+                        ):
+                            execution_state.trading_halted = False
+                            execution_state.halt_reason = None
+                        save_state_payload = (execution_state.current_position_id, copy.deepcopy(strategy.state), execution_state.cash_before_position)
+                    if hasattr(journal, "append"):
+                        journal.append(
+                            "THREE_STAGE_TP1_PROTECTIVE_SL_CANCELLED_ON_TP2",
+                            {
+                                **three_stage_post_tp1_cancel_payload,
+                                "cancel_ok": True,
+                                "reason": "three_stage_tp2_filled",
+                            },
+                            position_id=three_stage_post_tp1_cancel_payload.get("position_id"),
+                        )
+                    logger.warning(
+                        "THREE_STAGE_TP1_PROTECTIVE_SL_CANCELLED_ON_TP2 | position_id=%s algoId=%s cancel_ok=true",
+                        three_stage_post_tp1_cancel_payload.get("position_id"),
+                        old_order_id,
                     )
-                logger.warning(
-                    "THREE_STAGE_TP1_PROTECTIVE_SL_CANCELLED_ON_TP2 | position_id=%s algoId=%s cancel_ok=%s",
-                    three_stage_post_tp1_cancel_payload.get("position_id"),
-                    old_order_id,
-                    cancel_ok,
-                )
+                else:
+                    async with state_lock:
+                        strategy.state.three_stage_post_tp1_protective_sl_order_id = old_order_id
+                        strategy.state.three_stage_post_tp1_protective_sl_price = three_stage_post_tp1_cancel_payload.get("protective_sl_price")
+                        strategy.state.three_stage_post_tp1_protected = True
+                        execution_state.trading_halted = True
+                        execution_state.halt_reason = "three_stage_post_tp1_sl_cancel_failed_on_tp2"
+                        save_state_payload = (execution_state.current_position_id, copy.deepcopy(strategy.state), execution_state.cash_before_position)
+                    if hasattr(journal, "append"):
+                        journal.append(
+                            "THREE_STAGE_TP1_PROTECTIVE_SL_CANCEL_FAILED_ON_TP2",
+                            {
+                                **three_stage_post_tp1_cancel_payload,
+                                "critical": True,
+                                "cancel_ok": False,
+                                "trading_halted": True,
+                                "halt_reason": "three_stage_post_tp1_sl_cancel_failed_on_tp2",
+                                "reason": "manual_intervention_required_old_post_tp1_sl_may_remain_on_exchange",
+                            },
+                            position_id=three_stage_post_tp1_cancel_payload.get("position_id"),
+                        )
+                    logger.error(
+                        "THREE_STAGE_TP1_PROTECTIVE_SL_CANCEL_FAILED_ON_TP2 | position_id=%s algoId=%s protective_sl_price=%s trading_halted=true halt_reason=three_stage_post_tp1_sl_cancel_failed_on_tp2 manual_intervention_required=true",
+                        three_stage_post_tp1_cancel_payload.get("position_id"),
+                        old_order_id,
+                        three_stage_post_tp1_cancel_payload.get("protective_sl_price"),
+                    )
             if three_stage_post_tp1_sl_payload is not None:
                 sl_price = three_stage_post_tp1_sl_payload.get("protective_sl_price")
                 sl_order_id = None
@@ -2000,6 +2073,8 @@ async def account_position_sync_worker(
                                 "contracts": str(three_stage_post_tp1_sl_payload.get("contracts")),
                                 "protective_sl_price": sl_price,
                                 "protective_sl_order_id": sl_order_id,
+                                "current_price": three_stage_post_tp1_sl_payload.get("current_price"),
+                                "current_price_source": three_stage_post_tp1_sl_payload.get("current_price_source"),
                                 "avg_entry_price": getattr(strategy.state, "avg_entry_price", None),
                                 "tp1_price": getattr(strategy.state, "three_stage_tp1_price", None),
                                 "tp1_ratio": getattr(strategy.state, "three_stage_tp1_ratio", 0.0),
