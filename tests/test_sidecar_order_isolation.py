@@ -51,7 +51,7 @@ class IsolationTrader(Trader):
         self.placed = []
 
     async def fetch_position_snapshot(self) -> PositionSnapshot:
-        return PositionSnapshot("LONG", self.position_contracts, 100.0, 1.0, self.position_contracts)
+        return PositionSnapshot("LONG", Decimal("12"), 100.0, 1.2, Decimal("12"))
 
     async def fetch_pending_orders(self):  # type: ignore[no-untyped-def]
         return [
@@ -75,11 +75,23 @@ class IsolationTrader(Trader):
 async def test_main_tp_update_does_not_cancel_sidecar_tp() -> None:
     trader = IsolationTrader()
 
-    result = await trader.replace_take_profit(intent(protected_order_ids=("sidecar-tp", "near-sl")))
+    result = await trader.replace_take_profit(intent(protected_order_ids=("sidecar-tp", "near-sl"), managed_core_contracts="10"))
 
     assert result.ok
     assert trader.cancelled == ["core-old"]
     assert "sidecar-tp" not in trader.cancelled
+    assert trader.placed == [("final", Decimal("10"), 101.0)]
+
+
+@pytest.mark.asyncio
+async def test_update_tp_uses_core_contracts_not_okx_net_contracts() -> None:
+    trader = IsolationTrader()
+
+    result = await trader.replace_take_profit(intent(protected_order_ids=("sidecar-tp",), managed_core_contracts="10"))
+
+    assert result.ok
+    assert result.contracts == "10"
+    assert trader.placed == [("final", Decimal("10"), 101.0)]
 
 
 class UnknownReduceOnlyTrader(IsolationTrader):

@@ -66,6 +66,9 @@ class SimplePositionSizerConfig:
             raise RuntimeError("SIDECAR_ENABLED=true requires SIDECAR_TP_PCT > 0")
         if self.sidecar_max_legs < 1:
             raise RuntimeError("SIDECAR_ENABLED=true requires SIDECAR_MAX_LEGS >= 1")
+        max_layers = int(os.getenv("MAX_LAYERS", "3"))
+        if self.sidecar_max_legs < max_layers:
+            raise RuntimeError("SIDECAR_ENABLED=true requires SIDECAR_MAX_LEGS >= MAX_LAYERS")
 
 
 @dataclass(frozen=True)

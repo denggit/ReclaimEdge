@@ -6,6 +6,7 @@ import pytest
 
 from scripts.run_boll_cvd_live import (
     ExecutionState,
+    apply_main_tp_startup_recovery,
     apply_sidecar_startup_recovery,
     execute_sidecar_after_core_entry,
     force_close_sidecar_after_core_flat,
@@ -72,6 +73,8 @@ class Trader:
         self.cancelled_sidecar_tps = []
         self.market_exits = []
         self.status_by_order = {}
+        self.position_snapshot = PositionSnapshot("LONG", Decimal("1"), 3000, 0.1, Decimal("1"))
+        self.pending_orders = []
 
     async def place_sidecar_market_order(self, *, side, eth_qty):  # type: ignore[no-untyped-def]
         self.sidecar_market_orders.append((side, eth_qty))
@@ -83,6 +86,12 @@ class Trader:
 
     async def fetch_sidecar_order_status(self, order_id: str):  # type: ignore[no-untyped-def]
         return {"order_id": order_id, "status": self.status_by_order.get(order_id, "OPEN"), "filled_qty": None, "avg_fill_price": None}
+
+    async def fetch_position_snapshot(self) -> PositionSnapshot:
+        return self.position_snapshot
+
+    async def fetch_pending_orders(self):  # type: ignore[no-untyped-def]
+        return list(self.pending_orders)
 
     async def cancel_sidecar_take_profit(self, order_id: str):  # type: ignore[no-untyped-def]
         self.cancelled_sidecar_tps.append(order_id)
@@ -235,6 +244,36 @@ async def test_core_flat_force_closes_sidecar() -> None:
     assert journal.events[0][0] == "SIDECAR_FORCE_CLOSED_AFTER_CORE_FLAT"
 
 
+@pytest.mark.asyncio
+async def test_sidecar_force_close_mismatch_halts_without_market_exit() -> None:
+    state = sidecar_state()
+    state.sidecar_legs = [{"leg_id": "leg-1", "status": "OPEN", "tp_order_id": "tp-1", "qty": 0.1, "contracts": "1", "created_ts_ms": 1, "updated_ts_ms": 1}]
+    refresh_sidecar_state_totals(state)
+    trader = Trader()
+    trader.position_snapshot = PositionSnapshot("LONG", Decimal("2"), 3000, 0.2, Decimal("2"))
+    execution = ExecutionState("pos-1", 1000.0)
+    journal = Journal()
+
+    ok = await force_close_sidecar_after_core_flat(
+        trader=trader,
+        strategy_state=state,
+        execution_state=execution,
+        journal=journal,
+        state_store=Store(),
+        trader_symbol="ETH-USDT-SWAP",
+        position_id="pos-1",
+        cash_before_position=1000.0,
+        ts_ms=2,
+    )
+
+    assert not ok
+    assert execution.trading_halted
+    assert execution.halt_reason == "sidecar_force_close_position_mismatch"
+    assert trader.cancelled_sidecar_tps == []
+    assert trader.market_exits == []
+    assert journal.events[0][0] == "SIDECAR_FORCE_CLOSE_POSITION_MISMATCH"
+
+
 def test_core_sidecar_position_mismatch_detected() -> None:
     state = sidecar_state()
     state.sidecar_legs = [{"status": "OPEN", "qty": 0.2, "contracts": "2", "tp_order_id": "tp"}]
@@ -307,6 +346,73 @@ async def test_recovered_position_without_saved_sidecar_does_not_backfill(monkey
 
     assert state.sidecar_enabled_for_position is False
     assert journal.events[0][0] == "SIDECAR_DISABLED_FOR_RECOVERED_POSITION"
+
+
+@pytest.mark.asyncio
+async def test_startup_recovery_tp_filled_sidecar_position_stays_enabled() -> None:
+    state = sidecar_state()
+    state.sidecar_legs = [{"leg_id": "leg-1", "status": "TP_FILLED", "tp_order_id": "tp-1", "qty": 0.1, "contracts": "1", "created_ts_ms": 1, "updated_ts_ms": 2}]
+    execution = ExecutionState("pos-1", 1000.0)
+    saved_state = type(
+        "Saved",
+        (),
+        {
+            "sidecar_enabled_for_position": True,
+            "sidecar_margin_pct": 0.01,
+            "sidecar_tp_pct": 0.004,
+            "sidecar_legs": state.sidecar_legs,
+        },
+    )()
+
+    await apply_sidecar_startup_recovery(
+        strategy=type("S", (), {"state": state})(),
+        execution_state=execution,
+        saved_state=saved_state,
+        startup_position=PositionSnapshot("LONG", Decimal("5"), 3000, 0.5, Decimal("5")),
+        trader=Trader(),
+        journal=Journal(),
+        state_store=Store(),
+    )
+
+    assert state.sidecar_enabled_for_position is True
+
+
+@pytest.mark.asyncio
+async def test_startup_restores_main_tp_order_id() -> None:
+    trader = Trader()
+    execution = ExecutionState("pos-1", 1000.0)
+    saved_state = type("Saved", (), {"tp_order_id": "core-tp", "tp_order_ids": []})()
+
+    await apply_main_tp_startup_recovery(
+        execution_state=execution,
+        saved_state=saved_state,
+        startup_position=PositionSnapshot("LONG", Decimal("5"), 3000, 0.5, Decimal("5")),
+        trader=trader,
+        journal=Journal(),
+    )
+
+    assert getattr(trader, "tp_order_id") == "core-tp"
+    assert not execution.trading_halted
+
+
+@pytest.mark.asyncio
+async def test_startup_missing_main_tp_order_id_halts_when_reduce_only_exists() -> None:
+    trader = Trader()
+    trader.pending_orders = [{"instId": "ETH-USDT-SWAP", "reduceOnly": "true", "ordId": "unknown-tp"}]
+    execution = ExecutionState("pos-1", 1000.0)
+    journal = Journal()
+
+    await apply_main_tp_startup_recovery(
+        execution_state=execution,
+        saved_state=type("Saved", (), {"tp_order_id": None, "tp_order_ids": []})(),
+        startup_position=PositionSnapshot("LONG", Decimal("5"), 3000, 0.5, Decimal("5")),
+        trader=trader,
+        journal=journal,
+    )
+
+    assert execution.trading_halted
+    assert execution.halt_reason == "main_tp_order_id_missing_on_startup"
+    assert journal.events[0][0] == "MAIN_TP_ORDER_ID_MISSING_ON_STARTUP"
 
 
 def test_flat_cleanup_resets_sidecar_fields() -> None:

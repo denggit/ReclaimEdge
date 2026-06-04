@@ -244,6 +244,8 @@ class TradeIntent:
     trend_runner_exit_reason: str | None = None
     trend_runner_adjust_count: int = 0
     protected_order_ids: tuple[str, ...] = ()
+    managed_core_contracts: str | None = None
+    managed_core_eth_qty: float = 0.0
 
 
 @dataclass
@@ -336,6 +338,10 @@ class StrategyPositionState:
     sidecar_legs: list[dict] = field(default_factory=list)
     sidecar_dirty: bool = False
     sidecar_halt_reason: str | None = None
+    core_contracts: str | None = None
+    core_eth_qty: float = 0.0
+    tp_order_id: str | None = None
+    tp_order_ids: list[str] = field(default_factory=list)
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -2013,7 +2019,23 @@ class BollCvdReclaimStrategy:
             trend_runner_exit_reason=self.state.trend_runner_exit_reason,
             trend_runner_adjust_count=self.state.trend_runner_adjust_count,
             protected_order_ids=self._protected_order_ids(),
+            managed_core_contracts=self._managed_core_contracts_for_intent(intent_type),
+            managed_core_eth_qty=self._managed_core_eth_qty_for_intent(intent_type),
         )
+
+    def _managed_core_contracts_for_intent(self, intent_type: TradeIntentType) -> str | None:
+        if not self.state.sidecar_enabled_for_position:
+            return None
+        if intent_type in {"UPDATE_TP", "NEAR_TP_REDUCE", "MARKET_EXIT_RUNNER"}:
+            return self.state.core_contracts
+        return None
+
+    def _managed_core_eth_qty_for_intent(self, intent_type: TradeIntentType) -> float:
+        if not self.state.sidecar_enabled_for_position:
+            return 0.0
+        if intent_type in {"OPEN_LONG", "OPEN_SHORT", "ADD_LONG", "ADD_SHORT", "UPDATE_TP"}:
+            return float(self.state.total_entry_qty or 0.0)
+        return float(self.state.core_eth_qty or 0.0)
 
     def _protected_order_ids(self) -> tuple[str, ...]:
         ids: list[str] = []

@@ -71,6 +71,18 @@ def test_trim_and_open_qty_keep_small_state() -> None:
     assert [leg["leg_id"] for leg in trim_sidecar_legs_for_state(legs, 2)] == ["2", "3"]
 
 
+def test_trim_never_drops_open_legs_even_over_limit() -> None:
+    legs = [
+        {"leg_id": "1", "qty": 1, "status": SidecarLegStatus.OPEN.value, "created_ts_ms": 1, "updated_ts_ms": 1},
+        {"leg_id": "2", "qty": 1, "status": SidecarLegStatus.OPEN.value, "created_ts_ms": 2, "updated_ts_ms": 2},
+        {"leg_id": "3", "qty": 1, "status": SidecarLegStatus.OPEN.value, "created_ts_ms": 3, "updated_ts_ms": 3},
+    ]
+
+    trimmed = trim_sidecar_legs_for_state(legs, 2)
+
+    assert [leg["leg_id"] for leg in trimmed] == ["1", "2", "3"]
+
+
 def test_build_core_position_view_subtracts_sidecar() -> None:
     okx = PositionSnapshot("LONG", Decimal("12"), 3000.0, 1.2, Decimal("12"))
 

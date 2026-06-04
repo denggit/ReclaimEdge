@@ -9,7 +9,7 @@ import logging
 import os
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -363,6 +363,8 @@ def restore_strategy_from_saved_state(strategy: BollCvdReclaimStrategy, saved_st
         layers=saved_state.layers,
         last_entry_price=saved_state.last_entry_price,
         tp_price=saved_state.tp_price,
+        tp_order_id=getattr(saved_state, "tp_order_id", None),
+        tp_order_ids=list(getattr(saved_state, "tp_order_ids", []) or []),
         partial_tp_price=getattr(saved_state, "partial_tp_price", None),
         partial_tp_ratio=getattr(saved_state, "partial_tp_ratio", 0.0),
         tp_plan=tp_plan,
@@ -437,6 +439,8 @@ def restore_strategy_from_saved_state(strategy: BollCvdReclaimStrategy, saved_st
         sidecar_legs=list(getattr(saved_state, "sidecar_legs", []) or []),
         sidecar_dirty=getattr(saved_state, "sidecar_dirty", False),
         sidecar_halt_reason=getattr(saved_state, "sidecar_halt_reason", None),
+        core_contracts=getattr(saved_state, "core_contracts", None),
+        core_eth_qty=getattr(saved_state, "core_eth_qty", 0.0),
     )
     logger.warning(
         "Recovered strategy state from local disk | position_id=%s side=%s layers=%s avg_entry=%.4f tp=%s partial_tp=%s tp_plan=%s partial_tp_consumed=%s",
@@ -738,6 +742,11 @@ def sidecar_open_contracts(legs: list[dict[str, Any]]) -> Decimal:
     return total
 
 
+def open_sidecar_legs_exceed_limit(state: StrategyPositionState, max_legs: int) -> bool:
+    open_count = sum(1 for leg in list(getattr(state, "sidecar_legs", []) or []) if leg.get("status") == SidecarLegStatus.OPEN.value)
+    return open_count > max(int(max_legs), 1)
+
+
 def refresh_sidecar_state_totals(state: StrategyPositionState, max_legs: int = 10) -> None:
     state.sidecar_legs = trim_sidecar_legs_for_state(list(getattr(state, "sidecar_legs", []) or []), max_legs)
     state.sidecar_open_qty = sidecar_open_qty(state.sidecar_legs)
@@ -748,6 +757,26 @@ def refresh_sidecar_state_totals(state: StrategyPositionState, max_legs: int = 1
         for leg in state.sidecar_legs
         if leg.get("status") in {SidecarLegStatus.TP_FILLED.value, SidecarLegStatus.FORCE_CLOSED.value, SidecarLegStatus.CANCELLED.value}
     )
+
+
+def apply_core_position_view_to_state(state: StrategyPositionState, core_position: PositionSnapshot) -> None:
+    if core_position.has_position:
+        state.core_contracts = str(core_position.contracts)
+        state.core_eth_qty = float(core_position.eth_qty)
+    else:
+        state.core_contracts = None
+        state.core_eth_qty = 0.0
+
+
+def with_runtime_managed_core(intent: TradeIntent, account_position: PositionSnapshot | None) -> TradeIntent:
+    if not getattr(intent, "managed_core_contracts", None) and account_position is not None and account_position.has_position:
+        if intent.intent_type in {"UPDATE_TP", "NEAR_TP_REDUCE", "MARKET_EXIT_RUNNER"}:
+            return replace(
+                intent,
+                managed_core_contracts=str(account_position.contracts),
+                managed_core_eth_qty=float(account_position.eth_qty),
+            )
+    return intent
 
 
 def sidecar_client_order_id(position_id: str | None, layer_index: int, ts_ms: int) -> str:
@@ -929,6 +958,36 @@ async def force_close_sidecar_after_core_flat(
 ) -> bool:
     if sidecar_open_qty(strategy_state.sidecar_legs) <= 0:
         return True
+    expected_sidecar_contracts = sidecar_open_contracts(strategy_state.sidecar_legs)
+    okx_position = await trader.fetch_position_snapshot()
+    tolerance = Decimal(str(os.getenv("SIDECAR_FORCE_CLOSE_CONTRACT_TOLERANCE", "0.01")))
+    if (
+        not okx_position.has_position
+        or okx_position.side != strategy_state.side
+        or abs(okx_position.contracts - expected_sidecar_contracts) > tolerance
+    ):
+        execution_state.trading_halted = True
+        execution_state.halt_reason = "sidecar_force_close_position_mismatch"
+        strategy_state.sidecar_dirty = True
+        strategy_state.sidecar_halt_reason = "sidecar_force_close_position_mismatch"
+        payload = {
+            "okx_side": okx_position.side,
+            "okx_contracts": str(okx_position.contracts),
+            "sidecar_open_contracts": str(expected_sidecar_contracts),
+            "tolerance": str(tolerance),
+            "manual_intervention_required": True,
+        }
+        journal.append("SIDECAR_FORCE_CLOSE_POSITION_MISMATCH", payload, position_id=position_id)
+        logger.error(
+            "SIDECAR_FORCE_CLOSE_POSITION_MISMATCH | position_id=%s okx_side=%s okx_contracts=%s sidecar_open_contracts=%s tolerance=%s trading_halted=true manual_intervention_required=true",
+            position_id,
+            okx_position.side,
+            okx_position.contracts,
+            expected_sidecar_contracts,
+            tolerance,
+        )
+        state_store.save(LiveStateStore.from_strategy_state(position_id=position_id, symbol=trader_symbol, strategy_state=strategy_state, cash_before_position=cash_before_position))
+        return False
     try:
         for leg in strategy_state.sidecar_legs:
             if leg.get("status") == SidecarLegStatus.OPEN.value and leg.get("tp_order_id"):
@@ -1188,12 +1247,28 @@ async def apply_sidecar_startup_recovery(
         state_store.clear()
         return
     saved_legs = list(getattr(saved_state, "sidecar_legs", []) or []) if saved_state is not None else []
+    saved_sidecar_enabled = bool(getattr(saved_state, "sidecar_enabled_for_position", False)) if saved_state is not None else False
+    if saved_sidecar_enabled:
+        strategy.state.sidecar_enabled_for_position = True
+        strategy.state.sidecar_margin_pct = float(getattr(saved_state, "sidecar_margin_pct", strategy.state.sidecar_margin_pct) or 0.0)
+        strategy.state.sidecar_tp_pct = float(getattr(saved_state, "sidecar_tp_pct", strategy.state.sidecar_tp_pct) or 0.0)
     open_legs = [leg for leg in saved_legs if leg.get("status") == SidecarLegStatus.OPEN.value]
     if not open_legs:
-        strategy.state.sidecar_enabled_for_position = False
-        strategy.state.sidecar_margin_pct = 0.0
-        strategy.state.sidecar_tp_pct = 0.0
-        if os.getenv("SIDECAR_ENABLED", "false").strip().lower() in {"1", "true", "yes", "y", "on"} and hasattr(journal, "append"):
+        refresh_sidecar_state_totals(strategy.state, int(os.getenv("SIDECAR_MAX_LEGS", "10")))
+        if saved_sidecar_enabled:
+            state_store.save(
+                LiveStateStore.from_strategy_state(
+                    position_id=execution_state.current_position_id,
+                    symbol=trader.symbol,
+                    strategy_state=strategy.state,
+                    cash_before_position=execution_state.cash_before_position,
+                )
+            )
+            return
+        if not saved_legs and os.getenv("SIDECAR_ENABLED", "false").strip().lower() in {"1", "true", "yes", "y", "on"} and hasattr(journal, "append"):
+            strategy.state.sidecar_enabled_for_position = False
+            strategy.state.sidecar_margin_pct = 0.0
+            strategy.state.sidecar_tp_pct = 0.0
             journal.append(
                 "SIDECAR_DISABLED_FOR_RECOVERED_POSITION",
                 {
@@ -1250,6 +1325,66 @@ async def apply_sidecar_startup_recovery(
                 strategy_state=strategy.state,
                 cash_before_position=execution_state.cash_before_position,
             )
+        )
+
+
+async def apply_main_tp_startup_recovery(
+    *,
+    execution_state: ExecutionState,
+    saved_state: Any,
+    startup_position: PositionSnapshot,
+    trader: Trader,
+    journal: LiveTradeJournal,
+) -> None:
+    if not startup_position.has_position:
+        return
+    restored_tp_order_id = getattr(saved_state, "tp_order_id", None) if saved_state is not None else None
+    restored_tp_order_ids = list(getattr(saved_state, "tp_order_ids", []) or []) if saved_state is not None else []
+    if not restored_tp_order_id and restored_tp_order_ids:
+        restored_tp_order_id = ",".join(str(item) for item in restored_tp_order_ids if item)
+    if restored_tp_order_id:
+        trader.tp_order_id = str(restored_tp_order_id)
+        return
+    try:
+        pending_orders = await trader.fetch_pending_orders()
+    except Exception as exc:
+        execution_state.trading_halted = True
+        execution_state.halt_reason = "main_tp_order_id_missing_on_startup"
+        if hasattr(journal, "append"):
+            journal.append(
+                "MAIN_TP_ORDER_ID_MISSING_ON_STARTUP",
+                {"reason": "pending_order_check_failed", "error": str(exc), "manual_intervention_required": True},
+                position_id=execution_state.current_position_id,
+            )
+        logger.error("MAIN_TP_ORDER_ID_MISSING_ON_STARTUP | reason=pending_order_check_failed error=%s trading_halted=true manual_intervention_required=true", exc)
+        return
+    protected_sidecar_tp_ids = {
+        str(leg.get("tp_order_id"))
+        for leg in list(getattr(saved_state, "sidecar_legs", []) or [])
+        if leg.get("status") == SidecarLegStatus.OPEN.value and leg.get("tp_order_id")
+    } if saved_state is not None else set()
+    reduce_only_orders = [
+        item
+        for item in pending_orders
+        if item.get("instId") == trader.symbol and str(item.get("reduceOnly", "")).lower() == "true"
+        and str(item.get("ordId")) not in protected_sidecar_tp_ids
+    ]
+    if reduce_only_orders:
+        execution_state.trading_halted = True
+        execution_state.halt_reason = "main_tp_order_id_missing_on_startup"
+        if hasattr(journal, "append"):
+            journal.append(
+                "MAIN_TP_ORDER_ID_MISSING_ON_STARTUP",
+                {
+                    "pending_reduce_only_order_count": len(reduce_only_orders),
+                    "pending_reduce_only_order_ids": [item.get("ordId") for item in reduce_only_orders],
+                    "manual_intervention_required": True,
+                },
+                position_id=execution_state.current_position_id,
+            )
+        logger.error(
+            "MAIN_TP_ORDER_ID_MISSING_ON_STARTUP | pending_reduce_only_order_count=%s trading_halted=true manual_intervention_required=true",
+            len(reduce_only_orders),
         )
 
 @dataclass(frozen=True)
@@ -1467,6 +1602,8 @@ async def strategy_tick_worker(
             if allow_position_management_only:
                 intents = [intent for intent in intents if intent.intent_type in POSITION_MANAGEMENT_INTENTS]
             for intent in intents:
+                if getattr(strategy.state, "sidecar_enabled_for_position", False):
+                    intent = with_runtime_managed_core(intent, account_snapshot.position)
                 command = TradeCommand(
                     intent=intent,
                     strategy_state_snapshot=backup_state,
@@ -1626,6 +1763,8 @@ async def execution_worker(
                         if _parse_optional_float(getattr(result, "protective_sl_price", "")) is not None:
                             strategy.state.trend_runner_sl_price = _parse_optional_float(result.protective_sl_price)
                         strategy.state.trend_runner_tp_order_id = result.tp_order_id
+                    strategy.state.tp_order_id = result.tp_order_id
+                    strategy.state.tp_order_ids = list(getattr(result, "tp_order_ids", ()) or [])
                     if getattr(command.intent, "three_stage_post_tp1_protective_sl_price", None) is not None and getattr(command.intent, "three_stage_tp1_consumed", False):
                         if getattr(result, "protective_sl_order_id", None):
                             strategy.state.three_stage_post_tp1_protective_sl_order_id = result.protective_sl_order_id
@@ -1732,6 +1871,8 @@ async def execution_worker(
                     current_position_id = execution_state.current_position_id
                     cash_before_position = execution_state.cash_before_position
                     execution_state.last_order_ts_ms = command.intent.ts_ms
+                    strategy.state.tp_order_id = result.tp_order_id
+                    strategy.state.tp_order_ids = list(getattr(result, "tp_order_ids", ()) or [])
                     near_tp_state_synced = False
                     if getattr(result, "near_tp_exit_all", False):
                         execution_state.trading_halted = True
@@ -1867,6 +2008,8 @@ async def execution_worker(
                     current_position_id = execution_state.current_position_id
                     cash_before_position = execution_state.cash_before_position
                     execution_state.last_order_ts_ms = command.intent.ts_ms
+                    strategy.state.tp_order_id = result.tp_order_id
+                    strategy.state.tp_order_ids = list(getattr(result, "tp_order_ids", ()) or [])
                     strategy_state_for_save = copy.deepcopy(strategy.state)
                     equity = account_snapshot.equity
                 journal.record_entry(
@@ -2129,8 +2272,24 @@ async def account_position_sync_worker(
             async with state_lock:
                 pending_order_count = execution_state.pending_order_count
                 refresh_sidecar_state_totals(strategy.state, int(os.getenv("SIDECAR_MAX_LEGS", "10")))
+                if open_sidecar_legs_exceed_limit(strategy.state, int(os.getenv("SIDECAR_MAX_LEGS", "10"))):
+                    execution_state.trading_halted = True
+                    execution_state.halt_reason = "sidecar_open_legs_exceed_max"
+                    strategy.state.sidecar_dirty = True
+                    strategy.state.sidecar_halt_reason = "sidecar_open_legs_exceed_max"
+                    if hasattr(journal, "append"):
+                        journal.append(
+                            "SIDECAR_OPEN_LEGS_EXCEED_MAX",
+                            {
+                                "open_leg_count": sum(1 for leg in strategy.state.sidecar_legs if leg.get("status") == SidecarLegStatus.OPEN.value),
+                                "sidecar_max_legs": int(os.getenv("SIDECAR_MAX_LEGS", "10")),
+                                "manual_intervention_required": True,
+                            },
+                            position_id=execution_state.current_position_id,
+                        )
                 open_sidecar_qty = sidecar_open_qty(strategy.state.sidecar_legs)
                 core_position = build_core_position_view(position, open_sidecar_qty, sidecar_open_contracts(strategy.state.sidecar_legs))
+                apply_core_position_view_to_state(strategy.state, core_position)
                 current_position_key = position_log_key(core_position)
                 if sidecar_position_mismatch(position, strategy.state):
                     execution_state.trading_halted = True
@@ -3035,6 +3194,13 @@ async def main() -> None:
         cash_before_position=cash_before_position,
         trading_halted=False,
     )
+    await apply_main_tp_startup_recovery(
+        execution_state=execution_state,
+        saved_state=saved_state,
+        startup_position=startup_position,
+        trader=trader,
+        journal=journal,
+    )
     await apply_sidecar_startup_recovery(
         strategy=strategy,
         execution_state=execution_state,
@@ -3044,6 +3210,16 @@ async def main() -> None:
         journal=journal,
         state_store=state_store,
     )
+    refresh_sidecar_state_totals(strategy.state, int(os.getenv("SIDECAR_MAX_LEGS", "10")))
+    startup_core_position = build_core_position_view(
+        startup_position,
+        sidecar_open_qty(strategy.state.sidecar_legs),
+        sidecar_open_contracts(strategy.state.sidecar_legs),
+    )
+    apply_core_position_view_to_state(strategy.state, startup_core_position)
+    account_snapshot.position = startup_core_position
+    if startup_position.has_position:
+        state_store.save(LiveStateStore.from_strategy_state(position_id=current_position_id, symbol=trader.symbol, strategy_state=strategy.state, cash_before_position=cash_before_position))
     await apply_rolling_loss_guard_startup_state(
         rolling_loss_guard=rolling_loss_guard,
         execution_state=execution_state,

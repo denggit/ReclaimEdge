@@ -464,12 +464,17 @@ class Trader:
         )
 
     async def replace_take_profit(self, intent: TradeIntent) -> LiveTradeResult:
+        managed_core_contracts = self._managed_core_contracts_from_intent(intent)
         try:
             position = await self.fetch_position_snapshot()
-            if position.contracts > 0:
+            if managed_core_contracts is not None and managed_core_contracts > 0:
+                self.position_contracts = managed_core_contracts
+            elif position.contracts > 0:
                 self.position_contracts = position.contracts
         except Exception:
             logger.exception("Failed to refresh position before replacing TP")
+            if managed_core_contracts is not None and managed_core_contracts > 0:
+                self.position_contracts = managed_core_contracts
 
         if self.position_contracts <= 0:
             return LiveTradeResult(False, intent.intent_type, None, None, "0", self.price_to_str(intent.tp_price), "no position to protect")
@@ -685,6 +690,20 @@ class Trader:
         if not value:
             return set()
         return {item.strip() for item in str(value).split(",") if item.strip()}
+
+    def _managed_core_contracts_from_intent(self, intent: TradeIntent) -> Decimal | None:
+        raw_contracts = getattr(intent, "managed_core_contracts", None)
+        try:
+            if raw_contracts not in {None, ""}:
+                contracts = Decimal(str(raw_contracts))
+                if contracts > 0:
+                    return self.round_contracts_down(contracts)
+        except Exception:
+            raise RuntimeError(f"Invalid managed_core_contracts: {raw_contracts}")
+        raw_eth_qty = float(getattr(intent, "managed_core_eth_qty", 0.0) or 0.0)
+        if raw_eth_qty > 0:
+            return self.eth_qty_to_contracts(Decimal(str(raw_eth_qty)))
+        return None
 
     def _build_take_profit_order_specs(self, intent: TradeIntent) -> list[tuple[str, Decimal, float]]:
         partial_tp_price = getattr(intent, "partial_tp_price", None)

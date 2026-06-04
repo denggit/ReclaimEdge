@@ -132,11 +132,14 @@ def trim_sidecar_legs_for_state(legs: list[dict[str, Any]] | list[SidecarLeg], m
     max_count = max(int(max_legs), 1)
     serialized = serialize_sidecar_legs(legs)
     open_legs = [leg for leg in serialized if leg.get("status") == SidecarLegStatus.OPEN.value]
+    if len(open_legs) > max_count:
+        open_legs.sort(key=lambda leg: int(leg.get("created_ts_ms") or 0))
+        return open_legs
     recent_done = [leg for leg in serialized if leg.get("status") != SidecarLegStatus.OPEN.value]
     recent_done.sort(key=lambda leg: int(leg.get("updated_ts_ms") or leg.get("created_ts_ms") or 0), reverse=True)
     kept = open_legs + recent_done[: max(max_count - len(open_legs), 0)]
     kept.sort(key=lambda leg: int(leg.get("created_ts_ms") or 0))
-    return kept[-max_count:]
+    return kept
 
 
 def _leg_value(leg: dict[str, Any] | SidecarLeg, key: str) -> Any:
@@ -146,4 +149,3 @@ def _leg_value(leg: dict[str, Any] | SidecarLeg, key: str) -> Any:
             return value.value
         return value
     return leg.get(key)
-

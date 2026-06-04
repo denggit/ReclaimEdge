@@ -21,6 +21,8 @@ class LivePositionState:
     layers: int = 0
     last_entry_price: float | None = None
     tp_price: float | None = None
+    tp_order_id: str | None = None
+    tp_order_ids: list[str] | None = None
     partial_tp_price: float | None = None
     partial_tp_ratio: float = 0.0
     tp_plan: str = "SINGLE"
@@ -95,6 +97,8 @@ class LivePositionState:
     sidecar_legs: list | None = None
     sidecar_dirty: bool = False
     sidecar_halt_reason: str | None = None
+    core_contracts: str | None = None
+    core_eth_qty: float = 0.0
     cash_before_position: float | None = None
     updated_at: str = ""
 
@@ -143,6 +147,8 @@ class LiveStateStore:
             layers=int(strategy_state.layers or 0),
             last_entry_price=strategy_state.last_entry_price,
             tp_price=strategy_state.tp_price,
+            tp_order_id=getattr(strategy_state, "tp_order_id", None),
+            tp_order_ids=list(getattr(strategy_state, "tp_order_ids", []) or []),
             partial_tp_price=getattr(strategy_state, "partial_tp_price", None),
             partial_tp_ratio=float(getattr(strategy_state, "partial_tp_ratio", 0.0) or 0.0),
             tp_plan=_normalize_tp_plan(str(getattr(strategy_state, "tp_plan", "SINGLE") or "SINGLE")),
@@ -220,6 +226,8 @@ class LiveStateStore:
             ),
             sidecar_dirty=bool(getattr(strategy_state, "sidecar_dirty", False)),
             sidecar_halt_reason=getattr(strategy_state, "sidecar_halt_reason", None),
+            core_contracts=getattr(strategy_state, "core_contracts", None),
+            core_eth_qty=float(getattr(strategy_state, "core_eth_qty", 0.0) or 0.0),
             cash_before_position=cash_before_position,
         )
 
