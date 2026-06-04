@@ -891,6 +891,170 @@ async def execute_sidecar_after_core_entry(
     return True
 
 
+async def reconcile_sidecar_orders_before_core_view(
+    *,
+    trader: Trader,
+    strategy: BollCvdShockReclaimStrategy,
+    execution_state: ExecutionState,
+    journal: LiveTradeJournal,
+    state_store: LiveStateStore,
+    trader_symbol: str,
+    ts_ms: int,
+    state_lock: asyncio.Lock,
+) -> bool:
+    """Reconcile sidecar TP order status BEFORE constructing core_position view.
+
+    When Sidecar is enabled and OPEN sidecar legs exist, this must be called
+    before computing core_position = OKX_net - sidecar_open_qty. Otherwise a
+    sidecar TP that already filled on OKX (but not yet reflected in local state)
+    would cause core_position to be understated, which can incorrectly trigger
+    TP progress markers or pollute strategy average entry.
+
+    Returns True if any sidecar state was modified and saved.
+    Sets trading_halted if unrecoverable state is detected.
+    """
+    if not getattr(strategy.state, "sidecar_enabled_for_position", False):
+        return False
+
+    # --- Phase 1: handle dirty / missing TP orders under lock (no network) ---
+    dirty_changed = False
+    async with state_lock:
+        for index, leg in enumerate(list(strategy.state.sidecar_legs)):
+            if leg.get("status") != SidecarLegStatus.OPEN.value:
+                continue
+            if is_sidecar_dirty_missing_tp_order(leg):
+                execution_state.trading_halted = True
+                execution_state.halt_reason = "sidecar_tp_order_missing_or_unknown"
+                strategy.state.sidecar_dirty = True
+                strategy.state.sidecar_halt_reason = "sidecar_tp_order_missing_or_unknown"
+                if not leg.get("warning_recorded") and hasattr(journal, "append"):
+                    journal.append("SIDECAR_TP_ORDER_MISSING_OR_UNKNOWN", dict(leg), position_id=execution_state.current_position_id)
+                strategy.state.sidecar_legs[index] = mark_sidecar_leg_unknown_halted(leg, ts_ms)
+                dirty_changed = True
+        if dirty_changed:
+            refresh_sidecar_state_totals(strategy.state, int(os.getenv("SIDECAR_MAX_LEGS", "10")))
+            state_store.save(LiveStateStore.from_strategy_state(
+                position_id=execution_state.current_position_id,
+                symbol=trader_symbol,
+                strategy_state=strategy.state,
+                cash_before_position=execution_state.cash_before_position,
+            ))
+        # Snapshot remaining OPEN legs for network queries
+        open_legs: list[tuple[int, str, str]] = []
+        for index, leg in enumerate(strategy.state.sidecar_legs):
+            if leg.get("status") != SidecarLegStatus.OPEN.value:
+                continue
+            if is_sidecar_dirty_missing_tp_order(leg):
+                continue
+            tp_order_id = leg.get("tp_order_id")
+            if not tp_order_id:
+                continue
+            open_legs.append((index, str(tp_order_id), str(leg.get("leg_id", ""))))
+        position_id = execution_state.current_position_id
+        cash_before_position = execution_state.cash_before_position
+
+    if not open_legs:
+        return dirty_changed
+
+    # --- Phase 2: query order status (outside lock) ---
+    leg_updates: list[tuple[int, str, dict[str, Any], str]] = []
+    for index, order_id, leg_id in open_legs:
+        status = await trader.fetch_sidecar_order_status(order_id)
+        order_status = status.get("status")
+        if order_status != "OPEN":
+            leg_updates.append((index, order_status, status, leg_id))
+
+    if not leg_updates:
+        return dirty_changed
+
+    # --- Phase 3: apply updates under lock ---
+    changed = dirty_changed
+    async with state_lock:
+        for index, order_status, status_dict, expected_leg_id in leg_updates:
+            if index >= len(strategy.state.sidecar_legs):
+                continue
+            leg = strategy.state.sidecar_legs[index]
+            if leg.get("status") != SidecarLegStatus.OPEN.value:
+                continue
+            if leg.get("leg_id") != expected_leg_id:
+                continue
+
+            if order_status == "FILLED":
+                strategy.state.sidecar_legs[index] = mark_sidecar_leg_tp_filled(leg, ts_ms)
+                if hasattr(journal, "append"):
+                    journal.append("SIDECAR_TP_FILLED", {**dict(leg), **status_dict}, position_id=position_id)
+                changed = True
+
+                # Sidecar TP reduces OKX net position → existing global SL orders
+                # may now exceed current net position. Must halt for manual reconciliation.
+                active_global_sl_orders: list[str] = []
+                for sl_field in (
+                    "near_tp_protective_sl_order_id",
+                    "middle_runner_protective_sl_order_id",
+                    "three_stage_post_tp1_protective_sl_order_id",
+                    "trend_runner_sl_order_id",
+                ):
+                    sl_order_id = getattr(strategy.state, sl_field, None)
+                    if sl_order_id:
+                        active_global_sl_orders.append(f"{sl_field}={sl_order_id}")
+                if active_global_sl_orders:
+                    execution_state.trading_halted = True
+                    execution_state.halt_reason = "sidecar_tp_filled_requires_global_sl_reconcile"
+                    strategy.state.sidecar_dirty = True
+                    strategy.state.sidecar_halt_reason = "sidecar_tp_filled_requires_global_sl_reconcile"
+                    if hasattr(journal, "append"):
+                        journal.append(
+                            "SIDECAR_TP_FILLED_REQUIRES_GLOBAL_SL_RECONCILE",
+                            {
+                                "active_global_sl_orders": active_global_sl_orders,
+                                "trading_halted": True,
+                                "halt_reason": "sidecar_tp_filled_requires_global_sl_reconcile",
+                                "manual_intervention_required": True,
+                            },
+                            position_id=position_id,
+                        )
+                    logger.error(
+                        "SIDECAR_TP_FILLED_REQUIRES_GLOBAL_SL_RECONCILE | position_id=%s leg_id=%s active_global_sl_orders=%s trading_halted=true halt_reason=sidecar_tp_filled_requires_global_sl_reconcile manual_intervention_required=true",
+                        position_id,
+                        leg.get("leg_id"),
+                        active_global_sl_orders,
+                    )
+                continue
+
+            if order_status in {"CANCELED", "NOT_FOUND", "UNKNOWN"}:
+                # Without a verified core view we cannot determine whether the
+                # remaining OKX position is core-only or core+sidecar. Halt.
+                execution_state.trading_halted = True
+                execution_state.halt_reason = "sidecar_tp_order_missing_or_unknown"
+                strategy.state.sidecar_dirty = True
+                strategy.state.sidecar_halt_reason = "sidecar_tp_order_missing_or_unknown"
+                if not leg.get("warning_recorded") and hasattr(journal, "append"):
+                    journal.append(
+                        "SIDECAR_TP_ORDER_MISSING_OR_UNKNOWN",
+                        {**dict(leg), **status_dict, "manual_intervention_required": True},
+                        position_id=position_id,
+                    )
+                strategy.state.sidecar_legs[index] = mark_sidecar_leg_unknown_halted(leg, ts_ms)
+                changed = True
+                logger.error(
+                    "SIDECAR_TP_ORDER_MISSING_OR_UNKNOWN | position_id=%s leg_id=%s status=%s manual_intervention_required=true",
+                    position_id,
+                    leg.get("leg_id"),
+                    order_status,
+                )
+
+        if changed:
+            refresh_sidecar_state_totals(strategy.state, int(os.getenv("SIDECAR_MAX_LEGS", "10")))
+            state_store.save(LiveStateStore.from_strategy_state(
+                position_id=position_id,
+                symbol=trader_symbol,
+                strategy_state=strategy.state,
+                cash_before_position=cash_before_position,
+            ))
+
+    return changed
+
+
 async def monitor_sidecar_orders_once(
     *,
     trader: Trader,
@@ -2378,6 +2542,27 @@ async def account_position_sync_worker(
             force_close_sidecar = False
             clear_state = False
             flat_previous_halt_reason: str | None = None
+            # ── Pre-core sidecar reconciliation ──────────────────────────
+            # Sidecar TP may have already filled on OKX but local state still
+            # counts it as open.  If we compute core_position = OKX_net -
+            # stale_sidecar_open_qty first and discover the fill later via
+            # monitor_sidecar_orders_once, the stale core view can incorrectly
+            # trigger TP progress markers or pollute strategy cost.
+            #
+            # Reconcile sidecar orders NOW so that refresh_sidecar_state_totals
+            # and build_core_position_view inside the main state_lock block
+            # always see up-to-date sidecar_open_qty.
+            sidecar_reconciled_this_sync = await reconcile_sidecar_orders_before_core_view(
+                trader=trader,
+                strategy=strategy,
+                execution_state=execution_state,
+                journal=journal,
+                state_store=state_store,
+                trader_symbol=trader.symbol,
+                ts_ms=utc_ms(),
+                state_lock=state_lock,
+            )
+            # ── End pre-core reconciliation ──────────────────────────────
             async with state_lock:
                 pending_order_count = execution_state.pending_order_count
                 refresh_sidecar_state_totals(strategy.state, int(os.getenv("SIDECAR_MAX_LEGS", "10")))
@@ -2731,6 +2916,7 @@ async def account_position_sync_worker(
                 sidecar_check_seconds >= 0
                 and now - last_sidecar_status_check >= sidecar_check_seconds
                 and getattr(strategy.state, "sidecar_enabled_for_position", False)
+                and not sidecar_reconciled_this_sync
             ):
                 last_sidecar_status_check = now
                 await monitor_sidecar_orders_once(

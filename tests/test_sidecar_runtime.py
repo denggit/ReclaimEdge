@@ -5,6 +5,8 @@ from decimal import Decimal, ROUND_DOWN
 
 import pytest
 
+import asyncio
+
 from scripts.run_boll_cvd_live import (
     ExecutionState,
     apply_main_tp_startup_recovery,
@@ -12,10 +14,14 @@ from scripts.run_boll_cvd_live import (
     execute_sidecar_after_core_entry,
     force_close_sidecar_after_core_flat,
     monitor_sidecar_orders_once,
+    reconcile_sidecar_orders_before_core_view,
     refresh_sidecar_state_totals,
+    sidecar_open_contracts,
     sidecar_position_mismatch,
 )
 from src.execution.trader import PositionSnapshot
+from src.position_management.sidecar.model import sidecar_open_qty
+from src.position_management.sidecar.reconciler import build_core_position_view
 from src.risk.simple_position_sizer import PositionSize
 from src.strategies.boll_cvd_reclaim_strategy import StrategyPositionState, TradeIntent
 
@@ -701,4 +707,173 @@ async def test_sidecar_tp_filled_global_sl_on_trader_also_halts() -> None:
     assert execution.halt_reason == "sidecar_tp_filled_requires_global_sl_reconcile"
     event_names = [e[0] for e in journal.events]
     assert "SIDECAR_TP_FILLED_REQUIRES_GLOBAL_SL_RECONCILE" in event_names
+    assert len(store.saved) > 0
+
+
+# ---------------------------------------------------------------------------
+# Tests: reconcile_sidecar_orders_before_core_view
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_sidecar_tp_filled_reconciled_before_core_view() -> None:
+    """Pre-core reconciliation discovers sidecar TP_FILLED so that
+    core_position = OKX_net - sidecar_open_qty uses fresh (zero) sidecar open qty.
+
+    Scenario:
+    - OKX net position = 3 ETH (sidecar TP already filled, only core remains)
+    - Local sidecar_open_qty = 1 ETH (stale — still counts the leg as OPEN)
+    - Without pre-core reconcile, core_position = 3 - 1 = 2 ETH (wrong)
+    - With pre-core reconcile, sidecar_open_qty = 0, core_position = 3 ETH (correct)
+    """
+    state = sidecar_state()
+    state.sidecar_legs = [
+        {
+            "leg_id": "leg-1",
+            "status": "OPEN",
+            "tp_order_id": "tp-1",
+            "qty": 1.0,
+            "contracts": "10",
+            "entry_price": 3000.0,
+            "created_ts_ms": 1,
+            "updated_ts_ms": 1,
+        }
+    ]
+    refresh_sidecar_state_totals(state)
+    # Verify stale state: sidecar_open_qty = 1 ETH
+    assert sidecar_open_qty(state.sidecar_legs) == pytest.approx(1.0)
+
+    # OKX net position = 3 ETH / 30 contracts (only core remains after sidecar TP)
+    okx_position = PositionSnapshot("LONG", Decimal("30"), 3000.0, 3.0, Decimal("30"))
+
+    trader = Trader()
+    trader.status_by_order["tp-1"] = "FILLED"
+    execution = ExecutionState("pos-1", 1000.0)
+    journal = Journal()
+    store = Store()
+    state_lock = asyncio.Lock()
+
+    strategy = type("S", (), {"state": state})()
+
+    # Act: pre-core reconciliation
+    changed = await reconcile_sidecar_orders_before_core_view(
+        trader=trader,
+        strategy=strategy,
+        execution_state=execution,
+        journal=journal,
+        state_store=store,
+        trader_symbol="ETH-USDT-SWAP",
+        ts_ms=2,
+        state_lock=state_lock,
+    )
+
+    # Assert: sidecar state was updated
+    assert changed
+    assert state.sidecar_legs[0]["status"] == "TP_FILLED"
+    assert sidecar_open_qty(state.sidecar_legs) == pytest.approx(0.0)
+
+    # Now compute core_position with fresh sidecar_open_qty
+    core_position = build_core_position_view(
+        okx_position,
+        sidecar_open_qty(state.sidecar_legs),
+        sidecar_open_contracts(state.sidecar_legs),
+    )
+
+    # Core position should be 3 ETH (OKX net), NOT 2 ETH (3 - stale 1)
+    assert float(core_position.eth_qty) == pytest.approx(3.0)
+    assert core_position.contracts == Decimal("30")
+
+    # Journal should record SIDECAR_TP_FILLED
+    event_names = [e[0] for e in journal.events]
+    assert "SIDECAR_TP_FILLED" in event_names
+
+    # state_store.save must have been called
+    assert len(store.saved) > 0
+
+
+def test_stale_sidecar_open_qty_would_understate_core_without_pre_reconcile() -> None:
+    """Pure-function test: lock in the risk that stale sidecar_open_qty
+    understates core_position.
+
+    Without pre-core reconciliation:
+      core = OKX_net(3) - stale_sidecar_open_qty(1) = 2 ETH  ← WRONG
+    With pre-core reconciliation:
+      core = OKX_net(3) - fresh_sidecar_open_qty(0) = 3 ETH  ← CORRECT
+    """
+    okx_position = PositionSnapshot("LONG", Decimal("30"), 3000.0, 3.0, Decimal("30"))
+
+    # Stale: sidecar TP filled but local state still has open_qty = 1 ETH
+    stale_core = build_core_position_view(okx_position, 1.0, Decimal("10"))
+    assert float(stale_core.eth_qty) == pytest.approx(2.0)
+    assert stale_core.contracts == Decimal("20")
+
+    # Fresh: after pre-core reconcile, sidecar_open_qty = 0
+    fresh_core = build_core_position_view(okx_position, 0.0, Decimal("0"))
+    assert float(fresh_core.eth_qty) == pytest.approx(3.0)
+    assert fresh_core.contracts == Decimal("30")
+
+
+@pytest.mark.asyncio
+async def test_sidecar_tp_filled_with_active_global_sl_still_halts_pre_core() -> None:
+    """Pre-core reconciliation must still halt when sidecar TP_FILLED is
+    discovered and any active global SL order exists.
+
+    Even though we are reconciling early (before core_position calculation),
+    the conservative safety rule must still apply:
+      trading_halted = True
+      halt_reason = "sidecar_tp_filled_requires_global_sl_reconcile"
+    """
+    state = sidecar_state()
+    state.sidecar_legs = [
+        {
+            "leg_id": "leg-1",
+            "status": "OPEN",
+            "tp_order_id": "tp-1",
+            "qty": 0.1,
+            "contracts": "1",
+            "created_ts_ms": 1,
+            "updated_ts_ms": 1,
+        }
+    ]
+    refresh_sidecar_state_totals(state)
+    # Set an active global protective SL on strategy state
+    state.three_stage_post_tp1_protective_sl_order_id = "old-sl"
+
+    trader = Trader()
+    trader.status_by_order["tp-1"] = "FILLED"
+    execution = ExecutionState("pos-1", 1000.0)
+    journal = Journal()
+    store = Store()
+    state_lock = asyncio.Lock()
+
+    strategy = type("S", (), {"state": state})()
+
+    changed = await reconcile_sidecar_orders_before_core_view(
+        trader=trader,
+        strategy=strategy,
+        execution_state=execution,
+        journal=journal,
+        state_store=store,
+        trader_symbol="ETH-USDT-SWAP",
+        ts_ms=2,
+        state_lock=state_lock,
+    )
+
+    assert changed
+    # Leg must be marked TP_FILLED
+    assert state.sidecar_legs[0]["status"] == "TP_FILLED"
+    # Trading must be halted
+    assert execution.trading_halted
+    assert execution.halt_reason == "sidecar_tp_filled_requires_global_sl_reconcile"
+    # Journal must record the event
+    event_names = [e[0] for e in journal.events]
+    assert "SIDECAR_TP_FILLED" in event_names
+    assert "SIDECAR_TP_FILLED_REQUIRES_GLOBAL_SL_RECONCILE" in event_names
+    reconcile_entry = journal.events[
+        event_names.index("SIDECAR_TP_FILLED_REQUIRES_GLOBAL_SL_RECONCILE")
+    ]
+    assert "three_stage_post_tp1_protective_sl_order_id" in str(
+        reconcile_entry[1].get("active_global_sl_orders", [])
+    )
+    # state_store.save must be called
     assert len(store.saved) > 0
