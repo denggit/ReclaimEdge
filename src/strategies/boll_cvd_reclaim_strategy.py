@@ -227,6 +227,8 @@ class TradeIntent:
     trend_runner_active: bool = False
     trend_runner_tp_price: float | None = None
     trend_runner_sl_price: float | None = None
+    trend_runner_tp_order_id: str | None = None
+    trend_runner_sl_order_id: str | None = None
     trend_runner_exit_reason: str | None = None
     trend_runner_adjust_count: int = 0
 
@@ -1197,6 +1199,8 @@ class BollCvdReclaimStrategy:
             trend_runner_active=True,
             trend_runner_tp_price=self.state.trend_runner_tp_price,
             trend_runner_sl_price=self.state.trend_runner_sl_price,
+            trend_runner_tp_order_id=self.state.trend_runner_tp_order_id,
+            trend_runner_sl_order_id=self.state.trend_runner_sl_order_id,
             trend_runner_exit_reason=reason,
             trend_runner_adjust_count=self.state.trend_runner_adjust_count,
         )
@@ -1781,6 +1785,8 @@ class BollCvdReclaimStrategy:
             trend_runner_active=self.state.trend_runner_active,
             trend_runner_tp_price=self.state.trend_runner_tp_price,
             trend_runner_sl_price=self.state.trend_runner_sl_price,
+            trend_runner_tp_order_id=self.state.trend_runner_tp_order_id,
+            trend_runner_sl_order_id=self.state.trend_runner_sl_order_id,
             trend_runner_exit_reason=self.state.trend_runner_exit_reason,
             trend_runner_adjust_count=self.state.trend_runner_adjust_count,
         )

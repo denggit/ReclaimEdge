@@ -360,6 +360,7 @@ class RecordingTrader(Trader):
         self.side = side
         self.placed_specs = []
         self.trend_stop_calls = 0
+        self.cancelled_trend_runner_stop_ids = []
 
     async def fetch_position_snapshot(self) -> PositionSnapshot:
         return PositionSnapshot(self.side, self.position_contracts, 100.0, float(self.position_contracts * Decimal("0.1")), self.position_contracts)
@@ -376,6 +377,7 @@ class RecordingTrader(Trader):
         return True, "algo-runner", "protective_sl_placed"
 
     async def cancel_trend_runner_protective_stop(self, order_id: str | None) -> bool:
+        self.cancelled_trend_runner_stop_ids.append(order_id)
         return True
 
 
@@ -447,6 +449,29 @@ class ThreeStageTrendRunnerTraderTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.protective_sl_ok)
         self.assertEqual(trader.trend_stop_calls, 1)
         self.assertEqual(trader.placed_specs, [("final", Decimal("2"), 111.1)])
+
+    async def test_active_trend_runner_cancels_restored_sl_order_id_from_intent(self) -> None:
+        trader = RecordingTrader("LONG")
+        trader.position_contracts = Decimal("2")
+        trader.trend_runner_sl_order_id = None
+
+        result = await trader.replace_take_profit(
+            intent(
+                intent_type="UPDATE_TP",
+                tp_plan="SINGLE",
+                tp_price=111.1,
+                trend_runner_active=True,
+                trend_runner_tp_price=111.1,
+                trend_runner_sl_price=101.0,
+                trend_runner_sl_order_id="old-algo",
+            )
+        )
+
+        self.assertTrue(result.ok)
+        self.assertTrue(result.protective_sl_ok)
+        self.assertEqual(trader.trend_stop_calls, 1)
+        self.assertEqual(trader.cancelled_trend_runner_stop_ids, ["old-algo"])
+        self.assertEqual(trader.trend_runner_sl_order_id, "algo-runner")
 
 
 if __name__ == "__main__":
