@@ -415,8 +415,10 @@ class Trader:
             self.trend_runner_sl_order_id = restored_trend_runner_sl_order_id
         position = await self.fetch_position_snapshot()
         if not position.has_position:
+            await self._cleanup_after_near_tp_market_exit()
             return LiveTradeResult(True, action, None, None, "0", self.price_to_str(intent.tp_price), "runner_already_flat", near_tp_exit_all=True)
         if position.side != intent.side:
+            await self._cleanup_after_near_tp_market_exit()
             return LiveTradeResult(True, action, None, None, "0", self.price_to_str(intent.tp_price), "runner_side_absent", near_tp_exit_all=True)
 
         contracts_before = position.contracts

@@ -375,6 +375,60 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
         self.assertIsNone(strat.state.trend_runner_tp_price)
         self.assertIsNone(strat.state.trend_runner_sl_price)
 
+    def test_tp2_sync_does_not_activate_when_remaining_above_tight_tolerance(self) -> None:
+        strat = strategy()
+        strat.state = StrategyPositionState(
+            side="LONG",
+            layers=1,
+            total_entry_qty=1.0,
+            total_entry_notional=100.0,
+            avg_entry_price=100.0,
+            tp_plan="THREE_STAGE_RUNNER",
+            partial_tp_consumed=True,
+            three_stage_runner_enabled_for_position=True,
+            three_stage_tp1_ratio=0.6,
+            three_stage_tp2_ratio=0.2,
+            three_stage_runner_ratio=0.2,
+            three_stage_tp1_consumed=True,
+        )
+
+        event = mark_three_stage_progress_if_position_reduced(
+            strat,
+            PositionSnapshot("LONG", Decimal("2.5"), 100.0, 0.25, Decimal("2.5")),
+            30_000,
+        )
+
+        self.assertIsNone(event)
+        self.assertFalse(strat.state.three_stage_tp2_consumed)
+        self.assertFalse(strat.state.trend_runner_active)
+
+    def test_tp2_sync_activates_at_runner_ratio_plus_tight_tolerance(self) -> None:
+        strat = strategy()
+        strat.state = StrategyPositionState(
+            side="LONG",
+            layers=1,
+            total_entry_qty=1.0,
+            total_entry_notional=100.0,
+            avg_entry_price=100.0,
+            tp_plan="THREE_STAGE_RUNNER",
+            partial_tp_consumed=True,
+            three_stage_runner_enabled_for_position=True,
+            three_stage_tp1_ratio=0.6,
+            three_stage_tp2_ratio=0.2,
+            three_stage_runner_ratio=0.2,
+            three_stage_tp1_consumed=True,
+        )
+
+        event = mark_three_stage_progress_if_position_reduced(
+            strat,
+            PositionSnapshot("LONG", Decimal("2.2"), 100.0, 0.22, Decimal("2.2")),
+            30_000,
+        )
+
+        self.assertEqual(event, "TP2")
+        self.assertTrue(strat.state.three_stage_tp2_consumed)
+        self.assertTrue(strat.state.trend_runner_active)
+
     def test_waiting_tp2_new_candle_does_not_reset_three_stage_state(self) -> None:
         strat = strategy()
         strat.state = StrategyPositionState(
@@ -459,6 +513,11 @@ class RecordingTrader(Trader):
         if self.trend_runner_sl_order_id == order_id:
             self.trend_runner_sl_order_id = None
         return True
+
+
+class NoPositionRecordingTrader(RecordingTrader):
+    async def fetch_position_snapshot(self) -> PositionSnapshot:
+        return PositionSnapshot(None, Decimal("0"), 0.0, 0.0, Decimal("0"))
 
 
 class ThreeStageTrendRunnerTraderTest(unittest.IsolatedAsyncioTestCase):
@@ -573,6 +632,28 @@ class ThreeStageTrendRunnerTraderTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(result.ok)
         self.assertTrue(result.near_tp_exit_all)
+        self.assertEqual(trader.cancelled_trend_runner_stop_ids, ["old-algo"])
+        self.assertIsNone(trader.trend_runner_sl_order_id)
+
+    async def test_market_exit_runner_already_flat_cleans_restored_sl_order_id(self) -> None:
+        trader = NoPositionRecordingTrader("LONG")
+        trader.trend_runner_sl_order_id = None
+
+        result = await trader.execute_market_exit_runner(
+            intent(
+                intent_type="MARKET_EXIT_RUNNER",
+                tp_plan="SINGLE",
+                tp_price=111.1,
+                trend_runner_active=True,
+                trend_runner_tp_price=111.1,
+                trend_runner_sl_price=101.0,
+                trend_runner_sl_order_id="old-algo",
+                reason="trend_runner_middle_lost",
+            )
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.message, "runner_already_flat")
         self.assertEqual(trader.cancelled_trend_runner_stop_ids, ["old-algo"])
         self.assertIsNone(trader.trend_runner_sl_order_id)
 

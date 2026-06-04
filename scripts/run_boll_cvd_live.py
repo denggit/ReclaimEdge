@@ -535,10 +535,11 @@ def mark_three_stage_progress_if_position_reduced(strategy: BollCvdReclaimStrate
     runner_ratio = float(getattr(state, "three_stage_runner_ratio", 0.0) or 0.0)
     after_tp1_ratio = max(0.0, 1.0 - tp1_ratio)
     after_tp2_ratio = max(0.0, runner_ratio)
-    tolerance = max(0.03, runner_ratio * 0.25, 0.000001)
+    tp1_tolerance = max(0.02, tp1_ratio * 0.05, 0.000001)
+    tp2_tolerance = max(0.01, runner_ratio * 0.10, 0.000001)
     event: str | None = None
 
-    if not getattr(state, "three_stage_tp1_consumed", False) and remaining_ratio <= after_tp1_ratio + tolerance:
+    if not getattr(state, "three_stage_tp1_consumed", False) and remaining_ratio <= after_tp1_ratio + tp1_tolerance:
         state.three_stage_tp1_consumed = True
         state.partial_tp_consumed = True
         event = "TP1"
@@ -555,7 +556,7 @@ def mark_three_stage_progress_if_position_reduced(strategy: BollCvdReclaimStrate
     if (
         getattr(state, "three_stage_tp1_consumed", False)
         and not getattr(state, "three_stage_tp2_consumed", False)
-        and remaining_ratio <= after_tp2_ratio + tolerance
+        and remaining_ratio <= after_tp2_ratio + tp2_tolerance
     ):
         state.three_stage_tp2_consumed = True
         state.trend_runner_active = True
