@@ -2948,6 +2948,7 @@ async def account_position_sync_worker(
                 and now - last_sidecar_status_check >= sidecar_check_seconds
                 and getattr(strategy.state, "sidecar_enabled_for_position", False)
                 and not sidecar_reconciled_this_sync
+                and pending_order_count == 0
             ):
                 last_sidecar_status_check = now
                 await monitor_sidecar_orders_once(
