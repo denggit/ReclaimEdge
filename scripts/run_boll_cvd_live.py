@@ -3152,6 +3152,7 @@ async def account_position_sync_worker(
                         "near_tp_exit_all_waiting_flat",
                         "near_tp_protected_sync_failed",
                         "trend_runner_market_exit_waiting_flat",
+                        "three_stage_post_tp1_sl_failed_market_exit_waiting_flat",
                         "rolling_loss_soft_halt",
                         "rolling_loss_hard_halt",
                     }
@@ -3302,28 +3303,66 @@ async def account_position_sync_worker(
                         sl_order_id,
                     )
                 else:
+                    # ── Risk control: protective SL failed → immediate full market exit ──
+                    side = three_stage_post_tp1_sl_payload.get("side")
+                    exit_ok, exit_message = (False, "side_missing")
+                    if side is not None:
+                        exit_ok, exit_message = await trader.market_exit_remaining_position_with_retries(
+                            side,
+                            retry_count=int(os.getenv("NEAR_TP_SL_FAIL_MARKET_EXIT_RETRY_COUNT", "3")),
+                        )
+                    core_contracts = three_stage_post_tp1_sl_payload.get("core_contracts")
+                    net_contracts = three_stage_post_tp1_sl_payload.get("net_contracts")
+                    sl_contracts = three_stage_post_tp1_sl_payload.get("contracts")
+                    manual_intervention_required = not exit_ok
+                    if exit_ok:
+                        halt_reason = "three_stage_post_tp1_sl_failed_market_exit_waiting_flat"
+                    else:
+                        halt_reason = "three_stage_post_tp1_protective_sl_failure"
                     async with state_lock:
                         execution_state.trading_halted = True
-                        execution_state.halt_reason = "three_stage_post_tp1_protective_sl_failure"
+                        execution_state.halt_reason = halt_reason
+                    state_store.save(
+                        LiveStateStore.from_strategy_state(
+                            position_id=execution_state.current_position_id,
+                            symbol=trader.symbol,
+                            strategy_state=strategy.state,
+                            cash_before_position=execution_state.cash_before_position,
+                        )
+                    )
                     if hasattr(journal, "append"):
                         journal.append(
                             "THREE_STAGE_POST_TP1_PROTECTIVE_SL_FAILED",
                             {
                                 "position_id": three_stage_post_tp1_sl_payload.get("position_id"),
-                                "side": three_stage_post_tp1_sl_payload.get("side"),
+                                "side": side,
                                 "protective_sl_price": sl_price,
                                 "reason": sl_message,
                                 "trading_halted": True,
+                                "halt_reason": halt_reason,
                                 "retry_config": "NEAR_TP_PROTECTIVE_SL_RETRY_COUNT/NEAR_TP_PROTECTIVE_SL_RETRY_INTERVAL_SECONDS",
+                                "market_exit_attempted": True,
+                                "market_exit_ok": exit_ok,
+                                "market_exit_message": exit_message,
+                                "core_contracts": core_contracts,
+                                "net_contracts": net_contracts,
+                                "sl_contracts": str(sl_contracts) if sl_contracts is not None else None,
+                                "manual_intervention_required": manual_intervention_required,
                             },
                             position_id=three_stage_post_tp1_sl_payload.get("position_id"),
                         )
                     logger.error(
-                        "THREE_STAGE_POST_TP1_PROTECTIVE_SL_FAILED | position_id=%s side=%s sl_price=%s sl_message=%s trading_halted=true retry_config=near_tp",
+                        "THREE_STAGE_POST_TP1_PROTECTIVE_SL_FAILED | position_id=%s side=%s sl_price=%s sl_message=%s market_exit_attempted=true market_exit_ok=%s market_exit_message=%s core_contracts=%s net_contracts=%s sl_contracts=%s manual_intervention_required=%s",
                         three_stage_post_tp1_sl_payload.get("position_id"),
-                        three_stage_post_tp1_sl_payload.get("side"),
+                        side,
                         sl_price,
                         sl_message,
+                        exit_ok,
+                        exit_message,
+                        core_contracts,
+                        net_contracts,
+                        sl_contracts,
+                        manual_intervention_required,
                     )
             middle_runner_activation_recorded = False
             if middle_runner_sl_payload is not None:
