@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from decimal import Decimal
+from dataclasses import replace
+from decimal import Decimal, ROUND_DOWN
 
 import pytest
 
@@ -421,3 +422,161 @@ def test_flat_cleanup_resets_sidecar_fields() -> None:
     assert state.sidecar_enabled_for_position is False
     assert state.sidecar_legs == []
     assert state.sidecar_open_qty == 0
+
+
+# ---------------------------------------------------------------------------
+# Tests for with_entry_add_managed_core_contracts
+# ---------------------------------------------------------------------------
+
+from scripts.run_boll_cvd_live import with_entry_add_managed_core_contracts  # noqa: E402
+
+
+class FakeTraderForManagedCore:
+    """Minimal fake trader for with_entry_add_managed_core_contracts tests."""
+    symbol = "ETH-USDT-SWAP"
+    contract_multiplier = Decimal("0.1")
+    contract_precision = Decimal("0.01")
+    min_contracts = Decimal("0.01")
+
+    def eth_qty_to_contracts(self, eth_qty: Decimal) -> Decimal:
+        raw = eth_qty / self.contract_multiplier
+        lots = (raw / self.contract_precision).to_integral_value(rounding=ROUND_DOWN)
+        return lots * self.contract_precision
+
+
+def _make_open_intent(eth_qty: float, intent_type: str = "OPEN_LONG") -> TradeIntent:
+    return TradeIntent(
+        intent_type=intent_type,
+        side="LONG",
+        price=3000.0,
+        layer_index=1,
+        tp_price=3100.0,
+        reason="test",
+        size=PositionSize(30.0, 1500.0, eth_qty, 1, 1.0),
+        fast_cvd=0.0,
+        previous_fast_cvd=0.0,
+        buy_ratio=0.0,
+        sell_ratio=0.0,
+        boll_upper=3100.0,
+        boll_middle=3000.0,
+        boll_lower=2900.0,
+        ts_ms=1000,
+        avg_entry_price=3000.0,
+        breakeven_price=3003.0,
+        tp_mode="MIDDLE",
+    )
+
+
+def test_open_long_sidecar_enabled_core_flat_populates_managed_core() -> None:
+    """OPEN_LONG sidecar enabled, core flat: managed_core_contracts = 10 (1 ETH → 10 contracts)."""
+    state = StrategyPositionState(sidecar_enabled_for_position=True)
+    intent_t = _make_open_intent(eth_qty=1.0, intent_type="OPEN_LONG")
+    trader = FakeTraderForManagedCore()
+    # core flat = None position
+    core_position = PositionSnapshot(None, Decimal("0"), 0.0, 0.0, Decimal("0"))
+
+    result = with_entry_add_managed_core_contracts(
+        intent=intent_t,
+        strategy_state=state,
+        account_core_position=core_position,
+        trader=trader,
+    )
+
+    assert Decimal(result.managed_core_contracts) == Decimal("10")
+    assert float(result.managed_core_eth_qty) == pytest.approx(1.0)
+
+
+def test_add_long_sidecar_enabled_core_has_position_populates_managed_core() -> None:
+    """ADD_LONG sidecar enabled: core=10 contracts, add 1 ETH→10 contracts -> managed_core_contracts=20."""
+    state = StrategyPositionState(sidecar_enabled_for_position=True)
+    intent_t = _make_open_intent(eth_qty=1.0, intent_type="ADD_LONG")
+    trader = FakeTraderForManagedCore()
+    # Core position has 10 contracts (1 ETH), side is LONG matching intent
+    # account_core_position is already the core view (not OKX net)
+    core_position = PositionSnapshot("LONG", Decimal("10"), 3000.0, 1.0, Decimal("10"))
+
+    result = with_entry_add_managed_core_contracts(
+        intent=intent_t,
+        strategy_state=state,
+        account_core_position=core_position,
+        trader=trader,
+    )
+
+    # existing 10 + new 10 = 20
+    assert Decimal(result.managed_core_contracts) == Decimal("20")
+    # existing 1.0 + new 1.0 = 2.0
+    assert float(result.managed_core_eth_qty) == pytest.approx(2.0)
+
+
+def test_add_long_sidecar_enabled_core_side_mismatch_uses_zero() -> None:
+    """ADD_LONG sidecar enabled but core has SHORT position: current_core_contracts=0."""
+    state = StrategyPositionState(sidecar_enabled_for_position=True)
+    intent_t = _make_open_intent(eth_qty=1.0, intent_type="ADD_LONG")
+    trader = FakeTraderForManagedCore()
+    # Core position is SHORT, intent is LONG → side mismatch
+    core_position = PositionSnapshot("SHORT", Decimal("5"), 3000.0, 0.5, Decimal("5"))
+
+    result = with_entry_add_managed_core_contracts(
+        intent=intent_t,
+        strategy_state=state,
+        account_core_position=core_position,
+        trader=trader,
+    )
+
+    # side mismatch → current_core_contracts = 0, expected = 0 + 10 = 10
+    assert Decimal(result.managed_core_contracts) == Decimal("10")
+    assert float(result.managed_core_eth_qty) == pytest.approx(1.0)
+
+
+def test_add_long_sidecar_disabled_returns_unchanged() -> None:
+    """ADD_LONG with sidecar disabled: managed_core_contracts remains None (old logic)."""
+    state = StrategyPositionState(sidecar_enabled_for_position=False)
+    intent_t = _make_open_intent(eth_qty=1.0, intent_type="ADD_LONG")
+    trader = FakeTraderForManagedCore()
+    core_position = PositionSnapshot("LONG", Decimal("5"), 3000.0, 0.5, Decimal("5"))
+
+    result = with_entry_add_managed_core_contracts(
+        intent=intent_t,
+        strategy_state=state,
+        account_core_position=core_position,
+        trader=trader,
+    )
+
+    assert result is intent_t
+    assert result.managed_core_contracts is None
+
+
+def test_update_tp_intent_not_modified() -> None:
+    """UPDATE_TP intent is not modified by with_entry_add_managed_core_contracts."""
+    state = StrategyPositionState(sidecar_enabled_for_position=True)
+    intent_t = _make_open_intent(eth_qty=1.0, intent_type="UPDATE_TP")
+    trader = FakeTraderForManagedCore()
+    core_position = PositionSnapshot("LONG", Decimal("10"), 3000.0, 1.0, Decimal("10"))
+
+    result = with_entry_add_managed_core_contracts(
+        intent=intent_t,
+        strategy_state=state,
+        account_core_position=core_position,
+        trader=trader,
+    )
+
+    assert result is intent_t
+
+
+def test_intent_already_has_managed_core_contracts_not_overwritten() -> None:
+    """If managed_core_contracts is already set, it is not overwritten."""
+    state = StrategyPositionState(sidecar_enabled_for_position=True)
+    intent_t = _make_open_intent(eth_qty=1.0, intent_type="ADD_LONG")
+    intent_t = replace(intent_t, managed_core_contracts="99")
+    trader = FakeTraderForManagedCore()
+    core_position = PositionSnapshot("LONG", Decimal("10"), 3000.0, 1.0, Decimal("10"))
+
+    result = with_entry_add_managed_core_contracts(
+        intent=intent_t,
+        strategy_state=state,
+        account_core_position=core_position,
+        trader=trader,
+    )
+
+    assert result is intent_t
+    assert result.managed_core_contracts == "99"

@@ -1623,6 +1623,37 @@ async def strategy_tick_worker(
             strategy_tick_queue.task_done()
 
 
+def with_entry_add_managed_core_contracts(
+    *,
+    intent: TradeIntent,
+    strategy_state: StrategyPositionState,
+    account_core_position: PositionSnapshot | None,
+    trader: Trader,
+) -> TradeIntent:
+    if not strategy_state.sidecar_enabled_for_position:
+        return intent
+    if intent.intent_type not in {"OPEN_LONG", "OPEN_SHORT", "ADD_LONG", "ADD_SHORT"}:
+        return intent
+    if intent.managed_core_contracts:
+        return intent
+
+    current_core_contracts = Decimal("0")
+    current_core_eth_qty = 0.0
+
+    if account_core_position is not None and account_core_position.has_position and account_core_position.side == intent.side:
+        current_core_contracts = account_core_position.contracts
+        current_core_eth_qty = account_core_position.eth_qty
+
+    new_core_contracts = trader.eth_qty_to_contracts(Decimal(str(intent.size.eth_qty)))
+    expected_core_contracts = current_core_contracts + new_core_contracts
+
+    return replace(
+        intent,
+        managed_core_contracts=str(expected_core_contracts),
+        managed_core_eth_qty=current_core_eth_qty + float(intent.size.eth_qty),
+    )
+
+
 async def execution_worker(
     *,
     execution_queue: asyncio.Queue[TradeCommand],
@@ -1742,6 +1773,15 @@ async def execution_worker(
                             strategy_state_for_save.tp_plan,
                         )
                         continue
+
+            entry_intent = with_entry_add_managed_core_contracts(
+                intent=command.intent,
+                strategy_state=strategy.state,
+                account_core_position=account_snapshot.position,
+                trader=trader,
+            )
+            if entry_intent is not command.intent:
+                command = replace(command, intent=entry_intent)
 
             result = await trader.execute_intent(command.intent)
             if not result.ok:

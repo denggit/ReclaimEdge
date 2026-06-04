@@ -1,3 +1,5 @@
 /.env
 /logs/
 /mnt/
+/.claude/
+/.pytest_cache/

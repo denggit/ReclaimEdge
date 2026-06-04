@@ -692,18 +692,21 @@ class Trader:
         return {item.strip() for item in str(value).split(",") if item.strip()}
 
     def _managed_core_contracts_from_intent(self, intent: TradeIntent) -> Decimal | None:
-        raw_contracts = getattr(intent, "managed_core_contracts", None)
+        raw = getattr(intent, "managed_core_contracts", None)
+        if raw in (None, ""):
+            return None
         try:
-            if raw_contracts not in {None, ""}:
-                contracts = Decimal(str(raw_contracts))
-                if contracts > 0:
-                    return self.round_contracts_down(contracts)
+            contracts = Decimal(str(raw))
         except Exception:
-            raise RuntimeError(f"Invalid managed_core_contracts: {raw_contracts}")
-        raw_eth_qty = float(getattr(intent, "managed_core_eth_qty", 0.0) or 0.0)
-        if raw_eth_qty > 0:
-            return self.eth_qty_to_contracts(Decimal(str(raw_eth_qty)))
-        return None
+            raise RuntimeError(f"invalid managed_core_contracts: {raw}")
+        if contracts <= 0:
+            return None
+        contracts = self.round_contracts_down(contracts)
+        if contracts < self.min_contracts:
+            raise RuntimeError(
+                f"managed_core_contracts below min_contracts contracts={self.decimal_to_str(contracts)} min_contracts={self.decimal_to_str(self.min_contracts)}"
+            )
+        return contracts
 
     def _build_take_profit_order_specs(self, intent: TradeIntent) -> list[tuple[str, Decimal, float]]:
         partial_tp_price = getattr(intent, "partial_tp_price", None)

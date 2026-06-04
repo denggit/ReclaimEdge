@@ -317,6 +317,9 @@ class RecordingTrader(Trader):
         self.min_contracts = Decimal("0.01")
         self.tp_order_id = None
         self.near_tp_protective_sl_order_id = None
+        self.middle_runner_protective_sl_order_id = None
+        self.three_stage_post_tp1_protective_sl_order_id = None
+        self.trend_runner_sl_order_id = None
         self.positions: list[PositionSnapshot] = [
             PositionSnapshot("LONG", Decimal("1"), 100.0, 0.1, Decimal("1")),
             PositionSnapshot("LONG", Decimal("0.5"), 100.0, 0.05, Decimal("0.5")),
