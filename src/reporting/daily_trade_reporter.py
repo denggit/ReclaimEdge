@@ -771,6 +771,7 @@ class DailyTradeReporter:
         last_tp = tp_events[-1].payload.get("tp_price") if tp_events else flat.payload.get("last_tp_price")
         boll = f"M:{fmt(last_entry.payload.get('boll_middle'), 2)}<br>U:{fmt(last_entry.payload.get('boll_upper'), 2)}<br>L:{fmt(last_entry.payload.get('boll_lower'), 2)}"
         cvd = f"fast:{fmt(last_entry.payload.get('fast_cvd'), 4)}<br>buy:{fmt_pct((last_entry.payload.get('buy_ratio') or 0) * 100)}<br>sell:{fmt_pct((last_entry.payload.get('sell_ratio') or 0) * 100)}"
+        exit_reason = flat.payload.get("trend_runner_exit_reason") or flat.payload.get("flat_reason") or "-"
         return f"""
 <tr>
   <td style="padding:8px;border:1px solid #ddd;">{short_ts(first_entry.ts_iso)}<br>→ {short_ts(flat.ts_iso)}</td>
@@ -780,7 +781,7 @@ class DailyTradeReporter:
   <td style="padding:8px;border:1px solid #ddd;">{reasons}</td>
   <td style="padding:8px;border:1px solid #ddd;text-align:right;">{fmt(flat.payload.get('avg_entry_price'), 2)}</td>
   <td style="padding:8px;border:1px solid #ddd;text-align:right;">{fmt(last_tp, 2)}</td>
-  <td style="padding:8px;border:1px solid #ddd;">{html.escape(str(flat.payload.get('flat_reason') or '-'))}</td>
+  <td style="padding:8px;border:1px solid #ddd;">{html.escape(str(exit_reason))}</td>
   <td style="padding:8px;border:1px solid #ddd;text-align:right;">{fmt(flat.payload.get('realized_pnl_usdt_est'), 4)}</td>
   <td style="padding:8px;border:1px solid #ddd;text-align:right;">{fmt_pct(flat.payload.get('realized_pnl_pct_est'))}</td>
   <td style="padding:8px;border:1px solid #ddd;">{boll}</td>

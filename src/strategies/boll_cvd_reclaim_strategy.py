@@ -877,6 +877,8 @@ class BollCvdReclaimStrategy:
                 boll.candle_ts_ms,
                 self.state.three_stage_tp2_price,
             )
+            self.state.last_tp_update_ts_ms = ts_ms
+            self.state.last_tp_update_candle_ts_ms = boll.candle_ts_ms
             return None
 
         old_runner_sl = self.state.middle_runner_protective_sl_price

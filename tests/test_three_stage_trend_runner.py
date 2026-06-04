@@ -328,14 +328,23 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
             last_tp_update_candle_ts_ms=1_000,
         )
 
-        got = strat._maybe_update_tp(105.0, 2_000, boll(middle=102.0, upper=112.0, lower=92.0, candle_ts_ms=2_000), cvd())
+        bands = boll(middle=102.0, upper=112.0, lower=92.0, candle_ts_ms=2_000)
+        with self.assertLogs("src.strategies.boll_cvd_reclaim_strategy", level="INFO") as logs:
+            got = strat._maybe_update_tp(105.0, 2_000, bands, cvd())
 
         self.assertIsNone(got)
+        self.assertIn("reason=three_stage_waiting_tp2", "\n".join(logs.output))
+        self.assertEqual(strat.state.last_tp_update_ts_ms, 2_000)
+        self.assertEqual(strat.state.last_tp_update_candle_ts_ms, 2_000)
         self.assertTrue(strat.state.three_stage_runner_enabled_for_position)
         self.assertTrue(strat.state.three_stage_tp1_consumed)
         self.assertFalse(strat.state.three_stage_tp2_consumed)
         self.assertFalse(strat.state.trend_runner_active)
         self.assertEqual(strat.state.three_stage_tp2_price, 110.0)
+
+        with self.assertNoLogs("src.strategies.boll_cvd_reclaim_strategy", level="INFO"):
+            repeated = strat._maybe_update_tp(105.5, 2_500, bands, cvd())
+        self.assertIsNone(repeated)
 
 
 class RecordingTrader(Trader):

@@ -98,6 +98,40 @@ class DailyTradeReporterResidualTest(unittest.TestCase):
         self.assertIn("不完整记录数</b><br>0", content)
         self.assertIn("无不完整记录", content)
 
+    def test_closed_position_row_prefers_trend_runner_exit_reason(self) -> None:
+        reporter = self.reporter()
+        events = [
+            event(
+                "ENTRY",
+                {"side": "LONG", "price": 100.0, "layer_index": 1, "reason": "entry", "size_margin_usdt": 1.0},
+                "pos1",
+            ),
+            event(
+                "FLAT",
+                {
+                    "flat_reason": "OKX position is flat. TP filled or manual close detected.",
+                    "trend_runner_exit_reason": "trend_runner_max_time_after_second_tp",
+                    "realized_pnl_usdt_est": 1.0,
+                    "layers": 1,
+                    "avg_entry_price": 100.0,
+                    "last_tp_price": 111.0,
+                },
+                "pos1",
+                ts="2026-01-01T01:00:00+00:00",
+            ),
+        ]
+
+        _, content = reporter.build_report(
+            events,
+            DailyReportWindow(
+                start=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                end=datetime(2026, 1, 2, tzinfo=timezone.utc),
+            ),
+            context=ReportRuntimeContext(current_has_position=False),
+        )
+
+        self.assertIn("trend_runner_max_time_after_second_tp", content)
+
 
 if __name__ == "__main__":
     unittest.main()
