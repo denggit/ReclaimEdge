@@ -75,7 +75,7 @@ def make_trader(**overrides) -> Trader:
     return t
 
 
-class TraderManagedCoreContractsTest(unittest.TestCase):
+class TraderManagedCoreContractsTest(unittest.IsolatedAsyncioTestCase):
     """Tests for Trader._managed_core_contracts_from_intent."""
 
     def test_managed_core_contracts_valid_no_attribute_error(self) -> None:
@@ -139,15 +139,36 @@ class TraderManagedCoreContractsTest(unittest.TestCase):
         result = trader._managed_core_contracts_from_intent(intent)
         self.assertEqual(result, Decimal("10.00"))
 
-    def test_replace_take_profit_uses_managed_core_contracts(self) -> None:
-        """When managed_core_contracts is set, replace_take_profit should not fetch OKX position.
-        We verify that _managed_core_contracts_from_intent extracts the value correctly,
-        which is then used by replace_take_profit to set position_contracts.
-        """
+    async def test_replace_take_profit_uses_managed_core_contracts_for_tp(self) -> None:
+        """When managed_core_contracts=10 and OKX net=12, replace_take_profit sets TP to 10 (core)."""
         trader = make_trader()
+        trader.side = "LONG"
+        placed: list[tuple] = []
+
+        async def mock_fetch_snapshot():  # type: ignore[no-untyped-def]
+            return trader_module.PositionSnapshot("LONG", Decimal("12"), 3000.0, 1.2, Decimal("12"))
+
+        async def mock_fetch_pending():  # type: ignore[no-untyped-def]
+            return []
+
+        async def mock_place_tp(intent_, specs):  # type: ignore[no-untyped-def]
+            placed.extend(specs)
+            return [f"tp-{label}" for label, _c, _p in specs]
+
+        async def mock_cancel_existing():  # type: ignore[no-untyped-def]
+            return None
+
+        trader.fetch_position_snapshot = mock_fetch_snapshot
+        trader.fetch_pending_orders = mock_fetch_pending
+        trader._place_reduce_only_take_profit_orders = mock_place_tp
+        trader.cancel_existing_reduce_only_orders = mock_cancel_existing
+
         intent = make_intent(managed_core_contracts="10")
-        result = trader._managed_core_contracts_from_intent(intent)
-        self.assertEqual(result, Decimal("10"))
+        result = await trader.replace_take_profit(intent)
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.contracts, "10")
+        self.assertEqual(placed, [("final", Decimal("10"), 3100.0)])
 
 
 if __name__ == "__main__":

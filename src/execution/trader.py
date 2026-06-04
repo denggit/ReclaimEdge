@@ -467,17 +467,61 @@ class Trader:
         managed_core_contracts = self._managed_core_contracts_from_intent(intent)
         try:
             position = await self.fetch_position_snapshot()
-            if managed_core_contracts is not None and managed_core_contracts > 0:
-                self.position_contracts = managed_core_contracts
-            elif position.contracts > 0:
-                self.position_contracts = position.contracts
+            net_contracts_for_sl = position.contracts if position.has_position and position.side == intent.side else Decimal("0")
+            if managed_core_contracts is not None:
+                core_contracts_for_tp = managed_core_contracts
+            else:
+                core_contracts_for_tp = net_contracts_for_sl
         except Exception:
             logger.exception("Failed to refresh position before replacing TP")
             if managed_core_contracts is not None and managed_core_contracts > 0:
-                self.position_contracts = managed_core_contracts
+                core_contracts_for_tp = managed_core_contracts
+                net_contracts_for_sl = managed_core_contracts
+                logger.warning(
+                    "REPLACE_TP_POSITION_FETCH_FAILED_FALLBACK | using managed_core_contracts as both core and net; sidecar may be unprotected core=%s",
+                    self.decimal_to_str(managed_core_contracts),
+                )
+            else:
+                return LiveTradeResult(
+                    False,
+                    intent.intent_type,
+                    None,
+                    None,
+                    "0",
+                    self.price_to_str(intent.tp_price),
+                    "failed to fetch position and no managed_core_contracts",
+                )
 
-        if self.position_contracts <= 0:
-            return LiveTradeResult(False, intent.intent_type, None, None, "0", self.price_to_str(intent.tp_price), "no position to protect")
+        self.position_contracts = core_contracts_for_tp
+
+        if net_contracts_for_sl <= 0:
+            return LiveTradeResult(
+                False,
+                intent.intent_type,
+                None,
+                None,
+                "0",
+                self.price_to_str(intent.tp_price),
+                "no position to protect",
+            )
+
+        # Sanity check: core cannot exceed net (only when there is a net position)
+        if managed_core_contracts is not None and core_contracts_for_tp > net_contracts_for_sl:
+            raise RuntimeError(
+                f"managed_core_contracts_exceeds_net_position "
+                f"core={self.decimal_to_str(core_contracts_for_tp)} net={self.decimal_to_str(net_contracts_for_sl)}"
+            )
+
+        if core_contracts_for_tp <= 0:
+            return LiveTradeResult(
+                False,
+                intent.intent_type,
+                None,
+                None,
+                "0",
+                self.price_to_str(intent.tp_price),
+                "no core position for TP",
+            )
 
         post_tp1_sl_price = getattr(intent, "three_stage_post_tp1_protective_sl_price", None)
         if (
@@ -491,7 +535,7 @@ class Trader:
             old_sl_order_id = getattr(intent, "three_stage_post_tp1_protective_sl_order_id", None) or self.three_stage_post_tp1_protective_sl_order_id
             sl_ok, sl_order_id, sl_message = await self.place_three_stage_post_tp1_protective_stop_with_retries(
                 intent.side,
-                self.position_contracts,
+                net_contracts_for_sl,
                 float(post_tp1_sl_price),
                 retry_count=int(os.getenv("NEAR_TP_PROTECTIVE_SL_RETRY_COUNT", "3")),
                 retry_interval_seconds=float(os.getenv("NEAR_TP_PROTECTIVE_SL_RETRY_INTERVAL_SECONDS", "1")),
@@ -503,7 +547,7 @@ class Trader:
                     intent.intent_type,
                     None,
                     self.tp_order_id,
-                    self.decimal_to_str(self.position_contracts),
+                    self.decimal_to_str(core_contracts_for_tp),
                     self.price_to_str(intent.tp_price),
                     f"three_stage_post_tp1_protective_sl_failed: {sl_message}",
                     entry_filled=False,
@@ -515,9 +559,11 @@ class Trader:
             if old_sl_order_id and old_sl_order_id != sl_order_id:
                 await self.cancel_three_stage_post_tp1_protective_stop(old_sl_order_id)
             logger.warning(
-                "THREE_STAGE_TP1_PROTECTIVE_SL_UPDATED | side=%s contracts=%s protective_sl_price=%s old_sl_order_id=%s new_sl_order_id=%s retry_config=near_tp",
+                "THREE_STAGE_TP1_PROTECTIVE_SL_UPDATED | side=%s sl_contracts=%s core_contracts=%s net_contracts=%s protective_sl_price=%s old_sl_order_id=%s new_sl_order_id=%s retry_config=near_tp",
                 intent.side,
-                self.decimal_to_str(self.position_contracts),
+                self.decimal_to_str(net_contracts_for_sl),
+                self.decimal_to_str(core_contracts_for_tp),
+                self.decimal_to_str(net_contracts_for_sl),
                 protective_sl_price_text,
                 old_sl_order_id,
                 sl_order_id,
@@ -527,7 +573,7 @@ class Trader:
                 intent.intent_type,
                 None,
                 self.tp_order_id,
-                self.decimal_to_str(self.position_contracts),
+                self.decimal_to_str(core_contracts_for_tp),
                 self.price_to_str(intent.tp_price),
                 "three_stage_post_tp1_protective_sl_updated",
                 entry_filled=False,
@@ -565,7 +611,7 @@ class Trader:
             old_sl_order_id = getattr(intent, "middle_runner_protective_sl_order_id", None) or self.middle_runner_protective_sl_order_id
             sl_ok, sl_order_id, sl_message = await self.place_middle_runner_protective_stop_with_retries(
                 intent.side,
-                self.position_contracts,
+                net_contracts_for_sl,
                 float(runner_sl_price),
                 retry_count=int(os.getenv("NEAR_TP_PROTECTIVE_SL_RETRY_COUNT", "3")),
                 retry_interval_seconds=float(os.getenv("NEAR_TP_PROTECTIVE_SL_RETRY_INTERVAL_SECONDS", "1")),
@@ -577,7 +623,7 @@ class Trader:
                     intent.intent_type,
                     None,
                     tp_order_id,
-                    self.decimal_to_str(self.position_contracts),
+                    self.decimal_to_str(core_contracts_for_tp),
                     tp_price_text,
                     f"middle_runner_protective_sl_failed: {sl_message}",
                     entry_filled=False,
@@ -592,9 +638,11 @@ class Trader:
             if old_sl_order_id and old_sl_order_id != sl_order_id:
                 await self.cancel_middle_runner_protective_stop(old_sl_order_id)
             logger.warning(
-                "MIDDLE_RUNNER_SL_UPDATED | side=%s contracts=%s protective_sl_price=%s old_sl_order_id=%s new_sl_order_id=%s",
+                "MIDDLE_RUNNER_SL_UPDATED | side=%s sl_contracts=%s core_contracts=%s net_contracts=%s protective_sl_price=%s old_sl_order_id=%s new_sl_order_id=%s",
                 intent.side,
-                self.decimal_to_str(self.position_contracts),
+                self.decimal_to_str(net_contracts_for_sl),
+                self.decimal_to_str(core_contracts_for_tp),
+                self.decimal_to_str(net_contracts_for_sl),
                 protective_sl_price_text,
                 old_sl_order_id,
                 sl_order_id,
@@ -605,7 +653,7 @@ class Trader:
             and trend_runner_sl_price is not None
         ):
             old_sl_order_id = getattr(intent, "trend_runner_sl_order_id", None) or self.trend_runner_sl_order_id
-            sl_contracts = self._trend_runner_sl_contracts(intent)
+            sl_contracts = self._trend_runner_sl_contracts(intent, net_contracts_for_sl)
             sl_ok, sl_order_id, sl_message = await self.place_trend_runner_protective_stop_with_retries(
                 intent.side,
                 sl_contracts,
@@ -620,7 +668,7 @@ class Trader:
                     intent.intent_type,
                     None,
                     tp_order_id,
-                    self.decimal_to_str(self.position_contracts),
+                    self.decimal_to_str(core_contracts_for_tp),
                     tp_price_text,
                     f"trend_runner_protective_sl_failed: {sl_message}",
                     entry_filled=False,
@@ -635,9 +683,11 @@ class Trader:
             if old_sl_order_id and old_sl_order_id != sl_order_id:
                 await self.cancel_trend_runner_protective_stop(old_sl_order_id)
             logger.warning(
-                "TREND_RUNNER_SL_UPDATED | side=%s contracts=%s protective_sl_price=%s old_sl_order_id=%s new_sl_order_id=%s",
+                "TREND_RUNNER_SL_UPDATED | side=%s sl_contracts=%s core_contracts=%s net_contracts=%s protective_sl_price=%s old_sl_order_id=%s new_sl_order_id=%s",
                 intent.side,
                 self.decimal_to_str(sl_contracts),
+                self.decimal_to_str(core_contracts_for_tp),
+                self.decimal_to_str(net_contracts_for_sl),
                 protective_sl_price_text,
                 old_sl_order_id,
                 sl_order_id,
@@ -757,15 +807,15 @@ class Trader:
             ("tp2_outer", tp2_contracts, float(tp2_price)),
         ]
 
-    def _trend_runner_sl_contracts(self, intent: TradeIntent) -> Decimal:
+    def _trend_runner_sl_contracts(self, intent: TradeIntent, net_contracts_for_sl: Decimal) -> Decimal:
         if getattr(intent, "trend_runner_active", False):
-            return self.position_contracts
+            return net_contracts_for_sl
         runner_ratio = Decimal(str(getattr(intent, "three_stage_runner_ratio", 0.0)))
         if runner_ratio <= 0 or runner_ratio >= 1:
-            return self.position_contracts
-        contracts = self.round_contracts_down(self.position_contracts * runner_ratio)
+            return net_contracts_for_sl
+        contracts = self.round_contracts_down(net_contracts_for_sl * runner_ratio)
         if contracts < self.min_contracts:
-            return self.position_contracts
+            return net_contracts_for_sl
         return contracts
 
     async def _place_reduce_only_take_profit_orders(self, intent: TradeIntent, specs: list[tuple[str, Decimal, float]]) -> list[str]:
@@ -776,10 +826,11 @@ class Trader:
             order_id = self.extract_order_id(res)
             placed_order_ids.append(order_id)
             logger.info(
-                "TP_ORDER_PLACED | label=%s side=%s contracts=%s price=%s ordId=%s",
+                "TP_ORDER_PLACED | label=%s side=%s tp_contracts=%s core_contracts=%s price=%s ordId=%s",
                 label,
                 intent.side,
                 self.decimal_to_str(contracts),
+                self.decimal_to_str(self.position_contracts),
                 self.price_to_str(price),
                 order_id,
             )
