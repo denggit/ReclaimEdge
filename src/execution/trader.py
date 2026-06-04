@@ -410,6 +410,9 @@ class Trader:
 
     async def execute_market_exit_runner(self, intent: TradeIntent) -> LiveTradeResult:
         action = "MARKET_EXIT_RUNNER"
+        restored_trend_runner_sl_order_id = getattr(intent, "trend_runner_sl_order_id", None)
+        if restored_trend_runner_sl_order_id and not self.trend_runner_sl_order_id:
+            self.trend_runner_sl_order_id = restored_trend_runner_sl_order_id
         position = await self.fetch_position_snapshot()
         if not position.has_position:
             return LiveTradeResult(True, action, None, None, "0", self.price_to_str(intent.tp_price), "runner_already_flat", near_tp_exit_all=True)

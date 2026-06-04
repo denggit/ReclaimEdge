@@ -356,6 +356,8 @@ class RecordingTrader(Trader):
         self.contract_precision = Decimal("0.01")
         self.min_contracts = Decimal("0.01")
         self.tp_order_id = None
+        self.near_tp_protective_sl_order_id = None
+        self.middle_runner_protective_sl_order_id = None
         self.trend_runner_sl_order_id = None
         self.side = side
         self.placed_specs = []
@@ -368,6 +370,11 @@ class RecordingTrader(Trader):
     async def cancel_existing_reduce_only_orders(self) -> None:
         return None
 
+    async def market_exit_remaining_position_with_retries(self, side, retry_count):  # type: ignore[no-untyped-def]
+        self.position_contracts = Decimal("0")
+        await self._cleanup_after_near_tp_market_exit()
+        return True, "market_exit_order_id=runner-exit"
+
     async def _place_reduce_only_take_profit_orders(self, intent_: TradeIntent, specs):  # type: ignore[no-untyped-def]
         self.placed_specs = specs
         return [f"ord-{label}" for label, _contracts, _price in specs]
@@ -378,6 +385,8 @@ class RecordingTrader(Trader):
 
     async def cancel_trend_runner_protective_stop(self, order_id: str | None) -> bool:
         self.cancelled_trend_runner_stop_ids.append(order_id)
+        if self.trend_runner_sl_order_id == order_id:
+            self.trend_runner_sl_order_id = None
         return True
 
 
@@ -472,6 +481,29 @@ class ThreeStageTrendRunnerTraderTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(trader.trend_stop_calls, 1)
         self.assertEqual(trader.cancelled_trend_runner_stop_ids, ["old-algo"])
         self.assertEqual(trader.trend_runner_sl_order_id, "algo-runner")
+
+    async def test_market_exit_runner_cancels_restored_sl_order_id_from_intent(self) -> None:
+        trader = RecordingTrader("LONG")
+        trader.position_contracts = Decimal("2")
+        trader.trend_runner_sl_order_id = None
+
+        result = await trader.execute_market_exit_runner(
+            intent(
+                intent_type="MARKET_EXIT_RUNNER",
+                tp_plan="SINGLE",
+                tp_price=111.1,
+                trend_runner_active=True,
+                trend_runner_tp_price=111.1,
+                trend_runner_sl_price=101.0,
+                trend_runner_sl_order_id="old-algo",
+                reason="trend_runner_middle_lost",
+            )
+        )
+
+        self.assertTrue(result.ok)
+        self.assertTrue(result.near_tp_exit_all)
+        self.assertEqual(trader.cancelled_trend_runner_stop_ids, ["old-algo"])
+        self.assertIsNone(trader.trend_runner_sl_order_id)
 
 
 if __name__ == "__main__":
