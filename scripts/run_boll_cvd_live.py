@@ -52,7 +52,7 @@ from src.utils.log import get_logger  # noqa: E402
 logger = get_logger(__name__)
 
 SPLIT_TP_PLANS = {"SPLIT_PARTIAL_FINAL", "SPLIT_50_50"}
-POSITION_MANAGEMENT_INTENTS = {"UPDATE_TP", "NEAR_TP_REDUCE"}
+POSITION_MANAGEMENT_INTENTS = {"UPDATE_TP", "NEAR_TP_REDUCE", "MARKET_EXIT_RUNNER"}
 
 
 def live_trading_enabled() -> bool:
@@ -371,6 +371,30 @@ def restore_strategy_from_saved_state(strategy: BollCvdReclaimStrategy, saved_st
         middle_runner_protective_sl_order_id=getattr(saved_state, "middle_runner_protective_sl_order_id", None),
         middle_runner_extension_triggered=getattr(saved_state, "middle_runner_extension_triggered", False),
         middle_runner_add_disabled=getattr(saved_state, "middle_runner_add_disabled", False),
+        three_stage_runner_enabled_for_position=getattr(saved_state, "three_stage_runner_enabled_for_position", False),
+        three_stage_tp1_price=getattr(saved_state, "three_stage_tp1_price", None),
+        three_stage_tp2_price=getattr(saved_state, "three_stage_tp2_price", None),
+        three_stage_runner_initial_tp_price=getattr(saved_state, "three_stage_runner_initial_tp_price", None),
+        three_stage_tp1_ratio=getattr(saved_state, "three_stage_tp1_ratio", 0.0),
+        three_stage_tp2_ratio=getattr(saved_state, "three_stage_tp2_ratio", 0.0),
+        three_stage_runner_ratio=getattr(saved_state, "three_stage_runner_ratio", 0.0),
+        three_stage_tp1_consumed=getattr(saved_state, "three_stage_tp1_consumed", False),
+        three_stage_tp2_consumed=getattr(saved_state, "three_stage_tp2_consumed", False),
+        trend_runner_active=getattr(saved_state, "trend_runner_active", False),
+        trend_runner_trend_start_ts_ms=getattr(saved_state, "trend_runner_trend_start_ts_ms", 0),
+        trend_runner_adjust_count=getattr(saved_state, "trend_runner_adjust_count", 0),
+        trend_runner_last_update_candle_ts_ms=getattr(saved_state, "trend_runner_last_update_candle_ts_ms", 0),
+        trend_runner_tp_price=getattr(saved_state, "trend_runner_tp_price", None),
+        trend_runner_sl_price=getattr(saved_state, "trend_runner_sl_price", None),
+        trend_runner_tp_order_id=getattr(saved_state, "trend_runner_tp_order_id", None),
+        trend_runner_sl_order_id=getattr(saved_state, "trend_runner_sl_order_id", None),
+        trend_runner_exit_reason=getattr(saved_state, "trend_runner_exit_reason", None),
+        trend_runner_reverse_candidate=getattr(saved_state, "trend_runner_reverse_candidate", False),
+        trend_runner_reverse_start_ts_ms=getattr(saved_state, "trend_runner_reverse_start_ts_ms", 0),
+        trend_runner_reverse_start_price=getattr(saved_state, "trend_runner_reverse_start_price", None),
+        trend_runner_reverse_extreme_price=getattr(saved_state, "trend_runner_reverse_extreme_price", None),
+        trend_runner_reverse_fast_cvd_start=getattr(saved_state, "trend_runner_reverse_fast_cvd_start", 0.0),
+        trend_runner_reverse_samples=getattr(saved_state, "trend_runner_reverse_samples", []) or [],
     )
     logger.warning(
         "Recovered strategy state from local disk | position_id=%s side=%s layers=%s avg_entry=%.4f tp=%s partial_tp=%s tp_plan=%s partial_tp_consumed=%s",
@@ -390,6 +414,10 @@ def sync_strategy_cost_from_position(strategy: BollCvdReclaimStrategy, position:
         return
     if strategy.state.side is None or strategy.state.side != position.side or strategy.state.layers <= 0:
         restore_strategy_from_position(strategy, position)
+        return
+    if getattr(strategy.state, "three_stage_runner_enabled_for_position", False):
+        strategy.state.avg_entry_price = position.avg_entry_price
+        strategy.state.last_entry_price = strategy.state.last_entry_price or position.avg_entry_price
         return
     strategy.state.total_entry_qty = position.eth_qty
     strategy.state.total_entry_notional = position.avg_entry_price * position.eth_qty
@@ -489,6 +517,68 @@ def mark_middle_runner_active_if_position_reduced(strategy: BollCvdReclaimStrate
         getattr(state, "middle_runner_final_tp_price", None),
     )
     return True
+
+
+def mark_three_stage_progress_if_position_reduced(strategy: BollCvdReclaimStrategy, position: PositionSnapshot, ts_ms: int) -> str | None:
+    state = strategy.state
+    if not getattr(state, "three_stage_runner_enabled_for_position", False):
+        return None
+    if not position.has_position or position.side != state.side:
+        return None
+    total_entry_qty = float(getattr(state, "total_entry_qty", 0.0) or 0.0)
+    if total_entry_qty <= 0:
+        return None
+
+    remaining_ratio = float(position.eth_qty) / total_entry_qty
+    tp1_ratio = float(getattr(state, "three_stage_tp1_ratio", 0.0) or 0.0)
+    tp2_ratio = float(getattr(state, "three_stage_tp2_ratio", 0.0) or 0.0)
+    runner_ratio = float(getattr(state, "three_stage_runner_ratio", 0.0) or 0.0)
+    after_tp1_ratio = max(0.0, 1.0 - tp1_ratio)
+    after_tp2_ratio = max(0.0, runner_ratio)
+    tolerance = max(0.03, runner_ratio * 0.25, 0.000001)
+
+    if not getattr(state, "three_stage_tp1_consumed", False) and remaining_ratio <= after_tp1_ratio + tolerance:
+        state.three_stage_tp1_consumed = True
+        state.partial_tp_consumed = True
+        logger.warning(
+            "THREE_STAGE_TP1_FILLED | side=%s old_qty=%.8f new_qty=%.8f remaining_ratio=%.6f expected_after_tp1=%.6f tp1_ratio=%.4f",
+            state.side,
+            total_entry_qty,
+            position.eth_qty,
+            remaining_ratio,
+            after_tp1_ratio,
+            tp1_ratio,
+        )
+        return "TP1"
+
+    if (
+        getattr(state, "three_stage_tp1_consumed", False)
+        and not getattr(state, "three_stage_tp2_consumed", False)
+        and remaining_ratio <= after_tp2_ratio + tolerance
+    ):
+        state.three_stage_tp2_consumed = True
+        state.trend_runner_active = True
+        state.trend_runner_trend_start_ts_ms = ts_ms
+        state.trend_runner_adjust_count = 0
+        state.trend_runner_last_update_candle_ts_ms = 0
+        state.tp_plan = "SINGLE"
+        state.partial_tp_price = None
+        state.partial_tp_ratio = 0.0
+        state.tp_price = state.trend_runner_tp_price or state.three_stage_runner_initial_tp_price or state.tp_price
+        logger.warning(
+            "TREND_RUNNER_ACTIVATED | side=%s old_qty=%.8f new_qty=%.8f remaining_ratio=%.6f runner_ratio=%.6f tp2_ratio=%.4f runner_tp=%s runner_sl=%s trend_start_ts_ms=%s",
+            state.side,
+            total_entry_qty,
+            position.eth_qty,
+            remaining_ratio,
+            runner_ratio,
+            tp2_ratio,
+            getattr(state, "trend_runner_tp_price", None),
+            getattr(state, "trend_runner_sl_price", None),
+            ts_ms,
+        )
+        return "TP2"
+    return None
 
 
 def middle_runner_activation_boll(strategy: BollCvdReclaimStrategy):
@@ -958,6 +1048,12 @@ async def execution_worker(
                             strategy.state.middle_runner_protective_sl_order_id = result.protective_sl_order_id
                         if _parse_optional_float(getattr(result, "protective_sl_price", "")) is not None:
                             strategy.state.middle_runner_protective_sl_price = _parse_optional_float(result.protective_sl_price)
+                    if getattr(command.intent, "trend_runner_active", False):
+                        if getattr(result, "protective_sl_order_id", None):
+                            strategy.state.trend_runner_sl_order_id = result.protective_sl_order_id
+                        if _parse_optional_float(getattr(result, "protective_sl_price", "")) is not None:
+                            strategy.state.trend_runner_sl_price = _parse_optional_float(result.protective_sl_price)
+                        strategy.state.trend_runner_tp_order_id = result.tp_order_id
                     strategy_state_for_save = copy.deepcopy(strategy.state)
                     equity = account_snapshot.equity
                 journal.record_tp_update(position_id=current_position_id, intent=command.intent, result=result, equity=equity)
@@ -973,6 +1069,24 @@ async def execution_worker(
                             "final_tp_price": command.intent.tp_price,
                             "protective_sl_price": getattr(result, "protective_sl_price", "") or getattr(command.intent, "middle_runner_protective_sl_price", None),
                             "protective_sl_order_id": getattr(result, "protective_sl_order_id", None),
+                            "boll_lower": command.intent.boll_lower,
+                            "boll_middle": command.intent.boll_middle,
+                            "boll_upper": command.intent.boll_upper,
+                            "reason": command.intent.reason,
+                        },
+                        position_id=current_position_id,
+                    )
+                if getattr(command.intent, "trend_runner_active", False) and hasattr(journal, "append"):
+                    journal.append(
+                        "TREND_RUNNER_UPDATE",
+                        {
+                            "side": command.intent.side,
+                            "tp_plan": "THREE_STAGE_RUNNER",
+                            "runner_tp_price": getattr(command.intent, "trend_runner_tp_price", None) or command.intent.tp_price,
+                            "runner_sl_price": getattr(result, "protective_sl_price", "") or getattr(command.intent, "trend_runner_sl_price", None),
+                            "runner_sl_order_id": getattr(result, "protective_sl_order_id", None),
+                            "trend_runner_active": True,
+                            "trend_runner_adjust_count": getattr(command.intent, "trend_runner_adjust_count", 0),
                             "boll_lower": command.intent.boll_lower,
                             "boll_middle": command.intent.boll_middle,
                             "boll_upper": command.intent.boll_upper,
@@ -1109,6 +1223,37 @@ async def execution_worker(
                     result.near_tp_exit_all,
                     equity or 0.0,
                 )
+            elif command.intent.intent_type == "MARKET_EXIT_RUNNER":
+                async with state_lock:
+                    current_position_id = execution_state.current_position_id
+                    execution_state.last_order_ts_ms = command.intent.ts_ms
+                    execution_state.trading_halted = True
+                    execution_state.halt_reason = "trend_runner_market_exit_waiting_flat"
+                    strategy.state.trend_runner_exit_reason = getattr(command.intent, "trend_runner_exit_reason", None) or command.intent.reason
+                    strategy_state_for_save = copy.deepcopy(strategy.state)
+                    cash_before_position = execution_state.cash_before_position
+                journal.record_trend_runner_market_exit(
+                    position_id=current_position_id,
+                    symbol=trader.symbol,
+                    intent=command.intent,
+                    result=result,
+                )
+                state_store.save(
+                    LiveStateStore.from_strategy_state(
+                        position_id=current_position_id,
+                        symbol=trader.symbol,
+                        strategy_state=strategy_state_for_save,
+                        cash_before_position=cash_before_position,
+                    )
+                )
+                logger.warning(
+                    "LIVE Trend Runner market exit success | side=%s reason=%s contracts_before=%s contracts_after=%s message=%s",
+                    command.intent.side,
+                    command.intent.reason,
+                    result.contracts_before,
+                    result.contracts_after,
+                    result.message,
+                )
             else:
                 new_position_id = None
                 async with state_lock:
@@ -1119,6 +1264,12 @@ async def execution_worker(
                     current_position_id = execution_state.current_position_id
                     cash_before_position = execution_state.cash_before_position
                     execution_state.last_order_ts_ms = command.intent.ts_ms
+                    if getattr(command.intent, "tp_plan", "SINGLE") == "THREE_STAGE_RUNNER":
+                        strategy.state.trend_runner_tp_order_id = result.tp_order_id
+                        if getattr(result, "protective_sl_order_id", None):
+                            strategy.state.trend_runner_sl_order_id = result.protective_sl_order_id
+                        if _parse_optional_float(getattr(result, "protective_sl_price", "")) is not None:
+                            strategy.state.trend_runner_sl_price = _parse_optional_float(result.protective_sl_price)
                     strategy_state_for_save = copy.deepcopy(strategy.state)
                     equity = account_snapshot.equity
                 journal.record_entry(
@@ -1140,6 +1291,28 @@ async def execution_worker(
                             "final_tp_price": command.intent.tp_price,
                             "first_close_ratio": getattr(command.intent, "partial_tp_ratio", 0.0),
                             "keep_ratio": getattr(command.intent, "middle_runner_keep_ratio", 0.0),
+                            "boll_lower": command.intent.boll_lower,
+                            "boll_middle": command.intent.boll_middle,
+                            "boll_upper": command.intent.boll_upper,
+                        },
+                        position_id=current_position_id or new_position_id or "",
+                    )
+                if getattr(command.intent, "tp_plan", "SINGLE") == "THREE_STAGE_RUNNER" and hasattr(journal, "append"):
+                    journal.append(
+                        "THREE_STAGE_RUNNER_PLANNED",
+                        {
+                            "side": command.intent.side,
+                            "layers": command.intent.layer_index,
+                            "avg_entry_price": command.intent.avg_entry_price,
+                            "tp_plan": "THREE_STAGE_RUNNER",
+                            "tp1_price": getattr(command.intent, "three_stage_tp1_price", None),
+                            "tp1_ratio": getattr(command.intent, "three_stage_tp1_ratio", 0.0),
+                            "tp2_price": getattr(command.intent, "three_stage_tp2_price", None),
+                            "tp2_ratio": getattr(command.intent, "three_stage_tp2_ratio", 0.0),
+                            "runner_tp_price": getattr(command.intent, "three_stage_runner_tp_price", None),
+                            "runner_sl_price": getattr(command.intent, "three_stage_runner_sl_price", None),
+                            "runner_ratio": getattr(command.intent, "three_stage_runner_ratio", 0.0),
+                            "runner_sl_order_id": getattr(result, "protective_sl_order_id", None),
                             "boll_lower": command.intent.boll_lower,
                             "boll_middle": command.intent.boll_middle,
                             "boll_upper": command.intent.boll_upper,
@@ -1315,6 +1488,7 @@ async def account_position_sync_worker(
             save_state_payload: tuple[str | None, StrategyPositionState, float | None] | None = None
             middle_runner_sl_payload: dict[str, Any] | None = None
             middle_runner_activation_payload: dict[str, Any] | None = None
+            three_stage_event_payload: dict[str, Any] | None = None
             clear_state = False
             flat_previous_halt_reason: str | None = None
             async with state_lock:
@@ -1339,6 +1513,8 @@ async def account_position_sync_worker(
                         "partial_tp_consumed": getattr(strategy.state, "partial_tp_consumed", False),
                         "near_tp_protective_sl_order_id": getattr(strategy.state, "near_tp_protective_sl_order_id", None),
                         "middle_runner_protective_sl_order_id": getattr(strategy.state, "middle_runner_protective_sl_order_id", None),
+                        "trend_runner_sl_order_id": getattr(strategy.state, "trend_runner_sl_order_id", None),
+                        "trend_runner_exit_reason": getattr(strategy.state, "trend_runner_exit_reason", None),
                     }
                     execution_state.trading_halted = True
                     last_flat_detected_monotonic = now
@@ -1445,8 +1621,28 @@ async def account_position_sync_worker(
                     trader.position_contracts = position.contracts
                     if pending_order_count == 0:
                         middle_runner_activated = mark_middle_runner_active_if_position_reduced(strategy, position)
+                        three_stage_event = mark_three_stage_progress_if_position_reduced(strategy, position, utc_ms())
                         mark_partial_tp_consumed_if_position_reduced(strategy, position)
                         sync_strategy_cost_from_position(strategy, position)
+                        if three_stage_event is not None:
+                            three_stage_event_payload = {
+                                "event": three_stage_event,
+                                "position_id": execution_state.current_position_id,
+                                "side": position.side,
+                                "layers": strategy.state.layers,
+                                "avg_entry_price": strategy.state.avg_entry_price,
+                                "tp_plan": "THREE_STAGE_RUNNER",
+                                "tp1_price": getattr(strategy.state, "three_stage_tp1_price", None),
+                                "tp1_ratio": getattr(strategy.state, "three_stage_tp1_ratio", 0.0),
+                                "tp2_price": getattr(strategy.state, "three_stage_tp2_price", None),
+                                "tp2_ratio": getattr(strategy.state, "three_stage_tp2_ratio", 0.0),
+                                "runner_tp_price": getattr(strategy.state, "trend_runner_tp_price", None),
+                                "runner_sl_price": getattr(strategy.state, "trend_runner_sl_price", None),
+                                "runner_ratio": getattr(strategy.state, "three_stage_runner_ratio", 0.0),
+                                "trend_runner_active": getattr(strategy.state, "trend_runner_active", False),
+                                "trend_runner_adjust_count": getattr(strategy.state, "trend_runner_adjust_count", 0),
+                                "trend_runner_trend_start_ts_ms": getattr(strategy.state, "trend_runner_trend_start_ts_ms", 0),
+                            }
                         if middle_runner_activated:
                             config = getattr(strategy, "config", None)
                             if bool(getattr(config, "middle_runner_disable_add_after_partial", True)):
@@ -1548,6 +1744,12 @@ async def account_position_sync_worker(
                         await trader.cancel_middle_runner_protective_stop(middle_runner_sl_order_id)
                     except Exception:
                         logger.warning("MIDDLE_RUNNER_CANCELLED | reason=flat_sl_cancel_failed algoId=%s", middle_runner_sl_order_id)
+                trend_runner_sl_order_id = pending_flat_payload.get("trend_runner_sl_order_id")
+                if trend_runner_sl_order_id:
+                    try:
+                        await trader.cancel_trend_runner_protective_stop(trend_runner_sl_order_id)
+                    except Exception:
+                        logger.warning("TREND_RUNNER_CANCELLED | reason=flat_sl_cancel_failed algoId=%s", trend_runner_sl_order_id)
                 async with state_lock:
                     flat_previous_halt_reason = execution_state.halt_reason if execution_state.trading_halted else None
                     account_snapshot.position = position
@@ -1564,6 +1766,7 @@ async def account_position_sync_worker(
                         None,
                         "near_tp_exit_all_waiting_flat",
                         "near_tp_protected_sync_failed",
+                        "trend_runner_market_exit_waiting_flat",
                         "rolling_loss_soft_halt",
                         "rolling_loss_hard_halt",
                     }
@@ -1586,6 +1789,11 @@ async def account_position_sync_worker(
                 journal.record_cash_transfer(**cash_transfer_payload)
             if cash_drift_payload is not None:
                 journal.record_account_cash_drift(**cash_drift_payload)
+            if three_stage_event_payload is not None and hasattr(journal, "append"):
+                event_name = "THREE_STAGE_TP1_FILLED" if three_stage_event_payload.get("event") == "TP1" else "THREE_STAGE_TP2_FILLED"
+                journal.append(event_name, dict(three_stage_event_payload), position_id=three_stage_event_payload.get("position_id"))
+                if event_name == "THREE_STAGE_TP2_FILLED":
+                    journal.append("TREND_RUNNER_ACTIVATED", dict(three_stage_event_payload), position_id=three_stage_event_payload.get("position_id"))
             middle_runner_activation_recorded = False
             if middle_runner_sl_payload is not None:
                 sl_price = middle_runner_sl_payload.get("protective_sl_price")
@@ -1676,6 +1884,7 @@ async def account_position_sync_worker(
             if record_flat_payload is not None:
                 record_flat_payload.pop("near_tp_protective_sl_order_id", None)
                 record_flat_payload.pop("middle_runner_protective_sl_order_id", None)
+                record_flat_payload.pop("trend_runner_sl_order_id", None)
                 journal.record_flat(**record_flat_payload)
                 if rolling_loss_guard is not None and rolling_loss_guard.state is not None and rolling_loss_guard.state.enabled:
                     guard_now_ms = utc_ms()
@@ -1692,6 +1901,7 @@ async def account_position_sync_worker(
                                 None,
                                 "near_tp_exit_all_waiting_flat",
                                 "near_tp_protected_sync_failed",
+                                "trend_runner_market_exit_waiting_flat",
                                 "rolling_loss_soft_halt",
                                 "rolling_loss_hard_halt",
                             }

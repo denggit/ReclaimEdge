@@ -57,6 +57,10 @@ class BollCvdShockReclaimStrategy(BollCvdReclaimStrategy):
         if tp_intent is not None:
             intents.append(tp_intent)
 
+        runner_exit_intent = self._maybe_trend_runner_market_exit(price, ts_ms, boll, cvd)
+        if runner_exit_intent is not None:
+            intents.append(runner_exit_intent)
+
         near_tp_intent = self._maybe_near_tp_reduce(price, ts_ms, boll, cvd)
         if near_tp_intent is not None:
             intents.append(near_tp_intent)

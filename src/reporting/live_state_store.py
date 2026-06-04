@@ -52,6 +52,30 @@ class LivePositionState:
     middle_runner_protective_sl_order_id: str | None = None
     middle_runner_extension_triggered: bool = False
     middle_runner_add_disabled: bool = False
+    three_stage_runner_enabled_for_position: bool = False
+    three_stage_tp1_price: float | None = None
+    three_stage_tp2_price: float | None = None
+    three_stage_runner_initial_tp_price: float | None = None
+    three_stage_tp1_ratio: float = 0.0
+    three_stage_tp2_ratio: float = 0.0
+    three_stage_runner_ratio: float = 0.0
+    three_stage_tp1_consumed: bool = False
+    three_stage_tp2_consumed: bool = False
+    trend_runner_active: bool = False
+    trend_runner_trend_start_ts_ms: int = 0
+    trend_runner_adjust_count: int = 0
+    trend_runner_last_update_candle_ts_ms: int = 0
+    trend_runner_tp_price: float | None = None
+    trend_runner_sl_price: float | None = None
+    trend_runner_tp_order_id: str | None = None
+    trend_runner_sl_order_id: str | None = None
+    trend_runner_exit_reason: str | None = None
+    trend_runner_reverse_candidate: bool = False
+    trend_runner_reverse_start_ts_ms: int = 0
+    trend_runner_reverse_start_price: float | None = None
+    trend_runner_reverse_extreme_price: float | None = None
+    trend_runner_reverse_fast_cvd_start: float = 0.0
+    trend_runner_reverse_samples: list | None = None
     cash_before_position: float | None = None
     updated_at: str = ""
 
@@ -133,6 +157,30 @@ class LiveStateStore:
             middle_runner_protective_sl_order_id=getattr(strategy_state, "middle_runner_protective_sl_order_id", None),
             middle_runner_extension_triggered=bool(getattr(strategy_state, "middle_runner_extension_triggered", False)),
             middle_runner_add_disabled=bool(getattr(strategy_state, "middle_runner_add_disabled", False)),
+            three_stage_runner_enabled_for_position=bool(getattr(strategy_state, "three_stage_runner_enabled_for_position", False)),
+            three_stage_tp1_price=getattr(strategy_state, "three_stage_tp1_price", None),
+            three_stage_tp2_price=getattr(strategy_state, "three_stage_tp2_price", None),
+            three_stage_runner_initial_tp_price=getattr(strategy_state, "three_stage_runner_initial_tp_price", None),
+            three_stage_tp1_ratio=float(getattr(strategy_state, "three_stage_tp1_ratio", 0.0) or 0.0),
+            three_stage_tp2_ratio=float(getattr(strategy_state, "three_stage_tp2_ratio", 0.0) or 0.0),
+            three_stage_runner_ratio=float(getattr(strategy_state, "three_stage_runner_ratio", 0.0) or 0.0),
+            three_stage_tp1_consumed=bool(getattr(strategy_state, "three_stage_tp1_consumed", False)),
+            three_stage_tp2_consumed=bool(getattr(strategy_state, "three_stage_tp2_consumed", False)),
+            trend_runner_active=bool(getattr(strategy_state, "trend_runner_active", False)),
+            trend_runner_trend_start_ts_ms=int(getattr(strategy_state, "trend_runner_trend_start_ts_ms", 0) or 0),
+            trend_runner_adjust_count=int(getattr(strategy_state, "trend_runner_adjust_count", 0) or 0),
+            trend_runner_last_update_candle_ts_ms=int(getattr(strategy_state, "trend_runner_last_update_candle_ts_ms", 0) or 0),
+            trend_runner_tp_price=getattr(strategy_state, "trend_runner_tp_price", None),
+            trend_runner_sl_price=getattr(strategy_state, "trend_runner_sl_price", None),
+            trend_runner_tp_order_id=getattr(strategy_state, "trend_runner_tp_order_id", None),
+            trend_runner_sl_order_id=getattr(strategy_state, "trend_runner_sl_order_id", None),
+            trend_runner_exit_reason=getattr(strategy_state, "trend_runner_exit_reason", None),
+            trend_runner_reverse_candidate=bool(getattr(strategy_state, "trend_runner_reverse_candidate", False)),
+            trend_runner_reverse_start_ts_ms=int(getattr(strategy_state, "trend_runner_reverse_start_ts_ms", 0) or 0),
+            trend_runner_reverse_start_price=getattr(strategy_state, "trend_runner_reverse_start_price", None),
+            trend_runner_reverse_extreme_price=getattr(strategy_state, "trend_runner_reverse_extreme_price", None),
+            trend_runner_reverse_fast_cvd_start=float(getattr(strategy_state, "trend_runner_reverse_fast_cvd_start", 0.0) or 0.0),
+            trend_runner_reverse_samples=list(getattr(strategy_state, "trend_runner_reverse_samples", []) or []),
             cash_before_position=cash_before_position,
         )
 
@@ -143,5 +191,7 @@ def _normalize_tp_plan(tp_plan: str) -> str:
     if tp_plan == "SPLIT_PARTIAL_FINAL":
         return tp_plan
     if tp_plan == "MIDDLE_RUNNER":
+        return tp_plan
+    if tp_plan == "THREE_STAGE_RUNNER":
         return tp_plan
     return "SINGLE"

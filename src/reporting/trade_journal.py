@@ -346,6 +346,15 @@ class LiveTradeJournal:
             "order_id": result.order_id,
             "tp_order_id": result.tp_order_id,
             "tp_order_ids": list(getattr(result, "tp_order_ids", ()) or ()),
+            "three_stage_tp1_price": getattr(intent, "three_stage_tp1_price", None),
+            "three_stage_tp1_ratio": getattr(intent, "three_stage_tp1_ratio", 0.0),
+            "three_stage_tp2_price": getattr(intent, "three_stage_tp2_price", None),
+            "three_stage_tp2_ratio": getattr(intent, "three_stage_tp2_ratio", 0.0),
+            "three_stage_runner_tp_price": getattr(intent, "three_stage_runner_tp_price", None),
+            "three_stage_runner_sl_price": getattr(intent, "three_stage_runner_sl_price", None),
+            "three_stage_runner_ratio": getattr(intent, "three_stage_runner_ratio", 0.0),
+            "trend_runner_active": getattr(intent, "trend_runner_active", False),
+            "trend_runner_adjust_count": getattr(intent, "trend_runner_adjust_count", 0),
             "cash_before_position": cash_before_position,
             "equity": equity,
         }
@@ -376,6 +385,16 @@ class LiveTradeJournal:
                 "boll_lower": intent.boll_lower,
                 "tp_order_id": result.tp_order_id,
                 "tp_order_ids": list(getattr(result, "tp_order_ids", ()) or ()),
+                "three_stage_tp1_price": getattr(intent, "three_stage_tp1_price", None),
+                "three_stage_tp1_ratio": getattr(intent, "three_stage_tp1_ratio", 0.0),
+                "three_stage_tp2_price": getattr(intent, "three_stage_tp2_price", None),
+                "three_stage_tp2_ratio": getattr(intent, "three_stage_tp2_ratio", 0.0),
+                "three_stage_runner_tp_price": getattr(intent, "three_stage_runner_tp_price", None),
+                "three_stage_runner_sl_price": getattr(intent, "three_stage_runner_sl_price", None),
+                "three_stage_runner_ratio": getattr(intent, "three_stage_runner_ratio", 0.0),
+                "trend_runner_active": getattr(intent, "trend_runner_active", False),
+                "trend_runner_adjust_count": getattr(intent, "trend_runner_adjust_count", 0),
+                "trend_runner_exit_reason": getattr(intent, "trend_runner_exit_reason", None),
                 "equity": equity,
             },
             position_id=position_id,
@@ -415,6 +434,28 @@ class LiveTradeJournal:
             position_id=position_id,
         )
 
+    def record_trend_runner_market_exit(self, *, position_id: str | None, symbol: str, intent: Any, result: Any) -> None:
+        self.append(
+            "TREND_RUNNER_MARKET_EXIT_SIGNAL",
+            {
+                "symbol": symbol,
+                "side": getattr(intent, "side", None),
+                "contracts_before": getattr(result, "contracts_before", ""),
+                "contracts_reduced": getattr(result, "contracts_reduced", ""),
+                "contracts_after": getattr(result, "contracts_after", ""),
+                "tp_plan": getattr(intent, "tp_plan", "SINGLE"),
+                "runner_tp_price": getattr(intent, "trend_runner_tp_price", None),
+                "runner_sl_price": getattr(intent, "trend_runner_sl_price", None),
+                "runner_ratio": getattr(intent, "three_stage_runner_ratio", 0.0),
+                "trend_runner_active": getattr(intent, "trend_runner_active", False),
+                "trend_runner_adjust_count": getattr(intent, "trend_runner_adjust_count", 0),
+                "trend_runner_exit_reason": getattr(intent, "trend_runner_exit_reason", None) or getattr(intent, "reason", None),
+                "reason": getattr(intent, "reason", None),
+                "price": getattr(intent, "price", None),
+            },
+            position_id=position_id,
+        )
+
     def record_flat(
         self,
         *,
@@ -431,6 +472,7 @@ class LiveTradeJournal:
         last_partial_tp_price: float | None = None,
         last_tp_plan: str = "SINGLE",
         partial_tp_consumed: bool = False,
+        trend_runner_exit_reason: str | None = None,
     ) -> None:
         pnl = None
         pnl_pct = None
@@ -454,6 +496,7 @@ class LiveTradeJournal:
                 "last_partial_tp_price": last_partial_tp_price,
                 "last_tp_plan": last_tp_plan,
                 "partial_tp_consumed": partial_tp_consumed,
+                "trend_runner_exit_reason": trend_runner_exit_reason,
             },
             position_id=position_id,
         )

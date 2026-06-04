@@ -263,6 +263,7 @@ class DailyTradeReporter:
         add_count = 0
         tp_update_count = 0
         split_tp_count = 0
+        three_stage_runner_count = 0
         near_tp_reduce_count = 0
         error_count = 0
         active_known_closed_pnl = 0.0
@@ -281,6 +282,8 @@ class DailyTradeReporter:
                     add_count += 1
                 if event.payload.get("tp_plan") == "SPLIT_PARTIAL_FINAL":
                     split_tp_count += 1
+                if event.payload.get("tp_plan") == "THREE_STAGE_RUNNER":
+                    three_stage_runner_count += 1
             elif event.event_type == "TP_UPDATE":
                 tp_update_count += 1
             elif event.event_type == "NEAR_TP_REDUCE":
@@ -397,6 +400,7 @@ class DailyTradeReporter:
     {self._metric_card('ADD 事件数', str(add_count))}
     {self._metric_card('TP 更新数', str(tp_update_count))}
     {self._metric_card('Split TP 次数', str(split_tp_count))}
+    {self._metric_card('Three-Stage Runner 次数', str(three_stage_runner_count))}
     {self._metric_card('Near-TP 减仓数', str(near_tp_reduce_count))}
     {self._metric_card('错误事件数', str(error_count))}
   </div>
