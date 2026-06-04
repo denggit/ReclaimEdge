@@ -536,10 +536,12 @@ def mark_three_stage_progress_if_position_reduced(strategy: BollCvdReclaimStrate
     after_tp1_ratio = max(0.0, 1.0 - tp1_ratio)
     after_tp2_ratio = max(0.0, runner_ratio)
     tolerance = max(0.03, runner_ratio * 0.25, 0.000001)
+    event: str | None = None
 
     if not getattr(state, "three_stage_tp1_consumed", False) and remaining_ratio <= after_tp1_ratio + tolerance:
         state.three_stage_tp1_consumed = True
         state.partial_tp_consumed = True
+        event = "TP1"
         logger.warning(
             "THREE_STAGE_TP1_FILLED | side=%s old_qty=%.8f new_qty=%.8f remaining_ratio=%.6f expected_after_tp1=%.6f tp1_ratio=%.4f",
             state.side,
@@ -549,7 +551,6 @@ def mark_three_stage_progress_if_position_reduced(strategy: BollCvdReclaimStrate
             after_tp1_ratio,
             tp1_ratio,
         )
-        return "TP1"
 
     if (
         getattr(state, "three_stage_tp1_consumed", False)
@@ -580,8 +581,8 @@ def mark_three_stage_progress_if_position_reduced(strategy: BollCvdReclaimStrate
             getattr(state, "trend_runner_sl_price", None),
             ts_ms,
         )
-        return "TP2"
-    return None
+        return "TP1_TP2" if event == "TP1" else "TP2"
+    return event
 
 
 def middle_runner_activation_boll(strategy: BollCvdReclaimStrategy):

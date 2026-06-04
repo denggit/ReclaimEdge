@@ -265,6 +265,48 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
         self.assertIsNotNone(got)
         self.assertEqual(got.reason, "trend_runner_max_time_after_second_tp")
 
+    def test_on_tick_runner_market_exit_preempts_tp_update_on_new_candle(self) -> None:
+        strat = strategy()
+        strat.state = StrategyPositionState(
+            side="LONG",
+            layers=1,
+            total_entry_qty=1.0,
+            total_entry_notional=100.0,
+            avg_entry_price=100.0,
+            trend_runner_active=True,
+            trend_runner_trend_start_ts_ms=1_000,
+            trend_runner_tp_price=112.0,
+            trend_runner_sl_price=100.5,
+            last_tp_update_candle_ts_ms=1_000,
+        )
+
+        got = strat.on_tick(100.0, 20_000, boll(middle=101.0, upper=110.0, lower=90.0, candle_ts_ms=2_000), cvd())
+
+        self.assertEqual(len(got), 1)
+        self.assertEqual(got[0].intent_type, "MARKET_EXIT_RUNNER")
+        self.assertEqual(got[0].reason, "trend_runner_sl_failsafe")
+        self.assertNotIn("UPDATE_TP", [item.intent_type for item in got])
+
+    def test_trend_runner_tp_crossed_is_market_exit_signal(self) -> None:
+        strat = strategy()
+        strat.state = StrategyPositionState(
+            side="LONG",
+            layers=1,
+            total_entry_qty=1.0,
+            total_entry_notional=100.0,
+            avg_entry_price=100.0,
+            trend_runner_active=True,
+            trend_runner_trend_start_ts_ms=1_000,
+            trend_runner_tp_price=112.0,
+            trend_runner_sl_price=100.0,
+        )
+
+        got = strat._maybe_trend_runner_market_exit(112.1, 20_000, boll(middle=101.0), cvd())
+
+        self.assertIsNotNone(got)
+        self.assertEqual(got.intent_type, "MARKET_EXIT_RUNNER")
+        self.assertEqual(got.reason, "trend_runner_tp_crossed")
+
     def test_tp1_and_tp2_position_sync_activation(self) -> None:
         strat = strategy()
         strat.state = StrategyPositionState(
@@ -303,6 +345,35 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
         self.assertAlmostEqual(update.trend_runner_tp_price or 0, 111.1)
         self.assertEqual(update.trend_runner_sl_price, 101.0)
         self.assertEqual(update.tp_price, 111.1)
+
+    def test_tp1_and_tp2_same_position_sync_activates_runner_immediately(self) -> None:
+        strat = strategy()
+        strat.state = StrategyPositionState(
+            side="LONG",
+            layers=1,
+            total_entry_qty=1.0,
+            total_entry_notional=100.0,
+            avg_entry_price=100.0,
+            tp_plan="THREE_STAGE_RUNNER",
+            three_stage_runner_enabled_for_position=True,
+            three_stage_tp1_ratio=0.6,
+            three_stage_tp2_ratio=0.2,
+            three_stage_runner_ratio=0.2,
+        )
+
+        event = mark_three_stage_progress_if_position_reduced(
+            strat,
+            PositionSnapshot("LONG", Decimal("2"), 100.0, 0.2, Decimal("2")),
+            30_000,
+        )
+
+        self.assertEqual(event, "TP1_TP2")
+        self.assertTrue(strat.state.three_stage_tp1_consumed)
+        self.assertTrue(strat.state.three_stage_tp2_consumed)
+        self.assertTrue(strat.state.trend_runner_active)
+        self.assertEqual(strat.state.trend_runner_trend_start_ts_ms, 30_000)
+        self.assertIsNone(strat.state.trend_runner_tp_price)
+        self.assertIsNone(strat.state.trend_runner_sl_price)
 
     def test_waiting_tp2_new_candle_does_not_reset_three_stage_state(self) -> None:
         strat = strategy()

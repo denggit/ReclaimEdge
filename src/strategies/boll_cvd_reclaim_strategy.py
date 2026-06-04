@@ -335,15 +335,15 @@ class BollCvdReclaimStrategy:
 
         self._update_armed_state(price, ts_ms, boll)
 
+        runner_exit_intent = self._maybe_trend_runner_market_exit(price, ts_ms, boll, cvd)
+        if runner_exit_intent is not None:
+            return [runner_exit_intent]
+
         # TP maintenance is driven by BOLL candle timestamp. This avoids the old
         # problem where a restart/manual TP update delayed the next 15m update.
         tp_intent = self._maybe_update_tp(price, ts_ms, boll, cvd)
         if tp_intent is not None:
             intents.append(tp_intent)
-
-        runner_exit_intent = self._maybe_trend_runner_market_exit(price, ts_ms, boll, cvd)
-        if runner_exit_intent is not None:
-            intents.append(runner_exit_intent)
 
         near_tp_intent = self._maybe_near_tp_reduce(price, ts_ms, boll, cvd)
         if near_tp_intent is not None:
@@ -899,10 +899,6 @@ class BollCvdReclaimStrategy:
                 )
                 self.state.trend_runner_tp_price = tp_price
                 self.state.trend_runner_sl_price = runner_sl
-                if (self.state.side == "LONG" and price >= tp_price) or (self.state.side == "SHORT" and price <= tp_price):
-                    self.state.last_tp_update_ts_ms = ts_ms
-                    self.state.last_tp_update_candle_ts_ms = boll.candle_ts_ms
-                    return self._runner_market_exit_intent(price, ts_ms, boll, cvd, "trend_runner_tp_crossed")
                 logger.warning(
                     "TREND_RUNNER_UPDATE | side=%s old_tp=%s new_tp=%.4f old_sl=%s new_sl=%.4f adjust_count=%s tp_extra_pct=%.6f sl_distance_ratio=%.6f candle_ts=%s",
                     self.state.side,
@@ -1019,6 +1015,13 @@ class BollCvdReclaimStrategy:
             return None
         side = self.state.side
         sl_price = self.state.trend_runner_sl_price
+        tp_price = self.state.trend_runner_tp_price
+        if tp_price is not None:
+            if side == "LONG" and price >= tp_price:
+                return self._runner_market_exit_intent(price, ts_ms, boll, cvd, "trend_runner_tp_crossed")
+            if side == "SHORT" and price <= tp_price:
+                return self._runner_market_exit_intent(price, ts_ms, boll, cvd, "trend_runner_tp_crossed")
+
         if sl_price is not None:
             if side == "LONG" and price <= sl_price:
                 return self._runner_market_exit_intent(price, ts_ms, boll, cvd, "trend_runner_sl_failsafe")
