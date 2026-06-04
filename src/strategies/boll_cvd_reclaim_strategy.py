@@ -78,6 +78,7 @@ class BollCvdReclaimStrategyConfig:
     three_stage_tp2_ratio: float = 0.20
     three_stage_runner_ratio: float = 0.20
     runner_dynamic_enabled: bool = True
+    # Reserved for future timer-based updates; current runner TP/SL refreshes are driven by 15m BOLL candle_ts_ms.
     runner_dynamic_update_seconds: int = 900
     runner_tp_initial_outer_extra_pct: float = 0.010
     runner_tp_step_pct: float = 0.001

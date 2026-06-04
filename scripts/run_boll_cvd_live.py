@@ -306,26 +306,30 @@ def build_live_failure_email(intent: TradeIntent, error: Exception, rolled_back:
     return subject, content
 
 
-def restore_strategy_from_position(strategy: BollCvdReclaimStrategy, position: PositionSnapshot) -> None:
+def restore_strategy_from_position(strategy: BollCvdReclaimStrategy, position: PositionSnapshot, now_ms: int | None = None) -> None:
     if not position.has_position or position.side is None or position.avg_entry_price <= 0:
         return
+    now_ms = int(now_ms or utc_ms())
     strategy.state = StrategyPositionState(
         side=position.side,
         layers=1,
         last_entry_price=position.avg_entry_price,
         tp_price=None,
-        last_order_ts_ms=0,
+        last_order_ts_ms=now_ms,
+        first_entry_ts_ms=now_ms,
         last_tp_update_ts_ms=0,
         total_entry_qty=position.eth_qty,
         total_entry_notional=position.avg_entry_price * position.eth_qty,
         avg_entry_price=position.avg_entry_price,
     )
     logger.warning(
-        "Recovered existing position into strategy state | side=%s contracts=%s eth_qty=%.6f avg_entry=%.4f",
+        "Recovered existing position into strategy state | side=%s contracts=%s eth_qty=%.6f avg_entry=%.4f first_entry_ts_ms=%s last_order_ts_ms=%s",
         position.side,
         position.contracts,
         position.eth_qty,
         position.avg_entry_price,
+        now_ms,
+        now_ms,
     )
 
 
@@ -2074,7 +2078,7 @@ async def main() -> None:
             current_position_id = saved_state.position_id
             cash_before_position = saved_state.cash_before_position
         else:
-            restore_strategy_from_position(strategy, startup_position)
+            restore_strategy_from_position(strategy, startup_position, utc_ms())
             current_position_id = journal.new_position_id(trader.symbol, startup_position.side or "UNKNOWN")
             cash_before_position = startup_cash
             journal.record_startup_recovery(

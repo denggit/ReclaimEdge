@@ -24,6 +24,7 @@ from scripts.run_boll_cvd_live import (  # noqa: E402
     execution_worker,
     fetch_settled_flat_balance,
     next_weekly_summary_time,
+    restore_strategy_from_position,
     strategy_tick_worker,
 )
 from src.execution.trader import LiveTradeResult, PositionSnapshot  # noqa: E402
@@ -230,6 +231,17 @@ class GuardedLock:
 
 
 class LiveRuntimeWorkerTest(unittest.IsolatedAsyncioTestCase):
+    def test_restore_strategy_from_position_sets_conservative_first_entry_clock(self) -> None:
+        strategy = BollCvdShockReclaimStrategy(BollCvdReclaimStrategyConfig(), SimplePositionSizer(SimplePositionSizerConfig()))
+        position = PositionSnapshot("LONG", Decimal("3"), 100.5, 0.3, Decimal("3"))
+
+        restore_strategy_from_position(strategy, position, now_ms=123_456)
+
+        self.assertEqual(strategy.state.first_entry_ts_ms, 123_456)
+        self.assertEqual(strategy.state.last_order_ts_ms, 123_456)
+        self.assertEqual(strategy.state.layers, 1)
+        self.assertEqual(strategy.state.avg_entry_price, position.avg_entry_price)
+
     def test_weekly_summary_time(self) -> None:
         real_datetime = dt.datetime
 
