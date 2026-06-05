@@ -419,6 +419,7 @@ def restore_strategy_from_saved_state(strategy: BollCvdReclaimStrategy, saved_st
         middle_runner_add_disabled=getattr(saved_state, "middle_runner_add_disabled", False),
         middle_runner_size_mismatch_protected=getattr(saved_state, "middle_runner_size_mismatch_protected", False),
         middle_runner_size_mismatch_warning_ts_ms=getattr(saved_state, "middle_runner_size_mismatch_warning_ts_ms", 0),
+        middle_runner_sl_diag_last_signature=getattr(saved_state, "middle_runner_sl_diag_last_signature", None),
         three_stage_runner_enabled_for_position=getattr(saved_state, "three_stage_runner_enabled_for_position", False),
         three_stage_tp1_price=getattr(saved_state, "three_stage_tp1_price", None),
         three_stage_tp2_price=getattr(saved_state, "three_stage_tp2_price", None),
@@ -432,6 +433,7 @@ def restore_strategy_from_saved_state(strategy: BollCvdReclaimStrategy, saved_st
         three_stage_post_tp1_protective_sl_order_id=getattr(saved_state, "three_stage_post_tp1_protective_sl_order_id", None),
         three_stage_post_tp1_sl_extension_triggered=getattr(saved_state, "three_stage_post_tp1_sl_extension_triggered", False),
         three_stage_post_tp1_protected=getattr(saved_state, "three_stage_post_tp1_protected", False),
+        three_stage_post_tp1_sl_diag_last_signature=getattr(saved_state, "three_stage_post_tp1_sl_diag_last_signature", None),
         three_stage_pre_tp1_degrade_stage=getattr(saved_state, "three_stage_pre_tp1_degrade_stage", None),
         three_stage_pre_tp1_degraded_ts_ms=getattr(saved_state, "three_stage_pre_tp1_degraded_ts_ms", 0),
         trend_runner_active=getattr(saved_state, "trend_runner_active", False),
@@ -695,6 +697,21 @@ def mark_middle_runner_active_if_position_reduced(strategy: BollCvdReclaimStrate
         exit_price=getattr(state, "middle_runner_first_tp_price", None),
         fee_buffer_pct=strategy.config.breakeven_fee_buffer_pct,
     )
+    logger.warning(
+        "MIDDLE_RUNNER_COST_BASIS_AFTER_FIRST_CLOSE | side=%s total_entry_qty=%.8f okx_core_eth_qty=%.8f sidecar_open_qty=%.8f position_cost_entry_notional=%.4f position_cost_exit_notional=%.4f position_cost_remaining_qty=%.8f net_remaining_breakeven_price=%.4f avg_entry_price=%.4f first_tp_price=%s first_close_ratio=%.4f keep_ratio=%.4f",
+        state.side,
+        total_entry_qty,
+        float(position.eth_qty or 0.0),
+        sidecar_open_qty(list(getattr(state, "sidecar_legs", []) or [])),
+        float(getattr(state, "position_cost_entry_notional", 0.0) or 0.0),
+        float(getattr(state, "position_cost_exit_notional", 0.0) or 0.0),
+        float(getattr(state, "position_cost_remaining_qty", 0.0) or 0.0),
+        float(getattr(state, "net_remaining_breakeven_price", 0.0) or 0.0),
+        float(getattr(state, "avg_entry_price", 0.0) or 0.0),
+        getattr(state, "middle_runner_first_tp_price", None),
+        float(getattr(state, "middle_runner_first_close_ratio", 0.0) or 0.0),
+        keep_ratio,
+    )
     state.middle_runner_pending = False
     state.middle_runner_active = True
     state.middle_runner_add_disabled = True
@@ -744,6 +761,21 @@ def mark_three_stage_progress_if_position_reduced(strategy: BollCvdReclaimStrate
             exit_price=getattr(state, "three_stage_tp1_price", None),
             fee_buffer_pct=strategy.config.breakeven_fee_buffer_pct,
             expected_remaining_qty=expected_after_tp1_qty if will_mark_tp2_now else None,
+        )
+        logger.warning(
+            "THREE_STAGE_COST_BASIS_AFTER_TP1 | side=%s total_entry_qty=%.8f okx_core_eth_qty=%.8f sidecar_open_qty=%.8f position_cost_entry_notional=%.4f position_cost_exit_notional=%.4f position_cost_remaining_qty=%.8f net_remaining_breakeven_price=%.4f avg_entry_price=%.4f tp1_price=%s tp1_ratio=%.4f remaining_ratio=%.6f",
+            state.side,
+            total_entry_qty,
+            float(position.eth_qty or 0.0),
+            sidecar_open_qty(list(getattr(state, "sidecar_legs", []) or [])),
+            float(getattr(state, "position_cost_entry_notional", 0.0) or 0.0),
+            float(getattr(state, "position_cost_exit_notional", 0.0) or 0.0),
+            float(getattr(state, "position_cost_remaining_qty", 0.0) or 0.0),
+            float(getattr(state, "net_remaining_breakeven_price", 0.0) or 0.0),
+            float(getattr(state, "avg_entry_price", 0.0) or 0.0),
+            getattr(state, "three_stage_tp1_price", None),
+            tp1_ratio,
+            remaining_ratio,
         )
         state.three_stage_tp1_consumed = True
         state.partial_tp_consumed = True

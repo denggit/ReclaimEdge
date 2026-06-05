@@ -743,6 +743,54 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
 
         self.assertEqual(got, ((95.0 + 102.0) / 2))
 
+    def test_three_stage_post_tp1_sl_diag_logs_once_per_signature(self) -> None:
+        strat = strategy()
+        strat.state = StrategyPositionState(
+            side="LONG",
+            avg_entry_price=100.0,
+            net_remaining_breakeven_price=95.0,
+            three_stage_tp1_price=102.0,
+            three_stage_tp1_ratio=0.6,
+            three_stage_tp1_consumed=True,
+            position_cost_entry_notional=100.0,
+            position_cost_exit_notional=61.2,
+            position_cost_remaining_qty=0.4,
+        )
+        snapshot = boll(middle=102.0, upper=110.0, lower=90.0, candle_ts_ms=1_000)
+
+        with self.assertLogs("src.strategies.boll_cvd_reclaim_strategy", level="WARNING") as logs:
+            first = strat._calculate_three_stage_post_tp1_protective_sl("LONG", 103.0, snapshot)
+            second = strat._calculate_three_stage_post_tp1_protective_sl("LONG", 103.0, snapshot)
+
+        self.assertEqual(first, second)
+        joined = "\n".join(logs.output)
+        self.assertEqual(joined.count("THREE_STAGE_POST_TP1_PROTECTIVE_SL_DIAG"), 1)
+        self.assertIn("candidate_cost=98.5000", joined)
+        self.assertIn("candidate_structure=96.0000", joined)
+        self.assertIn("net_remaining_breakeven=95.0000", joined)
+
+    def test_three_stage_post_tp1_sl_diag_logs_warning_reason_when_invalid(self) -> None:
+        strat = strategy()
+        strat.state = StrategyPositionState(
+            side="LONG",
+            avg_entry_price=100.0,
+            net_remaining_breakeven_price=95.0,
+            three_stage_tp1_price=102.0,
+            three_stage_tp1_ratio=0.6,
+            three_stage_tp1_consumed=True,
+        )
+        snapshot = boll(middle=102.0, upper=110.0, lower=90.0, candle_ts_ms=1_000)
+
+        with self.assertLogs("src.strategies.boll_cvd_reclaim_strategy", level="WARNING") as logs:
+            first = strat._calculate_three_stage_post_tp1_protective_sl("LONG", 98.0, snapshot)
+            second = strat._calculate_three_stage_post_tp1_protective_sl("LONG", 98.0, snapshot)
+
+        self.assertIsNone(first)
+        self.assertIsNone(second)
+        joined = "\n".join(logs.output)
+        self.assertEqual(joined.count("THREE_STAGE_POST_TP1_PROTECTIVE_SL_DIAG"), 1)
+        self.assertIn("reason=long_sl_not_below_current", joined)
+
     def test_post_tp1_protective_sl_falls_back_to_core_avg_logic_without_net_breakeven(self) -> None:
         strat = strategy(breakeven_fee_buffer_pct=0.001)
         strat.state = StrategyPositionState(

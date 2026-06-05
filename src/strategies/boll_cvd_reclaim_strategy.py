@@ -352,6 +352,7 @@ class StrategyPositionState:
     middle_runner_add_disabled: bool = False
     middle_runner_size_mismatch_protected: bool = False
     middle_runner_size_mismatch_warning_ts_ms: int = 0
+    middle_runner_sl_diag_last_signature: str | None = None
     three_stage_runner_enabled_for_position: bool = False
     three_stage_tp1_price: float | None = None
     three_stage_tp2_price: float | None = None
@@ -365,6 +366,7 @@ class StrategyPositionState:
     three_stage_post_tp1_protective_sl_order_id: str | None = None
     three_stage_post_tp1_sl_extension_triggered: bool = False
     three_stage_post_tp1_protected: bool = False
+    three_stage_post_tp1_sl_diag_last_signature: str | None = None
     three_stage_pre_tp1_degrade_stage: str | None = None
     three_stage_pre_tp1_degraded_ts_ms: int = 0
     trend_runner_active: bool = False
@@ -2056,34 +2058,102 @@ class BollCvdReclaimStrategy:
         fee = self.config.breakeven_fee_buffer_pct
         if side == "LONG":
             after_partial_breakeven = base_breakeven if base_breakeven > 0 else avg_entry * (1 + fee)
-            candidate_1 = (after_partial_breakeven + boll.middle) / 2
-            candidate_2 = (boll.lower + boll.middle) / 2
-            protective_sl = max(candidate_1, candidate_2)
+            candidate_cost = (after_partial_breakeven + boll.middle) / 2
+            candidate_structure = (boll.lower + boll.middle) / 2
+            protective_sl = max(candidate_cost, candidate_structure)
             if protective_sl >= current_price:
-                logger.warning(
-                    "MIDDLE_RUNNER_ORDER_WARNING | reason=long_sl_not_below_current side=LONG current_price=%.4f protective_sl_price=%.4f boll_middle=%.4f boll_lower=%.4f",
+                self._log_middle_runner_sl_diagnostic_once(
+                    side,
+                    "long_sl_not_below_current",
                     current_price,
+                    base_breakeven,
+                    candidate_cost,
+                    candidate_structure,
                     protective_sl,
-                    boll.middle,
-                    boll.lower,
+                    boll,
                 )
                 return None
+            self._log_middle_runner_sl_diagnostic_once(
+                side,
+                "calculated",
+                current_price,
+                base_breakeven,
+                candidate_cost,
+                candidate_structure,
+                protective_sl,
+                boll,
+            )
             return protective_sl
 
         after_partial_breakeven = base_breakeven if base_breakeven > 0 else avg_entry * (1 - fee)
-        candidate_1 = (after_partial_breakeven + boll.middle) / 2
-        candidate_2 = (boll.upper + boll.middle) / 2
-        protective_sl = min(candidate_1, candidate_2)
+        candidate_cost = (after_partial_breakeven + boll.middle) / 2
+        candidate_structure = (boll.upper + boll.middle) / 2
+        protective_sl = min(candidate_cost, candidate_structure)
         if protective_sl <= current_price:
-            logger.warning(
-                "MIDDLE_RUNNER_ORDER_WARNING | reason=short_sl_not_above_current side=SHORT current_price=%.4f protective_sl_price=%.4f boll_middle=%.4f boll_upper=%.4f",
+            self._log_middle_runner_sl_diagnostic_once(
+                side,
+                "short_sl_not_above_current",
                 current_price,
+                base_breakeven,
+                candidate_cost,
+                candidate_structure,
                 protective_sl,
-                boll.middle,
-                boll.upper,
+                boll,
             )
             return None
+        self._log_middle_runner_sl_diagnostic_once(
+            side,
+            "calculated",
+            current_price,
+            base_breakeven,
+            candidate_cost,
+            candidate_structure,
+            protective_sl,
+            boll,
+        )
         return protective_sl
+
+    def _log_middle_runner_sl_diagnostic_once(
+        self,
+        side: PositionSide,
+        reason: str,
+        current_price: float,
+        net_remaining_breakeven: float,
+        candidate_cost: float,
+        candidate_structure: float,
+        protective_sl: float | None,
+        boll: BollSnapshot,
+    ) -> None:
+        protective_sl_for_signature = float(protective_sl or 0.0)
+        signature = (
+            f"{side}|{getattr(boll, 'candle_ts_ms', 0)}|{round(net_remaining_breakeven, 4)}|"
+            f"{round(candidate_cost, 4)}|{round(candidate_structure, 4)}|"
+            f"{round(protective_sl_for_signature, 4)}|{reason}"
+        )
+        if self.state.middle_runner_sl_diag_last_signature == signature:
+            return
+        self.state.middle_runner_sl_diag_last_signature = signature
+        breakeven_source = "net_remaining_breakeven" if net_remaining_breakeven > 0 else "avg_entry_fallback"
+        protective_sl_text = f"{protective_sl:.4f}" if protective_sl is not None else "-"
+        logger.warning(
+            "MIDDLE_RUNNER_PROTECTIVE_SL_DIAG | side=%s reason=%s current_price=%.4f avg_entry=%.4f net_remaining_breakeven=%.4f breakeven_source=%s candidate_cost=%.4f candidate_structure=%.4f protective_sl=%s candle_ts=%s middle=%.4f upper=%.4f lower=%.4f position_cost_entry_notional=%.4f position_cost_exit_notional=%.4f position_cost_remaining_qty=%.8f",
+            side,
+            reason,
+            current_price,
+            float(self.state.avg_entry_price or 0.0),
+            net_remaining_breakeven,
+            breakeven_source,
+            candidate_cost,
+            candidate_structure,
+            protective_sl_text,
+            getattr(boll, "candle_ts_ms", 0),
+            boll.middle,
+            boll.upper,
+            boll.lower,
+            float(getattr(self.state, "position_cost_entry_notional", 0.0) or 0.0),
+            float(getattr(self.state, "position_cost_exit_notional", 0.0) or 0.0),
+            float(getattr(self.state, "position_cost_remaining_qty", 0.0) or 0.0),
+        )
 
     def _tighten_middle_runner_sl(self, side: PositionSide, old_sl: float, new_sl: float) -> float:
         if side == "LONG":
@@ -2137,6 +2207,16 @@ class BollCvdReclaimStrategy:
         if current_price <= 0:
             return None
         if base_breakeven <= 0 and (avg_entry <= 0 or tp1_price is None or tp1_ratio <= 0 or tp1_ratio >= 1):
+            self._log_three_stage_post_tp1_sl_diagnostic_once(
+                side,
+                "missing_cost_basis",
+                current_price,
+                base_breakeven,
+                0.0,
+                0.0,
+                None,
+                boll,
+            )
             return None
         fee = self.config.breakeven_fee_buffer_pct
         if side == "LONG":
@@ -2145,21 +2225,31 @@ class BollCvdReclaimStrategy:
             else:
                 post_tp1_breakeven = avg_entry - tp1_ratio * (float(tp1_price) - avg_entry) / (1 - tp1_ratio)
                 post_tp1_breakeven_buffered = post_tp1_breakeven * (1 + fee)
-            candidate_1 = (post_tp1_breakeven_buffered + boll.middle) / 2
-            candidate_2 = (boll.lower + boll.middle) / 2
-            protective_sl = max(candidate_1, candidate_2)
+            candidate_cost = (post_tp1_breakeven_buffered + boll.middle) / 2
+            candidate_structure = (boll.lower + boll.middle) / 2
+            protective_sl = max(candidate_cost, candidate_structure)
             if protective_sl >= current_price:
-                logger.warning(
-                    "THREE_STAGE_POST_TP1_SL_WARNING | reason=long_sl_not_below_current side=LONG current_price=%.4f protective_sl_price=%.4f avg_entry=%.4f tp1_price=%.4f tp1_ratio=%.4f boll_middle=%.4f boll_lower=%.4f",
+                self._log_three_stage_post_tp1_sl_diagnostic_once(
+                    side,
+                    "long_sl_not_below_current",
                     current_price,
+                    base_breakeven,
+                    candidate_cost,
+                    candidate_structure,
                     protective_sl,
-                    avg_entry,
-                    float(tp1_price),
-                    tp1_ratio,
-                    boll.middle,
-                    boll.lower,
+                    boll,
                 )
                 return None
+            self._log_three_stage_post_tp1_sl_diagnostic_once(
+                side,
+                "calculated",
+                current_price,
+                base_breakeven,
+                candidate_cost,
+                candidate_structure,
+                protective_sl,
+                boll,
+            )
             return protective_sl
 
         if base_breakeven > 0:
@@ -2167,22 +2257,78 @@ class BollCvdReclaimStrategy:
         else:
             post_tp1_breakeven = avg_entry + tp1_ratio * (avg_entry - float(tp1_price)) / (1 - tp1_ratio)
             post_tp1_breakeven_buffered = post_tp1_breakeven * (1 - fee)
-        candidate_1 = (post_tp1_breakeven_buffered + boll.middle) / 2
-        candidate_2 = (boll.upper + boll.middle) / 2
-        protective_sl = min(candidate_1, candidate_2)
+        candidate_cost = (post_tp1_breakeven_buffered + boll.middle) / 2
+        candidate_structure = (boll.upper + boll.middle) / 2
+        protective_sl = min(candidate_cost, candidate_structure)
         if protective_sl <= current_price:
-            logger.warning(
-                "THREE_STAGE_POST_TP1_SL_WARNING | reason=short_sl_not_above_current side=SHORT current_price=%.4f protective_sl_price=%.4f avg_entry=%.4f tp1_price=%.4f tp1_ratio=%.4f boll_middle=%.4f boll_upper=%.4f",
+            self._log_three_stage_post_tp1_sl_diagnostic_once(
+                side,
+                "short_sl_not_above_current",
                 current_price,
+                base_breakeven,
+                candidate_cost,
+                candidate_structure,
                 protective_sl,
-                avg_entry,
-                float(tp1_price),
-                tp1_ratio,
-                boll.middle,
-                boll.upper,
+                boll,
             )
             return None
+        self._log_three_stage_post_tp1_sl_diagnostic_once(
+            side,
+            "calculated",
+            current_price,
+            base_breakeven,
+            candidate_cost,
+            candidate_structure,
+            protective_sl,
+            boll,
+        )
         return protective_sl
+
+    def _log_three_stage_post_tp1_sl_diagnostic_once(
+        self,
+        side: PositionSide,
+        reason: str,
+        current_price: float,
+        net_remaining_breakeven: float,
+        candidate_cost: float,
+        candidate_structure: float,
+        protective_sl: float | None,
+        boll: BollSnapshot,
+    ) -> None:
+        protective_sl_for_signature = float(protective_sl or 0.0)
+        signature = (
+            f"{side}|{getattr(boll, 'candle_ts_ms', 0)}|{round(net_remaining_breakeven, 4)}|"
+            f"{round(candidate_cost, 4)}|{round(candidate_structure, 4)}|"
+            f"{round(protective_sl_for_signature, 4)}|{reason}"
+        )
+        if self.state.three_stage_post_tp1_sl_diag_last_signature == signature:
+            return
+        self.state.three_stage_post_tp1_sl_diag_last_signature = signature
+        breakeven_source = "net_remaining_breakeven" if net_remaining_breakeven > 0 else "avg_entry_fallback"
+        protective_sl_text = f"{protective_sl:.4f}" if protective_sl is not None else "-"
+        tp1_price = getattr(self.state, "three_stage_tp1_price", None)
+        tp1_price_text = f"{float(tp1_price):.4f}" if tp1_price is not None else "-"
+        logger.warning(
+            "THREE_STAGE_POST_TP1_PROTECTIVE_SL_DIAG | side=%s reason=%s current_price=%.4f avg_entry=%.4f net_remaining_breakeven=%.4f breakeven_source=%s tp1_price=%s tp1_ratio=%.4f candidate_cost=%.4f candidate_structure=%.4f protective_sl=%s candle_ts=%s middle=%.4f upper=%.4f lower=%.4f position_cost_entry_notional=%.4f position_cost_exit_notional=%.4f position_cost_remaining_qty=%.8f",
+            side,
+            reason,
+            current_price,
+            float(self.state.avg_entry_price or 0.0),
+            net_remaining_breakeven,
+            breakeven_source,
+            tp1_price_text,
+            float(getattr(self.state, "three_stage_tp1_ratio", 0.0) or 0.0),
+            candidate_cost,
+            candidate_structure,
+            protective_sl_text,
+            getattr(boll, "candle_ts_ms", 0),
+            boll.middle,
+            boll.upper,
+            boll.lower,
+            float(getattr(self.state, "position_cost_entry_notional", 0.0) or 0.0),
+            float(getattr(self.state, "position_cost_exit_notional", 0.0) or 0.0),
+            float(getattr(self.state, "position_cost_remaining_qty", 0.0) or 0.0),
+        )
 
     def _tighten_three_stage_post_tp1_sl(self, side: PositionSide, old_sl: float, new_sl: float) -> float:
         if side == "LONG":

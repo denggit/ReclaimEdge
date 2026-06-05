@@ -25,6 +25,8 @@ from scripts.run_boll_cvd_live import (  # noqa: E402
     apply_three_stage_startup_safety_gate,
     execution_worker,
     fetch_settled_flat_balance,
+    mark_middle_runner_active_if_position_reduced,
+    mark_three_stage_progress_if_position_reduced,
     next_weekly_summary_time,
     restore_strategy_from_position,
     strategy_tick_worker,
@@ -289,6 +291,55 @@ class LiveRuntimeWorkerTest(unittest.IsolatedAsyncioTestCase):
             three_stage_runner_ratio=0.2,
         )
         return strategy
+
+    async def test_middle_runner_activation_logs_cost_basis_after_first_close(self) -> None:
+        strategy = BollCvdShockReclaimStrategy(
+            BollCvdReclaimStrategyConfig(middle_runner_enabled=True, breakeven_fee_buffer_pct=0.001),
+            SimplePositionSizer(SimplePositionSizerConfig()),
+        )
+        strategy.state = StrategyPositionState(
+            side="LONG",
+            layers=1,
+            total_entry_qty=1.0,
+            total_entry_notional=100.0,
+            avg_entry_price=100.0,
+            tp_price=110.0,
+            tp_plan="MIDDLE_RUNNER",
+            partial_tp_price=105.0,
+            partial_tp_ratio=0.8,
+            middle_runner_pending=True,
+            middle_runner_first_close_ratio=0.8,
+            middle_runner_keep_ratio=0.2,
+            middle_runner_first_tp_price=105.0,
+            middle_runner_final_tp_price=110.0,
+            position_cost_entry_notional=100.0,
+            position_cost_remaining_qty=1.0,
+        )
+        position = PositionSnapshot("LONG", Decimal("2"), 100.0, 0.2, Decimal("2"))
+
+        with self.assertLogs("scripts.run_boll_cvd_live", level="WARNING") as logs:
+            activated = mark_middle_runner_active_if_position_reduced(strategy, position)
+
+        self.assertTrue(activated)
+        joined = "\n".join(logs.output)
+        self.assertIn("MIDDLE_RUNNER_COST_BASIS_AFTER_FIRST_CLOSE", joined)
+        self.assertIn("net_remaining_breakeven_price", joined)
+        self.assertIn("position_cost_exit_notional=84.0000", joined)
+
+    async def test_three_stage_tp1_logs_cost_basis_after_tp1(self) -> None:
+        strategy = self.three_stage_strategy("LONG")
+        strategy.state.position_cost_entry_notional = 100.0
+        strategy.state.position_cost_remaining_qty = 1.0
+        position = PositionSnapshot("LONG", Decimal("4"), 100.0, 0.4, Decimal("4"))
+
+        with self.assertLogs("scripts.run_boll_cvd_live", level="WARNING") as logs:
+            event = mark_three_stage_progress_if_position_reduced(strategy, position, 10_000)
+
+        self.assertEqual(event, "TP1")
+        joined = "\n".join(logs.output)
+        self.assertIn("THREE_STAGE_COST_BASIS_AFTER_TP1", joined)
+        self.assertIn("net_remaining_breakeven_price", joined)
+        self.assertIn("position_cost_exit_notional=60.6000", joined)
 
     async def run_account_sync_until(self, predicate, *, account_snapshot, execution_state, trader, strategy, journal, state_store, timeout: float = 0.5):  # type: ignore[no-untyped-def]
         task = asyncio.create_task(

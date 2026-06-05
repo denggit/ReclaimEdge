@@ -423,6 +423,52 @@ class SplitTakeProfitStrategyTest(unittest.TestCase):
         # breakeven candidate wins when structure is looser
         self.assertEqual(short_sl_d, s_candidate_breakeven_d)
 
+    def test_middle_runner_sl_diag_logs_once_per_signature(self) -> None:
+        strat = strategy(middle_runner_enabled=True, breakeven_fee_buffer_pct=0.001)
+        strat.state = StrategyPositionState(
+            side="LONG",
+            avg_entry_price=100.0,
+            net_remaining_breakeven_price=95.0,
+            position_cost_entry_notional=100.0,
+            position_cost_exit_notional=76.0,
+            position_cost_remaining_qty=0.2,
+        )
+        snapshot = boll(middle=102.0, lower=90.0, upper=110.0, candle_ts_ms=1_000)
+
+        with self.assertLogs("src.strategies.boll_cvd_reclaim_strategy", level="WARNING") as logs:
+            first = strat._calculate_middle_runner_protective_sl("LONG", 103.0, snapshot)
+            second = strat._calculate_middle_runner_protective_sl("LONG", 103.0, snapshot)
+
+        self.assertEqual(first, second)
+        joined = "\n".join(logs.output)
+        self.assertEqual(joined.count("MIDDLE_RUNNER_PROTECTIVE_SL_DIAG"), 1)
+        self.assertIn("net_remaining_breakeven=95.0000", joined)
+        self.assertIn("breakeven_source=net_remaining_breakeven", joined)
+        self.assertIn("candidate_cost=98.5000", joined)
+        self.assertIn("candidate_structure=96.0000", joined)
+        self.assertIn("protective_sl=98.5000", joined)
+
+    def test_middle_runner_sl_diag_logs_again_when_signature_changes(self) -> None:
+        strat = strategy(middle_runner_enabled=True, breakeven_fee_buffer_pct=0.001)
+        strat.state = StrategyPositionState(side="LONG", avg_entry_price=100.0, net_remaining_breakeven_price=95.0)
+
+        with self.assertLogs("src.strategies.boll_cvd_reclaim_strategy", level="WARNING") as logs:
+            strat._calculate_middle_runner_protective_sl("LONG", 103.0, boll(middle=102.0, lower=90.0, upper=110.0, candle_ts_ms=1_000))
+            strat._calculate_middle_runner_protective_sl("LONG", 103.0, boll(middle=102.0, lower=90.0, upper=110.0, candle_ts_ms=2_000))
+
+        self.assertEqual("\n".join(logs.output).count("MIDDLE_RUNNER_PROTECTIVE_SL_DIAG"), 2)
+
+    def test_middle_runner_sl_diag_logs_avg_entry_fallback(self) -> None:
+        strat = strategy(middle_runner_enabled=True, breakeven_fee_buffer_pct=0.001)
+        strat.state = StrategyPositionState(side="LONG", avg_entry_price=100.0, net_remaining_breakeven_price=0.0)
+
+        with self.assertLogs("src.strategies.boll_cvd_reclaim_strategy", level="WARNING") as logs:
+            strat._calculate_middle_runner_protective_sl("LONG", 103.0, boll(middle=102.0, lower=90.0, upper=110.0, candle_ts_ms=1_000))
+
+        joined = "\n".join(logs.output)
+        self.assertIn("MIDDLE_RUNNER_PROTECTIVE_SL_DIAG", joined)
+        self.assertIn("breakeven_source=avg_entry_fallback", joined)
+
     def test_middle_runner_extension_trigger_moves_sl_to_middle(self) -> None:
         long_strat = strategy(middle_runner_enabled=True, middle_runner_extension_trigger_ratio=0.6)
         long_strat.state.middle_runner_active = True

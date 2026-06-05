@@ -65,6 +65,7 @@ class LivePositionState:
     middle_runner_add_disabled: bool = False
     middle_runner_size_mismatch_protected: bool = False
     middle_runner_size_mismatch_warning_ts_ms: int = 0
+    middle_runner_sl_diag_last_signature: str | None = None
     three_stage_runner_enabled_for_position: bool = False
     three_stage_tp1_price: float | None = None
     three_stage_tp2_price: float | None = None
@@ -78,6 +79,7 @@ class LivePositionState:
     three_stage_post_tp1_protective_sl_order_id: str | None = None
     three_stage_post_tp1_sl_extension_triggered: bool = False
     three_stage_post_tp1_protected: bool = False
+    three_stage_post_tp1_sl_diag_last_signature: str | None = None
     three_stage_pre_tp1_degrade_stage: str | None = None
     three_stage_pre_tp1_degraded_ts_ms: int = 0
     trend_runner_active: bool = False
@@ -202,6 +204,7 @@ class LiveStateStore:
             middle_runner_add_disabled=bool(getattr(strategy_state, "middle_runner_add_disabled", False)),
             middle_runner_size_mismatch_protected=bool(getattr(strategy_state, "middle_runner_size_mismatch_protected", False)),
             middle_runner_size_mismatch_warning_ts_ms=int(getattr(strategy_state, "middle_runner_size_mismatch_warning_ts_ms", 0) or 0),
+            middle_runner_sl_diag_last_signature=getattr(strategy_state, "middle_runner_sl_diag_last_signature", None),
             three_stage_runner_enabled_for_position=bool(getattr(strategy_state, "three_stage_runner_enabled_for_position", False)),
             three_stage_tp1_price=getattr(strategy_state, "three_stage_tp1_price", None),
             three_stage_tp2_price=getattr(strategy_state, "three_stage_tp2_price", None),
@@ -215,6 +218,7 @@ class LiveStateStore:
             three_stage_post_tp1_protective_sl_order_id=getattr(strategy_state, "three_stage_post_tp1_protective_sl_order_id", None),
             three_stage_post_tp1_sl_extension_triggered=bool(getattr(strategy_state, "three_stage_post_tp1_sl_extension_triggered", False)),
             three_stage_post_tp1_protected=bool(getattr(strategy_state, "three_stage_post_tp1_protected", False)),
+            three_stage_post_tp1_sl_diag_last_signature=getattr(strategy_state, "three_stage_post_tp1_sl_diag_last_signature", None),
             three_stage_pre_tp1_degrade_stage=getattr(strategy_state, "three_stage_pre_tp1_degrade_stage", None),
             three_stage_pre_tp1_degraded_ts_ms=int(getattr(strategy_state, "three_stage_pre_tp1_degraded_ts_ms", 0) or 0),
             trend_runner_active=bool(getattr(strategy_state, "trend_runner_active", False)),
