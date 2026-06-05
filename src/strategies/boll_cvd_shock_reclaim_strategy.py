@@ -27,12 +27,16 @@ class BollCvdShockReclaimStrategy(BollCvdReclaimStrategy):
     period after the last switch=True tick.
     """
 
+    ADD_FREEZE_SKIP_LOG_INTERVAL_MS = 30_000
+
     def __init__(self, config: BollCvdReclaimStrategyConfig, sizer: SimplePositionSizer):
         super().__init__(config, sizer)
         self.switch_grace_seconds = float(os.getenv("BOLL_SWITCH_GRACE_SECONDS", "300"))
         self.first_add_block_bypass_multiplier = float(os.getenv("FIRST_ADD_BLOCK_BYPASS_MULTIPLIER", "5"))
         self._last_switch_on_ts_ms: int = 0
         self._last_switch_on_candle_ts_ms: int = 0
+        self._last_add_freeze_skip_log_ts_ms: int = 0
+        self._last_add_freeze_skip_log_key: tuple[str, int, int, int, float] | None = None
         self._last_lower_outside_no_burst_log_monotonic: float = 0.0
         self._last_upper_outside_no_burst_log_monotonic: float = 0.0
         self.outside_no_burst_log_interval_seconds = float(os.getenv("OUTSIDE_NO_BURST_LOG_INTERVAL_SECONDS", "10"))
@@ -246,9 +250,25 @@ class BollCvdShockReclaimStrategy(BollCvdReclaimStrategy):
 
     def _log_add_timing_skipped(self, side: PositionSide, reason: str, price: float, ts_ms: int, target_layer: int) -> None:
         if reason == "add_freeze":
+            multiplier = self._active_add_freeze_bypass_multiplier()
+            log_key = (
+                side,
+                int(self.state.layers),
+                int(target_layer),
+                int(getattr(self.state, "add_freeze_penalty_count", 0) or 0),
+                round(float(multiplier), 6),
+            )
+            last_ts = int(getattr(self, "_last_add_freeze_skip_log_ts_ms", 0) or 0)
+            last_key = getattr(self, "_last_add_freeze_skip_log_key", None)
+            if (
+                last_key == log_key
+                and ts_ms - last_ts < self.ADD_FREEZE_SKIP_LOG_INTERVAL_MS
+            ):
+                return
+            self._last_add_freeze_skip_log_ts_ms = ts_ms
+            self._last_add_freeze_skip_log_key = log_key
             last = self.state.last_entry_price if self.state.last_entry_price is not None else 0.0
             adverse_gap_pct = self._adverse_gap_pct(side, price)
-            multiplier = self._active_add_freeze_bypass_multiplier()
             required_gap_pct = self._add_layer_gap_pct_for_target_layer(target_layer) * multiplier
             logger.info(
                 "ADD_SKIPPED | reason=add_freeze side=%s price=%.4f layers=%s target_layer=%s last_entry=%.4f freeze_remaining_seconds=%.1f required_seconds=%s adverse_gap_pct=%.4f%% required_gap_pct=%.4f%% multiplier=%.2f penalty_count=%s",

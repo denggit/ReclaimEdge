@@ -176,6 +176,32 @@ class BollCvdShockReclaimStrategyTest(unittest.TestCase):
         self.assertTrue(enough)
         self.assertEqual(enough_reason, "add_freeze_bypassed")
 
+    def test_add_freeze_skipped_log_is_throttled_by_time_and_key(self) -> None:
+        strat = strategy(add_layer_gap_pct=0.003, add_min_interval_bypass_multiplier=2.0)
+        strat.state.layers = 2
+        strat.state.last_entry_price = 100.0
+        strat.state.add_freeze_until_ts_ms = 2_000_000
+        strat.state.add_freeze_penalty_count = 1
+
+        ok, reason = strat._add_timing_passed("LONG", 99.2, 1_000_000, 3)
+        self.assertFalse(ok)
+        self.assertEqual(reason, "add_freeze")
+
+        with patch("src.strategies.boll_cvd_shock_reclaim_strategy.logger.info") as log_info:
+            strat._log_add_timing_skipped("LONG", "add_freeze", 99.2, 1_000_000, 3)
+            strat._log_add_timing_skipped("LONG", "add_freeze", 99.1, 1_001_000, 3)
+            self.assertEqual(log_info.call_count, 1)
+
+            strat._log_add_timing_skipped("LONG", "add_freeze", 99.0, 1_030_000, 3)
+            self.assertEqual(log_info.call_count, 2)
+
+            strat._log_add_timing_skipped("LONG", "add_freeze", 98.9, 1_031_000, 4)
+            self.assertEqual(log_info.call_count, 3)
+
+            strat.state.add_freeze_penalty_count = 2
+            strat._log_add_timing_skipped("LONG", "add_freeze", 98.8, 1_032_000, 4)
+            self.assertEqual(log_info.call_count, 4)
+
     def test_penalty_increments_to_4x_after_second_freeze_add(self) -> None:
         strat = strategy(add_layer_gap_pct=0.003, add_min_interval_seconds=1800, add_min_interval_bypass_multiplier=2.0)
         strat.state.side = "LONG"
