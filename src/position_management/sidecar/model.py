@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import re
 from dataclasses import asdict, dataclass
+from decimal import Decimal
 from enum import Enum
 from typing import Any, Literal
 
@@ -9,6 +11,7 @@ PositionSide = Literal["LONG", "SHORT"]
 
 class SidecarLegStatus(str, Enum):
     OPEN = "OPEN"
+    OPEN_UNPROTECTED = "OPEN_UNPROTECTED"
     TP_FILLED = "TP_FILLED"
     FORCE_CLOSED = "FORCE_CLOSED"
     CANCELLED = "CANCELLED"
@@ -73,9 +76,29 @@ def sidecar_open_qty(legs: list[dict[str, Any]] | list[SidecarLeg]) -> float:
     total = 0.0
     for leg in legs:
         status = _leg_value(leg, "status")
-        if status == SidecarLegStatus.OPEN.value:
+        if status in _OPEN_EXPOSURE_STATUSES:
             total += float(_leg_value(leg, "qty") or 0.0)
     return total
+
+
+def sidecar_open_contracts(legs: list[dict[str, Any]] | list[SidecarLeg]) -> Decimal:
+    total = Decimal("0")
+    for leg in legs:
+        status = _leg_value(leg, "status")
+        if status not in _OPEN_EXPOSURE_STATUSES:
+            continue
+        try:
+            total += Decimal(str(_leg_value(leg, "contracts") or "0"))
+        except Exception:
+            continue
+    return total
+
+
+def sanitize_okx_client_order_id(raw: str, max_len: int = 32) -> str:
+    sanitized = re.sub(r"[^A-Za-z0-9]", "", str(raw or ""))
+    if not sanitized:
+        return ""
+    return sanitized[: max(int(max_len), 0)]
 
 
 def serialize_sidecar_legs(legs: list[SidecarLeg] | list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -131,11 +154,11 @@ def deserialize_sidecar_legs(data: Any) -> list[SidecarLeg]:
 def trim_sidecar_legs_for_state(legs: list[dict[str, Any]] | list[SidecarLeg], max_legs: int) -> list[dict[str, Any]]:
     max_count = max(int(max_legs), 1)
     serialized = serialize_sidecar_legs(legs)
-    open_legs = [leg for leg in serialized if leg.get("status") == SidecarLegStatus.OPEN.value]
+    open_legs = [leg for leg in serialized if leg.get("status") in _OPEN_EXPOSURE_STATUSES]
     if len(open_legs) > max_count:
         open_legs.sort(key=lambda leg: int(leg.get("created_ts_ms") or 0))
         return open_legs
-    recent_done = [leg for leg in serialized if leg.get("status") != SidecarLegStatus.OPEN.value]
+    recent_done = [leg for leg in serialized if leg.get("status") not in _OPEN_EXPOSURE_STATUSES]
     recent_done.sort(key=lambda leg: int(leg.get("updated_ts_ms") or leg.get("created_ts_ms") or 0), reverse=True)
     kept = open_legs + recent_done[: max(max_count - len(open_legs), 0)]
     kept.sort(key=lambda leg: int(leg.get("created_ts_ms") or 0))
@@ -149,3 +172,9 @@ def _leg_value(leg: dict[str, Any] | SidecarLeg, key: str) -> Any:
             return value.value
         return value
     return leg.get(key)
+
+
+_OPEN_EXPOSURE_STATUSES = {
+    SidecarLegStatus.OPEN.value,
+    SidecarLegStatus.OPEN_UNPROTECTED.value,
+}

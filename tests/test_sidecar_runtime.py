@@ -10,9 +10,9 @@ import asyncio
 from scripts.run_boll_cvd_live import (
     ExecutionState,
     SidecarPreCoreReconcileResult,
+    attach_sidecar_after_combined_entry,
     apply_main_tp_startup_recovery,
     apply_sidecar_startup_recovery,
-    execute_sidecar_after_core_entry,
     force_close_sidecar_after_core_flat,
     monitor_sidecar_orders_once,
     reconcile_sidecar_orders_before_core_view,
@@ -21,7 +21,8 @@ from scripts.run_boll_cvd_live import (
     sidecar_position_mismatch,
 )
 from src.execution.trader import PositionSnapshot
-from src.position_management.sidecar.model import sidecar_open_qty
+from src.position_management.sidecar.model import SidecarLegStatus, sidecar_open_qty
+from src.position_management.sidecar.planner import build_combined_entry_intent
 from src.position_management.sidecar.reconciler import build_core_position_view
 from src.risk.simple_position_sizer import PositionSize
 from src.strategies.boll_cvd_reclaim_strategy import StrategyPositionState, TradeIntent
@@ -74,6 +75,8 @@ class Trader:
     symbol = "ETH-USDT-SWAP"
     account_equity_usdt = 1000.0
     leverage = "50"
+    contract_multiplier = Decimal("0.1")
+    contract_precision = Decimal("0.01")
 
     def __init__(self) -> None:
         self.sidecar_market_orders = []
@@ -110,6 +113,20 @@ class Trader:
         return True, "ok"
 
 
+def sidecar_plan_for(intent_: TradeIntent, execution: ExecutionState, trader: Trader, state: StrategyPositionState):
+    return build_combined_entry_intent(
+        intent=intent_,
+        sidecar_enabled=state.sidecar_enabled_for_position,
+        account_equity_usdt=trader.account_equity_usdt,
+        leverage=float(trader.leverage),
+        sidecar_margin_pct=state.sidecar_margin_pct,
+        sidecar_tp_pct=state.sidecar_tp_pct,
+        position_id=execution.current_position_id,
+        contract_multiplier=trader.contract_multiplier,
+        contract_precision=trader.contract_precision,
+    )
+
+
 def sidecar_state() -> StrategyPositionState:
     return StrategyPositionState(
         side="LONG",
@@ -123,6 +140,45 @@ def sidecar_state() -> StrategyPositionState:
 
 
 @pytest.mark.asyncio
+async def test_combined_sidecar_entry_uses_one_total_market_order_and_core_tp_contracts() -> None:
+    state = sidecar_state()
+    state.sidecar_margin_pct = 0.01
+    state.sidecar_tp_pct = 0.004
+    execution = ExecutionState("pos-live", 1000.0)
+    trader = Trader()
+    trader.account_equity_usdt = 414.0
+    entry_intent = replace(
+        intent(),
+        size=PositionSize(62.4, 624.0, 0.208, 1, 1.0),
+    )
+
+    combined = sidecar_plan_for(entry_intent, execution, trader, state)
+
+    assert combined.sidecar_plan is not None
+    assert combined.sidecar_plan.core_contracts == Decimal("2.08")
+    assert combined.sidecar_plan.sidecar_contracts == Decimal("0.69")
+    assert combined.sidecar_plan.total_contracts == Decimal("2.77")
+    assert combined.execution_intent.size.eth_qty == pytest.approx(0.277)
+    assert combined.execution_intent.managed_core_contracts == "2.08"
+    assert combined.execution_intent.managed_core_eth_qty == pytest.approx(0.208)
+
+    ok = await attach_sidecar_after_combined_entry(
+        trader=trader,
+        strategy_state=state,
+        execution_state=execution,
+        intent=combined.execution_intent,
+        sidecar_plan=combined.sidecar_plan,
+        journal=Journal(),
+        state_store=Store(),
+        trader_symbol="ETH-USDT-SWAP",
+    )
+
+    assert ok
+    assert trader.sidecar_market_orders == []
+    assert trader.sidecar_tps == [("LONG", "0.69", pytest.approx(3012.0), combined.sidecar_plan.client_order_id)]
+
+
+@pytest.mark.asyncio
 async def test_open_long_success_creates_sidecar_leg_and_tp() -> None:
     state = sidecar_state()
     execution = ExecutionState("pos-1", 1000.0)
@@ -130,11 +186,14 @@ async def test_open_long_success_creates_sidecar_leg_and_tp() -> None:
     journal = Journal()
     store = Store()
 
-    ok = await execute_sidecar_after_core_entry(
-        trader=trader, strategy_state=state, execution_state=execution, intent=intent(), journal=journal, state_store=store, trader_symbol="ETH-USDT-SWAP"
+    entry_intent = intent()
+    combined = sidecar_plan_for(entry_intent, execution, trader, state)
+    ok = await attach_sidecar_after_combined_entry(
+        trader=trader, strategy_state=state, execution_state=execution, intent=combined.execution_intent, sidecar_plan=combined.sidecar_plan, journal=journal, state_store=store, trader_symbol="ETH-USDT-SWAP"
     )
 
     assert ok
+    assert trader.sidecar_market_orders == []
     assert state.sidecar_legs[0]["status"] == "OPEN"
     assert state.sidecar_legs[0]["tp_order_id"] == "sidecar-tp"
     assert state.sidecar_legs[0]["tp_price"] == pytest.approx(3012.0)
@@ -148,12 +207,14 @@ async def test_add_long_creates_layer_sidecar_leg() -> None:
     execution = ExecutionState("pos-1", 1000.0)
     trader = Trader()
 
-    await execute_sidecar_after_core_entry(
-        trader=trader, strategy_state=state, execution_state=execution, intent=intent("ADD_LONG", 2), journal=Journal(), state_store=Store(), trader_symbol="ETH-USDT-SWAP"
+    entry_intent = intent("ADD_LONG", 2)
+    combined = sidecar_plan_for(entry_intent, execution, trader, state)
+    await attach_sidecar_after_combined_entry(
+        trader=trader, strategy_state=state, execution_state=execution, intent=combined.execution_intent, sidecar_plan=combined.sidecar_plan, journal=Journal(), state_store=Store(), trader_symbol="ETH-USDT-SWAP"
     )
 
     assert state.sidecar_legs[0]["layer_index"] == 2
-    assert trader.sidecar_market_orders
+    assert trader.sidecar_market_orders == []
 
 
 @pytest.mark.asyncio
@@ -162,9 +223,15 @@ async def test_position_level_disabled_does_not_create_sidecar_mid_position() ->
     state.sidecar_enabled_for_position = False
     trader = Trader()
 
-    ok = await execute_sidecar_after_core_entry(
-        trader=trader, strategy_state=state, execution_state=ExecutionState("pos-1", 1000.0), intent=intent("ADD_LONG", 2), journal=Journal(), state_store=Store(), trader_symbol="ETH-USDT-SWAP"
-    )
+    entry_intent = intent("ADD_LONG", 2)
+    execution = ExecutionState("pos-1", 1000.0)
+    combined = sidecar_plan_for(entry_intent, execution, trader, state)
+    assert combined.sidecar_plan is None
+    ok = True
+    if combined.sidecar_plan is not None:
+        ok = await attach_sidecar_after_combined_entry(
+            trader=trader, strategy_state=state, execution_state=execution, intent=combined.execution_intent, sidecar_plan=combined.sidecar_plan, journal=Journal(), state_store=Store(), trader_symbol="ETH-USDT-SWAP"
+        )
 
     assert ok
     assert state.sidecar_legs == []
@@ -902,9 +969,11 @@ async def test_sidecar_leg_not_in_state_before_tp_placement() -> None:
     journal = Journal()
     store = Store()
 
-    ok = await execute_sidecar_after_core_entry(
+    entry_intent = intent()
+    combined = sidecar_plan_for(entry_intent, execution, trader, state)
+    ok = await attach_sidecar_after_combined_entry(
         trader=trader, strategy_state=state, execution_state=execution,
-        intent=intent(), journal=journal, state_store=store,
+        intent=combined.execution_intent, sidecar_plan=combined.sidecar_plan, journal=journal, state_store=store,
         trader_symbol="ETH-USDT-SWAP",
     )
 
@@ -929,8 +998,8 @@ class FailingTpTrader(Trader):
 
 
 @pytest.mark.asyncio
-async def test_sidecar_tp_failure_appends_unknown_halted_not_open() -> None:
-    """When TP placement fails, the leg must be appended as UNKNOWN_HALTED,
+async def test_sidecar_tp_failure_appends_open_unprotected_and_market_exits() -> None:
+    """When TP placement fails, the leg must be appended as OPEN_UNPROTECTED,
     not OPEN.  An OPEN leg with tp_order_id=None must never be exposed.
     """
     state = sidecar_state()
@@ -939,22 +1008,27 @@ async def test_sidecar_tp_failure_appends_unknown_halted_not_open() -> None:
     journal = Journal()
     store = Store()
 
-    ok = await execute_sidecar_after_core_entry(
+    entry_intent = intent()
+    combined = sidecar_plan_for(entry_intent, execution, trader, state)
+    ok = await attach_sidecar_after_combined_entry(
         trader=trader, strategy_state=state, execution_state=execution,
-        intent=intent(), journal=journal, state_store=store,
+        intent=combined.execution_intent, sidecar_plan=combined.sidecar_plan, journal=journal, state_store=store,
         trader_symbol="ETH-USDT-SWAP",
     )
 
     assert not ok
     assert execution.trading_halted
-    assert execution.halt_reason == "sidecar_tp_place_failed"
+    assert execution.halt_reason == "sidecar_tp_place_failed_market_exit_waiting_flat"
     assert state.sidecar_dirty
-    assert state.sidecar_halt_reason == "sidecar_tp_place_failed"
+    assert state.sidecar_halt_reason == "sidecar_tp_place_failed_market_exit_waiting_flat"
 
-    # The leg must be UNKNOWN_HALTED, not OPEN
+    # The leg must be OPEN_UNPROTECTED, not OPEN/UNKNOWN_HALTED, because exposure exists in OKX net.
     assert len(state.sidecar_legs) == 1
-    assert state.sidecar_legs[0]["status"] == "UNKNOWN_HALTED"
+    assert state.sidecar_legs[0]["status"] == SidecarLegStatus.OPEN_UNPROTECTED.value
     assert state.sidecar_legs[0]["warning_recorded"] is True
+    assert sidecar_open_qty(state.sidecar_legs) > 0
+    assert trader.market_exits == [("LONG", 3)]
+    assert store.saved
 
     # No OPEN leg should exist with tp_order_id=None
     for leg in state.sidecar_legs:

@@ -392,9 +392,12 @@ class SplitTakeProfitStrategyTest(unittest.TestCase):
         )
 
         pending_intent = strat._maybe_update_tp(100.0, 2_000, boll(middle=102.0, upper=112.0, lower=92.0, candle_ts_ms=2_000), cvd())
-        self.assertIsNone(pending_intent)
-        self.assertEqual(strat.state.partial_tp_price, 101.0)
-        self.assertEqual(strat.state.tp_price, 110.0)
+        self.assertIsNotNone(pending_intent)
+        self.assertEqual(pending_intent.tp_plan, "MIDDLE_RUNNER")
+        self.assertEqual(pending_intent.partial_tp_price, 102.0)
+        self.assertEqual(pending_intent.tp_price, 112.0)
+        self.assertEqual(strat.state.partial_tp_price, 102.0)
+        self.assertEqual(strat.state.tp_price, 112.0)
         self.assertTrue(strat.state.middle_runner_pending)
 
         strat.state.middle_runner_pending = False
@@ -430,10 +433,13 @@ class SplitTakeProfitStrategyTest(unittest.TestCase):
 
         update_intent = strat._maybe_update_tp(100.0, 2_000, boll(middle=100.1, upper=111.0, lower=90.0, candle_ts_ms=2_000), cvd())
 
-        self.assertIsNone(update_intent)
+        self.assertIsNotNone(update_intent)
+        self.assertEqual(update_intent.tp_plan, "MIDDLE_RUNNER")
+        self.assertEqual(update_intent.partial_tp_price, 100.1)
+        self.assertEqual(update_intent.tp_price, 111.0)
         self.assertTrue(strat.state.middle_runner_pending)
         self.assertTrue(strat.state.middle_runner_enabled_for_position)
-        self.assertEqual(strat.state.middle_runner_keep_ratio, 0.2)
+        self.assertAlmostEqual(strat.state.middle_runner_keep_ratio, 0.2)
         self.assertEqual(strat.state.tp_plan, "MIDDLE_RUNNER")
         self.assertFalse(strat._three_stage_runner_plan_allowed("MIDDLE", boll(middle=100.1, upper=111.0, lower=90.0)))
 

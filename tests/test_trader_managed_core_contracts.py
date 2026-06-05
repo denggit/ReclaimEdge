@@ -86,6 +86,46 @@ class TraderManagedCoreContractsTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result, Decimal("10"))
 
+    async def test_sidecar_fixed_tp_sanitizes_client_order_id(self) -> None:
+        trader = make_trader()
+        requests = []
+
+        async def fake_request(method, path, body):  # type: ignore[no-untyped-def]
+            requests.append((method, path, dict(body)))
+            return {"data": [{"ordId": "tp-1"}]}
+
+        trader.request = fake_request  # type: ignore[method-assign]
+
+        order_id = await trader.place_sidecar_fixed_take_profit(
+            side="LONG",
+            contracts="0.69",
+            tp_price=3012.0,
+            client_order_id="SC-97644895de-L1-47229",
+        )
+
+        self.assertEqual(order_id, "tp-1")
+        self.assertEqual(requests[0][2]["clOrdId"], "SC97644895deL147229")
+        self.assertLessEqual(len(requests[0][2]["clOrdId"]), 32)
+
+    async def test_sidecar_fixed_tp_omits_empty_sanitized_client_order_id(self) -> None:
+        trader = make_trader()
+        requests = []
+
+        async def fake_request(method, path, body):  # type: ignore[no-untyped-def]
+            requests.append((method, path, dict(body)))
+            return {"data": [{"ordId": "tp-1"}]}
+
+        trader.request = fake_request  # type: ignore[method-assign]
+
+        await trader.place_sidecar_fixed_take_profit(
+            side="LONG",
+            contracts="0.69",
+            tp_price=3012.0,
+            client_order_id="---___:::",
+        )
+
+        self.assertNotIn("clOrdId", requests[0][2])
+
     def test_managed_core_contracts_none_returns_none(self) -> None:
         """managed_core_contracts=None returns None (old logic path)."""
         trader = make_trader()

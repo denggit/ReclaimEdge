@@ -26,6 +26,14 @@ TpMode = Literal["MIDDLE", "UPPER", "LOWER"]
 TpPlan = Literal["SINGLE", "SPLIT_PARTIAL_FINAL", "MIDDLE_RUNNER", "THREE_STAGE_RUNNER"]
 
 
+def _price_changed(old: float | None, new: float | None, threshold: float = 0.0001) -> bool:
+    if old is None or new is None:
+        return old is not None or new is not None
+    if new == 0:
+        return old != 0
+    return abs(float(old) - float(new)) / abs(float(new)) >= threshold
+
+
 @dataclass(frozen=True)
 class BollCvdReclaimStrategyConfig:
     min_buy_ratio: float = 0.55
@@ -246,6 +254,23 @@ class TradeIntent:
     protected_order_ids: tuple[str, ...] = ()
     managed_core_contracts: str | None = None
     managed_core_eth_qty: float = 0.0
+
+
+@dataclass(frozen=True)
+class MainTpUpdatePlan:
+    should_update: bool
+    reason: str
+    tp_price: float
+    tp_mode: TpMode
+    tp_plan: TpPlan
+    partial_tp_price: float | None
+    partial_tp_ratio: float
+    three_stage_tp1_price: float | None = None
+    three_stage_tp2_price: float | None = None
+    middle_runner_first_tp_price: float | None = None
+    middle_runner_final_tp_price: float | None = None
+    protective_sl_price: float | None = None
+    log_reason: str = ""
 
 
 @dataclass
@@ -930,6 +955,8 @@ class BollCvdReclaimStrategy:
             return None
         if self._three_stage_waiting_tp2():
             old_post_tp1_sl = self.state.three_stage_post_tp1_protective_sl_price
+            old_tp2_price = self.state.three_stage_tp2_price
+            new_tp2_price = boll.upper if self.state.side == "LONG" else boll.lower
             if self.config.three_stage_post_tp1_protective_sl_enabled:
                 calculated_sl = self._calculate_three_stage_post_tp1_protective_sl(self.state.side, price, boll)
                 protective_sl = self._tighten_optional_three_stage_post_tp1_sl(self.state.side, old_post_tp1_sl, calculated_sl)
@@ -938,28 +965,30 @@ class BollCvdReclaimStrategy:
                 self.state.three_stage_post_tp1_protective_sl_price = protective_sl
             else:
                 protective_sl = old_post_tp1_sl
+            self.state.three_stage_tp2_price = new_tp2_price
+            self.state.tp_price = new_tp2_price
+            self.state.tp_mode = "UPPER" if self.state.side == "LONG" else "LOWER"
+            self.state.tp_plan = "THREE_STAGE_RUNNER"
+            self.state.partial_tp_price = None
+            self.state.partial_tp_ratio = 0.0
             self.state.last_tp_update_ts_ms = ts_ms
             self.state.last_tp_update_candle_ts_ms = boll.candle_ts_ms
-            post_tp1_sl_changed = (
-                protective_sl is not None
-                and (
-                    old_post_tp1_sl is None
-                    or abs(protective_sl - old_post_tp1_sl) / protective_sl >= 0.0001
-                )
-            )
-            if post_tp1_sl_changed:
+            post_tp1_sl_changed = protective_sl is not None and _price_changed(old_post_tp1_sl, protective_sl)
+            tp2_changed = _price_changed(old_tp2_price, new_tp2_price)
+            if post_tp1_sl_changed or tp2_changed:
                 size = self.sizer.calculate(price, layer_index=self.state.layers)
                 logger.warning(
-                    "THREE_STAGE_TP1_PROTECTIVE_SL_UPDATE_SIGNAL | side=%s old_sl=%s new_sl=%.4f candle_ts=%s tp2_price=%s",
+                    "THREE_STAGE_TP1_PROTECTIVE_SL_UPDATE_SIGNAL | side=%s old_sl=%s new_sl=%s old_tp2=%s new_tp2=%.4f candle_ts=%s",
                     self.state.side,
                     f"{old_post_tp1_sl:.4f}" if old_post_tp1_sl is not None else "-",
-                    protective_sl,
+                    f"{protective_sl:.4f}" if protective_sl is not None else "-",
+                    f"{old_tp2_price:.4f}" if old_tp2_price is not None else "-",
+                    new_tp2_price,
                     boll.candle_ts_ms,
-                    self.state.three_stage_tp2_price,
                 )
-                return self._intent("UPDATE_TP", self.state.side, price, self.state.layers, self.state.tp_price or self.state.three_stage_tp2_price or price, "three_stage_post_tp1_protective_sl_update", size, boll, cvd, ts_ms)
+                return self._intent("UPDATE_TP", self.state.side, price, self.state.layers, new_tp2_price, "three_stage_post_tp1_dynamic_tp_sl_update", size, boll, cvd, ts_ms)
             logger.info(
-                "TP_UPDATE_SKIPPED | reason=three_stage_waiting_tp2 side=%s candle_ts=%s tp2_price=%s protective_sl=%s",
+                "TP_UPDATE_SKIPPED | reason=three_stage_waiting_tp2_plan_unchanged side=%s candle_ts=%s tp2_price=%s protective_sl=%s",
                 self.state.side,
                 boll.candle_ts_ms,
                 self.state.three_stage_tp2_price,
@@ -1008,27 +1037,25 @@ class BollCvdReclaimStrategy:
             self.state.middle_runner_final_tp_price = tp_price
             self.state.middle_runner_protective_sl_price = protective_sl
         elif self.state.middle_runner_pending:
-            logger.info(
-                "TP_UPDATE_SKIPPED | reason=middle_runner_plan_locked side=%s candle_ts=%s first_tp=%s final_tp=%s",
-                self.state.side,
-                boll.candle_ts_ms,
-                self.state.middle_runner_first_tp_price,
-                self.state.middle_runner_final_tp_price,
-            )
-            self.state.last_tp_update_ts_ms = ts_ms
-            self.state.last_tp_update_candle_ts_ms = boll.candle_ts_ms
-            return None
+            tp_price = boll.upper if self.state.side == "LONG" else boll.lower
+            tp_mode = "UPPER" if self.state.side == "LONG" else "LOWER"
+            partial_tp_price = boll.middle
+            partial_tp_ratio = self.state.middle_runner_first_close_ratio or min(max(self.config.middle_runner_first_close_ratio, 0.1), 0.95)
+            tp_plan = "MIDDLE_RUNNER"
+            self.state.middle_runner_first_tp_price = partial_tp_price
+            self.state.middle_runner_final_tp_price = tp_price
         elif self.state.three_stage_runner_enabled_for_position and not self.state.trend_runner_active:
-            logger.info(
-                "TP_UPDATE_SKIPPED | reason=three_stage_plan_locked side=%s candle_ts=%s tp1=%s tp2=%s",
-                self.state.side,
-                boll.candle_ts_ms,
-                self.state.three_stage_tp1_price,
-                self.state.three_stage_tp2_price,
-            )
-            self.state.last_tp_update_ts_ms = ts_ms
-            self.state.last_tp_update_candle_ts_ms = boll.candle_ts_ms
-            return None
+            tp1_ratio, tp2_ratio, runner_ratio = self._normalized_three_stage_ratios()
+            tp_price = boll.upper if self.state.side == "LONG" else boll.lower
+            tp_mode = "UPPER" if self.state.side == "LONG" else "LOWER"
+            partial_tp_price = boll.middle
+            partial_tp_ratio = tp1_ratio
+            tp_plan = "THREE_STAGE_RUNNER"
+            self.state.three_stage_tp1_price = partial_tp_price
+            self.state.three_stage_tp2_price = tp_price
+            self.state.three_stage_tp1_ratio = tp1_ratio
+            self.state.three_stage_tp2_ratio = tp2_ratio
+            self.state.three_stage_runner_ratio = runner_ratio
         elif self.state.near_tp_protected or self.state.near_tp_add_disabled:
             partial_tp_price, partial_tp_ratio, tp_plan = None, 0.0, "SINGLE"
         else:

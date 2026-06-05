@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import copy
 import datetime as dt
-import hashlib
 import html
 import logging
 import os
@@ -30,14 +29,19 @@ from src.monitors.boll_band_breakout_monitor import (  # noqa: E402
 )
 from src.position_management.sidecar.model import (  # noqa: E402
     SidecarLegStatus,
-    calculate_sidecar_margin,
-    calculate_sidecar_qty,
+    sidecar_open_contracts,
     sidecar_open_qty,
     trim_sidecar_legs_for_state,
+)
+from src.position_management.sidecar.planner import (  # noqa: E402
+    SidecarExecutionPlan,
+    build_combined_entry_intent,
+    sidecar_client_order_id as build_sidecar_client_order_id,
 )
 from src.position_management.sidecar.reconciler import (  # noqa: E402
     build_core_position_view,
     is_sidecar_dirty_missing_tp_order,
+    mark_sidecar_leg_open_unprotected,
     mark_sidecar_leg_force_closed,
     mark_sidecar_leg_tp_filled,
     mark_sidecar_leg_unknown_halted,
@@ -737,20 +741,12 @@ def position_log_key(position: PositionSnapshot) -> tuple[str, str, float]:
     return (position.side, str(position.contracts), round(position.avg_entry_price, 2))
 
 
-def sidecar_open_contracts(legs: list[dict[str, Any]]) -> Decimal:
-    total = Decimal("0")
-    for leg in legs:
-        if leg.get("status") != SidecarLegStatus.OPEN.value:
-            continue
-        try:
-            total += Decimal(str(leg.get("contracts") or "0"))
-        except Exception:
-            continue
-    return total
-
-
 def open_sidecar_legs_exceed_limit(state: StrategyPositionState, max_legs: int) -> bool:
-    open_count = sum(1 for leg in list(getattr(state, "sidecar_legs", []) or []) if leg.get("status") == SidecarLegStatus.OPEN.value)
+    open_count = sum(
+        1
+        for leg in list(getattr(state, "sidecar_legs", []) or [])
+        if leg.get("status") in {SidecarLegStatus.OPEN.value, SidecarLegStatus.OPEN_UNPROTECTED.value}
+    )
     return open_count > max(int(max_legs), 1)
 
 
@@ -787,8 +783,7 @@ def with_runtime_managed_core(intent: TradeIntent, account_position: PositionSna
 
 
 def sidecar_client_order_id(position_id: str | None, layer_index: int, ts_ms: int) -> str:
-    digest = hashlib.sha1(str(position_id or "unknown").encode("utf-8")).hexdigest()[:10]
-    return f"SC-{digest}-L{int(layer_index)}-{int(ts_ms) % 100000}"
+    return build_sidecar_client_order_id(position_id, layer_index, ts_ms)
 
 
 def sidecar_position_mismatch(okx_position: PositionSnapshot, state: StrategyPositionState, tolerance_qty: float = 0.000001) -> bool:
@@ -805,12 +800,13 @@ def sidecar_position_mismatch(okx_position: PositionSnapshot, state: StrategyPos
     return abs((core_position.eth_qty + open_qty) - okx_position.eth_qty) > tolerance_qty
 
 
-async def execute_sidecar_after_core_entry(
+async def attach_sidecar_after_combined_entry(
     *,
     trader: Trader,
     strategy_state: StrategyPositionState,
     execution_state: ExecutionState,
     intent: TradeIntent,
+    sidecar_plan: SidecarExecutionPlan,
     journal: LiveTradeJournal,
     state_store: LiveStateStore,
     trader_symbol: str,
@@ -820,37 +816,8 @@ async def execute_sidecar_after_core_entry(
     if intent.intent_type not in {"OPEN_LONG", "OPEN_SHORT", "ADD_LONG", "ADD_SHORT"}:
         return True
     position_id = execution_state.current_position_id
-    sidecar_qty = calculate_sidecar_qty(
-        account_equity_usdt=trader.account_equity_usdt,
-        price=float(intent.price),
-        leverage=float(getattr(trader, "leverage", getattr(getattr(trader, "config", None), "leverage", 50)) or 50),
-        layer_margin_pct=float(getattr(intent.size, "margin_usdt", 0.0) or 0.0),
-        sidecar_margin_pct=float(strategy_state.sidecar_margin_pct or 0.0),
-        layer_multiplier=float(intent.size.layer_multiplier or 1.0),
-    )
-    # calculate_sidecar_qty expects layer_margin_pct only for API symmetry; sidecar_margin_pct drives the result.
-    try:
-        market = await trader.place_sidecar_market_order(side=intent.side, eth_qty=sidecar_qty)
-    except Exception as exc:
-        execution_state.trading_halted = True
-        execution_state.halt_reason = "sidecar_market_order_failed"
-        strategy_state.sidecar_dirty = True
-        strategy_state.sidecar_halt_reason = "sidecar_market_order_failed"
-        journal.append(
-            "SIDECAR_MARKET_ORDER_FAILED",
-            {"side": intent.side, "layer_index": intent.layer_index, "qty": sidecar_qty, "error": str(exc), "manual_intervention_required": True},
-            position_id=position_id,
-        )
-        logger.error("SIDECAR_MARKET_ORDER_FAILED | position_id=%s side=%s layer=%s error=%s manual_intervention_required=true", position_id, intent.side, intent.layer_index, exc)
-        return False
-
-    contracts = str(market.get("contracts") or "")
-    filled_qty = float(market.get("qty") or sidecar_qty)
-    margin_pct = calculate_sidecar_margin(
-        float(getattr(intent.size, "margin_usdt", 0.0) or 0.0),
-        float(strategy_state.sidecar_margin_pct or 0.0),
-        float(intent.size.layer_multiplier or 1.0),
-    )
+    contracts = str(sidecar_plan.sidecar_contracts)
+    filled_qty = float(sidecar_plan.sidecar_qty)
     leg = sidecar_leg_from_fill(
         leg_id=f"{position_id}:SC:{intent.layer_index}:{intent.ts_ms}",
         position_id=str(position_id or ""),
@@ -859,12 +826,14 @@ async def execute_sidecar_after_core_entry(
         entry_price=float(intent.price),
         qty=filled_qty,
         contracts=contracts,
-        margin_pct=margin_pct,
-        layer_multiplier=float(intent.size.layer_multiplier or 1.0),
+        margin_pct=float(sidecar_plan.sidecar_margin_pct),
+        layer_multiplier=float(sidecar_plan.layer_multiplier),
         tp_pct=float(strategy_state.sidecar_tp_pct or 0.0),
         tp_order_id=None,
         ts_ms=int(intent.ts_ms),
     )
+    leg["tp_price"] = float(sidecar_plan.sidecar_tp_price)
+    leg["sidecar_client_order_id"] = sidecar_plan.client_order_id
 
     # ── Place sidecar TP BEFORE appending leg to state ─────────────────
     # The leg must never appear in strategy_state.sidecar_legs with
@@ -876,21 +845,52 @@ async def execute_sidecar_after_core_entry(
             side=intent.side,
             contracts=contracts,
             tp_price=float(leg["tp_price"]),
-            client_order_id=sidecar_client_order_id(position_id, intent.layer_index, intent.ts_ms),
+            client_order_id=sidecar_plan.client_order_id,
         )
     except Exception as exc:
-        # TP placement failed → append UNKNOWN_HALTED leg, not OPEN
-        leg["status"] = SidecarLegStatus.UNKNOWN_HALTED.value
-        leg["warning_recorded"] = True
+        leg = mark_sidecar_leg_open_unprotected(leg, int(intent.ts_ms), warning_recorded=True)
         strategy_state.sidecar_legs.append(leg)
         execution_state.trading_halted = True
-        execution_state.halt_reason = "sidecar_tp_place_failed"
         strategy_state.sidecar_dirty = True
-        strategy_state.sidecar_halt_reason = "sidecar_tp_place_failed"
+        exit_ok, exit_message = await trader.market_exit_remaining_position_with_retries(
+            intent.side,
+            retry_count=int(os.getenv("SIDECAR_TP_FAIL_MARKET_EXIT_RETRY_COUNT", os.getenv("NEAR_TP_SL_FAIL_MARKET_EXIT_RETRY_COUNT", "3"))),
+        )
+        if exit_ok:
+            execution_state.halt_reason = "sidecar_tp_place_failed_market_exit_waiting_flat"
+            strategy_state.sidecar_halt_reason = "sidecar_tp_place_failed_market_exit_waiting_flat"
+        else:
+            execution_state.halt_reason = "sidecar_tp_place_failed"
+            strategy_state.sidecar_halt_reason = "sidecar_tp_place_failed"
         refresh_sidecar_state_totals(strategy_state, int(os.getenv("SIDECAR_MAX_LEGS", "10")))
         state_store.save(LiveStateStore.from_strategy_state(position_id=position_id, symbol=trader_symbol, strategy_state=strategy_state, cash_before_position=execution_state.cash_before_position))
-        journal.append("SIDECAR_TP_PLACE_FAILED", {**dict(leg), "error": str(exc), "manual_intervention_required": True}, position_id=position_id)
-        logger.error("SIDECAR_TP_PLACE_FAILED | position_id=%s leg_id=%s error=%s manual_intervention_required=true", position_id, leg.get("leg_id"), exc)
+        manual_intervention_required = not exit_ok
+        journal.append(
+            "SIDECAR_TP_PLACE_FAILED",
+            {
+                **dict(leg),
+                "error": str(exc),
+                "market_exit_attempted": True,
+                "market_exit_ok": exit_ok,
+                "market_exit_message": exit_message,
+                "sidecar_contracts": str(sidecar_plan.sidecar_contracts),
+                "sidecar_qty": sidecar_plan.sidecar_qty,
+                "core_contracts": str(sidecar_plan.core_contracts),
+                "net_contracts": str(sidecar_plan.total_contracts),
+                "total_contracts": str(sidecar_plan.total_contracts),
+                "sidecar_status": SidecarLegStatus.OPEN_UNPROTECTED.value,
+                "manual_intervention_required": manual_intervention_required,
+            },
+            position_id=position_id,
+        )
+        logger.error(
+            "SIDECAR_TP_PLACE_FAILED | position_id=%s leg_id=%s error=%s market_exit_attempted=true market_exit_ok=%s manual_intervention_required=%s",
+            position_id,
+            leg.get("leg_id"),
+            exc,
+            exit_ok,
+            manual_intervention_required,
+        )
         return False
 
     # TP placed successfully → now append leg to state with tp_order_id set
@@ -902,6 +902,26 @@ async def execute_sidecar_after_core_entry(
     journal.append("SIDECAR_LEG_OPENED", dict(leg), position_id=position_id)
     journal.append("SIDECAR_TP_PLACED", dict(leg), position_id=position_id)
     return True
+
+
+async def execute_sidecar_after_core_entry(
+    *,
+    trader: Trader,
+    strategy_state: StrategyPositionState,
+    execution_state: ExecutionState,
+    intent: TradeIntent,
+    journal: LiveTradeJournal,
+    state_store: LiveStateStore,
+    trader_symbol: str,
+) -> bool:
+    logger.error(
+        "SIDECAR_LEGACY_AFTER_CORE_ENTRY_DISABLED | position_id=%s intent_type=%s side=%s layer=%s",
+        execution_state.current_position_id,
+        intent.intent_type,
+        intent.side,
+        intent.layer_index,
+    )
+    return False
 
 
 async def reconcile_sidecar_orders_before_core_view(
@@ -1240,7 +1260,9 @@ async def force_close_sidecar_after_core_flat(
         state_store.save(LiveStateStore.from_strategy_state(position_id=position_id, symbol=trader_symbol, strategy_state=strategy_state, cash_before_position=cash_before_position))
         return False
     strategy_state.sidecar_legs = [
-        mark_sidecar_leg_force_closed(leg, ts_ms) if leg.get("status") == SidecarLegStatus.OPEN.value else leg
+        mark_sidecar_leg_force_closed(leg, ts_ms)
+        if leg.get("status") in {SidecarLegStatus.OPEN.value, SidecarLegStatus.OPEN_UNPROTECTED.value}
+        else leg
         for leg in strategy_state.sidecar_legs
     ]
     refresh_sidecar_state_totals(strategy_state, int(os.getenv("SIDECAR_MAX_LEGS", "10")))
@@ -1485,7 +1507,11 @@ async def apply_sidecar_startup_recovery(
         strategy.state.sidecar_enabled_for_position = True
         strategy.state.sidecar_margin_pct = float(getattr(saved_state, "sidecar_margin_pct", strategy.state.sidecar_margin_pct) or 0.0)
         strategy.state.sidecar_tp_pct = float(getattr(saved_state, "sidecar_tp_pct", strategy.state.sidecar_tp_pct) or 0.0)
-    open_legs = [leg for leg in saved_legs if leg.get("status") == SidecarLegStatus.OPEN.value]
+    open_legs = [
+        leg
+        for leg in saved_legs
+        if leg.get("status") in {SidecarLegStatus.OPEN.value, SidecarLegStatus.OPEN_UNPROTECTED.value}
+    ]
     if not open_legs:
         refresh_sidecar_state_totals(strategy.state, int(os.getenv("SIDECAR_MAX_LEGS", "10")))
         if saved_sidecar_enabled:
@@ -1515,6 +1541,12 @@ async def apply_sidecar_startup_recovery(
 
     changed = False
     for index, leg in enumerate(list(strategy.state.sidecar_legs)):
+        if leg.get("status") == SidecarLegStatus.OPEN_UNPROTECTED.value:
+            execution_state.trading_halted = True
+            execution_state.halt_reason = str(getattr(strategy.state, "sidecar_halt_reason", None) or "sidecar_tp_place_failed")
+            strategy.state.sidecar_dirty = True
+            strategy.state.sidecar_halt_reason = execution_state.halt_reason
+            continue
         if leg.get("status") != SidecarLegStatus.OPEN.value:
             continue
         order_id = leg.get("tp_order_id")
@@ -2051,6 +2083,31 @@ async def execution_worker(
                 )
                 continue
 
+            sidecar_plan: SidecarExecutionPlan | None = None
+            if command.intent.intent_type in {"OPEN_LONG", "OPEN_SHORT", "ADD_LONG", "ADD_SHORT"}:
+                async with state_lock:
+                    if execution_state.current_position_id is None:
+                        execution_state.current_position_id = journal.new_position_id(
+                            trader.symbol,
+                            command.intent.side,
+                            command.intent.ts_ms,
+                        )
+                        execution_state.cash_before_position = entry_cash_before
+                    current_position_id = execution_state.current_position_id
+                combined_plan = build_combined_entry_intent(
+                    intent=command.intent,
+                    sidecar_enabled=bool(getattr(strategy.state, "sidecar_enabled_for_position", False)),
+                    account_equity_usdt=float(trader.account_equity_usdt),
+                    leverage=float(getattr(trader, "leverage", getattr(getattr(trader, "config", None), "leverage", 50)) or 50),
+                    sidecar_margin_pct=float(getattr(strategy.state, "sidecar_margin_pct", 0.0) or 0.0),
+                    sidecar_tp_pct=float(getattr(strategy.state, "sidecar_tp_pct", 0.0) or 0.0),
+                    position_id=current_position_id,
+                    contract_multiplier=getattr(trader, "contract_multiplier", Decimal("0.1")),
+                    contract_precision=getattr(trader, "contract_precision", Decimal("0.01")),
+                )
+                command = replace(command, intent=combined_plan.execution_intent)
+                sidecar_plan = combined_plan.sidecar_plan
+
             result = await trader.execute_intent(command.intent)
             if not result.ok:
                 raise RuntimeError(result.message)
@@ -2328,15 +2385,18 @@ async def execution_worker(
                     equity=equity,
                     extra={"symbol": trader.symbol},
                 )
-                sidecar_ok = await execute_sidecar_after_core_entry(
-                    trader=trader,
-                    strategy_state=strategy.state,
-                    execution_state=execution_state,
-                    intent=command.intent,
-                    journal=journal,
-                    state_store=state_store,
-                    trader_symbol=trader.symbol,
-                )
+                sidecar_ok = True
+                if sidecar_plan is not None:
+                    sidecar_ok = await attach_sidecar_after_combined_entry(
+                        trader=trader,
+                        strategy_state=strategy.state,
+                        execution_state=execution_state,
+                        intent=command.intent,
+                        sidecar_plan=sidecar_plan,
+                        journal=journal,
+                        state_store=state_store,
+                        trader_symbol=trader.symbol,
+                    )
                 async with state_lock:
                     strategy_state_for_save = copy.deepcopy(strategy.state)
                 if not sidecar_ok:
@@ -2612,7 +2672,11 @@ async def account_position_sync_worker(
                         journal.append(
                             "SIDECAR_OPEN_LEGS_EXCEED_MAX",
                             {
-                                "open_leg_count": sum(1 for leg in strategy.state.sidecar_legs if leg.get("status") == SidecarLegStatus.OPEN.value),
+                                "open_leg_count": sum(
+                                    1
+                                    for leg in strategy.state.sidecar_legs
+                                    if leg.get("status") in {SidecarLegStatus.OPEN.value, SidecarLegStatus.OPEN_UNPROTECTED.value}
+                                ),
                                 "sidecar_max_legs": int(os.getenv("SIDECAR_MAX_LEGS", "10")),
                                 "manual_intervention_required": True,
                             },
@@ -3153,6 +3217,7 @@ async def account_position_sync_worker(
                         "near_tp_protected_sync_failed",
                         "trend_runner_market_exit_waiting_flat",
                         "three_stage_post_tp1_sl_failed_market_exit_waiting_flat",
+                        "sidecar_tp_place_failed_market_exit_waiting_flat",
                         "rolling_loss_soft_halt",
                         "rolling_loss_hard_halt",
                     }
@@ -3489,6 +3554,7 @@ async def account_position_sync_worker(
                                 "near_tp_exit_all_waiting_flat",
                                 "near_tp_protected_sync_failed",
                                 "trend_runner_market_exit_waiting_flat",
+                                "sidecar_tp_place_failed_market_exit_waiting_flat",
                                 "rolling_loss_soft_halt",
                                 "rolling_loss_hard_halt",
                             }

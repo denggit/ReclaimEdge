@@ -490,18 +490,20 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
 
         self.assertIsNotNone(got)
         self.assertEqual(got.intent_type, "UPDATE_TP")
-        self.assertEqual(got.reason, "three_stage_post_tp1_protective_sl_update")
+        self.assertEqual(got.reason, "three_stage_post_tp1_dynamic_tp_sl_update")
         self.assertEqual(got.tp_plan, "THREE_STAGE_RUNNER")
         self.assertTrue(got.three_stage_tp1_consumed)
         self.assertFalse(got.trend_runner_active)
         self.assertIsNotNone(got.three_stage_post_tp1_protective_sl_price)
+        self.assertEqual(got.three_stage_tp2_price, 112.0)
+        self.assertEqual(got.tp_price, 112.0)
         self.assertEqual(strat.state.last_tp_update_ts_ms, 2_000)
         self.assertEqual(strat.state.last_tp_update_candle_ts_ms, 2_000)
         self.assertTrue(strat.state.three_stage_runner_enabled_for_position)
         self.assertTrue(strat.state.three_stage_tp1_consumed)
         self.assertFalse(strat.state.three_stage_tp2_consumed)
         self.assertFalse(strat.state.trend_runner_active)
-        self.assertEqual(strat.state.three_stage_tp2_price, 110.0)
+        self.assertEqual(strat.state.three_stage_tp2_price, 112.0)
 
         with self.assertNoLogs("src.strategies.boll_cvd_reclaim_strategy", level="INFO"):
             repeated = strat._maybe_update_tp(105.5, 2_500, bands, cvd())
@@ -558,7 +560,10 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
 
         got = strat._maybe_update_tp(100.0, 2_000, boll(middle=102.0, upper=112.0, lower=92.0, candle_ts_ms=2_000), cvd())
 
-        self.assertIsNone(got)
+        self.assertIsNotNone(got)
+        self.assertEqual(got.tp_plan, "THREE_STAGE_RUNNER")
+        self.assertEqual(got.three_stage_tp1_price, 102.0)
+        self.assertEqual(got.three_stage_tp2_price, 112.0)
         self.assertEqual(strat.state.tp_plan, "THREE_STAGE_RUNNER")
         self.assertTrue(strat.state.three_stage_runner_enabled_for_position)
         self.assertFalse(strat._middle_runner_plan_allowed("MIDDLE", boll()))
@@ -697,7 +702,7 @@ class ThreeStageTrendRunnerTraderTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(trader.trend_stop_calls, 1)
         self.assertEqual(trader.placed_specs, [("final", Decimal("2"), 111.1)])
 
-    async def test_post_tp1_protective_sl_update_does_not_rebuild_tp2(self) -> None:
+    async def test_post_tp1_update_rebuilds_only_tp2_and_global_sl(self) -> None:
         trader = RecordingTrader("LONG")
         trader.position_contracts = Decimal("4")
 
@@ -717,8 +722,8 @@ class ThreeStageTrendRunnerTraderTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.ok)
         self.assertTrue(result.protective_sl_ok)
         self.assertEqual(trader.post_tp1_stop_calls, 1)
-        self.assertEqual(trader.cancel_reduce_only_calls, 0)
-        self.assertEqual(trader.placed_specs, [])
+        self.assertEqual(trader.cancel_reduce_only_calls, 1)
+        self.assertEqual(trader.placed_specs, [("tp2_outer", Decimal("4"), 110.0)])
         self.assertEqual(trader.cancelled_post_tp1_stop_ids, ["old-post"])
 
     async def test_active_trend_runner_cancels_restored_sl_order_id_from_intent(self) -> None:

@@ -14,6 +14,7 @@ from typing import Any, Optional
 import aiohttp
 
 from config.env_loader import OKX_CONFIG
+from src.position_management.sidecar.model import sanitize_okx_client_order_id
 from src.strategies.boll_cvd_reclaim_strategy import PositionSide, TradeIntent
 from src.utils.log import get_logger
 
@@ -524,66 +525,6 @@ class Trader:
                 "no core position for TP",
             )
 
-        post_tp1_sl_price = getattr(intent, "three_stage_post_tp1_protective_sl_price", None)
-        if (
-            intent.intent_type == "UPDATE_TP"
-            and getattr(intent, "tp_plan", "SINGLE") == "THREE_STAGE_RUNNER"
-            and getattr(intent, "three_stage_tp1_consumed", False)
-            and not getattr(intent, "three_stage_tp2_consumed", False)
-            and not getattr(intent, "trend_runner_active", False)
-            and post_tp1_sl_price is not None
-        ):
-            old_sl_order_id = getattr(intent, "three_stage_post_tp1_protective_sl_order_id", None) or self.three_stage_post_tp1_protective_sl_order_id
-            sl_ok, sl_order_id, sl_message = await self.place_three_stage_post_tp1_protective_stop_with_retries(
-                intent.side,
-                net_contracts_for_sl,
-                float(post_tp1_sl_price),
-                retry_count=int(os.getenv("NEAR_TP_PROTECTIVE_SL_RETRY_COUNT", "3")),
-                retry_interval_seconds=float(os.getenv("NEAR_TP_PROTECTIVE_SL_RETRY_INTERVAL_SECONDS", "1")),
-            )
-            protective_sl_price_text = self.price_to_str(float(post_tp1_sl_price))
-            if not sl_ok:
-                return LiveTradeResult(
-                    False,
-                    intent.intent_type,
-                    None,
-                    self.tp_order_id,
-                    self.decimal_to_str(core_contracts_for_tp),
-                    self.price_to_str(intent.tp_price),
-                    f"three_stage_post_tp1_protective_sl_failed: {sl_message}",
-                    entry_filled=False,
-                    tp_ok=True,
-                    protective_sl_price=protective_sl_price_text,
-                    protective_sl_ok=False,
-                )
-            self.three_stage_post_tp1_protective_sl_order_id = sl_order_id
-            if old_sl_order_id and old_sl_order_id != sl_order_id:
-                await self.cancel_three_stage_post_tp1_protective_stop(old_sl_order_id)
-            logger.warning(
-                "THREE_STAGE_TP1_PROTECTIVE_SL_UPDATED | side=%s sl_contracts=%s core_contracts=%s net_contracts=%s protective_sl_price=%s old_sl_order_id=%s new_sl_order_id=%s retry_config=near_tp",
-                intent.side,
-                self.decimal_to_str(net_contracts_for_sl),
-                self.decimal_to_str(core_contracts_for_tp),
-                self.decimal_to_str(net_contracts_for_sl),
-                protective_sl_price_text,
-                old_sl_order_id,
-                sl_order_id,
-            )
-            return LiveTradeResult(
-                True,
-                intent.intent_type,
-                None,
-                self.tp_order_id,
-                self.decimal_to_str(core_contracts_for_tp),
-                self.price_to_str(intent.tp_price),
-                "three_stage_post_tp1_protective_sl_updated",
-                entry_filled=False,
-                tp_ok=True,
-                protective_sl_order_id=sl_order_id,
-                protective_sl_price=protective_sl_price_text,
-                protective_sl_ok=True,
-            )
-
         await self._cancel_existing_take_profit_orders_for_intent(intent)
 
         specs = self._build_take_profit_order_specs(intent)
@@ -693,6 +634,53 @@ class Trader:
                 old_sl_order_id,
                 sl_order_id,
             )
+        post_tp1_sl_price = getattr(intent, "three_stage_post_tp1_protective_sl_price", None)
+        if (
+            getattr(intent, "tp_plan", "SINGLE") == "THREE_STAGE_RUNNER"
+            and getattr(intent, "three_stage_tp1_consumed", False)
+            and not getattr(intent, "three_stage_tp2_consumed", False)
+            and not getattr(intent, "trend_runner_active", False)
+            and post_tp1_sl_price is not None
+        ):
+            old_sl_order_id = getattr(intent, "three_stage_post_tp1_protective_sl_order_id", None) or self.three_stage_post_tp1_protective_sl_order_id
+            sl_ok, sl_order_id, sl_message = await self.place_three_stage_post_tp1_protective_stop_with_retries(
+                intent.side,
+                net_contracts_for_sl,
+                float(post_tp1_sl_price),
+                retry_count=int(os.getenv("NEAR_TP_PROTECTIVE_SL_RETRY_COUNT", "3")),
+                retry_interval_seconds=float(os.getenv("NEAR_TP_PROTECTIVE_SL_RETRY_INTERVAL_SECONDS", "1")),
+            )
+            protective_sl_price_text = self.price_to_str(float(post_tp1_sl_price))
+            if not sl_ok:
+                return LiveTradeResult(
+                    False,
+                    intent.intent_type,
+                    None,
+                    tp_order_id,
+                    self.decimal_to_str(core_contracts_for_tp),
+                    tp_price_text,
+                    f"three_stage_post_tp1_protective_sl_failed: {sl_message}",
+                    entry_filled=False,
+                    tp_ok=True,
+                    tp_order_ids=tuple(placed_order_ids),
+                    protective_sl_price=protective_sl_price_text,
+                    protective_sl_ok=False,
+                )
+            protective_sl_order_id = sl_order_id
+            protective_sl_ok = True
+            self.three_stage_post_tp1_protective_sl_order_id = sl_order_id
+            if old_sl_order_id and old_sl_order_id != sl_order_id:
+                await self.cancel_three_stage_post_tp1_protective_stop(old_sl_order_id)
+            logger.warning(
+                "THREE_STAGE_TP1_PROTECTIVE_SL_UPDATED | side=%s sl_contracts=%s core_contracts=%s net_contracts=%s protective_sl_price=%s old_sl_order_id=%s new_sl_order_id=%s retry_config=near_tp",
+                intent.side,
+                self.decimal_to_str(net_contracts_for_sl),
+                self.decimal_to_str(core_contracts_for_tp),
+                self.decimal_to_str(net_contracts_for_sl),
+                protective_sl_price_text,
+                old_sl_order_id,
+                sl_order_id,
+            )
         return LiveTradeResult(
             True,
             intent.intent_type,
@@ -765,6 +753,8 @@ class Trader:
         tp_plan = getattr(intent, "tp_plan", "SINGLE")
         if tp_plan == "THREE_STAGE_RUNNER":
             return self._build_three_stage_order_specs(intent)
+        if getattr(intent, "partial_tp_consumed", False) or (tp_plan == "MIDDLE_RUNNER" and getattr(intent, "middle_runner_active", False)):
+            return [("final", self.position_contracts, intent.tp_price)]
         if tp_plan not in {"SPLIT_PARTIAL_FINAL", "SPLIT_50_50", "MIDDLE_RUNNER"} or partial_tp_price is None or partial_tp_ratio <= 0 or partial_tp_ratio >= 1:
             return [("final", self.position_contracts, intent.tp_price)]
 
@@ -788,6 +778,8 @@ class Trader:
         tp2_price = getattr(intent, "three_stage_tp2_price", None)
         tp1_ratio = Decimal(str(getattr(intent, "three_stage_tp1_ratio", 0.0)))
         tp2_ratio = Decimal(str(getattr(intent, "three_stage_tp2_ratio", 0.0)))
+        if getattr(intent, "three_stage_tp1_consumed", False) and not getattr(intent, "three_stage_tp2_consumed", False):
+            return [("tp2_outer", self.position_contracts, float(tp2_price if tp2_price is not None else intent.tp_price))]
         if tp1_price is None or tp2_price is None or tp1_ratio <= 0 or tp2_ratio <= 0:
             return [("final", self.position_contracts, intent.tp_price)]
         tp1_contracts = self.round_contracts_down(self.position_contracts * tp1_ratio)
@@ -1242,15 +1234,19 @@ class Trader:
         client_order_id: str | None = None,
     ) -> str:
         body = self._reduce_only_tp_order_body(side, Decimal(str(contracts)), float(tp_price))
+        sent_client_order_id = ""
         if client_order_id:
-            body["clOrdId"] = client_order_id[:32]
+            sent_client_order_id = sanitize_okx_client_order_id(client_order_id)
+            if sent_client_order_id:
+                body["clOrdId"] = sent_client_order_id
         res = await self.request("POST", "/api/v5/trade/order", body)
         order_id = self.extract_order_id(res)
         logger.warning(
-            "SIDECAR_TP_PLACED | side=%s contracts=%s tp_price=%s ordId=%s",
+            "SIDECAR_TP_PLACED | side=%s contracts=%s tp_price=%s sent_clOrdId=%s ordId=%s",
             side,
             self.decimal_to_str(Decimal(str(contracts))),
             self.price_to_str(float(tp_price)),
+            sent_client_order_id or "-",
             order_id,
         )
         return order_id

@@ -89,3 +89,13 @@ def mark_sidecar_leg_unknown_halted(leg: dict[str, Any], ts_ms: int, *, warning_
     updated["last_warning_ts_ms"] = int(ts_ms)
     updated["warning_recorded"] = warning_recorded
     return updated
+
+
+def mark_sidecar_leg_open_unprotected(leg: dict[str, Any], ts_ms: int, *, warning_recorded: bool = True) -> dict[str, Any]:
+    updated = dict(leg)
+    updated["status"] = SidecarLegStatus.OPEN_UNPROTECTED.value
+    updated["tp_order_id"] = None
+    updated["updated_ts_ms"] = int(ts_ms)
+    updated["last_warning_ts_ms"] = int(ts_ms)
+    updated["warning_recorded"] = warning_recorded
+    return updated

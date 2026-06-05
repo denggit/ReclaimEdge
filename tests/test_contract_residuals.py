@@ -99,6 +99,32 @@ def test_split_tp_build_specs_exact_sum_to_core_contracts() -> None:
     assert final == Decimal("4.01"), f"final should be 4.01, got {final}"
 
 
+def test_split_partial_consumed_builds_only_final_tp() -> None:
+    trader = make_trader(position_contracts=Decimal("4.01"))
+    intent = make_intent(
+        tp_plan="SPLIT_PARTIAL_FINAL",
+        partial_tp_price=3060.0,
+        partial_tp_ratio=0.60,
+        partial_tp_consumed=True,
+        tp_price=3120.0,
+    )
+
+    assert trader._build_take_profit_order_specs(intent) == [("final", Decimal("4.01"), 3120.0)]
+
+
+def test_middle_runner_active_builds_only_final_tp() -> None:
+    trader = make_trader(position_contracts=Decimal("2.00"))
+    intent = make_intent(
+        tp_plan="MIDDLE_RUNNER",
+        partial_tp_price=3050.0,
+        partial_tp_ratio=0.80,
+        middle_runner_active=True,
+        tp_price=3120.0,
+    )
+
+    assert trader._build_take_profit_order_specs(intent) == [("final", Decimal("2.00"), 3120.0)]
+
+
 # ============================================================
 # Test 2: Three-Stage _build_three_stage_order_specs exact sum (calls production)
 # ============================================================
@@ -139,6 +165,23 @@ def test_three_stage_build_specs_exact_sum_to_core_contracts() -> None:
     assert tp2 == Decimal("2.00"), f"tp2 should be 2.00, got {tp2}"
     # Runner should be 10.01 - 6.00 - 2.00 = 2.01
     assert runner == Decimal("2.01"), f"runner should be 2.01, got {runner}"
+
+
+def test_three_stage_tp1_consumed_builds_only_tp2_from_remaining_core() -> None:
+    trader = make_trader(position_contracts=Decimal("0.63"))
+    intent = make_intent(
+        tp_plan="THREE_STAGE_RUNNER",
+        tp_price=3120.0,
+        three_stage_tp1_price=3050.0,
+        three_stage_tp1_ratio=0.60,
+        three_stage_tp2_price=3120.0,
+        three_stage_tp2_ratio=0.20,
+        three_stage_runner_ratio=0.20,
+        three_stage_tp1_consumed=True,
+        three_stage_tp2_consumed=False,
+    )
+
+    assert trader._build_three_stage_order_specs(intent) == [("tp2_outer", Decimal("0.63"), 3120.0)]
 
 
 # ============================================================
