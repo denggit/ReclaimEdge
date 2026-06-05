@@ -155,13 +155,13 @@ class SplitTakeProfitStrategyTest(unittest.TestCase):
         strat = strategy(breakeven_fee_buffer_pct=0.001, tp_min_net_profit_pct=0.002)
         strat.state.avg_entry_price = 100.0
 
-        tp_price, mode = strat._select_tp_price("LONG", boll(middle=100.30, upper=110.0))
-        self.assertEqual(mode, "MIDDLE")
-        self.assertAlmostEqual(tp_price, 100.30)
-
         tp_price, mode = strat._select_tp_price("LONG", boll(middle=100.31, upper=110.0))
         self.assertEqual(mode, "MIDDLE")
         self.assertAlmostEqual(tp_price, 100.31)
+
+        tp_price, mode = strat._select_tp_price("LONG", boll(middle=100.40, upper=110.0))
+        self.assertEqual(mode, "MIDDLE")
+        self.assertAlmostEqual(tp_price, 100.40)
 
     def test_short_tp_switches_to_lower_when_middle_net_profit_below_threshold(self) -> None:
         strat = strategy(breakeven_fee_buffer_pct=0.001, tp_min_net_profit_pct=0.002)
@@ -193,9 +193,10 @@ class SplitTakeProfitStrategyTest(unittest.TestCase):
         partial_tp, partial_ratio, plan = strat._select_tp_plan("LONG", tp_price, 4)
 
         self.assertEqual(mode, "UPPER")
-        self.assertEqual(plan, "SPLIT_PARTIAL_FINAL")
-        self.assertEqual(partial_ratio, 0.5)
-        self.assertAlmostEqual(partial_tp or 0, 108.0)
+        # Middle profit insufficient → SPLIT is blocked; SINGLE only
+        self.assertEqual(plan, "SINGLE")
+        self.assertIsNone(partial_tp)
+        self.assertEqual(partial_ratio, 0.0)
 
     def test_short_split_tp_uses_lower_when_final_tp_switches_to_lower(self) -> None:
         strat = strategy(breakeven_fee_buffer_pct=0.001, tp_min_net_profit_pct=0.002)
@@ -205,15 +206,16 @@ class SplitTakeProfitStrategyTest(unittest.TestCase):
         partial_tp, partial_ratio, plan = strat._select_tp_plan("SHORT", tp_price, 4)
 
         self.assertEqual(mode, "LOWER")
-        self.assertEqual(plan, "SPLIT_PARTIAL_FINAL")
-        self.assertEqual(partial_ratio, 0.5)
-        self.assertAlmostEqual(partial_tp or 0, 92.0)
+        # Middle profit insufficient → SPLIT is blocked; SINGLE only
+        self.assertEqual(plan, "SINGLE")
+        self.assertIsNone(partial_tp)
+        self.assertEqual(partial_ratio, 0.0)
 
     def test_long_split_tp_uses_80_pct_path_when_min_profit_is_inside_final_tp(self) -> None:
         strat = strategy()
         strat.state.avg_entry_price = 100.0
 
-        partial_tp, partial_ratio, plan = strat._select_tp_plan("LONG", 110.0, 4)
+        partial_tp, partial_ratio, plan = strat._select_tp_plan("LONG", 110.0, 4, tp_mode="MIDDLE", boll=boll(middle=101.0, upper=110.0))
 
         self.assertEqual(plan, "SPLIT_PARTIAL_FINAL")
         self.assertEqual(partial_ratio, 0.5)
@@ -233,7 +235,7 @@ class SplitTakeProfitStrategyTest(unittest.TestCase):
         strat = strategy()
         strat.state.avg_entry_price = 100.0
 
-        partial_tp, partial_ratio, plan = strat._select_tp_plan("SHORT", 90.0, 4)
+        partial_tp, partial_ratio, plan = strat._select_tp_plan("SHORT", 90.0, 4, tp_mode="MIDDLE", boll=boll(middle=99.0, upper=110.0, lower=90.0))
 
         self.assertEqual(plan, "SPLIT_PARTIAL_FINAL")
         self.assertEqual(partial_ratio, 0.5)
@@ -494,17 +496,18 @@ class SplitTakeProfitStrategyTest(unittest.TestCase):
             last_tp_update_candle_ts_ms=1_000,
         )
 
-        update_intent = strat._maybe_update_tp(100.0, 2_000, boll(middle=100.1, upper=111.0, lower=90.0, candle_ts_ms=2_000), cvd())
+        # middle=100.5 is sufficient: effective_be=100.1, required=100.3002 < 100.5 → MIDDLE
+        update_intent = strat._maybe_update_tp(100.0, 2_000, boll(middle=100.5, upper=111.0, lower=90.0, candle_ts_ms=2_000), cvd())
 
         self.assertIsNotNone(update_intent)
         self.assertEqual(update_intent.tp_plan, "MIDDLE_RUNNER")
-        self.assertEqual(update_intent.partial_tp_price, 100.1)
-        self.assertEqual(update_intent.tp_price, 111.0)
+        self.assertAlmostEqual(update_intent.partial_tp_price, 100.5)
+        self.assertAlmostEqual(update_intent.tp_price, 111.0)
         self.assertTrue(strat.state.middle_runner_pending)
         self.assertTrue(strat.state.middle_runner_enabled_for_position)
         self.assertAlmostEqual(strat.state.middle_runner_keep_ratio, 0.2)
         self.assertEqual(strat.state.tp_plan, "MIDDLE_RUNNER")
-        self.assertFalse(strat._three_stage_runner_plan_allowed("MIDDLE", boll(middle=100.1, upper=111.0, lower=90.0)))
+        self.assertFalse(strat._three_stage_runner_plan_allowed("MIDDLE", boll(middle=100.5, upper=111.0, lower=90.0)))
 
     def test_middle_runner_active_keeps_old_sl_when_new_sl_calculation_returns_none(self) -> None:
         strat = strategy(middle_runner_enabled=True, breakeven_fee_buffer_pct=0.001, tp_min_net_profit_pct=0.002)
@@ -563,6 +566,104 @@ class SplitTakeProfitStrategyTest(unittest.TestCase):
         strat.state = StrategyPositionState(**base_state, middle_runner_active=True)
         self.assertIsNone(strat._maybe_near_tp_reduce(109.0, 3_000, boll(), cvd()))
         self.assertFalse(strat.state.near_tp_armed)
+
+    # ── Middle-profit eligibility enforcement ──
+
+    def test_middle_runner_pending_disables_when_middle_profit_insufficient(self) -> None:
+        """Middle Runner pending (first close not done) must disable when middle profit insufficient."""
+        strat = strategy(middle_runner_enabled=True, breakeven_fee_buffer_pct=0.001, tp_min_net_profit_pct=0.002)
+        strat.state = StrategyPositionState(
+            side="LONG",
+            layers=1,
+            total_entry_qty=1.0,
+            total_entry_notional=100.0,
+            avg_entry_price=100.0,
+            net_remaining_breakeven_price=100.0,
+            tp_price=110.0,
+            tp_mode="MIDDLE",
+            tp_plan="MIDDLE_RUNNER",
+            partial_tp_price=101.0,
+            partial_tp_ratio=0.8,
+            middle_runner_enabled_for_position=True,
+            middle_runner_pending=True,
+            middle_runner_first_close_ratio=0.8,
+            middle_runner_keep_ratio=0.2,
+            middle_runner_first_tp_price=101.0,
+            middle_runner_final_tp_price=110.0,
+            last_tp_update_candle_ts_ms=1_000,
+        )
+
+        # middle=100.1: required_middle = 100.0 * 1.002 = 100.2 > 100.1 → insufficient
+        got = strat._maybe_update_tp(99.0, 2_000, boll(middle=100.1, upper=103.0, lower=97.0, candle_ts_ms=2_000), cvd())
+
+        self.assertIsNotNone(got, "Must return UPDATE_TP when middle profit insufficient")
+        self.assertEqual(got.intent_type, "UPDATE_TP")
+        self.assertEqual(got.tp_plan, "SINGLE")
+        self.assertAlmostEqual(got.tp_price, 103.0)
+        self.assertIsNone(got.partial_tp_price)
+        self.assertEqual(got.partial_tp_ratio, 0.0)
+        self.assertFalse(strat.state.middle_runner_pending)
+        self.assertFalse(strat.state.middle_runner_enabled_for_position)
+
+    def test_middle_runner_active_does_not_reset_when_middle_profit_insufficient(self) -> None:
+        """Middle Runner active must NOT be reset when middle profit insufficient."""
+        strat = strategy(middle_runner_enabled=True, breakeven_fee_buffer_pct=0.001, tp_min_net_profit_pct=0.002)
+        strat.state = StrategyPositionState(
+            side="LONG",
+            layers=1,
+            total_entry_qty=1.0,
+            total_entry_notional=100.0,
+            avg_entry_price=100.0,
+            net_remaining_breakeven_price=100.0,
+            tp_price=110.0,
+            tp_mode="MIDDLE",
+            tp_plan="SINGLE",
+            partial_tp_consumed=True,
+            middle_runner_enabled_for_position=True,
+            middle_runner_active=True,
+            middle_runner_first_close_ratio=0.8,
+            middle_runner_keep_ratio=0.2,
+            middle_runner_final_tp_price=110.0,
+            middle_runner_protective_sl_price=101.5,
+            middle_runner_protective_sl_order_id="algo-old",
+            last_tp_update_candle_ts_ms=1_000,
+        )
+
+        # middle insufficient but middle_runner_active → must NOT reset
+        got = strat._maybe_update_tp(100.5, 2_000, boll(middle=100.1, upper=103.0, lower=97.0, candle_ts_ms=2_000), cvd())
+
+        self.assertIsNotNone(got, "Must return UPDATE_TP for active middle runner")
+        self.assertTrue(strat.state.middle_runner_active, "middle_runner_active must be preserved")
+        self.assertIsNotNone(strat.state.middle_runner_protective_sl_price)
+
+    def test_split_partial_disabled_when_middle_profit_insufficient(self) -> None:
+        """SPLIT with partial not consumed must fall back to SINGLE outer when middle profit insufficient."""
+        strat = strategy(breakeven_fee_buffer_pct=0.001, tp_min_net_profit_pct=0.002, split_tp_enabled=True, split_tp_min_layers=2)
+        strat.state = StrategyPositionState(
+            side="LONG",
+            layers=2,
+            total_entry_qty=1.0,
+            total_entry_notional=100.0,
+            avg_entry_price=100.0,
+            net_remaining_breakeven_price=100.0,
+            tp_price=110.0,
+            tp_mode="MIDDLE",
+            tp_plan="SPLIT_PARTIAL_FINAL",
+            partial_tp_price=108.0,
+            partial_tp_ratio=0.5,
+            partial_tp_consumed=False,
+            last_tp_update_candle_ts_ms=1_000,
+        )
+
+        # middle=100.1: required_middle = 100.0 * 1.002 = 100.2 > 100.1 → insufficient
+        got = strat._maybe_update_tp(99.0, 2_000, boll(middle=100.1, upper=103.0, lower=97.0, candle_ts_ms=2_000), cvd())
+
+        self.assertIsNotNone(got, "Must return UPDATE_TP when middle profit insufficient")
+        self.assertEqual(got.intent_type, "UPDATE_TP")
+        self.assertEqual(got.tp_plan, "SINGLE")
+        self.assertAlmostEqual(got.tp_price, 103.0)
+        self.assertIsNone(got.partial_tp_price)
+        self.assertEqual(got.partial_tp_ratio, 0.0)
 
 
 class SplitTakeProfitTraderTest(unittest.IsolatedAsyncioTestCase):

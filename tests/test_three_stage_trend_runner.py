@@ -948,6 +948,136 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
         self.assertEqual(got.tp_price, 98.0, "TP must update to latest middle band (sufficient profit)")
         self.assertFalse(strat.state.startup_force_tp_reconcile)
 
+    # ── Middle-profit eligibility enforcement ──
+
+    def test_three_stage_before_tp1_disables_when_middle_profit_insufficient_on_update(self) -> None:
+        """Three-Stage before TP1 consumed must disable when middle profit insufficient."""
+        strat = strategy(breakeven_fee_buffer_pct=0.001, tp_min_net_profit_pct=0.002)
+        strat.state = StrategyPositionState(
+            side="LONG",
+            layers=1,
+            total_entry_qty=1.0,
+            total_entry_notional=100.0,
+            avg_entry_price=100.0,
+            net_remaining_breakeven_price=100.0,
+            tp_price=110.0,
+            tp_mode="UPPER",
+            tp_plan="THREE_STAGE_RUNNER",
+            partial_tp_price=101.0,
+            partial_tp_ratio=0.6,
+            three_stage_runner_enabled_for_position=True,
+            three_stage_tp1_price=101.0,
+            three_stage_tp2_price=110.0,
+            three_stage_tp1_ratio=0.6,
+            three_stage_tp2_ratio=0.2,
+            three_stage_runner_ratio=0.2,
+            three_stage_tp1_consumed=False,
+            three_stage_tp2_consumed=False,
+            trend_runner_active=False,
+            last_tp_update_candle_ts_ms=1_000,
+        )
+
+        # middle=100.1 is too low for net_remaining_be=100.0 with min_profit=0.002
+        # required_middle = 100.0 * 1.002 = 100.2 > 100.1 → middle insufficient
+        got = strat._maybe_update_tp(99.0, 2_000, boll(middle=100.1, upper=103.0, lower=97.0, candle_ts_ms=2_000), cvd())
+
+        self.assertIsNotNone(got, "Must return UPDATE_TP when middle profit insufficient")
+        self.assertEqual(got.intent_type, "UPDATE_TP")
+        self.assertEqual(got.tp_plan, "SINGLE")
+        self.assertAlmostEqual(got.tp_price, 103.0)
+        self.assertIsNone(got.partial_tp_price)
+        self.assertEqual(got.partial_tp_ratio, 0.0)
+        self.assertFalse(strat.state.three_stage_runner_enabled_for_position)
+        self.assertIsNone(strat.state.three_stage_tp1_price)
+        self.assertIsNone(strat.state.three_stage_tp2_price)
+
+    def test_three_stage_before_tp1_keeps_when_middle_profit_sufficient(self) -> None:
+        """Three-Stage before TP1 consumed keeps running when middle profit sufficient."""
+        strat = strategy(breakeven_fee_buffer_pct=0.001, tp_min_net_profit_pct=0.002)
+        strat.state = StrategyPositionState(
+            side="LONG",
+            layers=1,
+            total_entry_qty=1.0,
+            total_entry_notional=100.0,
+            avg_entry_price=100.0,
+            net_remaining_breakeven_price=100.0,
+            tp_price=110.0,
+            tp_mode="UPPER",
+            tp_plan="THREE_STAGE_RUNNER",
+            partial_tp_price=101.0,
+            partial_tp_ratio=0.6,
+            three_stage_runner_enabled_for_position=True,
+            three_stage_tp1_price=101.0,
+            three_stage_tp2_price=110.0,
+            three_stage_tp1_ratio=0.6,
+            three_stage_tp2_ratio=0.2,
+            three_stage_runner_ratio=0.2,
+            three_stage_tp1_consumed=False,
+            three_stage_tp2_consumed=False,
+            trend_runner_active=False,
+            last_tp_update_candle_ts_ms=1_000,
+        )
+
+        # middle=100.3 is high enough: required_middle = 100.0 * 1.002 = 100.2 < 100.3 → middle sufficient
+        got = strat._maybe_update_tp(100.0, 2_000, boll(middle=100.3, upper=103.0, lower=97.0, candle_ts_ms=2_000), cvd())
+
+        self.assertIsNotNone(got, "Must return UPDATE_TP when middle profit sufficient")
+        self.assertEqual(got.intent_type, "UPDATE_TP")
+        self.assertEqual(got.tp_plan, "THREE_STAGE_RUNNER")
+        self.assertAlmostEqual(got.partial_tp_price, 100.3)
+        self.assertAlmostEqual(got.tp_price, 103.0)
+        self.assertTrue(strat.state.three_stage_runner_enabled_for_position)
+
+    def test_three_stage_after_tp1_does_not_disable_when_middle_profit_insufficient(self) -> None:
+        """Three-Stage after TP1 consumed must NOT be reset when middle profit insufficient."""
+        strat = strategy(breakeven_fee_buffer_pct=0.001, tp_min_net_profit_pct=0.002)
+        strat.state = StrategyPositionState(
+            side="LONG",
+            layers=1,
+            total_entry_qty=1.0,
+            total_entry_notional=100.0,
+            avg_entry_price=100.0,
+            net_remaining_breakeven_price=100.0,
+            tp_price=110.0,
+            tp_mode="UPPER",
+            tp_plan="THREE_STAGE_RUNNER",
+            partial_tp_consumed=True,
+            three_stage_runner_enabled_for_position=True,
+            three_stage_tp1_price=101.0,
+            three_stage_tp2_price=110.0,
+            three_stage_tp1_ratio=0.6,
+            three_stage_tp2_ratio=0.2,
+            three_stage_runner_ratio=0.2,
+            three_stage_tp1_consumed=True,
+            three_stage_tp2_consumed=False,
+            trend_runner_active=False,
+            last_tp_update_candle_ts_ms=1_000,
+        )
+
+        # middle insufficient but TP1 already consumed → must NOT reset
+        got = strat._maybe_update_tp(105.0, 2_000, boll(middle=100.1, upper=103.0, lower=97.0, candle_ts_ms=2_000), cvd())
+
+        self.assertIsNotNone(got, "Must return UPDATE_TP for waiting_tp2 even when middle insufficient")
+        self.assertEqual(got.intent_type, "UPDATE_TP")
+        self.assertTrue(got.three_stage_tp1_consumed, "TP1 consumed flag must be preserved")
+        self.assertEqual(got.tp_plan, "THREE_STAGE_RUNNER")
+        self.assertAlmostEqual(got.three_stage_tp2_price, 103.0, "TP2 must update to latest outer band")
+        self.assertTrue(strat.state.three_stage_runner_enabled_for_position)
+        self.assertTrue(strat.state.three_stage_tp1_consumed)
+
+    def test_tp_selection_uses_net_remaining_breakeven(self) -> None:
+        """_select_tp_price uses net_remaining_breakeven_price over avg_entry_price."""
+        strat = strategy(breakeven_fee_buffer_pct=0.001, tp_min_net_profit_pct=0.002)
+        strat.state.avg_entry_price = 100.0
+        strat.state.net_remaining_breakeven_price = 98.0
+
+        # With avg_entry=100: required_middle=100*1.002=100.2 > 98.3 → would be UPPER
+        # With net_remaining_be=98: required_middle=98*1.002=98.196 < 98.3 → MIDDLE
+        tp_price, tp_mode = strat._select_tp_price("LONG", boll(middle=98.3, upper=105.0))
+
+        self.assertEqual(tp_mode, "MIDDLE")
+        self.assertAlmostEqual(tp_price, 98.3)
+
 
 class RecordingTrader(Trader):
     def __init__(self, side: str = "LONG") -> None:

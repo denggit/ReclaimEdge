@@ -1068,6 +1068,85 @@ class BollCvdReclaimStrategy:
         old_trend_runner_tp = self.state.trend_runner_tp_price
         old_trend_runner_sl = self.state.trend_runner_sl_price
         tp_price, tp_mode = self._select_tp_price(self.state.side, boll)
+
+        # ── Unified middle-profit eligibility enforcement ──
+        # Before any complex TP mode is allowed, the middle band must offer
+        # sufficient net profit relative to the effective breakeven.
+        # Exceptions: already-executed stages (TP1 consumed, runner active).
+        if tp_mode != "MIDDLE":
+            outer = boll.upper if self.state.side == "LONG" else boll.lower
+            outer_mode: TpMode = "UPPER" if self.state.side == "LONG" else "LOWER"
+            effective_be = self._effective_breakeven_for_tp_selection(self.state.side)
+            min_profit = self.config.tp_min_net_profit_pct
+            required_middle = effective_be * (1 + min_profit) if self.state.side == "LONG" else effective_be * (1 - min_profit)
+
+            # Three-Stage: only reset when TP1 has NOT been consumed and trend runner is NOT active
+            if (
+                self.state.three_stage_runner_enabled_for_position
+                and not self.state.three_stage_tp1_consumed
+                and not self.state.trend_runner_active
+            ):
+                old_tp1 = self.state.three_stage_tp1_price
+                old_tp2 = self.state.three_stage_tp2_price
+                self._reset_three_stage_runner_state()
+                logger.warning(
+                    "THREE_STAGE_DISABLED_MIDDLE_PROFIT_INSUFFICIENT | "
+                    "side=%s effective_breakeven=%.4f middle=%.4f required_middle=%.4f "
+                    "outer=%.4f old_tp1=%s old_tp2=%s candle_ts=%s",
+                    self.state.side,
+                    effective_be,
+                    boll.middle,
+                    required_middle,
+                    outer,
+                    f"{old_tp1:.4f}" if old_tp1 is not None else "-",
+                    f"{old_tp2:.4f}" if old_tp2 is not None else "-",
+                    boll.candle_ts_ms,
+                )
+                tp_price = outer
+                tp_mode = outer_mode
+                partial_tp_price = None
+                partial_tp_ratio = 0.0
+                tp_plan = "SINGLE"
+
+            # Middle Runner pending (first close NOT done): reset
+            elif self.state.middle_runner_pending and not self.state.middle_runner_active:
+                self._reset_middle_runner_state()
+                logger.warning(
+                    "MIDDLE_RUNNER_DISABLED_MIDDLE_PROFIT_INSUFFICIENT | "
+                    "side=%s effective_breakeven=%.4f middle=%.4f required_middle=%.4f "
+                    "outer=%.4f candle_ts=%s",
+                    self.state.side,
+                    effective_be,
+                    boll.middle,
+                    required_middle,
+                    outer,
+                    boll.candle_ts_ms,
+                )
+                tp_price = outer
+                tp_mode = outer_mode
+                partial_tp_price = None
+                partial_tp_ratio = 0.0
+                tp_plan = "SINGLE"
+
+            # SPLIT partial NOT consumed: fall back to SINGLE outer
+            elif self.state.tp_plan == "SPLIT_PARTIAL_FINAL" and not self.state.partial_tp_consumed:
+                logger.warning(
+                    "SPLIT_TP_DISABLED_MIDDLE_PROFIT_INSUFFICIENT | "
+                    "side=%s effective_breakeven=%.4f middle=%.4f required_middle=%.4f "
+                    "outer=%.4f candle_ts=%s",
+                    self.state.side,
+                    effective_be,
+                    boll.middle,
+                    required_middle,
+                    outer,
+                    boll.candle_ts_ms,
+                )
+                tp_price = outer
+                tp_mode = outer_mode
+                partial_tp_price = None
+                partial_tp_ratio = 0.0
+                tp_plan = "SINGLE"
+
         if self.state.trend_runner_active:
             tp_mode = "UPPER" if self.state.side == "LONG" else "LOWER"
             partial_tp_price, partial_tp_ratio, tp_plan = None, 0.0, "SINGLE"
@@ -1965,20 +2044,32 @@ class BollCvdReclaimStrategy:
         self.state.three_stage_post_tp1_sl_extension_triggered = True
         return new_sl
 
-    def _select_tp_price(self, side: PositionSide, boll: BollSnapshot) -> tuple[float, TpMode]:
-        if self.state.avg_entry_price <= 0:
-            return boll.middle, "MIDDLE"
+    def _effective_breakeven_for_tp_selection(self, side: PositionSide) -> float:
+        net_be = float(getattr(self.state, "net_remaining_breakeven_price", 0.0) or 0.0)
+        if net_be > 0:
+            return net_be
+        avg = self.state.avg_entry_price
+        if avg <= 0:
+            return 0.0
         fee = self.config.breakeven_fee_buffer_pct
-        min_net_profit = self.config.tp_min_net_profit_pct
-        required_profit_pct = fee + min_net_profit
         if side == "LONG":
-            self.state.breakeven_price = self.state.avg_entry_price * (1 + fee)
-            middle_required_price = self.state.avg_entry_price * (1 + required_profit_pct)
+            return avg * (1 + fee)
+        return avg * (1 - fee)
+
+    def _select_tp_price(self, side: PositionSide, boll: BollSnapshot) -> tuple[float, TpMode]:
+        effective_be = self._effective_breakeven_for_tp_selection(side)
+        if effective_be <= 0:
+            return boll.middle, "MIDDLE"
+        min_net_profit = self.config.tp_min_net_profit_pct
+        fee = self.config.breakeven_fee_buffer_pct
+        if side == "LONG":
+            self.state.breakeven_price = effective_be
+            middle_required_price = effective_be * (1 + min_net_profit)
             if boll.middle < middle_required_price:
                 return boll.upper, "UPPER"
             return boll.middle, "MIDDLE"
-        self.state.breakeven_price = self.state.avg_entry_price * (1 - fee)
-        middle_required_price = self.state.avg_entry_price * (1 - required_profit_pct)
+        self.state.breakeven_price = effective_be
+        middle_required_price = effective_be * (1 - min_net_profit)
         if boll.middle > middle_required_price:
             return boll.lower, "LOWER"
         return boll.middle, "MIDDLE"
@@ -2000,6 +2091,8 @@ class BollCvdReclaimStrategy:
         if self._middle_runner_plan_allowed(tp_mode, boll):
             first_close_ratio = min(max(self.config.middle_runner_first_close_ratio, 0.1), 0.95)
             return boll.middle, first_close_ratio, "MIDDLE_RUNNER"
+        if tp_mode != "MIDDLE":
+            return None, 0.0, "SINGLE"
         if not self.config.split_tp_enabled:
             return None, 0.0, "SINGLE"
         if layers < self.config.split_tp_min_layers:
