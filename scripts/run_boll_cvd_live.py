@@ -22,14 +22,7 @@ sys.path.insert(0, str(SRC))
 
 from src.execution.trader import PositionSnapshot, Trader  # noqa: E402
 from src.indicators.cvd_tracker import CvdTracker, CvdTrackerConfig  # noqa: E402
-from src.live.time_utils import (  # noqa: E402
-    format_ts_ms,
-    next_daily_report_time,
-    next_weekly_summary_time,
-    parse_daily_report_time,
-    parse_weekly_report_time,
-    utc_ms,
-)
+from src.live import time_utils as live_time_utils  # noqa: E402
 from src.monitors.boll_band_breakout_monitor import (  # noqa: E402
     BollBandBreakoutMonitor,
     BollBandBreakoutMonitorConfig,
@@ -117,7 +110,7 @@ def rolling_loss_guard_subject(action: str, threshold_pct: float | None = None) 
 def build_rolling_loss_guard_email(action: str, payload: dict[str, Any]) -> tuple[str, str]:
     subject = rolling_loss_guard_subject(action, payload.get("threshold_pct"))
     halt_until = payload.get("halt_until_ts_ms")
-    halt_until_text = format_ts_ms(halt_until) if isinstance(halt_until, int) else "-"
+    halt_until_text = live_time_utils.format_ts_ms(halt_until) if isinstance(halt_until, int) else "-"
     threshold = payload.get("threshold_pct")
     threshold_text = f"{float(threshold) * 100:.2f}%" if threshold is not None else "-"
     reference_flat_equity = float(payload.get("reference_flat_equity") or 0.0)
@@ -287,7 +280,7 @@ def build_report_context(
 
 def build_live_failure_email(intent: TradeIntent, error: Exception, rolled_back: bool, halted: bool) -> tuple[str, str]:
     subject = f"LIVE order failed | ETH-USDT-SWAP | {intent.intent_type} | layer {intent.layer_index}"
-    event_time = format_ts_ms(intent.ts_ms)
+    event_time = live_time_utils.format_ts_ms(intent.ts_ms)
     state_text = "Strategy state has been rolled back." if rolled_back else "Entry may be live. Strategy state was NOT rolled back."
     halt_text = "Trading has been halted. Please check OKX manually." if halted else "Trading is not halted."
     content = f"""
@@ -318,7 +311,7 @@ def build_live_failure_email(intent: TradeIntent, error: Exception, rolled_back:
 def restore_strategy_from_position(strategy: BollCvdReclaimStrategy, position: PositionSnapshot, now_ms: int | None = None) -> None:
     if not position.has_position or position.side is None or position.avg_entry_price <= 0:
         return
-    now_ms = int(now_ms or utc_ms())
+    now_ms = int(now_ms or live_time_utils.utc_ms())
     strategy.state = StrategyPositionState(
         side=position.side,
         layers=1,
@@ -1742,7 +1735,7 @@ async def apply_sidecar_startup_recovery(
                 status,
                 fee_buffer_pct=getattr(getattr(strategy, "config", None), "breakeven_fee_buffer_pct", DEFAULT_NET_REMAINING_FEE_BUFFER_PCT),
             )
-            strategy.state.sidecar_legs[index] = mark_sidecar_leg_tp_filled(leg, utc_ms())
+            strategy.state.sidecar_legs[index] = mark_sidecar_leg_tp_filled(leg, live_time_utils.utc_ms())
             if hasattr(journal, "append"):
                 journal.append("SIDECAR_TP_FILLED", {**dict(leg), **status, "source": "startup_recovery"}, position_id=execution_state.current_position_id)
             changed = True
@@ -1751,7 +1744,7 @@ async def apply_sidecar_startup_recovery(
         execution_state.halt_reason = "sidecar_startup_order_state_unknown"
         strategy.state.sidecar_dirty = True
         strategy.state.sidecar_halt_reason = "sidecar_startup_order_state_unknown"
-        strategy.state.sidecar_legs[index] = mark_sidecar_leg_unknown_halted(leg, utc_ms())
+        strategy.state.sidecar_legs[index] = mark_sidecar_leg_unknown_halted(leg, live_time_utils.utc_ms())
         if hasattr(journal, "append"):
             journal.append(
                 "SIDECAR_STARTUP_ORDER_STATE_UNKNOWN",
@@ -2836,7 +2829,7 @@ async def account_position_sync_worker(
                 journal=journal,
                 state_store=state_store,
                 trader_symbol=trader.symbol,
-                ts_ms=utc_ms(),
+                ts_ms=live_time_utils.utc_ms(),
                 state_lock=state_lock,
             )
             sidecar_reconciled_this_sync = _sidecar_pre_core_result.queried
@@ -2931,7 +2924,7 @@ async def account_position_sync_worker(
                     account_snapshot.cash = cash
                     account_snapshot.equity = equity
                     account_snapshot.updated_monotonic = time.monotonic()
-                    account_snapshot.updated_ts_ms = utc_ms()
+                    account_snapshot.updated_ts_ms = live_time_utils.utc_ms()
                     account_snapshot.version += 1
                     trader.account_equity_usdt = equity
                     sizer.update_account_equity(equity)
@@ -2940,7 +2933,7 @@ async def account_position_sync_worker(
                     seconds_since_last_order = (
                         cash_transfer_settle_seconds
                         if execution_state.last_order_ts_ms == 0
-                        else max((utc_ms() - execution_state.last_order_ts_ms) / 1000, 0.0)
+                        else max((live_time_utils.utc_ms() - execution_state.last_order_ts_ms) / 1000, 0.0)
                     )
                     unsafe_reasons = []
                     if pending_order_count > 0:
@@ -3031,7 +3024,7 @@ async def account_position_sync_worker(
                     # pending after TP1 fill). The mark_* helpers are internally
                     # idempotent via consumed/active flags.
                     middle_runner_activated = mark_middle_runner_active_if_position_reduced(strategy, core_position)
-                    three_stage_event = mark_three_stage_progress_if_position_reduced(strategy, core_position, utc_ms())
+                    three_stage_event = mark_three_stage_progress_if_position_reduced(strategy, core_position, live_time_utils.utc_ms())
                     mark_partial_tp_consumed_if_position_reduced(strategy, core_position)
                     sync_strategy_cost_from_position(strategy, core_position)
                     if pending_order_count > 0 and three_stage_event is not None:
@@ -3056,7 +3049,7 @@ async def account_position_sync_worker(
                                 current_price = None
                                 price_source = "missing"
                                 if post_tp1_boll is not None and core_position.side is not None:
-                                    current_price, price_source = three_stage_post_tp1_current_price(account_snapshot, core_position, post_tp1_boll, utc_ms())
+                                    current_price, price_source = three_stage_post_tp1_current_price(account_snapshot, core_position, post_tp1_boll, live_time_utils.utc_ms())
                                     base_sl = strategy._calculate_three_stage_post_tp1_protective_sl(core_position.side, current_price, post_tp1_boll)
                                     extension_sl = strategy._apply_three_stage_post_tp1_extension_trigger(core_position.side, current_price, post_tp1_boll, base_sl)
                                     protective_sl = strategy._tighten_optional_three_stage_post_tp1_sl(core_position.side, base_sl, extension_sl)
@@ -3314,7 +3307,7 @@ async def account_position_sync_worker(
                     trader_symbol=trader.symbol,
                     position_id=execution_state.current_position_id,
                     cash_before_position=execution_state.cash_before_position,
-                    ts_ms=utc_ms(),
+                    ts_ms=live_time_utils.utc_ms(),
                 )
                 continue
 
@@ -3337,7 +3330,7 @@ async def account_position_sync_worker(
                     core_position=core_position,
                     position_id=execution_state.current_position_id,
                     cash_before_position=execution_state.cash_before_position,
-                    ts_ms=utc_ms(),
+                    ts_ms=live_time_utils.utc_ms(),
                     fee_buffer_pct=strategy.config.breakeven_fee_buffer_pct,
                 )
 
@@ -3404,7 +3397,7 @@ async def account_position_sync_worker(
                     account_snapshot.cash = settled.cash
                     account_snapshot.equity = settled.equity
                     account_snapshot.updated_monotonic = time.monotonic()
-                    account_snapshot.updated_ts_ms = utc_ms()
+                    account_snapshot.updated_ts_ms = live_time_utils.utc_ms()
                     account_snapshot.version += 1
                     trader.account_equity_usdt = settled.equity
                     sizer.update_account_equity(settled.equity)
@@ -3443,7 +3436,7 @@ async def account_position_sync_worker(
                     new_reference = transfer_equity_after if transfer_equity_after is not None else transfer_cash_after
                     if new_reference is not None:
                         rolling_loss_guard.adjust_flat_reference_for_cash_transfer(
-                            now_ms=utc_ms(),
+                            now_ms=live_time_utils.utc_ms(),
                             new_flat_equity=float(new_reference),
                             reason=str(cash_transfer_payload.get("reason") or "safe_flat_cash_transfer"),
                         )
@@ -3748,7 +3741,7 @@ async def account_position_sync_worker(
                 record_flat_payload.pop("trend_runner_sl_order_id", None)
                 journal.record_flat(**record_flat_payload)
                 if rolling_loss_guard is not None and rolling_loss_guard.state is not None and rolling_loss_guard.state.enabled:
-                    guard_now_ms = utc_ms()
+                    guard_now_ms = live_time_utils.utc_ms()
                     flat_equity = record_flat_payload.get("equity_after") or record_flat_payload.get("cash_after")
                     flat_event_id = (
                         record_flat_payload.get("position_id")
@@ -3813,7 +3806,7 @@ async def account_position_sync_worker(
                 position_id, strategy_state, cash_before_position = save_state_payload
                 state_store.save(LiveStateStore.from_strategy_state(position_id=position_id, symbol=trader.symbol, strategy_state=strategy_state, cash_before_position=cash_before_position))
             if rolling_loss_guard is not None and rolling_loss_guard.state is not None and rolling_loss_guard.state.enabled:
-                guard_now_ms = utc_ms()
+                guard_now_ms = live_time_utils.utc_ms()
                 has_position_now = bool(position.has_position)
                 async with state_lock:
                     halted = execution_state.trading_halted
@@ -4091,7 +4084,7 @@ async def main() -> None:
         strategy = BollCvdShockReclaimStrategy(BollCvdReclaimStrategyConfig.from_env(), sizer)
         startup_position = await trader.fetch_position_snapshot()
         startup_cash = await fetch_usdt_cash_balance(trader)
-        rolling_loss_guard.load_or_initialize(utc_ms(), trader.account_equity_usdt)
+        rolling_loss_guard.load_or_initialize(live_time_utils.utc_ms(), trader.account_equity_usdt)
         journal.record_cash_baseline(
             source="startup",
             cash=startup_cash,
@@ -4112,7 +4105,7 @@ async def main() -> None:
             current_position_id = trusted_saved_state.position_id
             cash_before_position = trusted_saved_state.cash_before_position
         else:
-            restore_strategy_from_position(strategy, startup_position, utc_ms())
+            restore_strategy_from_position(strategy, startup_position, live_time_utils.utc_ms())
             current_position_id = journal.new_position_id(trader.symbol, startup_position.side or "UNKNOWN")
             cash_before_position = startup_cash
             journal.record_startup_recovery(
@@ -4146,7 +4139,7 @@ async def main() -> None:
         cash=startup_cash,
         equity=trader.account_equity_usdt,
         updated_monotonic=time.monotonic(),
-        updated_ts_ms=utc_ms(),
+        updated_ts_ms=live_time_utils.utc_ms(),
         version=1,
     )
     execution_state = ExecutionState(
@@ -4185,7 +4178,7 @@ async def main() -> None:
         execution_state=execution_state,
         has_position=startup_position.has_position,
         equity=trader.account_equity_usdt,
-        now_ms=utc_ms(),
+        now_ms=live_time_utils.utc_ms(),
         journal=journal,
         email_sender=email_sender,
     )
@@ -4210,10 +4203,10 @@ async def main() -> None:
 
     async def daily_report_loop() -> None:
         raw_time = os.getenv("DAILY_REPORT_TIME", "09:00")
-        hour, minute = parse_daily_report_time(raw_time)
+        hour, minute = live_time_utils.parse_daily_report_time(raw_time)
         logger.info("Daily trade report loop started | DAILY_REPORT_TIME=%s", raw_time)
         while True:
-            target = next_daily_report_time(hour, minute)
+            target = live_time_utils.next_daily_report_time(hour, minute)
             sleep_seconds = max((target - dt.datetime.now().astimezone()).total_seconds(), 1)
             await asyncio.sleep(sleep_seconds)
             try:
@@ -4238,7 +4231,7 @@ async def main() -> None:
         raw_time = os.getenv("WEEKLY_SUMMARY_TIME", "10:00")
         raw_weekday = os.getenv("WEEKLY_SUMMARY_WEEKDAY", "0")
         compact_after_success = os.getenv("WEEKLY_COMPACT_AFTER_SUCCESS", "false").strip().lower() in {"1", "true", "yes", "y", "on"}
-        hour, minute = parse_weekly_report_time(raw_time)
+        hour, minute = live_time_utils.parse_weekly_report_time(raw_time)
         weekday = int(raw_weekday)
         if weekday < 0 or weekday > 6:
             raise ValueError(f"Invalid WEEKLY_SUMMARY_WEEKDAY={raw_weekday}")
@@ -4254,7 +4247,7 @@ async def main() -> None:
         )
 
         while True:
-            target = next_weekly_summary_time(hour, minute, weekday)
+            target = live_time_utils.next_weekly_summary_time(hour, minute, weekday)
             sleep_seconds = max((target - dt.datetime.now().astimezone()).total_seconds(), 1)
             await asyncio.sleep(sleep_seconds)
             try:
