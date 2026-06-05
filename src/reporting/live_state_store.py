@@ -105,6 +105,7 @@ class LivePositionState:
     last_add_skip_log_ts_ms: int = 0
     core_contracts: str | None = None
     core_eth_qty: float = 0.0
+    startup_force_tp_reconcile: bool = False
     cash_before_position: float | None = None
     updated_at: str = ""
 
@@ -240,6 +241,7 @@ class LiveStateStore:
             last_add_skip_log_ts_ms=int(getattr(strategy_state, "last_add_skip_log_ts_ms", 0) or 0),
             core_contracts=getattr(strategy_state, "core_contracts", None),
             core_eth_qty=float(getattr(strategy_state, "core_eth_qty", 0.0) or 0.0),
+            startup_force_tp_reconcile=bool(getattr(strategy_state, "startup_force_tp_reconcile", False)),
             cash_before_position=cash_before_position,
         )
 

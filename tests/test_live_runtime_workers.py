@@ -1783,6 +1783,154 @@ class LiveRuntimeWorkerTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("ACCOUNT_SYNC_RECOVERED | failures=2", output)
         self.assertIn("ACCOUNT_SYNC_FAILED | failures=1", output.split("ACCOUNT_SYNC_RECOVERED | failures=2", 1)[1])
 
+    # ── startup force TP reconcile ──────────────────────────────────────
+
+    def test_startup_recovery_sets_force_tp_reconcile_flag(self) -> None:
+        """After startup recovery with has_position, startup_force_tp_reconcile must be True."""
+        from scripts.run_boll_cvd_live import restore_strategy_from_saved_state
+        import types
+
+        sizer = SimplePositionSizer(SimplePositionSizerConfig())
+        config = BollCvdReclaimStrategyConfig(three_stage_runner_enabled=False)
+        strategy = BollCvdShockReclaimStrategy(config, sizer)
+
+        saved_state = types.SimpleNamespace(
+            position_id="pos-1",
+            side="LONG",
+            layers=1,
+            last_entry_price=100.0,
+            tp_price=110.0,
+            tp_order_id=None,
+            tp_order_ids=[],
+            partial_tp_price=None,
+            partial_tp_ratio=0.0,
+            tp_plan="SINGLE",
+            partial_tp_consumed=False,
+            last_order_ts_ms=1_000,
+            first_entry_ts_ms=1_000,
+            last_tp_update_ts_ms=1_000,
+            last_tp_update_candle_ts_ms=1_000,
+            total_entry_qty=1.0,
+            total_entry_notional=100.0,
+            avg_entry_price=100.0,
+            breakeven_price=100.0,
+            position_cost_entry_notional=100.0,
+            position_cost_exit_notional=0.0,
+            position_cost_remaining_qty=1.0,
+            net_remaining_breakeven_price=100.0,
+            tp_mode="MIDDLE",
+            startup_force_tp_reconcile=False,
+        )
+
+        restore_strategy_from_saved_state(strategy, saved_state)
+        # Startup code sets the flag AFTER restore via strategy.state.startup_force_tp_reconcile = True
+        strategy.state.startup_force_tp_reconcile = True
+
+        self.assertTrue(strategy.state.startup_force_tp_reconcile)
+        self.assertEqual(strategy.state.side, "LONG")
+        self.assertEqual(strategy.state.layers, 1)
+
+    def test_saved_state_restore_preserves_startup_force_tp_reconcile(self) -> None:
+        """Restore from saved state reads startup_force_tp_reconcile."""
+        from scripts.run_boll_cvd_live import restore_strategy_from_saved_state
+        import types
+
+        sizer = SimplePositionSizer(SimplePositionSizerConfig())
+        config = BollCvdReclaimStrategyConfig(three_stage_runner_enabled=False)
+        strategy = BollCvdShockReclaimStrategy(config, sizer)
+
+        saved_state = types.SimpleNamespace(
+            position_id="pos-1",
+            side="LONG",
+            layers=1,
+            last_entry_price=100.0,
+            tp_price=110.0,
+            tp_order_id=None,
+            tp_order_ids=[],
+            partial_tp_price=None,
+            partial_tp_ratio=0.0,
+            tp_plan="SINGLE",
+            partial_tp_consumed=False,
+            last_order_ts_ms=1_000,
+            first_entry_ts_ms=1_000,
+            last_tp_update_ts_ms=1_000,
+            last_tp_update_candle_ts_ms=1_000,
+            total_entry_qty=1.0,
+            total_entry_notional=100.0,
+            avg_entry_price=100.0,
+            breakeven_price=100.0,
+            position_cost_entry_notional=100.0,
+            position_cost_exit_notional=0.0,
+            position_cost_remaining_qty=1.0,
+            net_remaining_breakeven_price=100.0,
+            tp_mode="MIDDLE",
+            startup_force_tp_reconcile=True,  # saved as True from a previous interrupted startup
+        )
+
+        restore_strategy_from_saved_state(strategy, saved_state)
+
+        self.assertTrue(strategy.state.startup_force_tp_reconcile,
+                        "startup_force_tp_reconcile should be restored from saved state")
+
+    def test_force_tp_reconcile_not_armed_when_flat(self) -> None:
+        """When startup position is FLAT, startup_force_tp_reconcile should remain False."""
+        sizer = SimplePositionSizer(SimplePositionSizerConfig())
+        config = BollCvdReclaimStrategyConfig()
+        strategy = BollCvdShockReclaimStrategy(config, sizer)
+
+        # Simulate a FLAT startup: the flag is never set
+        self.assertFalse(strategy.state.startup_force_tp_reconcile)
+        # _maybe_update_tp should return None because side is None
+        result = strategy._maybe_update_tp(100.0, 2_000, boll(), cvd_snapshot(2_000))
+        self.assertIsNone(result)
+
+    def test_force_tp_reconcile_protected_order_ids_includes_sidecar_tp(self) -> None:
+        """UPDATE_TP intent with sidecar enabled includes sidecar TP in protected_order_ids."""
+        strat = BollCvdShockReclaimStrategy(
+            BollCvdReclaimStrategyConfig(three_stage_runner_enabled=False),
+            SimplePositionSizer(SimplePositionSizerConfig()),
+        )
+        strat.state = StrategyPositionState(
+            side="LONG",
+            layers=1,
+            total_entry_qty=1.0,
+            total_entry_notional=100.0,
+            avg_entry_price=100.0,
+            tp_price=110.0,
+            tp_mode="MIDDLE",
+            tp_plan="SINGLE",
+            last_tp_update_candle_ts_ms=500,
+            startup_force_tp_reconcile=True,
+            sidecar_enabled_for_position=True,
+            sidecar_legs=[
+                {
+                    "leg_id": "pos-1:SC:1:1000",
+                    "position_id": "pos-1",
+                    "layer_index": 1,
+                    "side": "LONG",
+                    "entry_price": 100.0,
+                    "qty": 0.1,
+                    "contracts": "1",
+                    "tp_price": 100.4,
+                    "tp_order_id": "sc-tp-12345",
+                    "status": "OPEN",
+                    "ts_ms": 1_000,
+                }
+            ],
+            core_contracts="9",
+            core_eth_qty=0.9,
+        )
+
+        bands = BollSnapshot("ETH-USDT-SWAP", 2_000, 105.0, 102.0, 112.0, 92.0, 0.1, 0.1, True, True)
+        got = strat._maybe_update_tp(105.0, 2_000, bands, cvd_snapshot(2_000))
+
+        self.assertIsNotNone(got)
+        self.assertIn("sc-tp-12345", got.protected_order_ids,
+                      "Sidecar TP order ID must be in protected_order_ids")
+        self.assertIn("startup_force_tp_reconcile", got.reason)
+        self.assertIsNotNone(got.managed_core_contracts,
+                             "managed_core_contracts must be set when sidecar enabled")
+
 
 if __name__ == "__main__":
     unittest.main()

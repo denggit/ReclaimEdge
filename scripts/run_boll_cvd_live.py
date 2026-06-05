@@ -460,6 +460,7 @@ def restore_strategy_from_saved_state(strategy: BollCvdReclaimStrategy, saved_st
         last_add_skip_log_ts_ms=getattr(saved_state, "last_add_skip_log_ts_ms", 0),
         core_contracts=getattr(saved_state, "core_contracts", None),
         core_eth_qty=getattr(saved_state, "core_eth_qty", 0.0),
+        startup_force_tp_reconcile=bool(getattr(saved_state, "startup_force_tp_reconcile", False)),
     )
     logger.warning(
         "Recovered strategy state from local disk | position_id=%s side=%s layers=%s avg_entry=%.4f tp=%s partial_tp=%s tp_plan=%s partial_tp_consumed=%s",
@@ -3907,6 +3908,15 @@ async def main() -> None:
                 equity=trader.account_equity_usdt,
             )
         state_store.save(LiveStateStore.from_strategy_state(position_id=current_position_id, symbol=trader.symbol, strategy_state=strategy.state, cash_before_position=cash_before_position))
+        strategy.state.startup_force_tp_reconcile = True
+        logger.warning(
+            "STARTUP_FORCE_TP_RECONCILE_ARMED | position_id=%s side=%s layers=%s tp_plan=%s last_tp_update_candle_ts_ms=%s",
+            current_position_id,
+            strategy.state.side,
+            strategy.state.layers,
+            getattr(strategy.state, "tp_plan", "SINGLE"),
+            getattr(strategy.state, "last_tp_update_candle_ts_ms", 0),
+        )
     else:
         state_store.clear()
 

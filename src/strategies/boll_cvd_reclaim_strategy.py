@@ -375,6 +375,7 @@ class StrategyPositionState:
     core_eth_qty: float = 0.0
     tp_order_id: str | None = None
     tp_order_ids: list[str] = field(default_factory=list)
+    startup_force_tp_reconcile: bool = False
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -1000,8 +1001,22 @@ class BollCvdReclaimStrategy:
             self.state.trend_runner_active
             and (self.state.trend_runner_tp_price is None or self.state.trend_runner_sl_price is None)
         )
-        if self.state.last_tp_update_candle_ts_ms == boll.candle_ts_ms and not trend_runner_needs_initial_orders:
+        force_reconcile = bool(getattr(self.state, "startup_force_tp_reconcile", False))
+        if (
+            self.state.last_tp_update_candle_ts_ms == boll.candle_ts_ms
+            and not trend_runner_needs_initial_orders
+            and not force_reconcile
+        ):
             return None
+        if force_reconcile:
+            logger.warning(
+                "STARTUP_FORCE_TP_RECONCILE_ARMED | side=%s layers=%s tp_plan=%s candle_ts=%s last_tp_update_candle_ts_ms=%s",
+                self.state.side,
+                self.state.layers,
+                self.state.tp_plan,
+                boll.candle_ts_ms,
+                self.state.last_tp_update_candle_ts_ms,
+            )
         if self._three_stage_waiting_tp2():
             old_post_tp1_sl = self.state.three_stage_post_tp1_protective_sl_price
             old_tp2_price = self.state.three_stage_tp2_price
@@ -1024,18 +1039,22 @@ class BollCvdReclaimStrategy:
             self.state.last_tp_update_candle_ts_ms = boll.candle_ts_ms
             post_tp1_sl_changed = protective_sl is not None and _price_changed(old_post_tp1_sl, protective_sl)
             tp2_changed = _price_changed(old_tp2_price, new_tp2_price)
-            if post_tp1_sl_changed or tp2_changed:
+            if post_tp1_sl_changed or tp2_changed or force_reconcile:
+                self.state.startup_force_tp_reconcile = False
                 size = self.sizer.calculate(price, layer_index=self.state.layers)
+                reason_text = "startup_force_tp_reconcile" if force_reconcile else "three_stage_post_tp1_dynamic_tp_sl_update"
                 logger.warning(
-                    "THREE_STAGE_TP1_PROTECTIVE_SL_UPDATE_SIGNAL | side=%s old_sl=%s new_sl=%s old_tp2=%s new_tp2=%.4f candle_ts=%s",
+                    "THREE_STAGE_TP1_PROTECTIVE_SL_UPDATE_SIGNAL | side=%s old_sl=%s new_sl=%s old_tp2=%s new_tp2=%.4f candle_ts=%s force_reconcile=%s",
                     self.state.side,
                     f"{old_post_tp1_sl:.4f}" if old_post_tp1_sl is not None else "-",
                     f"{protective_sl:.4f}" if protective_sl is not None else "-",
                     f"{old_tp2_price:.4f}" if old_tp2_price is not None else "-",
                     new_tp2_price,
                     boll.candle_ts_ms,
+                    force_reconcile,
                 )
-                return self._intent("UPDATE_TP", self.state.side, price, self.state.layers, new_tp2_price, "three_stage_post_tp1_dynamic_tp_sl_update", size, boll, cvd, ts_ms)
+                return self._intent("UPDATE_TP", self.state.side, price, self.state.layers, new_tp2_price, reason_text, size, boll, cvd, ts_ms)
+            self.state.startup_force_tp_reconcile = False
             logger.info(
                 "TP_UPDATE_SKIPPED | reason=three_stage_waiting_tp2_plan_unchanged side=%s candle_ts=%s tp2_price=%s protective_sl=%s",
                 self.state.side,
@@ -1143,7 +1162,8 @@ class BollCvdReclaimStrategy:
                 or abs(self.state.trend_runner_sl_price - old_trend_runner_sl) / self.state.trend_runner_sl_price >= 0.0001
             )
         )
-        if self._tp_plan_unchanged(tp_price, partial_tp_price, partial_tp_ratio, tp_plan) and not runner_sl_changed and not trend_runner_orders_changed:
+        if self._tp_plan_unchanged(tp_price, partial_tp_price, partial_tp_ratio, tp_plan) and not runner_sl_changed and not trend_runner_orders_changed and not force_reconcile:
+            self.state.startup_force_tp_reconcile = False
             logger.info(
                 "TP_UPDATE_SKIPPED | reason=plan_unchanged side=%s mode=%s plan=%s candle_ts=%s current_tp=%.4f target_tp=%.4f partial_tp=%s avg_entry=%.4f breakeven=%.4f",
                 self.state.side,
@@ -1158,6 +1178,7 @@ class BollCvdReclaimStrategy:
             )
             return None
 
+        self.state.startup_force_tp_reconcile = False
         self.state.tp_price = tp_price
         self.state.tp_mode = tp_mode
         self.state.partial_tp_price = partial_tp_price
@@ -1171,8 +1192,10 @@ class BollCvdReclaimStrategy:
             self.state.trend_runner_adjust_count += 1
             self.state.trend_runner_last_update_candle_ts_ms = boll.candle_ts_ms
         size = self.sizer.calculate(price, layer_index=self.state.layers)
-        logger.info(
-            "TP_SELECTED | reason=new_candle side=%s mode=%s plan=%s partial_tp=%s partial_ratio=%.2f avg_entry=%.4f breakeven=%.4f candle_ts=%s middle=%.4f upper=%.4f lower=%.4f final_tp=%.4f",
+        reason_text = f"startup_force_tp_reconcile" if force_reconcile else f"新15m K线更新止盈到{tp_mode}轨"
+        logger.warning(
+            "TP_SELECTED | reason=%s side=%s mode=%s plan=%s partial_tp=%s partial_ratio=%.2f avg_entry=%.4f breakeven=%.4f candle_ts=%s middle=%.4f upper=%.4f lower=%.4f final_tp=%.4f force_reconcile=%s",
+            reason_text,
             self.state.side,
             tp_mode,
             tp_plan,
@@ -1185,8 +1208,9 @@ class BollCvdReclaimStrategy:
             boll.upper,
             boll.lower,
             tp_price,
+            force_reconcile,
         )
-        return self._intent("UPDATE_TP", self.state.side, price, self.state.layers, tp_price, f"新15m K线更新止盈到{tp_mode}轨", size, boll, cvd, ts_ms)
+        return self._intent("UPDATE_TP", self.state.side, price, self.state.layers, tp_price, reason_text, size, boll, cvd, ts_ms)
 
     def _maybe_trend_runner_market_exit(self, price: float, ts_ms: int, boll: BollSnapshot, cvd: CvdSnapshot) -> TradeIntent | None:
         if not self.state.trend_runner_active or self.state.side is None:

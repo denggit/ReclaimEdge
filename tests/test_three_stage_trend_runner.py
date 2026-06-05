@@ -771,6 +771,183 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
         self.assertTrue(strat.state.three_stage_runner_enabled_for_position)
         self.assertFalse(strat._middle_runner_plan_allowed("MIDDLE", boll()))
 
+    # ── startup force TP reconcile ──────────────────────────────────────
+
+    def test_force_tp_reconcile_bypasses_same_candle_guard(self) -> None:
+        """When startup_force_tp_reconcile=True, same candle does NOT skip TP update."""
+        strat = strategy()
+        strat.state = StrategyPositionState(
+            side="LONG",
+            layers=1,
+            total_entry_qty=1.0,
+            total_entry_notional=100.0,
+            avg_entry_price=100.0,
+            tp_price=110.0,
+            tp_mode="UPPER",
+            tp_plan="THREE_STAGE_RUNNER",
+            partial_tp_consumed=False,
+            three_stage_runner_enabled_for_position=True,
+            three_stage_tp1_price=101.0,
+            three_stage_tp2_price=110.0,
+            three_stage_tp1_ratio=0.6,
+            three_stage_tp2_ratio=0.2,
+            three_stage_runner_ratio=0.2,
+            three_stage_tp1_consumed=False,
+            three_stage_tp2_consumed=False,
+            trend_runner_active=False,
+            last_tp_update_candle_ts_ms=1_000,
+            startup_force_tp_reconcile=True,
+        )
+
+        bands = boll(middle=102.0, upper=112.0, lower=92.0, candle_ts_ms=1_000)  # same candle as last_tp_update
+        got = strat._maybe_update_tp(105.0, 2_000, bands, cvd())
+
+        self.assertIsNotNone(got, "Force reconcile must return UPDATE_TP even on same candle")
+        self.assertEqual(got.intent_type, "UPDATE_TP")
+        self.assertIn("startup_force_tp_reconcile", got.reason)
+        self.assertEqual(got.tp_plan, "THREE_STAGE_RUNNER")
+        self.assertFalse(strat.state.startup_force_tp_reconcile, "Flag must be cleared after reconcile")
+        self.assertEqual(strat.state.last_tp_update_candle_ts_ms, 1_000, "candle_ts must update to current candle")
+        self.assertEqual(strat.state.three_stage_tp1_price, 102.0, "TP1 must update to latest boll middle")
+        self.assertEqual(strat.state.three_stage_tp2_price, 112.0, "TP2 must update to latest boll upper")
+
+    def test_force_tp_reconcile_returns_update_even_when_plan_unchanged(self) -> None:
+        """Even when TP plan/prices match current state, force reconcile returns UPDATE_TP."""
+        strat = strategy()
+        strat.state = StrategyPositionState(
+            side="LONG",
+            layers=1,
+            total_entry_qty=1.0,
+            total_entry_notional=100.0,
+            avg_entry_price=100.0,
+            tp_price=112.0,
+            tp_mode="UPPER",
+            tp_plan="THREE_STAGE_RUNNER",
+            partial_tp_consumed=False,
+            three_stage_runner_enabled_for_position=True,
+            three_stage_tp1_price=102.0,
+            three_stage_tp2_price=112.0,
+            three_stage_tp1_ratio=0.6,
+            three_stage_tp2_ratio=0.2,
+            three_stage_runner_ratio=0.2,
+            three_stage_tp1_consumed=False,
+            three_stage_tp2_consumed=False,
+            trend_runner_active=False,
+            last_tp_update_candle_ts_ms=1_000,
+            startup_force_tp_reconcile=True,
+        )
+
+        bands = boll(middle=102.0, upper=112.0, lower=92.0, candle_ts_ms=1_000)
+        got = strat._maybe_update_tp(105.0, 2_000, bands, cvd())
+
+        self.assertIsNotNone(got, "Force reconcile must return UPDATE_TP even when plan unchanged")
+        self.assertEqual(got.intent_type, "UPDATE_TP")
+        self.assertIn("startup_force_tp_reconcile", got.reason)
+        self.assertFalse(strat.state.startup_force_tp_reconcile)
+
+    def test_force_tp_reconcile_three_stage_waiting_tp2_updates_tp2_and_sl(self) -> None:
+        """After TP1 consumed, force reconcile must update TP2 and recalculate post-TP1 SL."""
+        strat = strategy()
+        strat.state = StrategyPositionState(
+            side="LONG",
+            layers=1,
+            total_entry_qty=1.0,
+            total_entry_notional=100.0,
+            avg_entry_price=100.0,
+            tp_price=110.0,
+            tp_mode="UPPER",
+            tp_plan="THREE_STAGE_RUNNER",
+            partial_tp_consumed=True,
+            three_stage_runner_enabled_for_position=True,
+            three_stage_tp1_price=101.0,
+            three_stage_tp2_price=110.0,
+            three_stage_tp1_ratio=0.6,
+            three_stage_tp2_ratio=0.2,
+            three_stage_runner_ratio=0.2,
+            three_stage_tp1_consumed=True,
+            three_stage_tp2_consumed=False,
+            trend_runner_active=False,
+            last_tp_update_candle_ts_ms=1_000,
+            startup_force_tp_reconcile=True,
+        )
+
+        bands = boll(middle=102.0, upper=112.0, lower=92.0, candle_ts_ms=1_000)
+        got = strat._maybe_update_tp(105.0, 2_000, bands, cvd())
+
+        self.assertIsNotNone(got, "Force reconcile must return UPDATE_TP for waiting_tp2")
+        self.assertEqual(got.intent_type, "UPDATE_TP")
+        self.assertIn("startup_force_tp_reconcile", got.reason)
+        self.assertEqual(got.three_stage_tp2_price, 112.0, "TP2 must update to latest outer band")
+        self.assertEqual(got.tp_price, 112.0)
+        self.assertTrue(got.three_stage_tp1_consumed, "TP1 consumed flag must be preserved")
+        self.assertFalse(got.three_stage_tp2_consumed, "TP2 consumed flag must remain False")
+        self.assertFalse(got.trend_runner_active, "Trend runner must not activate on reconcile")
+        self.assertIsNotNone(got.three_stage_post_tp1_protective_sl_price, "Post-TP1 SL must be recalculated")
+        self.assertFalse(strat.state.startup_force_tp_reconcile, "Flag must be cleared")
+        self.assertEqual(strat.state.last_tp_update_candle_ts_ms, 1_000)
+
+    def test_force_tp_reconcile_trend_runner_generates_initial_orders(self) -> None:
+        """When trend_runner_active=True with no TP/SL orders, force reconcile generates them."""
+        strat = strategy(runner_dynamic_enabled=True)
+        strat.state = StrategyPositionState(
+            side="LONG",
+            layers=1,
+            total_entry_qty=0.2,
+            total_entry_notional=20.0,
+            avg_entry_price=100.0,
+            tp_price=110.0,
+            tp_mode="UPPER",
+            tp_plan="SINGLE",
+            partial_tp_consumed=True,
+            three_stage_runner_enabled_for_position=True,
+            three_stage_tp1_consumed=True,
+            three_stage_tp2_consumed=True,
+            trend_runner_active=True,
+            trend_runner_trend_start_ts_ms=1_000,
+            trend_runner_adjust_count=0,
+            trend_runner_last_update_candle_ts_ms=500,
+            trend_runner_tp_price=None,
+            trend_runner_sl_price=None,
+            last_tp_update_candle_ts_ms=1_000,
+            startup_force_tp_reconcile=True,
+        )
+
+        bands = boll(middle=102.0, upper=112.0, lower=92.0, candle_ts_ms=1_000)
+        got = strat._maybe_update_tp(108.0, 2_000, bands, cvd())
+
+        self.assertIsNotNone(got, "Force reconcile must return UPDATE_TP for trend runner with initial orders")
+        self.assertEqual(got.intent_type, "UPDATE_TP")
+        self.assertIn("startup_force_tp_reconcile", got.reason)
+        self.assertIsNotNone(strat.state.trend_runner_tp_price, "Trend runner TP must be generated")
+        self.assertIsNotNone(strat.state.trend_runner_sl_price, "Trend runner SL must be generated")
+        self.assertFalse(strat.state.startup_force_tp_reconcile)
+
+    def test_force_tp_reconcile_single_tp_mode_works(self) -> None:
+        """Force reconcile works with SINGLE tp_plan (no multi-stage)."""
+        strat = strategy(three_stage_runner_enabled=False, split_tp_enabled=False)
+        strat.state = StrategyPositionState(
+            side="SHORT",
+            layers=1,
+            total_entry_qty=1.0,
+            total_entry_notional=100.0,
+            avg_entry_price=100.0,
+            tp_price=96.0,
+            tp_mode="LOWER",
+            tp_plan="SINGLE",
+            partial_tp_consumed=False,
+            last_tp_update_candle_ts_ms=1_000,
+            startup_force_tp_reconcile=True,
+        )
+
+        bands = boll(middle=98.0, upper=108.0, lower=88.0, candle_ts_ms=1_000)
+        got = strat._maybe_update_tp(97.0, 2_000, bands, cvd())
+
+        self.assertIsNotNone(got, "Force reconcile must return UPDATE_TP for SINGLE TP plan")
+        self.assertEqual(got.intent_type, "UPDATE_TP")
+        self.assertIn("startup_force_tp_reconcile", got.reason)
+        self.assertEqual(got.tp_price, 98.0, "TP must update to latest middle band (sufficient profit)")
+        self.assertFalse(strat.state.startup_force_tp_reconcile)
+
 
 class RecordingTrader(Trader):
     def __init__(self, side: str = "LONG") -> None:
