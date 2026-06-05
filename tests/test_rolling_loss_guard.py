@@ -19,11 +19,7 @@ if importlib.util.find_spec("dotenv") is None:
     dotenv.load_dotenv = lambda *args, **kwargs: None
     sys.modules.setdefault("dotenv", dotenv)
 
-from scripts.run_boll_cvd_live import (  # noqa: E402
-    account_position_sync_worker,
-    apply_rolling_loss_guard_startup_state,
-    rolling_loss_halt_reason,
-)
+from scripts.run_boll_cvd_live import account_position_sync_worker  # noqa: E402
 from src.execution.trader import PositionSnapshot  # noqa: E402
 from src.live.runtime_types import AccountSnapshot, ExecutionState  # noqa: E402
 from src.reporting.trade_journal import JournalEvent  # noqa: E402
@@ -31,6 +27,12 @@ from src.risk.rolling_loss_guard import (  # noqa: E402
     MS_PER_HOUR,
     RollingLossGuard,
     RollingLossGuardConfig,
+)
+from src.risk.rolling_loss_live import (  # noqa: E402
+    apply_rolling_loss_guard_startup_state,
+    rolling_loss_guard_payload,
+    rolling_loss_guard_state_payload,
+    rolling_loss_halt_reason,
 )
 from src.risk.simple_position_sizer import SimplePositionSizer, SimplePositionSizerConfig  # noqa: E402
 from src.strategies.boll_cvd_reclaim_strategy import StrategyPositionState  # noqa: E402
@@ -146,6 +148,96 @@ class RollingLossGuardTest(unittest.IsolatedAsyncioTestCase):
         }
         values.update(overrides)
         return RollingLossGuard(root / "rolling_loss_guard_state.json", RollingLossGuardConfig(**values))
+
+    def test_rolling_loss_halt_reason_maps_only_halt_actions(self) -> None:
+        self.assertEqual(rolling_loss_halt_reason("SOFT_HALT"), "rolling_loss_soft_halt")
+        self.assertEqual(rolling_loss_halt_reason("HARD_HALT"), "rolling_loss_hard_halt")
+        self.assertIsNone(rolling_loss_halt_reason("WARN"))
+        self.assertIsNone(rolling_loss_halt_reason("RESUME"))
+        self.assertIsNone(rolling_loss_halt_reason("UNKNOWN"))
+
+    def test_rolling_loss_guard_payload_preserves_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            guard = self.make_guard(Path(tmp))
+            guard.load_or_initialize(NOW_MS, 100.0)
+            decision = guard.evaluate_after_flat(now_ms=NOW_MS + 1, flat_equity=80.0, flat_event_id="flat-1")
+
+            payload = rolling_loss_guard_payload(decision.action, decision)
+
+            self.assertEqual(
+                set(payload),
+                {
+                    "action",
+                    "mode",
+                    "window_start_ts_ms",
+                    "window_end_ts_ms",
+                    "baseline_equity",
+                    "reference_flat_equity",
+                    "flat_equity",
+                    "segment_retention",
+                    "segment_return_pct",
+                    "cumulative_retention",
+                    "drawdown_pct",
+                    "max_drawdown_pct",
+                    "rolling_realized_pnl",
+                    "loss_usdt",
+                    "loss_pct",
+                    "threshold_pct",
+                    "halt_hours",
+                    "halt_until_ts_ms",
+                    "reason",
+                },
+            )
+            self.assertEqual(payload["action"], "HARD_HALT")
+            self.assertEqual(payload["mode"], "flat_to_flat_drawdown")
+            self.assertIsNone(payload["window_start_ts_ms"])
+            self.assertIsNone(payload["window_end_ts_ms"])
+            self.assertEqual(payload["reference_flat_equity"], decision.reference_flat_equity)
+            self.assertEqual(payload["flat_equity"], decision.flat_equity)
+            self.assertEqual(payload["halt_until_ts_ms"], decision.halt_until_ts_ms)
+
+    def test_rolling_loss_guard_state_payload_preserves_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            guard = self.make_guard(Path(tmp))
+            with self.assertRaises(RuntimeError):
+                rolling_loss_guard_state_payload("RESUME", guard, "not_loaded")
+
+            guard.load_or_initialize(NOW_MS, 100.0)
+            guard.evaluate_after_flat(now_ms=NOW_MS + 1, flat_equity=80.0, flat_event_id="flat-1")
+
+            payload = rolling_loss_guard_state_payload("RESUME", guard, "cooldown_elapsed")
+
+            self.assertEqual(
+                set(payload),
+                {
+                    "action",
+                    "mode",
+                    "window_start_ts_ms",
+                    "window_end_ts_ms",
+                    "baseline_equity",
+                    "reference_flat_equity",
+                    "flat_equity",
+                    "segment_retention",
+                    "segment_return_pct",
+                    "cumulative_retention",
+                    "drawdown_pct",
+                    "max_drawdown_pct",
+                    "rolling_realized_pnl",
+                    "loss_usdt",
+                    "loss_pct",
+                    "threshold_pct",
+                    "halt_hours",
+                    "halt_until_ts_ms",
+                    "reason",
+                },
+            )
+            self.assertEqual(payload["action"], "RESUME")
+            self.assertEqual(payload["mode"], "flat_to_flat_drawdown")
+            self.assertIsNone(payload["window_start_ts_ms"])
+            self.assertIsNone(payload["window_end_ts_ms"])
+            self.assertEqual(payload["reference_flat_equity"], guard.state.reference_flat_equity)
+            self.assertEqual(payload["flat_equity"], guard.state.last_flat_equity)
+            self.assertEqual(payload["reason"], "cooldown_elapsed")
 
     def test_flat_to_flat_drawdown_soft_halt(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
