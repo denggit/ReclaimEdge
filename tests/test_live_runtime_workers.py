@@ -29,6 +29,7 @@ from scripts.run_boll_cvd_live import (  # noqa: E402
     restore_strategy_from_position,
     strategy_tick_worker,
     three_stage_post_tp1_current_price,
+    trusted_startup_saved_state,
 )
 from src.execution.trader import LiveTradeResult, PositionSnapshot  # noqa: E402
 from src.indicators.cvd_tracker import CvdSnapshot  # noqa: E402
@@ -203,6 +204,11 @@ class FakeTrader:
         self.post_tp1_stop_orders = []
         self.cancelled_post_tp1_stop_ids = []
         self.cancel_post_tp1_ok = True
+        self.tp_order_id = ""
+        self.pending_orders: list[dict[str, str]] = []
+
+    async def fetch_pending_orders(self) -> list[dict[str, str]]:
+        return list(self.pending_orders)
 
     async def execute_intent(self, trade_intent: TradeIntent) -> LiveTradeResult:
         if self.execute_delay:
@@ -1930,6 +1936,232 @@ class LiveRuntimeWorkerTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("startup_force_tp_reconcile", got.reason)
         self.assertIsNotNone(got.managed_core_contracts,
                              "managed_core_contracts must be set when sidecar enabled")
+
+    # ── trusted startup saved state ─────────────────────────────────────
+
+    def test_trusted_startup_saved_state_matching_side_and_layers(self) -> None:
+        """Saved state matching current OKX position is trusted."""
+        saved = types.SimpleNamespace(
+            position_id="pos-1",
+            side="LONG",
+            layers=3,
+        )
+        pos = PositionSnapshot("LONG", Decimal("6"), 100.0, 6.0, Decimal("6"))
+
+        result = trusted_startup_saved_state(saved, pos)
+        self.assertIs(result, saved)
+
+    def test_trusted_startup_saved_state_none_saved_state(self) -> None:
+        """None saved_state returns None regardless of position."""
+        pos = PositionSnapshot("LONG", Decimal("6"), 100.0, 6.0, Decimal("6"))
+        self.assertIsNone(trusted_startup_saved_state(None, pos))
+
+    def test_trusted_startup_saved_state_flat_position(self) -> None:
+        """Even with matching saved_state, a FLAT position rejects it."""
+        saved = types.SimpleNamespace(
+            position_id="pos-1",
+            side="LONG",
+            layers=3,
+        )
+        pos = PositionSnapshot(None, Decimal("0"), 0.0, 0.0, Decimal("0"))
+        self.assertFalse(pos.has_position)
+
+        result = trusted_startup_saved_state(saved, pos)
+        self.assertIsNone(result)
+
+    def test_trusted_startup_saved_state_side_mismatch(self) -> None:
+        """Saved state from a LONG position must not bind to current SHORT position."""
+        saved = types.SimpleNamespace(
+            position_id="pos-1",
+            side="LONG",
+            layers=3,
+            tp_order_id="old-long-tp",
+        )
+        pos = PositionSnapshot("SHORT", Decimal("6"), 100.0, 6.0, Decimal("6"))
+
+        result = trusted_startup_saved_state(saved, pos)
+        self.assertIsNone(result)
+
+    def test_trusted_startup_saved_state_zero_layers(self) -> None:
+        """Saved state with layers=0 is not trusted."""
+        saved = types.SimpleNamespace(
+            position_id="pos-1",
+            side="LONG",
+            layers=0,
+        )
+        pos = PositionSnapshot("LONG", Decimal("6"), 100.0, 6.0, Decimal("6"))
+
+        result = trusted_startup_saved_state(saved, pos)
+        self.assertIsNone(result)
+
+    def test_untrusted_saved_state_not_used_for_main_tp_startup_recovery(self) -> None:
+        """When saved_state is untrusted, apply_main_tp_startup_recovery gets None."""
+        from scripts.run_boll_cvd_live import apply_main_tp_startup_recovery
+
+        saved_state = types.SimpleNamespace(
+            position_id="pos-old",
+            side="LONG",
+            layers=3,
+            tp_order_id="old-tp-order-id",
+        )
+        # Current OKX position is SHORT → side mismatch → untrusted
+        startup_pos = PositionSnapshot("SHORT", Decimal("6"), 100.0, 6.0, Decimal("6"))
+
+        trusted = trusted_startup_saved_state(saved_state, startup_pos)
+        self.assertIsNone(trusted, "Side-mismatched saved_state must not be trusted")
+
+        # The caller in main() should pass trusted_saved_state (None) to the recovery function.
+        # We verify that apply_main_tp_startup_recovery with saved_state=None does NOT
+        # restore the old tp_order_id.
+        trader = FakeTrader()
+        execution_state = ExecutionState("pos-new", 100.0)
+        journal = FakeJournal()
+
+        async def _run():
+            await apply_main_tp_startup_recovery(
+                execution_state=execution_state,
+                saved_state=None,  # ← trusted_saved_state is None
+                startup_position=startup_pos,
+                trader=trader,  # type: ignore[arg-type]
+                journal=journal,  # type: ignore[arg-type]
+            )
+
+        asyncio.get_event_loop().run_until_complete(_run())
+        # tp_order_id must NOT be set from the untrusted saved_state
+        self.assertEqual(trader.tp_order_id, "")
+
+    def test_trusted_saved_state_still_used_for_main_tp_startup_recovery(self) -> None:
+        """When saved_state is trusted, tp_order_id is restored."""
+        from scripts.run_boll_cvd_live import apply_main_tp_startup_recovery
+
+        saved_state = types.SimpleNamespace(
+            position_id="pos-1",
+            side="LONG",
+            layers=3,
+            tp_order_id="trusted-tp-order-id",
+            tp_order_ids=[],
+            sidecar_legs=[],
+        )
+        startup_pos = PositionSnapshot("LONG", Decimal("6"), 100.0, 6.0, Decimal("6"))
+
+        trusted = trusted_startup_saved_state(saved_state, startup_pos)
+        self.assertIs(trusted, saved_state, "Matching saved_state must be trusted")
+
+        trader = FakeTrader()
+        execution_state = ExecutionState("pos-1", 100.0)
+        journal = FakeJournal()
+
+        async def _run():
+            await apply_main_tp_startup_recovery(
+                execution_state=execution_state,
+                saved_state=saved_state,
+                startup_position=startup_pos,
+                trader=trader,  # type: ignore[arg-type]
+                journal=journal,  # type: ignore[arg-type]
+            )
+
+        asyncio.get_event_loop().run_until_complete(_run())
+        # tp_order_id must be restored from the trusted saved_state
+        self.assertEqual(trader.tp_order_id, "trusted-tp-order-id")
+
+    def test_untrusted_saved_state_not_used_for_three_stage_safety_gate(self) -> None:
+        """Three-stage safety gate must not inspect untrusted saved_state."""
+        sizer = SimplePositionSizer(SimplePositionSizerConfig())
+        config = BollCvdReclaimStrategyConfig(three_stage_runner_enabled=True)
+        strategy = BollCvdShockReclaimStrategy(config, sizer)
+        # Simulate a dirty post-TP1 state in saved_state
+        saved_state = types.SimpleNamespace(
+            position_id="pos-old",
+            side="LONG",
+            layers=3,
+            three_stage_post_tp1_protective_sl_order_id="old-post-tp1-sl",
+        )
+        # Current position is SHORT → mismatch
+        startup_pos = PositionSnapshot("SHORT", Decimal("6"), 100.0, 6.0, Decimal("6"))
+
+        trusted = trusted_startup_saved_state(saved_state, startup_pos)
+        self.assertIsNone(trusted, "Side-mismatched saved_state must not be trusted")
+
+        execution_state = ExecutionState("pos-new", 100.0)
+        journal = FakeJournal()
+        state_store = RecordingStateStore()
+
+        applied = apply_three_stage_startup_safety_gate(
+            strategy=strategy,
+            execution_state=execution_state,
+            saved_state=None,  # ← trusted_saved_state is None
+            startup_position=startup_pos,
+            journal=journal,  # type: ignore[arg-type]
+            state_store=state_store,  # type: ignore[arg-type]
+            trader_symbol="ETH-USDT-SWAP",
+        )
+        self.assertFalse(applied, "Untrusted saved_state must not trigger safety gate")
+
+    def test_sidecar_not_recovered_from_untrusted_saved_state(self) -> None:
+        """Sidecar enabled + legs in untrusted saved_state must not pollute current strategy."""
+        from scripts.run_boll_cvd_live import apply_sidecar_startup_recovery
+
+        sizer = SimplePositionSizer(SimplePositionSizerConfig())
+        config = BollCvdReclaimStrategyConfig()
+        strategy = BollCvdShockReclaimStrategy(config, sizer)
+
+        # Old saved_state has sidecar enabled with an OPEN leg
+        saved_state = types.SimpleNamespace(
+            position_id="pos-old",
+            side="LONG",
+            layers=3,
+            sidecar_enabled_for_position=True,
+            sidecar_margin_pct=0.05,
+            sidecar_tp_pct=0.004,
+            sidecar_legs=[
+                {
+                    "leg_id": "pos-old:SC:1:1000",
+                    "position_id": "pos-old",
+                    "layer_index": 1,
+                    "side": "LONG",
+                    "entry_price": 100.0,
+                    "qty": 0.1,
+                    "contracts": "1",
+                    "tp_price": 100.4,
+                    "tp_order_id": "sc-old-tp",
+                    "status": "OPEN",
+                    "ts_ms": 1_000,
+                }
+            ],
+            sidecar_dirty=False,
+            sidecar_halt_reason=None,
+        )
+        # Current position is SHORT → mismatch
+        startup_pos = PositionSnapshot("SHORT", Decimal("6"), 100.0, 6.0, Decimal("6"))
+
+        trusted = trusted_startup_saved_state(saved_state, startup_pos)
+        self.assertIsNone(trusted, "Side-mismatched saved_state must not be trusted")
+
+        execution_state = ExecutionState("pos-new", 100.0)
+        journal = FakeJournal()
+        state_store = RecordingStateStore()
+
+        async def _run():
+            await apply_sidecar_startup_recovery(
+                strategy=strategy,
+                execution_state=execution_state,
+                saved_state=None,  # ← trusted_saved_state is None
+                startup_position=startup_pos,
+                trader=FakeTrader(),  # type: ignore[arg-type]
+                journal=journal,  # type: ignore[arg-type]
+                state_store=state_store,  # type: ignore[arg-type]
+            )
+
+        asyncio.get_event_loop().run_until_complete(_run())
+        # Sidecar must NOT be enabled from untrusted saved_state
+        self.assertFalse(
+            strategy.state.sidecar_enabled_for_position,
+            "Sidecar must not be enabled from untrusted saved_state",
+        )
+        self.assertEqual(
+            len(strategy.state.sidecar_legs), 0,
+            "No sidecar legs should be recovered from untrusted saved_state",
+        )
 
 
 if __name__ == "__main__":

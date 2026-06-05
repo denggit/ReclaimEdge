@@ -3854,6 +3854,28 @@ async def account_position_sync_worker(
                 last_stale_log = now
 
 
+def trusted_startup_saved_state(saved_state: Any, startup_position: PositionSnapshot) -> Any:  # type: ignore[no-untyped-def]
+    """Return saved_state only when it matches the current OKX position.
+
+    A saved_state is trusted when all of:
+      - saved_state is not None
+      - startup_position.has_position is True
+      - saved_state.side == startup_position.side
+      - saved_state.layers > 0
+
+    If any condition fails the saved_state is considered stale / from a previous
+    position and must NOT be passed to TP/Sidecar/Three-Stage recovery helpers.
+    """
+    if (
+        saved_state is not None
+        and startup_position.has_position
+        and getattr(saved_state, "side", None) == startup_position.side
+        and int(getattr(saved_state, "layers", 0) or 0) > 0
+    ):
+        return saved_state
+    return None
+
+
 async def main() -> None:
     load_dotenv()
     if not live_trading_enabled():
@@ -3888,13 +3910,16 @@ async def main() -> None:
     cash_before_position: float | None = None
 
     saved_state = state_store.load()
+    trusted_saved_state: Any = None
     if startup_position.has_position:
         if saved_state and saved_state.side == startup_position.side and saved_state.layers > 0:
             restore_strategy_from_saved_state(strategy, saved_state)
+            trusted_saved_state = saved_state
             current_position_id = saved_state.position_id
             cash_before_position = saved_state.cash_before_position
         else:
             restore_strategy_from_position(strategy, startup_position, utc_ms())
+            trusted_saved_state = None
             current_position_id = journal.new_position_id(trader.symbol, startup_position.side or "UNKNOWN")
             cash_before_position = startup_cash
             journal.record_startup_recovery(
@@ -3907,16 +3932,17 @@ async def main() -> None:
                 cash=startup_cash,
                 equity=trader.account_equity_usdt,
             )
-        state_store.save(LiveStateStore.from_strategy_state(position_id=current_position_id, symbol=trader.symbol, strategy_state=strategy.state, cash_before_position=cash_before_position))
         strategy.state.startup_force_tp_reconcile = True
         logger.warning(
-            "STARTUP_FORCE_TP_RECONCILE_ARMED | position_id=%s side=%s layers=%s tp_plan=%s last_tp_update_candle_ts_ms=%s",
+            "STARTUP_FORCE_TP_RECONCILE_ARMED | position_id=%s side=%s layers=%s tp_plan=%s last_tp_update_candle_ts_ms=%s trusted_saved_state=%s",
             current_position_id,
             strategy.state.side,
             strategy.state.layers,
             getattr(strategy.state, "tp_plan", "SINGLE"),
             getattr(strategy.state, "last_tp_update_candle_ts_ms", 0),
+            trusted_saved_state is not None,
         )
+        state_store.save(LiveStateStore.from_strategy_state(position_id=current_position_id, symbol=trader.symbol, strategy_state=strategy.state, cash_before_position=cash_before_position))
     else:
         state_store.clear()
 
@@ -3937,7 +3963,7 @@ async def main() -> None:
     )
     await apply_main_tp_startup_recovery(
         execution_state=execution_state,
-        saved_state=saved_state,
+        saved_state=trusted_saved_state,
         startup_position=startup_position,
         trader=trader,
         journal=journal,
@@ -3945,7 +3971,7 @@ async def main() -> None:
     await apply_sidecar_startup_recovery(
         strategy=strategy,
         execution_state=execution_state,
-        saved_state=saved_state,
+        saved_state=trusted_saved_state,
         startup_position=startup_position,
         trader=trader,
         journal=journal,
@@ -3973,7 +3999,7 @@ async def main() -> None:
     apply_three_stage_startup_safety_gate(
         strategy=strategy,
         execution_state=execution_state,
-        saved_state=saved_state,
+        saved_state=trusted_saved_state,
         startup_position=startup_position,
         journal=journal,
         state_store=state_store,
