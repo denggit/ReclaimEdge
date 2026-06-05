@@ -300,6 +300,26 @@ class SplitTakeProfitStrategyTest(unittest.TestCase):
         self.assertEqual(partial_ratio, 0.0)
         self.assertIsNone(partial_tp)
 
+    def test_open_position_initializes_net_remaining_breakeven_long(self) -> None:
+        strat = strategy(breakeven_fee_buffer_pct=0.001)
+
+        strat._open_position("LONG", "OPEN_LONG", 100.0, 2_000, boll(), cvd(), "test")
+
+        self.assertGreater(strat.state.position_cost_entry_notional, 0)
+        self.assertGreater(strat.state.position_cost_remaining_qty, 0)
+        self.assertGreater(strat.state.net_remaining_breakeven_price, 0)
+        self.assertAlmostEqual(strat.state.net_remaining_breakeven_price, strat.state.avg_entry_price * 1.001)
+
+    def test_open_position_initializes_net_remaining_breakeven_short(self) -> None:
+        strat = strategy(breakeven_fee_buffer_pct=0.001)
+
+        strat._open_position("SHORT", "OPEN_SHORT", 100.0, 2_000, boll(middle=99.0, upper=110.0, lower=90.0), cvd(), "test")
+
+        self.assertGreater(strat.state.position_cost_entry_notional, 0)
+        self.assertGreater(strat.state.position_cost_remaining_qty, 0)
+        self.assertGreater(strat.state.net_remaining_breakeven_price, 0)
+        self.assertAlmostEqual(strat.state.net_remaining_breakeven_price, strat.state.avg_entry_price * 0.999)
+
     def test_middle_runner_long_uses_middle_first_and_upper_runner(self) -> None:
         strat = strategy(middle_runner_enabled=True, breakeven_fee_buffer_pct=0.001, tp_min_net_profit_pct=0.002)
         strat.state.avg_entry_price = 100.0

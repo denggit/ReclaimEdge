@@ -369,6 +369,8 @@ class StrategyPositionState:
     sidecar_dirty: bool = False
     sidecar_halt_reason: str | None = None
     near_tp_sidecar_skip_logged: bool = False
+    last_add_skip_log_reason: str | None = None
+    last_add_skip_log_ts_ms: int = 0
     core_contracts: str | None = None
     core_eth_qty: float = 0.0
     tp_order_id: str | None = None
@@ -585,13 +587,19 @@ class BollCvdReclaimStrategy:
         if self.state.side != "LONG":
             return None
         if self.state.near_tp_add_disabled:
-            logger.info("ADD_SKIPPED | reason=near_tp_protected side=LONG price=%.4f layers=%s", price, self.state.layers)
+            self._log_add_skip_once_per_window(reason="near_tp_protected", side="LONG", price=price, ts_ms=ts_ms)
             return None
-        if self.state.three_stage_runner_enabled_for_position or self.state.trend_runner_active:
-            logger.info("ADD_SKIPPED | reason=three_stage_runner side=LONG price=%.4f layers=%s", price, self.state.layers)
+        if self.state.trend_runner_active:
+            self._log_add_skip_once_per_window(reason="trend_runner_active", side="LONG", price=price, ts_ms=ts_ms)
+            return None
+        if (
+            self.state.three_stage_runner_enabled_for_position
+            and (self.state.three_stage_tp1_consumed or self.state.three_stage_tp2_consumed)
+        ):
+            self._log_add_skip_once_per_window(reason="three_stage_after_tp1", side="LONG", price=price, ts_ms=ts_ms)
             return None
         if self.state.middle_runner_add_disabled or self.state.middle_runner_active:
-            logger.info("ADD_SKIPPED | reason=middle_runner_active side=LONG price=%.4f layers=%s", price, self.state.layers)
+            self._log_add_skip_once_per_window(reason="middle_runner_active", side="LONG", price=price, ts_ms=ts_ms)
             return None
         if self.state.layers >= self.config.max_layers:
             return None
@@ -662,13 +670,19 @@ class BollCvdReclaimStrategy:
         if self.state.side != "SHORT":
             return None
         if self.state.near_tp_add_disabled:
-            logger.info("ADD_SKIPPED | reason=near_tp_protected side=SHORT price=%.4f layers=%s", price, self.state.layers)
+            self._log_add_skip_once_per_window(reason="near_tp_protected", side="SHORT", price=price, ts_ms=ts_ms)
             return None
-        if self.state.three_stage_runner_enabled_for_position or self.state.trend_runner_active:
-            logger.info("ADD_SKIPPED | reason=three_stage_runner side=SHORT price=%.4f layers=%s", price, self.state.layers)
+        if self.state.trend_runner_active:
+            self._log_add_skip_once_per_window(reason="trend_runner_active", side="SHORT", price=price, ts_ms=ts_ms)
+            return None
+        if (
+            self.state.three_stage_runner_enabled_for_position
+            and (self.state.three_stage_tp1_consumed or self.state.three_stage_tp2_consumed)
+        ):
+            self._log_add_skip_once_per_window(reason="three_stage_after_tp1", side="SHORT", price=price, ts_ms=ts_ms)
             return None
         if self.state.middle_runner_add_disabled or self.state.middle_runner_active:
-            logger.info("ADD_SKIPPED | reason=middle_runner_active side=SHORT price=%.4f layers=%s", price, self.state.layers)
+            self._log_add_skip_once_per_window(reason="middle_runner_active", side="SHORT", price=price, ts_ms=ts_ms)
             return None
         if self.state.layers >= self.config.max_layers:
             return None
@@ -813,6 +827,30 @@ class BollCvdReclaimStrategy:
             return (last - price) / last
         return (price - last) / last
 
+    def _log_add_skip_once_per_window(
+        self,
+        *,
+        reason: str,
+        side: PositionSide,
+        price: float,
+        ts_ms: int,
+        min_interval_ms: int = 60_000,
+    ) -> None:
+        if (
+            self.state.last_add_skip_log_reason == reason
+            and ts_ms - int(self.state.last_add_skip_log_ts_ms or 0) < min_interval_ms
+        ):
+            return
+        self.state.last_add_skip_log_reason = reason
+        self.state.last_add_skip_log_ts_ms = ts_ms
+        logger.info(
+            "ADD_SKIPPED | reason=%s side=%s price=%.4f layers=%s",
+            reason,
+            side,
+            price,
+            self.state.layers,
+        )
+
     def _log_add_timing_skipped(self, side: PositionSide, reason: str, price: float, ts_ms: int, target_layer: int) -> None:
         last = self.state.last_entry_price if self.state.last_entry_price is not None else 0.0
         elapsed_seconds = self._add_elapsed_seconds(ts_ms)
@@ -890,6 +928,8 @@ class BollCvdReclaimStrategy:
             self.state.position_cost_exit_notional = 0.0
             self.state.position_cost_remaining_qty = 0.0
             self.state.net_remaining_breakeven_price = 0.0
+            self.state.last_add_skip_log_reason = None
+            self.state.last_add_skip_log_ts_ms = 0
         self.state.side = side
         self._update_position_cost(price, size.eth_qty)
         self.state.partial_tp_consumed = False

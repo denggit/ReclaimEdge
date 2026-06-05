@@ -105,6 +105,34 @@ class RecordingJournal:
 
 
 class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
+    def _three_stage_add_state(self, side: str) -> StrategyPositionState:
+        last_entry = 1743.57
+        return StrategyPositionState(
+            side=side,
+            layers=1,
+            last_entry_price=last_entry,
+            last_order_ts_ms=0,
+            total_entry_qty=1.0,
+            total_entry_notional=last_entry,
+            avg_entry_price=last_entry,
+            tp_plan="THREE_STAGE_RUNNER",
+            three_stage_runner_enabled_for_position=True,
+            three_stage_tp1_price=1760.0 if side == "LONG" else 1720.0,
+            three_stage_tp2_price=1800.0 if side == "LONG" else 1680.0,
+            three_stage_tp1_ratio=0.6,
+            three_stage_tp2_ratio=0.2,
+            three_stage_runner_ratio=0.2,
+            three_stage_tp1_consumed=False,
+            three_stage_tp2_consumed=False,
+            trend_runner_active=False,
+            lower_armed=True,
+            lower_deep_enough=True,
+            lower_extreme_price=1728.0,
+            upper_armed=True,
+            upper_deep_enough=True,
+            upper_extreme_price=1760.0,
+        )
+
     def test_middle_tp_mode_enables_three_stage_runner_long(self) -> None:
         strat = strategy()
         strat.state.avg_entry_price = 100.0
@@ -143,6 +171,94 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
         self.assertIsNone(got.three_stage_runner_sl_price)
         self.assertFalse(got.trend_runner_active)
         self.assertEqual(got.tp_price, 90.0)
+
+    def test_three_stage_allows_add_before_tp1(self) -> None:
+        strat = strategy()
+        strat.state = self._three_stage_add_state("LONG")
+
+        got = strat._maybe_open_or_add_long(
+            1728.0,
+            2_000_000,
+            boll(middle=1750.0, upper=1810.0, lower=1700.0),
+            cvd(side="buy", buy_volume=1.0, sell_volume=0.0, buy_ratio=1.0, sell_ratio=0.0, cross_positive=True, cvd_increasing=True, no_new_low=True),
+        )
+
+        self.assertIsNotNone(got)
+        assert got is not None
+        self.assertEqual(got.intent_type, "ADD_LONG")
+        self.assertEqual(got.tp_plan, "THREE_STAGE_RUNNER")
+        self.assertEqual(strat.state.layers, 2)
+        self.assertFalse(strat.state.three_stage_tp1_consumed)
+        self.assertFalse(strat.state.three_stage_tp2_consumed)
+
+    def test_three_stage_blocks_add_after_tp1_consumed(self) -> None:
+        strat = strategy()
+        strat.state = self._three_stage_add_state("LONG")
+        strat.state.three_stage_tp1_consumed = True
+
+        with self.assertLogs("src.strategies.boll_cvd_reclaim_strategy", level="INFO") as logs:
+            got = strat._maybe_open_or_add_long(
+                1728.0,
+                2_000_000,
+                boll(middle=1750.0, upper=1810.0, lower=1700.0),
+                cvd(side="buy", buy_volume=1.0, sell_volume=0.0, buy_ratio=1.0, sell_ratio=0.0, cross_positive=True, cvd_increasing=True, no_new_low=True),
+            )
+
+        self.assertIsNone(got)
+        self.assertTrue(any("reason=three_stage_after_tp1" in line for line in logs.output))
+
+    def test_three_stage_blocks_add_when_trend_runner_active(self) -> None:
+        strat = strategy()
+        strat.state = self._three_stage_add_state("LONG")
+        strat.state.trend_runner_active = True
+
+        with self.assertLogs("src.strategies.boll_cvd_reclaim_strategy", level="INFO") as logs:
+            got = strat._maybe_open_or_add_long(
+                1728.0,
+                2_000_000,
+                boll(middle=1750.0, upper=1810.0, lower=1700.0),
+                cvd(side="buy", buy_volume=1.0, sell_volume=0.0, buy_ratio=1.0, sell_ratio=0.0, cross_positive=True, cvd_increasing=True, no_new_low=True),
+            )
+
+        self.assertIsNone(got)
+        self.assertTrue(any("reason=trend_runner_active" in line for line in logs.output))
+
+    def test_three_stage_short_allows_add_before_tp1(self) -> None:
+        strat = strategy()
+        strat.state = self._three_stage_add_state("SHORT")
+
+        got = strat._maybe_open_or_add_short(
+            1760.0,
+            2_000_000,
+            boll(middle=1730.0, upper=1780.0, lower=1680.0),
+            cvd(side="sell", buy_volume=0.0, sell_volume=1.0, buy_ratio=0.0, sell_ratio=1.0, cross_negative=True, cvd_decreasing=True, no_new_high=True),
+        )
+
+        self.assertIsNotNone(got)
+        assert got is not None
+        self.assertEqual(got.intent_type, "ADD_SHORT")
+        self.assertEqual(got.tp_plan, "THREE_STAGE_RUNNER")
+        self.assertEqual(strat.state.layers, 2)
+        self.assertFalse(strat.state.three_stage_tp1_consumed)
+        self.assertFalse(strat.state.three_stage_tp2_consumed)
+
+    def test_add_skip_log_throttled_for_three_stage_after_tp1(self) -> None:
+        strat = strategy()
+        strat.state = self._three_stage_add_state("LONG")
+        strat.state.three_stage_tp1_consumed = True
+
+        with self.assertLogs("src.strategies.boll_cvd_reclaim_strategy", level="INFO") as logs:
+            for ts_ms in (2_000_000, 2_010_000, 2_020_000):
+                got = strat._maybe_open_or_add_long(
+                    1728.0,
+                    ts_ms,
+                    boll(middle=1750.0, upper=1810.0, lower=1700.0),
+                    cvd(side="buy", buy_volume=1.0, sell_volume=0.0, buy_ratio=1.0, sell_ratio=0.0, cross_positive=True, cvd_increasing=True, no_new_low=True),
+                )
+                self.assertIsNone(got)
+
+        add_skip_logs = [line for line in logs.output if "ADD_SKIPPED" in line and "reason=three_stage_after_tp1" in line]
+        self.assertEqual(len(add_skip_logs), 1)
 
     def test_outer_tp_mode_does_not_enable_three_stage_or_split(self) -> None:
         strat = strategy()

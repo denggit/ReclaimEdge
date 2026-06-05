@@ -276,6 +276,49 @@ async def test_add_long_creates_layer_sidecar_leg() -> None:
 
 
 @pytest.mark.asyncio
+async def test_sidecar_combined_add_still_single_market_order_when_three_stage_before_tp1() -> None:
+    state = sidecar_state()
+    state.tp_plan = "THREE_STAGE_RUNNER"
+    state.three_stage_runner_enabled_for_position = True
+    state.three_stage_tp1_consumed = False
+    state.three_stage_tp2_consumed = False
+    execution = ExecutionState("pos-1", 1000.0)
+    trader = Trader()
+    trader.account_equity_usdt = 414.0
+    journal = Journal()
+    store = Store()
+    add_intent = replace(
+        intent("ADD_LONG", 2),
+        size=PositionSize(30.0, 300.0, 0.1009, 2, 1.0),
+        managed_core_contracts="3.08",
+        managed_core_eth_qty=0.308,
+    )
+
+    combined = sidecar_plan_for(add_intent, execution, trader, state)
+    assert combined.sidecar_plan is not None
+    ok = await attach_sidecar_after_combined_entry(
+        trader=trader,
+        strategy_state=state,
+        execution_state=execution,
+        intent=combined.execution_intent,
+        sidecar_plan=combined.sidecar_plan,
+        journal=journal,
+        state_store=store,
+        trader_symbol="ETH-USDT-SWAP",
+    )
+
+    assert ok
+    assert combined.execution_intent.size.eth_qty == pytest.approx(combined.sidecar_plan.total_qty)
+    assert combined.execution_intent.managed_core_contracts == "3.08"
+    assert combined.execution_intent.managed_core_eth_qty == pytest.approx(0.308)
+    assert trader.sidecar_market_orders == []
+    assert trader.sidecar_tps == [("LONG", str(combined.sidecar_plan.sidecar_contracts), pytest.approx(combined.sidecar_plan.sidecar_tp_price), combined.sidecar_plan.client_order_id)]
+    assert len(state.sidecar_legs) == 1
+    assert state.sidecar_legs[0]["layer_index"] == 2
+    assert state.sidecar_legs[0]["status"] == "OPEN"
+
+
+@pytest.mark.asyncio
 async def test_position_level_disabled_does_not_create_sidecar_mid_position() -> None:
     state = sidecar_state()
     state.sidecar_enabled_for_position = False

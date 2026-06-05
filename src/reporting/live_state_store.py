@@ -101,6 +101,8 @@ class LivePositionState:
     sidecar_legs: list | None = None
     sidecar_dirty: bool = False
     sidecar_halt_reason: str | None = None
+    last_add_skip_log_reason: str | None = None
+    last_add_skip_log_ts_ms: int = 0
     core_contracts: str | None = None
     core_eth_qty: float = 0.0
     cash_before_position: float | None = None
@@ -234,6 +236,8 @@ class LiveStateStore:
             ),
             sidecar_dirty=bool(getattr(strategy_state, "sidecar_dirty", False)),
             sidecar_halt_reason=getattr(strategy_state, "sidecar_halt_reason", None),
+            last_add_skip_log_reason=getattr(strategy_state, "last_add_skip_log_reason", None),
+            last_add_skip_log_ts_ms=int(getattr(strategy_state, "last_add_skip_log_ts_ms", 0) or 0),
             core_contracts=getattr(strategy_state, "core_contracts", None),
             core_eth_qty=float(getattr(strategy_state, "core_eth_qty", 0.0) or 0.0),
             cash_before_position=cash_before_position,

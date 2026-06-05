@@ -456,6 +456,8 @@ def restore_strategy_from_saved_state(strategy: BollCvdReclaimStrategy, saved_st
         sidecar_dirty=getattr(saved_state, "sidecar_dirty", False),
         sidecar_halt_reason=getattr(saved_state, "sidecar_halt_reason", None),
         near_tp_sidecar_skip_logged=getattr(saved_state, "near_tp_sidecar_skip_logged", False),
+        last_add_skip_log_reason=getattr(saved_state, "last_add_skip_log_reason", None),
+        last_add_skip_log_ts_ms=getattr(saved_state, "last_add_skip_log_ts_ms", 0),
         core_contracts=getattr(saved_state, "core_contracts", None),
         core_eth_qty=getattr(saved_state, "core_eth_qty", 0.0),
     )
