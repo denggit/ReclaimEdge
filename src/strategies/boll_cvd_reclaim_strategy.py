@@ -6,6 +6,7 @@ from typing import Literal, Optional
 
 from src.indicators.cvd_tracker import CvdSnapshot
 from src.monitors.boll_band_breakout_monitor import BollSnapshot
+from src.position_management.cost_basis import calculate_remaining_breakeven_price
 from src.position_management.sidecar.model import trim_sidecar_legs_for_state
 from src.risk.simple_position_sizer import PositionSize, SimplePositionSizer
 from src.utils.log import get_logger
@@ -297,6 +298,10 @@ class StrategyPositionState:
     total_entry_notional: float = 0.0
     avg_entry_price: float = 0.0
     breakeven_price: float = 0.0
+    position_cost_entry_notional: float = 0.0
+    position_cost_exit_notional: float = 0.0
+    position_cost_remaining_qty: float = 0.0
+    net_remaining_breakeven_price: float = 0.0
     tp_mode: TpMode = "MIDDLE"
     partial_tp_price: float | None = None
     partial_tp_ratio: float = 0.0
@@ -881,6 +886,11 @@ class BollCvdReclaimStrategy:
             self.state.sidecar_legs = []
             self.state.sidecar_dirty = False
             self.state.sidecar_halt_reason = None
+            self.state.position_cost_entry_notional = 0.0
+            self.state.position_cost_exit_notional = 0.0
+            self.state.position_cost_remaining_qty = 0.0
+            self.state.net_remaining_breakeven_price = 0.0
+        self.state.side = side
         self._update_position_cost(price, size.eth_qty)
         self.state.partial_tp_consumed = False
         self._reset_near_tp_state()
@@ -900,7 +910,6 @@ class BollCvdReclaimStrategy:
             reason = f"{reason} + 中轨先平{partial_tp_ratio * 100:.0f}%，剩余runner到外轨"
         if tp_plan == "THREE_STAGE_RUNNER":
             reason = f"{reason} + 三段式趋势Runner：中轨{self.config.three_stage_tp1_ratio * 100:.0f}%/外轨{self.config.three_stage_tp2_ratio * 100:.0f}%/Runner{self.config.three_stage_runner_ratio * 100:.0f}%"
-        self.state.side = side
         self.state.layers = next_layer
         self.state.last_entry_price = price
         self.state.tp_price = tp_price
@@ -1543,6 +1552,22 @@ class BollCvdReclaimStrategy:
         self.state.total_entry_qty += eth_qty
         self.state.total_entry_notional += entry_price * eth_qty
         self.state.avg_entry_price = self.state.total_entry_notional / self.state.total_entry_qty
+        self.state.position_cost_entry_notional += entry_price * eth_qty
+        self.state.position_cost_remaining_qty += eth_qty
+        self._refresh_net_remaining_breakeven_price()
+
+    def _refresh_net_remaining_breakeven_price(self) -> None:
+        if self.state.side not in {"LONG", "SHORT"}:
+            self.state.net_remaining_breakeven_price = 0.0
+            return
+        basis = calculate_remaining_breakeven_price(
+            side=self.state.side,
+            entry_notional=self.state.position_cost_entry_notional,
+            exit_notional=self.state.position_cost_exit_notional,
+            remaining_qty=self.state.position_cost_remaining_qty,
+            fee_buffer_pct=self.config.breakeven_fee_buffer_pct,
+        )
+        self.state.net_remaining_breakeven_price = float(basis.buffered_breakeven_price or 0.0)
 
     def _reset_near_tp_state(self) -> None:
         self.state.near_tp_armed = False
@@ -1698,11 +1723,12 @@ class BollCvdReclaimStrategy:
 
     def _calculate_middle_runner_protective_sl(self, side: PositionSide, current_price: float, boll: BollSnapshot) -> float | None:
         avg_entry = self.state.avg_entry_price
-        if avg_entry <= 0 or current_price <= 0:
+        base_breakeven = float(getattr(self.state, "net_remaining_breakeven_price", 0.0) or 0.0)
+        if current_price <= 0 or (base_breakeven <= 0 and avg_entry <= 0):
             return None
         fee = self.config.breakeven_fee_buffer_pct
         if side == "LONG":
-            after_partial_breakeven = avg_entry * (1 + fee)
+            after_partial_breakeven = base_breakeven if base_breakeven > 0 else avg_entry * (1 + fee)
             candidate_1 = (after_partial_breakeven + boll.middle) / 2
             candidate_2 = (boll.lower + boll.middle) / 2
             protective_sl = max(candidate_1, candidate_2)
@@ -1717,7 +1743,7 @@ class BollCvdReclaimStrategy:
                 return None
             return protective_sl
 
-        after_partial_breakeven = avg_entry * (1 - fee)
+        after_partial_breakeven = base_breakeven if base_breakeven > 0 else avg_entry * (1 - fee)
         candidate_1 = (after_partial_breakeven + boll.middle) / 2
         candidate_2 = (boll.upper + boll.middle) / 2
         protective_sl = min(candidate_1, candidate_2)
@@ -1780,12 +1806,18 @@ class BollCvdReclaimStrategy:
         avg_entry = self.state.avg_entry_price
         tp1_price = self.state.three_stage_tp1_price
         tp1_ratio = float(self.state.three_stage_tp1_ratio or 0.0)
-        if avg_entry <= 0 or current_price <= 0 or tp1_price is None or tp1_ratio <= 0 or tp1_ratio >= 1:
+        base_breakeven = float(getattr(self.state, "net_remaining_breakeven_price", 0.0) or 0.0)
+        if current_price <= 0:
+            return None
+        if base_breakeven <= 0 and (avg_entry <= 0 or tp1_price is None or tp1_ratio <= 0 or tp1_ratio >= 1):
             return None
         fee = self.config.breakeven_fee_buffer_pct
         if side == "LONG":
-            post_tp1_breakeven = avg_entry - tp1_ratio * (float(tp1_price) - avg_entry) / (1 - tp1_ratio)
-            post_tp1_breakeven_buffered = post_tp1_breakeven * (1 + fee)
+            if base_breakeven > 0:
+                post_tp1_breakeven_buffered = base_breakeven
+            else:
+                post_tp1_breakeven = avg_entry - tp1_ratio * (float(tp1_price) - avg_entry) / (1 - tp1_ratio)
+                post_tp1_breakeven_buffered = post_tp1_breakeven * (1 + fee)
             candidate_1 = (post_tp1_breakeven_buffered + boll.middle) / 2
             candidate_2 = (boll.lower + boll.middle) / 2
             protective_sl = max(candidate_1, candidate_2)
@@ -1803,8 +1835,11 @@ class BollCvdReclaimStrategy:
                 return None
             return protective_sl
 
-        post_tp1_breakeven = avg_entry + tp1_ratio * (avg_entry - float(tp1_price)) / (1 - tp1_ratio)
-        post_tp1_breakeven_buffered = post_tp1_breakeven * (1 - fee)
+        if base_breakeven > 0:
+            post_tp1_breakeven_buffered = base_breakeven
+        else:
+            post_tp1_breakeven = avg_entry + tp1_ratio * (avg_entry - float(tp1_price)) / (1 - tp1_ratio)
+            post_tp1_breakeven_buffered = post_tp1_breakeven * (1 - fee)
         candidate_1 = (post_tp1_breakeven_buffered + boll.middle) / 2
         candidate_2 = (boll.upper + boll.middle) / 2
         protective_sl = min(candidate_1, candidate_2)

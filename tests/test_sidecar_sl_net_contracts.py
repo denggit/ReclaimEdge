@@ -207,6 +207,7 @@ class SidecarSLNetContractsTest(unittest.IsolatedAsyncioTestCase):
         strategy.state = StrategyPositionState(
             side=side, layers=1, total_entry_qty=1.0, total_entry_notional=100.0,
             avg_entry_price=100.0, tp_price=110.0 if side == "LONG" else 90.0,
+            net_remaining_breakeven_price=99.0 if side == "LONG" else 101.0,
             tp_plan="THREE_STAGE_RUNNER", three_stage_runner_enabled_for_position=True,
             three_stage_tp1_price=101.0 if side == "LONG" else 99.0,
             three_stage_tp2_price=110.0 if side == "LONG" else 90.0,
@@ -232,6 +233,7 @@ class SidecarSLNetContractsTest(unittest.IsolatedAsyncioTestCase):
         strategy.state = StrategyPositionState(
             side=side, layers=1, total_entry_qty=1.0, total_entry_notional=100.0,
             avg_entry_price=100.0, tp_price=110.0 if side == "LONG" else 90.0,
+            net_remaining_breakeven_price=99.0 if side == "LONG" else 101.0,
             tp_plan="SINGLE", partial_tp_consumed=False,
             middle_runner_enabled_for_position=True, middle_runner_pending=True,
             middle_runner_active=False, middle_runner_first_close_ratio=0.6,

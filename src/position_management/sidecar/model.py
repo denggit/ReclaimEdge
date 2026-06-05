@@ -51,8 +51,7 @@ def calculate_sidecar_tp_price(side: PositionSide, entry_price: float, tp_pct: f
     return float(entry_price) * (1.0 - float(tp_pct))
 
 
-def calculate_sidecar_margin(layer_margin_pct: float, sidecar_margin_pct: float, layer_multiplier: float) -> float:
-    _ = layer_margin_pct
+def calculate_sidecar_margin(sidecar_margin_pct: float, layer_multiplier: float) -> float:
     return float(sidecar_margin_pct) * float(layer_multiplier)
 
 
@@ -61,13 +60,12 @@ def calculate_sidecar_qty(
     account_equity_usdt: float,
     price: float,
     leverage: float,
-    layer_margin_pct: float,
     sidecar_margin_pct: float,
     layer_multiplier: float,
 ) -> float:
     if price <= 0:
         return 0.0
-    margin_pct = calculate_sidecar_margin(layer_margin_pct, sidecar_margin_pct, layer_multiplier)
+    margin_pct = calculate_sidecar_margin(sidecar_margin_pct, layer_multiplier)
     notional = float(account_equity_usdt) * margin_pct * float(leverage)
     return notional / float(price)
 

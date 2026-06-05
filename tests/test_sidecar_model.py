@@ -47,14 +47,13 @@ def test_sidecar_enabled_core_and_sidecar_sizing() -> None:
         account_equity_usdt=1000,
         price=100.0,
         leverage=50,
-        layer_margin_pct=0.04,
         sidecar_margin_pct=0.01,
         layer_multiplier=1.15,
     )
 
     assert config.core_margin_pct == pytest.approx(0.03)
     assert core.margin_usdt == pytest.approx(1000 * 0.03 * 1.15)
-    assert calculate_sidecar_margin(0.04, 0.01, 1.15) == pytest.approx(0.0115)
+    assert calculate_sidecar_margin(0.01, 1.15) == pytest.approx(0.0115)
     assert sidecar_qty == pytest.approx((1000 * 0.01 * 1.15 * 50) / 100.0)
 
 

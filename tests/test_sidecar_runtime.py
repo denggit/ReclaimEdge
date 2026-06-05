@@ -178,6 +178,23 @@ async def test_combined_sidecar_entry_uses_one_total_market_order_and_core_tp_co
     assert trader.sidecar_tps == [("LONG", "0.69", pytest.approx(3012.0), combined.sidecar_plan.client_order_id)]
 
 
+def test_combined_sidecar_entry_ignores_large_margin_usdt_for_sidecar_qty() -> None:
+    state = sidecar_state()
+    execution = ExecutionState("pos-live", 1000.0)
+    trader = Trader()
+    trader.account_equity_usdt = 414.0
+    entry_intent = replace(
+        intent(),
+        size=PositionSize(999999.0, 624.0, 0.208, 1, 1.0),
+    )
+
+    combined = sidecar_plan_for(entry_intent, execution, trader, state)
+
+    assert combined.sidecar_plan is not None
+    assert combined.sidecar_plan.sidecar_contracts == Decimal("0.69")
+    assert combined.sidecar_plan.sidecar_qty == pytest.approx(0.069)
+
+
 def test_combined_open_uses_rounded_layer_core_when_no_managed_core_contracts() -> None:
     state = sidecar_state()
     execution = ExecutionState("pos-open", 1000.0)
@@ -282,7 +299,10 @@ async def test_position_level_disabled_does_not_create_sidecar_mid_position() ->
 @pytest.mark.asyncio
 async def test_sidecar_tp_filled_updates_state() -> None:
     state = sidecar_state()
-    state.sidecar_legs = [{"leg_id": "leg-1", "status": "OPEN", "tp_order_id": "tp-1", "qty": 0.1, "contracts": "1", "created_ts_ms": 1, "updated_ts_ms": 1}]
+    state.position_cost_entry_notional = 3000.0
+    state.position_cost_remaining_qty = 1.0
+    state.net_remaining_breakeven_price = 3003.0
+    state.sidecar_legs = [{"leg_id": "leg-1", "status": "OPEN", "tp_order_id": "tp-1", "qty": 0.1, "contracts": "1", "tp_price": 3012.0, "created_ts_ms": 1, "updated_ts_ms": 1}]
     refresh_sidecar_state_totals(state)
     trader = Trader()
     trader.status_by_order["tp-1"] = "FILLED"
@@ -303,6 +323,9 @@ async def test_sidecar_tp_filled_updates_state() -> None:
 
     assert state.sidecar_legs[0]["status"] == "TP_FILLED"
     assert state.sidecar_open_qty == 0
+    assert state.position_cost_exit_notional == pytest.approx(301.2)
+    assert state.position_cost_remaining_qty == pytest.approx(0.9)
+    assert state.net_remaining_breakeven_price < 3003.0
     assert journal.events[0][0] == "SIDECAR_TP_FILLED"
 
 

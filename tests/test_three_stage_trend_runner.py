@@ -580,6 +580,53 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
         self.assertLessEqual(extension or 999, 98.0)
         self.assertTrue(short_strat.state.three_stage_post_tp1_sl_extension_triggered)
 
+    def test_post_tp1_protective_sl_uses_net_remaining_breakeven_when_present(self) -> None:
+        strat = strategy()
+        strat.state = StrategyPositionState(
+            side="LONG",
+            avg_entry_price=100.0,
+            net_remaining_breakeven_price=95.0,
+            three_stage_tp1_price=102.0,
+            three_stage_tp1_ratio=0.6,
+            three_stage_tp1_consumed=True,
+        )
+
+        got = strat._calculate_three_stage_post_tp1_protective_sl("LONG", 105.0, boll(middle=102.0, upper=112.0, lower=92.0))
+
+        self.assertEqual(got, ((95.0 + 102.0) / 2))
+
+    def test_post_tp1_protective_sl_falls_back_to_core_avg_logic_without_net_breakeven(self) -> None:
+        strat = strategy(breakeven_fee_buffer_pct=0.001)
+        strat.state = StrategyPositionState(
+            side="LONG",
+            avg_entry_price=100.0,
+            net_remaining_breakeven_price=0.0,
+            three_stage_tp1_price=102.0,
+            three_stage_tp1_ratio=0.6,
+            three_stage_tp1_consumed=True,
+        )
+
+        got = strat._calculate_three_stage_post_tp1_protective_sl("LONG", 105.0, boll(middle=102.0, upper=112.0, lower=92.0))
+
+        fallback_breakeven = (100.0 - 0.6 * (102.0 - 100.0) / 0.4) * 1.001
+        self.assertEqual(got, max((fallback_breakeven + 102.0) / 2, (92.0 + 102.0) / 2))
+
+    def test_post_tp1_protective_sl_long_uses_max_candidate_with_net_breakeven(self) -> None:
+        strat = strategy()
+        strat.state = StrategyPositionState(side="LONG", net_remaining_breakeven_price=85.0)
+
+        got = strat._calculate_three_stage_post_tp1_protective_sl("LONG", 105.0, boll(middle=102.0, upper=112.0, lower=92.0))
+
+        self.assertEqual(got, (92.0 + 102.0) / 2)
+
+    def test_post_tp1_protective_sl_short_uses_min_candidate_with_net_breakeven(self) -> None:
+        strat = strategy()
+        strat.state = StrategyPositionState(side="SHORT", net_remaining_breakeven_price=110.0)
+
+        got = strat._calculate_three_stage_post_tp1_protective_sl("SHORT", 95.0, boll(middle=98.0, upper=108.0, lower=88.0))
+
+        self.assertEqual(got, (108.0 + 98.0) / 2)
+
     def test_three_stage_position_blocks_middle_runner_plan_after_env_change(self) -> None:
         strat = strategy(three_stage_runner_enabled=False, middle_runner_enabled=True)
         strat.state = StrategyPositionState(

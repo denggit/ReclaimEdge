@@ -19,6 +19,10 @@ class LiveStateStoreTest(unittest.TestCase):
                 total_entry_qty=1.0,
                 total_entry_notional=100.0,
                 avg_entry_price=100.0,
+                position_cost_entry_notional=120.0,
+                position_cost_exit_notional=20.0,
+                position_cost_remaining_qty=0.8,
+                net_remaining_breakeven_price=125.125,
                 tp_plan="THREE_STAGE_RUNNER",
                 three_stage_runner_enabled_for_position=True,
                 three_stage_tp1_price=101.0,
@@ -51,6 +55,10 @@ class LiveStateStoreTest(unittest.TestCase):
             self.assertEqual(loaded.three_stage_post_tp1_protective_sl_price, 101.0)
             self.assertTrue(loaded.three_stage_post_tp1_sl_extension_triggered)
             self.assertTrue(loaded.three_stage_post_tp1_protected)
+            self.assertEqual(loaded.position_cost_entry_notional, 120.0)
+            self.assertEqual(loaded.position_cost_exit_notional, 20.0)
+            self.assertEqual(loaded.position_cost_remaining_qty, 0.8)
+            self.assertEqual(loaded.net_remaining_breakeven_price, 125.125)
 
     def test_middle_runner_size_mismatch_fields_save_and_restore(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

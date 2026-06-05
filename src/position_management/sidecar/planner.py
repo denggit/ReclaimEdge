@@ -47,7 +47,6 @@ def build_sidecar_execution_plan(
     entry_price: float,
     account_equity_usdt: float,
     leverage: float,
-    layer_margin_pct: float,
     sidecar_margin_pct: float,
     sidecar_tp_pct: float,
     layer_multiplier: float,
@@ -65,7 +64,6 @@ def build_sidecar_execution_plan(
         account_equity_usdt=account_equity_usdt,
         price=entry_price,
         leverage=leverage,
-        layer_margin_pct=layer_margin_pct,
         sidecar_margin_pct=sidecar_margin_pct,
         layer_multiplier=layer_multiplier,
     )
@@ -85,7 +83,7 @@ def build_sidecar_execution_plan(
         total_qty=total_qty,
         total_contracts=total_contracts,
         sidecar_tp_price=calculate_sidecar_tp_price(side, entry_price, sidecar_tp_pct),
-        sidecar_margin_pct=calculate_sidecar_margin(layer_margin_pct, sidecar_margin_pct, layer_multiplier),
+        sidecar_margin_pct=calculate_sidecar_margin(sidecar_margin_pct, layer_multiplier),
         layer_multiplier=float(layer_multiplier),
         client_order_id=sidecar_client_order_id(position_id, layer_index, ts_ms),
     )
@@ -113,7 +111,6 @@ def build_combined_entry_intent(
         entry_price=float(intent.price),
         account_equity_usdt=account_equity_usdt,
         leverage=leverage,
-        layer_margin_pct=float(getattr(intent.size, "margin_usdt", 0.0) or 0.0),
         sidecar_margin_pct=sidecar_margin_pct,
         sidecar_tp_pct=sidecar_tp_pct,
         layer_multiplier=float(intent.size.layer_multiplier or 1.0),

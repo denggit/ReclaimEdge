@@ -31,6 +31,10 @@ class LivePositionState:
     total_entry_notional: float = 0.0
     avg_entry_price: float = 0.0
     breakeven_price: float = 0.0
+    position_cost_entry_notional: float = 0.0
+    position_cost_exit_notional: float = 0.0
+    position_cost_remaining_qty: float = 0.0
+    net_remaining_breakeven_price: float = 0.0
     tp_mode: str = "MIDDLE"
     last_order_ts_ms: int = 0
     first_entry_ts_ms: int = 0
@@ -157,6 +161,10 @@ class LiveStateStore:
             total_entry_notional=float(strategy_state.total_entry_notional or 0.0),
             avg_entry_price=float(strategy_state.avg_entry_price or 0.0),
             breakeven_price=float(strategy_state.breakeven_price or 0.0),
+            position_cost_entry_notional=float(getattr(strategy_state, "position_cost_entry_notional", 0.0) or 0.0),
+            position_cost_exit_notional=float(getattr(strategy_state, "position_cost_exit_notional", 0.0) or 0.0),
+            position_cost_remaining_qty=float(getattr(strategy_state, "position_cost_remaining_qty", 0.0) or 0.0),
+            net_remaining_breakeven_price=float(getattr(strategy_state, "net_remaining_breakeven_price", 0.0) or 0.0),
             tp_mode=strategy_state.tp_mode,
             last_order_ts_ms=int(strategy_state.last_order_ts_ms or 0),
             first_entry_ts_ms=int(getattr(strategy_state, "first_entry_ts_ms", 0) or 0),

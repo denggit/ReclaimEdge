@@ -358,6 +358,17 @@ class SplitTakeProfitStrategyTest(unittest.TestCase):
         self.assertAlmostEqual(short_sl or 0, min((99.9 + 98.0) / 2, (104.0 + 98.0) / 2))
         self.assertEqual(short_strat._tighten_middle_runner_sl("SHORT", 98.5, 99.5), 98.5)
 
+    def test_middle_runner_sl_uses_net_remaining_breakeven_when_present(self) -> None:
+        long_strat = strategy(middle_runner_enabled=True, breakeven_fee_buffer_pct=0.001)
+        long_strat.state = StrategyPositionState(side="LONG", avg_entry_price=100.0, net_remaining_breakeven_price=95.0)
+        long_sl = long_strat._calculate_middle_runner_protective_sl("LONG", 103.0, boll(middle=102.0, lower=96.0))
+        self.assertEqual(long_sl, (95.0 + 102.0) / 2)
+
+        short_strat = strategy(middle_runner_enabled=True, breakeven_fee_buffer_pct=0.001)
+        short_strat.state = StrategyPositionState(side="SHORT", avg_entry_price=100.0, net_remaining_breakeven_price=105.0)
+        short_sl = short_strat._calculate_middle_runner_protective_sl("SHORT", 97.0, boll(middle=98.0, upper=104.0))
+        self.assertEqual(short_sl, (105.0 + 98.0) / 2)
+
     def test_middle_runner_extension_trigger_moves_sl_to_middle(self) -> None:
         long_strat = strategy(middle_runner_enabled=True, middle_runner_extension_trigger_ratio=0.6)
         long_strat.state.middle_runner_active = True
