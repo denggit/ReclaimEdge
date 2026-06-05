@@ -3854,26 +3854,121 @@ async def account_position_sync_worker(
                 last_stale_log = now
 
 
-def trusted_startup_saved_state(saved_state: Any, startup_position: PositionSnapshot) -> Any:  # type: ignore[no-untyped-def]
+def trusted_startup_saved_state(  # type: ignore[no-untyped-def]
+    saved_state: Any,
+    startup_position: PositionSnapshot,
+    max_avg_diff_pct: float | None = None,
+    max_qty_diff_pct: float | None = None,
+) -> Any:
     """Return saved_state only when it matches the current OKX position.
 
-    A saved_state is trusted when all of:
-      - saved_state is not None
-      - startup_position.has_position is True
-      - saved_state.side == startup_position.side
-      - saved_state.layers > 0
+    A saved_state is trusted when ALL of these hold:
+      1. saved_state is not None
+      2. startup_position.has_position is True
+      3. saved_state.side == startup_position.side
+      4. saved_state.layers > 0
+      5. avg_entry_price is within max_avg_diff_pct of OKX avg
+      6. expected total qty (core + sidecar open) is within max_qty_diff_pct of OKX qty
 
     If any condition fails the saved_state is considered stale / from a previous
     position and must NOT be passed to TP/Sidecar/Three-Stage recovery helpers.
+
+    Tolerance defaults are read from env vars with fallback values:
+      STARTUP_SAVED_STATE_MAX_AVG_DIFF_PCT  → 0.003  (0.3%)
+      STARTUP_SAVED_STATE_MAX_QTY_DIFF_PCT  → 0.05   (5%)
     """
-    if (
-        saved_state is not None
-        and startup_position.has_position
-        and getattr(saved_state, "side", None) == startup_position.side
-        and int(getattr(saved_state, "layers", 0) or 0) > 0
-    ):
-        return saved_state
-    return None
+    if max_avg_diff_pct is None:
+        max_avg_diff_pct = float(os.getenv("STARTUP_SAVED_STATE_MAX_AVG_DIFF_PCT", "0.003"))
+    if max_qty_diff_pct is None:
+        max_qty_diff_pct = float(os.getenv("STARTUP_SAVED_STATE_MAX_QTY_DIFF_PCT", "0.05"))
+
+    # ── basic identity checks ─────────────────────────────────────────
+    if saved_state is None:
+        return None
+    if not startup_position.has_position:
+        return None
+    if getattr(saved_state, "side", None) != startup_position.side:
+        logger.warning(
+            "STARTUP_SAVED_STATE_UNTRUSTED | reason=side_mismatch saved_side=%s okx_side=%s",
+            getattr(saved_state, "side", None),
+            startup_position.side,
+        )
+        return None
+    if int(getattr(saved_state, "layers", 0) or 0) <= 0:
+        logger.warning(
+            "STARTUP_SAVED_STATE_UNTRUSTED | reason=layers_zero_or_missing saved_layers=%s",
+            getattr(saved_state, "layers", None),
+        )
+        return None
+
+    # ── avg_entry check ───────────────────────────────────────────────
+    saved_avg = float(getattr(saved_state, "avg_entry_price", 0.0) or 0.0)
+    pos_avg = float(startup_position.avg_entry_price or 0.0)
+    if saved_avg <= 0:
+        logger.warning(
+            "STARTUP_SAVED_STATE_UNTRUSTED | reason=avg_entry_missing_or_zero saved_avg=%s okx_avg=%.4f",
+            getattr(saved_state, "avg_entry_price", None),
+            pos_avg,
+        )
+        return None
+    if pos_avg <= 0:
+        logger.warning(
+            "STARTUP_SAVED_STATE_UNTRUSTED | reason=okx_avg_entry_zero saved_avg=%.4f okx_avg=%.4f",
+            saved_avg,
+            pos_avg,
+        )
+        return None
+    avg_diff = abs(saved_avg - pos_avg) / pos_avg
+    if avg_diff > max_avg_diff_pct:
+        logger.warning(
+            "STARTUP_SAVED_STATE_UNTRUSTED | reason=avg_entry_mismatch saved_avg=%.4f okx_avg=%.4f diff_pct=%.6f max_diff_pct=%.6f",
+            saved_avg,
+            pos_avg,
+            avg_diff,
+            max_avg_diff_pct,
+        )
+        return None
+
+    # ── size check ────────────────────────────────────────────────────
+    sidecar_enabled = bool(getattr(saved_state, "sidecar_enabled_for_position", False))
+    if sidecar_enabled:
+        saved_core_qty = float(getattr(saved_state, "core_eth_qty", 0.0) or 0.0)
+        saved_sidecar_legs = list(getattr(saved_state, "sidecar_legs", []) or [])
+        saved_sc_open = sidecar_open_qty(saved_sidecar_legs)
+        expected_qty = saved_core_qty + saved_sc_open
+    else:
+        expected_qty = float(getattr(saved_state, "total_entry_qty", 0.0) or 0.0)
+    pos_qty = float(startup_position.eth_qty or 0.0)
+
+    if expected_qty <= 0:
+        logger.warning(
+            "STARTUP_SAVED_STATE_UNTRUSTED | reason=qty_missing_or_zero expected_qty=%.8f sidecar_enabled=%s saved_total_entry_qty=%s saved_core_eth_qty=%s",
+            expected_qty,
+            sidecar_enabled,
+            getattr(saved_state, "total_entry_qty", None),
+            getattr(saved_state, "core_eth_qty", None),
+        )
+        return None
+    if pos_qty <= 0:
+        logger.warning(
+            "STARTUP_SAVED_STATE_UNTRUSTED | reason=okx_qty_zero expected_qty=%.8f okx_qty=%.8f",
+            expected_qty,
+            pos_qty,
+        )
+        return None
+    qty_diff = abs(expected_qty - pos_qty) / pos_qty
+    if qty_diff > max_qty_diff_pct:
+        logger.warning(
+            "STARTUP_SAVED_STATE_UNTRUSTED | reason=qty_mismatch expected_qty=%.8f okx_qty=%.8f diff_pct=%.6f max_diff_pct=%.6f sidecar_enabled=%s",
+            expected_qty,
+            pos_qty,
+            qty_diff,
+            max_qty_diff_pct,
+            sidecar_enabled,
+        )
+        return None
+
+    return saved_state
 
 
 async def main() -> None:
@@ -3910,16 +4005,14 @@ async def main() -> None:
     cash_before_position: float | None = None
 
     saved_state = state_store.load()
-    trusted_saved_state: Any = None
+    trusted_saved_state = trusted_startup_saved_state(saved_state, startup_position)
     if startup_position.has_position:
-        if saved_state and saved_state.side == startup_position.side and saved_state.layers > 0:
-            restore_strategy_from_saved_state(strategy, saved_state)
-            trusted_saved_state = saved_state
-            current_position_id = saved_state.position_id
-            cash_before_position = saved_state.cash_before_position
+        if trusted_saved_state is not None:
+            restore_strategy_from_saved_state(strategy, trusted_saved_state)
+            current_position_id = trusted_saved_state.position_id
+            cash_before_position = trusted_saved_state.cash_before_position
         else:
             restore_strategy_from_position(strategy, startup_position, utc_ms())
-            trusted_saved_state = None
             current_position_id = journal.new_position_id(trader.symbol, startup_position.side or "UNKNOWN")
             cash_before_position = startup_cash
             journal.record_startup_recovery(

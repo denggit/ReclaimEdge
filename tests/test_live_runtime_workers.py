@@ -1939,12 +1939,15 @@ class LiveRuntimeWorkerTest(unittest.IsolatedAsyncioTestCase):
 
     # ── trusted startup saved state ─────────────────────────────────────
 
-    def test_trusted_startup_saved_state_matching_side_and_layers(self) -> None:
-        """Saved state matching current OKX position is trusted."""
+    def test_trusted_startup_saved_state_matching_side_layers_avg_and_qty(self) -> None:
+        """Saved state matching current OKX position (side, layers, avg, qty) is trusted."""
         saved = types.SimpleNamespace(
             position_id="pos-1",
             side="LONG",
             layers=3,
+            avg_entry_price=100.0,
+            total_entry_qty=6.0,
+            sidecar_enabled_for_position=False,
         )
         pos = PositionSnapshot("LONG", Decimal("6"), 100.0, 6.0, Decimal("6"))
 
@@ -2038,8 +2041,11 @@ class LiveRuntimeWorkerTest(unittest.IsolatedAsyncioTestCase):
             position_id="pos-1",
             side="LONG",
             layers=3,
+            avg_entry_price=100.0,
+            total_entry_qty=6.0,
             tp_order_id="trusted-tp-order-id",
             tp_order_ids=[],
+            sidecar_enabled_for_position=False,
             sidecar_legs=[],
         )
         startup_pos = PositionSnapshot("LONG", Decimal("6"), 100.0, 6.0, Decimal("6"))
@@ -2162,6 +2168,111 @@ class LiveRuntimeWorkerTest(unittest.IsolatedAsyncioTestCase):
             len(strategy.state.sidecar_legs), 0,
             "No sidecar legs should be recovered from untrusted saved_state",
         )
+
+    # ── tightened trusted_startup_saved_state checks ───────────────────
+
+    def test_trusted_startup_saved_state_avg_mismatch_rejected(self) -> None:
+        """Saved avg differs from OKX avg beyond tolerance → untrusted."""
+        saved = types.SimpleNamespace(
+            position_id="pos-1",
+            side="LONG",
+            layers=3,
+            avg_entry_price=1700.0,
+            total_entry_qty=6.0,
+            sidecar_enabled_for_position=False,
+        )
+        # OKX avg is 1750 → diff = 50/1750 ≈ 2.86%  > 0.3%
+        pos = PositionSnapshot("LONG", Decimal("6"), 1750.0, 6.0, Decimal("6"))
+
+        result = trusted_startup_saved_state(saved, pos)
+        self.assertIsNone(result, "Avg mismatch beyond tolerance must reject saved_state")
+
+    def test_trusted_startup_saved_state_qty_mismatch_rejected(self) -> None:
+        """Saved qty differs from OKX qty beyond tolerance → untrusted."""
+        saved = types.SimpleNamespace(
+            position_id="pos-1",
+            side="LONG",
+            layers=3,
+            avg_entry_price=100.0,
+            total_entry_qty=1.0,
+            sidecar_enabled_for_position=False,
+        )
+        # OKX qty is 2.0 → diff = 1.0/2.0 = 50%  > 5%
+        pos = PositionSnapshot("LONG", Decimal("6"), 100.0, 2.0, Decimal("6"))
+
+        result = trusted_startup_saved_state(saved, pos)
+        self.assertIsNone(result, "Qty mismatch beyond tolerance must reject saved_state")
+
+    def test_trusted_startup_saved_state_sidecar_qty_uses_core_plus_open_sidecar(self) -> None:
+        """When sidecar enabled, expected qty = core_eth_qty + sidecar open qty."""
+        saved = types.SimpleNamespace(
+            position_id="pos-1",
+            side="LONG",
+            layers=3,
+            avg_entry_price=100.0,
+            total_entry_qty=2.5,  # not used when sidecar enabled
+            sidecar_enabled_for_position=True,
+            core_eth_qty=2.0,
+            sidecar_legs=[
+                {
+                    "leg_id": "pos-1:SC:1:1000",
+                    "position_id": "pos-1",
+                    "layer_index": 1,
+                    "side": "LONG",
+                    "entry_price": 100.0,
+                    "qty": 0.5,
+                    "contracts": "5",
+                    "tp_price": 100.4,
+                    "tp_order_id": "sc-tp-12345",
+                    "status": "OPEN",
+                    "ts_ms": 1_000,
+                }
+            ],
+        )
+        # core_eth_qty(2.0) + sidecar_open_qty(0.5) = 2.5 → matches OKX qty
+        pos = PositionSnapshot("LONG", Decimal("6"), 100.0, 2.5, Decimal("6"))
+
+        result = trusted_startup_saved_state(saved, pos)
+        self.assertIs(result, saved)
+
+    def test_trusted_startup_saved_state_sidecar_qty_mismatch_rejected(self) -> None:
+        """Sidecar core+open qty differs from OKX qty → untrusted."""
+        saved = types.SimpleNamespace(
+            position_id="pos-1",
+            side="LONG",
+            layers=3,
+            avg_entry_price=100.0,
+            sidecar_enabled_for_position=True,
+            core_eth_qty=1.0,
+            sidecar_legs=[
+                {
+                    "leg_id": "pos-1:SC:1:1000",
+                    "qty": 0.5,
+                    "status": "OPEN",
+                    "tp_order_id": "sc-tp-12345",
+                }
+            ],
+        )
+        # core_eth_qty(1.0) + sidecar_open_qty(0.5) = 1.5, but OKX qty = 3.0
+        pos = PositionSnapshot("LONG", Decimal("6"), 100.0, 3.0, Decimal("6"))
+
+        result = trusted_startup_saved_state(saved, pos)
+        self.assertIsNone(result, "Sidecar qty mismatch must reject saved_state")
+
+    def test_trusted_startup_saved_state_missing_avg_rejected(self) -> None:
+        """Saved state with missing or zero avg_entry_price is untrusted."""
+        saved = types.SimpleNamespace(
+            position_id="pos-1",
+            side="LONG",
+            layers=3,
+            avg_entry_price=0.0,
+            total_entry_qty=6.0,
+            sidecar_enabled_for_position=False,
+        )
+        pos = PositionSnapshot("LONG", Decimal("6"), 100.0, 6.0, Decimal("6"))
+
+        result = trusted_startup_saved_state(saved, pos)
+        self.assertIsNone(result, "Zero avg_entry in saved_state must be rejected")
 
 
 if __name__ == "__main__":
