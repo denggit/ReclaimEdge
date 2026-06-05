@@ -20,13 +20,12 @@ if importlib.util.find_spec("dotenv") is None:
     sys.modules.setdefault("dotenv", dotenv)
 
 from scripts.run_boll_cvd_live import (  # noqa: E402
-    AccountSnapshot,
-    ExecutionState,
     account_position_sync_worker,
     apply_rolling_loss_guard_startup_state,
     rolling_loss_halt_reason,
 )
 from src.execution.trader import PositionSnapshot  # noqa: E402
+from src.live.runtime_types import AccountSnapshot, ExecutionState  # noqa: E402
 from src.reporting.trade_journal import JournalEvent  # noqa: E402
 from src.risk.rolling_loss_guard import (  # noqa: E402
     MS_PER_HOUR,

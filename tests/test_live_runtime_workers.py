@@ -18,9 +18,6 @@ if importlib.util.find_spec("dotenv") is None:
     sys.modules.setdefault("dotenv", dotenv)
 
 from scripts.run_boll_cvd_live import (  # noqa: E402
-    AccountSnapshot,
-    ExecutionState,
-    TradeCommand,
     account_position_sync_worker,
     apply_three_stage_startup_safety_gate,
     execution_worker,
@@ -33,6 +30,7 @@ from scripts.run_boll_cvd_live import (  # noqa: E402
     trusted_startup_saved_state,
 )
 from src.execution.trader import LiveTradeResult, PositionSnapshot  # noqa: E402
+from src.live.runtime_types import AccountSnapshot, ExecutionState, TradeCommand  # noqa: E402
 from src.live.time_utils import next_weekly_summary_time  # noqa: E402
 from src.indicators.cvd_tracker import CvdSnapshot  # noqa: E402
 from src.monitors.boll_band_breakout_monitor import BollSnapshot, MarketTickEvent, TradeTick  # noqa: E402

@@ -8,7 +8,7 @@ import logging
 import os
 import sys
 import time
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -23,6 +23,7 @@ sys.path.insert(0, str(SRC))
 from src.execution.trader import PositionSnapshot, Trader  # noqa: E402
 from src.indicators.cvd_tracker import CvdTracker, CvdTrackerConfig  # noqa: E402
 from src.live import config_helpers as live_config_helpers  # noqa: E402
+from src.live import runtime_types as live_runtime_types  # noqa: E402
 from src.live import time_utils as live_time_utils  # noqa: E402
 from src.monitors.boll_band_breakout_monitor import (  # noqa: E402
     BollBandBreakoutMonitor,
@@ -217,7 +218,7 @@ async def record_and_notify_rolling_loss_guard(
 async def apply_rolling_loss_guard_startup_state(
     *,
     rolling_loss_guard: RollingLossGuard,
-    execution_state: ExecutionState,
+    execution_state: live_runtime_types.ExecutionState,
     has_position: bool,
     equity: float,
     now_ms: int,
@@ -259,8 +260,8 @@ async def apply_rolling_loss_guard_startup_state(
 
 def build_report_context(
     *,
-    account_snapshot: AccountSnapshot,
-    execution_state: ExecutionState,
+    account_snapshot: live_runtime_types.AccountSnapshot,
+    execution_state: live_runtime_types.ExecutionState,
     period_start_cash: float | None = None,
     period_start_equity: float | None = None,
 ) -> ReportRuntimeContext:
@@ -834,7 +835,7 @@ def three_stage_post_tp1_boll(strategy: BollCvdReclaimStrategy):
     return type("ThreeStagePostTp1Boll", (), {"middle": float(middle), "upper": upper, "lower": lower})()
 
 
-def three_stage_post_tp1_current_price(account_snapshot: AccountSnapshot, position: PositionSnapshot, post_tp1_boll: Any, now_ms: int) -> tuple[float, str]:
+def three_stage_post_tp1_current_price(account_snapshot: live_runtime_types.AccountSnapshot, position: PositionSnapshot, post_tp1_boll: Any, now_ms: int) -> tuple[float, str]:
     latest_price = getattr(account_snapshot, "latest_market_price", None)
     latest_ts_ms = int(getattr(account_snapshot, "latest_market_price_ts_ms", 0) or 0)
     max_age_seconds = float(os.getenv("LATEST_MARKET_PRICE_MAX_AGE_SECONDS", "30"))
@@ -953,7 +954,7 @@ async def attach_sidecar_after_combined_entry(
     *,
     trader: Trader,
     strategy_state: StrategyPositionState,
-    execution_state: ExecutionState,
+    execution_state: live_runtime_types.ExecutionState,
     intent: TradeIntent,
     sidecar_plan: SidecarExecutionPlan,
     journal: LiveTradeJournal,
@@ -1064,7 +1065,7 @@ async def execute_sidecar_after_core_entry(
     *,
     trader: Trader,
     strategy_state: StrategyPositionState,
-    execution_state: ExecutionState,
+    execution_state: live_runtime_types.ExecutionState,
     intent: TradeIntent,
     journal: LiveTradeJournal,
     state_store: LiveStateStore,
@@ -1084,13 +1085,13 @@ async def reconcile_sidecar_orders_before_core_view(
     *,
     trader: Trader,
     strategy: BollCvdShockReclaimStrategy,
-    execution_state: ExecutionState,
+    execution_state: live_runtime_types.ExecutionState,
     journal: LiveTradeJournal,
     state_store: LiveStateStore,
     trader_symbol: str,
     ts_ms: int,
     state_lock: asyncio.Lock,
-) -> SidecarPreCoreReconcileResult:
+) -> live_runtime_types.SidecarPreCoreReconcileResult:
     """Reconcile sidecar TP order status BEFORE constructing core_position view.
 
     When Sidecar is enabled and OPEN sidecar legs exist, this must be called
@@ -1099,7 +1100,7 @@ async def reconcile_sidecar_orders_before_core_view(
     would cause core_position to be understated, which can incorrectly trigger
     TP progress markers or pollute strategy average entry.
 
-    Returns SidecarPreCoreReconcileResult:
+    Returns live_runtime_types.SidecarPreCoreReconcileResult:
       - queried: True if we performed any REST order status fetch for OPEN legs.
       - changed: True if any sidecar state was modified and saved.
 
@@ -1109,10 +1110,10 @@ async def reconcile_sidecar_orders_before_core_view(
     # orders or advance core state.  Return False / False to allow the caller
     # to fall through safely without blocking the sync cycle.
     if execution_state.pending_order_count > 0:
-        return SidecarPreCoreReconcileResult(queried=False, changed=False)
+        return live_runtime_types.SidecarPreCoreReconcileResult(queried=False, changed=False)
 
     if not getattr(strategy.state, "sidecar_enabled_for_position", False):
-        return SidecarPreCoreReconcileResult(queried=False, changed=False)
+        return live_runtime_types.SidecarPreCoreReconcileResult(queried=False, changed=False)
 
     # --- Phase 1: handle dirty / missing TP orders under lock (no network) ---
     dirty_changed = False
@@ -1152,7 +1153,7 @@ async def reconcile_sidecar_orders_before_core_view(
         cash_before_position = execution_state.cash_before_position
 
     if not open_legs:
-        return SidecarPreCoreReconcileResult(queried=False, changed=dirty_changed)
+        return live_runtime_types.SidecarPreCoreReconcileResult(queried=False, changed=dirty_changed)
 
     # --- Phase 2: query order status (outside lock) ---
     leg_updates: list[tuple[int, str, dict[str, Any], str]] = []
@@ -1164,7 +1165,7 @@ async def reconcile_sidecar_orders_before_core_view(
 
     if not leg_updates:
         # We queried open legs but found no status changes.
-        return SidecarPreCoreReconcileResult(queried=True, changed=False)
+        return live_runtime_types.SidecarPreCoreReconcileResult(queried=True, changed=False)
 
     # --- Phase 3: apply updates under lock ---
     changed = dirty_changed
@@ -1263,14 +1264,14 @@ async def reconcile_sidecar_orders_before_core_view(
                 cash_before_position=cash_before_position,
             ))
 
-    return SidecarPreCoreReconcileResult(queried=True, changed=changed)
+    return live_runtime_types.SidecarPreCoreReconcileResult(queried=True, changed=changed)
 
 
 async def monitor_sidecar_orders_once(
     *,
     trader: Trader,
     strategy_state: StrategyPositionState,
-    execution_state: ExecutionState,
+    execution_state: live_runtime_types.ExecutionState,
     journal: LiveTradeJournal,
     state_store: LiveStateStore,
     trader_symbol: str,
@@ -1364,7 +1365,7 @@ async def force_close_sidecar_after_core_flat(
     *,
     trader: Trader,
     strategy_state: StrategyPositionState,
-    execution_state: ExecutionState,
+    execution_state: live_runtime_types.ExecutionState,
     journal: LiveTradeJournal,
     state_store: LiveStateStore,
     trader_symbol: str,
@@ -1451,15 +1452,6 @@ async def fetch_usdt_cash_balance(trader: Trader) -> float:
     return float(data[0].get("totalEq") or 0.0)
 
 
-@dataclass(frozen=True)
-class SettledFlatBalance:
-    cash: float
-    equity: float
-    attempts: int
-    stable: bool
-    reason: str
-
-
 async def fetch_settled_flat_balance(
     trader: Trader,
     *,
@@ -1467,7 +1459,7 @@ async def fetch_settled_flat_balance(
     interval_seconds: float,
     stable_delta_usdt: float,
     cash_equity_max_diff_usdt: float,
-) -> SettledFlatBalance:
+) -> live_runtime_types.SettledFlatBalance:
     attempts = max(int(attempts), 1)
     previous_flat_cash: float | None = None
     last_cash: float | None = None
@@ -1482,7 +1474,7 @@ async def fetch_settled_flat_balance(
             equity = await trader.fetch_usdt_equity()
         except Exception as exc:
             if last_cash is not None and last_equity is not None:
-                return SettledFlatBalance(
+                return live_runtime_types.SettledFlatBalance(
                     cash=last_cash,
                     equity=last_equity,
                     attempts=last_attempt,
@@ -1502,7 +1494,7 @@ async def fetch_settled_flat_balance(
         cash_equity_stable = abs(cash - equity) <= cash_equity_max_diff_usdt
         cash_repeat_stable = previous_flat_cash is not None and abs(cash - previous_flat_cash) <= stable_delta_usdt
         if cash_equity_stable and cash_repeat_stable:
-            return SettledFlatBalance(
+            return live_runtime_types.SettledFlatBalance(
                 cash=cash,
                 equity=equity,
                 attempts=attempt,
@@ -1516,49 +1508,20 @@ async def fetch_settled_flat_balance(
     if last_cash is None or last_equity is None:
         raise RuntimeError("flat balance settlement finished without any balance sample")
     if last_position is not None and not last_position.has_position:
-        return SettledFlatBalance(
+        return live_runtime_types.SettledFlatBalance(
             cash=last_equity,
             equity=last_equity,
             attempts=attempts,
             stable=False,
             reason="fallback_to_equity_after_timeout",
         )
-    return SettledFlatBalance(
+    return live_runtime_types.SettledFlatBalance(
         cash=last_cash,
         equity=last_equity,
         attempts=attempts,
         stable=False,
         reason="position_not_flat_after_timeout",
     )
-
-
-@dataclass
-class AccountSnapshot:
-    position: PositionSnapshot | None
-    cash: float
-    equity: float
-    updated_monotonic: float
-    updated_ts_ms: int
-    version: int = 0
-    latest_market_price: float | None = None
-    latest_market_price_ts_ms: int = 0
-
-
-@dataclass(frozen=True)
-class SidecarPreCoreReconcileResult:
-    queried: bool
-    changed: bool
-
-
-@dataclass
-class ExecutionState:
-    current_position_id: str | None
-    cash_before_position: float | None
-    trading_halted: bool = False
-    last_order_ts_ms: int = 0
-    pending_order_count: int = 0
-    halt_reason: str | None = None
-    halt_until_ts_ms: int | None = None
 
 
 def three_stage_dirty_post_tp1_sl_after_tp2(state: StrategyPositionState) -> bool:
@@ -1572,7 +1535,7 @@ def three_stage_dirty_post_tp1_sl_after_tp2(state: StrategyPositionState) -> boo
 def three_stage_dirty_post_tp1_payload(
     *,
     strategy: BollCvdReclaimStrategy,
-    execution_state: ExecutionState,
+    execution_state: live_runtime_types.ExecutionState,
     reason: str,
 ) -> dict[str, Any]:
     state = strategy.state
@@ -1593,7 +1556,7 @@ def append_three_stage_dirty_post_tp1_event(
     *,
     event_name: str,
     strategy: BollCvdReclaimStrategy,
-    execution_state: ExecutionState,
+    execution_state: live_runtime_types.ExecutionState,
     journal: LiveTradeJournal,
     state_store: LiveStateStore,
     trader_symbol: str,
@@ -1626,7 +1589,7 @@ def append_three_stage_dirty_post_tp1_event(
 def apply_three_stage_startup_safety_gate(
     *,
     strategy: BollCvdReclaimStrategy,
-    execution_state: ExecutionState,
+    execution_state: live_runtime_types.ExecutionState,
     saved_state: Any,
     startup_position: PositionSnapshot,
     journal: LiveTradeJournal,
@@ -1657,7 +1620,7 @@ def apply_three_stage_startup_safety_gate(
 async def apply_sidecar_startup_recovery(
     *,
     strategy: BollCvdReclaimStrategy,
-    execution_state: ExecutionState,
+    execution_state: live_runtime_types.ExecutionState,
     saved_state: Any,
     startup_position: PositionSnapshot,
     trader: Trader,
@@ -1770,7 +1733,7 @@ async def apply_sidecar_startup_recovery(
 
 async def apply_main_tp_startup_recovery(
     *,
-    execution_state: ExecutionState,
+    execution_state: live_runtime_types.ExecutionState,
     saved_state: Any,
     startup_position: PositionSnapshot,
     trader: Trader,
@@ -1826,28 +1789,6 @@ async def apply_main_tp_startup_recovery(
             "MAIN_TP_ORDER_ID_MISSING_ON_STARTUP | pending_reduce_only_order_count=%s trading_halted=true manual_intervention_required=true",
             len(reduce_only_orders),
         )
-
-@dataclass(frozen=True)
-class TradeCommand:
-    intent: TradeIntent
-    strategy_state_snapshot: StrategyPositionState
-    tick_ts_ms: int
-    created_monotonic: float
-    account_snapshot_updated_ts_ms: int
-    reason: str
-
-
-@dataclass(frozen=True)
-class ExecutionReport:
-    command: TradeCommand
-    result: Any | None
-    ok: bool
-    error: Exception | None
-    entry_may_be_live: bool
-    created_monotonic: float
-    finished_monotonic: float
-
-
 def queue_log_level(queue_size: int) -> int | None:
     if queue_size < 500:
         return None
@@ -1858,7 +1799,7 @@ def queue_log_level(queue_size: int) -> int | None:
     return logging.ERROR
 
 
-def queue_oldest_command_age_seconds(queue: asyncio.Queue[TradeCommand]) -> float:
+def queue_oldest_command_age_seconds(queue: asyncio.Queue[live_runtime_types.TradeCommand]) -> float:
     try:
         oldest = queue._queue[0]  # type: ignore[attr-defined]
     except Exception:
@@ -1870,7 +1811,7 @@ async def enqueue_strategy_tick(
     event: MarketTickEvent,
     strategy_tick_queue: asyncio.Queue[MarketTickEvent],
     state_lock: asyncio.Lock,
-    execution_state: ExecutionState,
+    execution_state: live_runtime_types.ExecutionState,
 ) -> None:
     if event.boll is None:
         return
@@ -1888,10 +1829,10 @@ async def enqueue_strategy_tick(
 
 
 async def enqueue_execution_command(
-    command: TradeCommand,
-    execution_queue: asyncio.Queue[TradeCommand],
+    command: live_runtime_types.TradeCommand,
+    execution_queue: asyncio.Queue[live_runtime_types.TradeCommand],
     state_lock: asyncio.Lock,
-    execution_state: ExecutionState,
+    execution_state: live_runtime_types.ExecutionState,
 ) -> bool:
     async with state_lock:
         if execution_queue.full():
@@ -1924,10 +1865,10 @@ async def enqueue_execution_command(
 async def strategy_tick_worker(
     *,
     strategy_tick_queue: asyncio.Queue[MarketTickEvent],
-    execution_queue: asyncio.Queue[TradeCommand],
+    execution_queue: asyncio.Queue[live_runtime_types.TradeCommand],
     state_lock: asyncio.Lock,
-    account_snapshot: AccountSnapshot,
-    execution_state: ExecutionState,
+    account_snapshot: live_runtime_types.AccountSnapshot,
+    execution_state: live_runtime_types.ExecutionState,
     cvd: CvdTracker,
     strategy: BollCvdShockReclaimStrategy,
     heartbeat_seconds: float,
@@ -2031,7 +1972,7 @@ async def strategy_tick_worker(
             for intent in intents:
                 if getattr(strategy.state, "sidecar_enabled_for_position", False):
                     intent = with_runtime_managed_core(intent, account_snapshot.position)
-                command = TradeCommand(
+                command = live_runtime_types.TradeCommand(
                     intent=intent,
                     strategy_state_snapshot=backup_state,
                     tick_ts_ms=event.tick.ts_ms,
@@ -2083,10 +2024,10 @@ def with_entry_add_managed_core_contracts(
 
 async def execution_worker(
     *,
-    execution_queue: asyncio.Queue[TradeCommand],
+    execution_queue: asyncio.Queue[live_runtime_types.TradeCommand],
     state_lock: asyncio.Lock,
-    execution_state: ExecutionState,
-    account_snapshot: AccountSnapshot,
+    execution_state: live_runtime_types.ExecutionState,
+    account_snapshot: live_runtime_types.AccountSnapshot,
     trader: Trader,
     strategy: BollCvdShockReclaimStrategy,
     journal: LiveTradeJournal,
@@ -2647,16 +2588,16 @@ async def execution_worker(
 
 async def handle_execution_failure(
     *,
-    command: TradeCommand,
+    command: live_runtime_types.TradeCommand,
     result: Any | None,
     error: Exception,
     state_lock: asyncio.Lock,
-    execution_state: ExecutionState,
+    execution_state: live_runtime_types.ExecutionState,
     trader: Trader,
     strategy: BollCvdShockReclaimStrategy,
     journal: LiveTradeJournal,
     email_sender: EmailSender,
-) -> ExecutionReport:
+) -> live_runtime_types.ExecutionReport:
     contracts = trader.position_contracts
     if result is None or getattr(result, "entry_filled", False) or getattr(result, "reduce_filled", False):
         try:
@@ -2723,7 +2664,7 @@ async def handle_execution_failure(
     if not ok:
         logger.error("Failed to send live execution failure email")
 
-    return ExecutionReport(
+    return live_runtime_types.ExecutionReport(
         command=command,
         result=result,
         ok=False,
@@ -2737,8 +2678,8 @@ async def handle_execution_failure(
 async def account_position_sync_worker(
     *,
     state_lock: asyncio.Lock,
-    account_snapshot: AccountSnapshot,
-    execution_state: ExecutionState,
+    account_snapshot: live_runtime_types.AccountSnapshot,
+    execution_state: live_runtime_types.ExecutionState,
     trader: Trader,
     sizer: SimplePositionSizer,
     strategy: BollCvdShockReclaimStrategy,
@@ -3333,7 +3274,7 @@ async def account_position_sync_worker(
                     )
                 except Exception as exc:
                     logger.exception("FLAT_BALANCE_SETTLE_FAILED | falling back to latest account equity before FLAT journal")
-                    settled = SettledFlatBalance(
+                    settled = live_runtime_types.SettledFlatBalance(
                         cash=equity,
                         equity=equity,
                         attempts=0,
@@ -4122,7 +4063,7 @@ async def main() -> None:
 
     cvd = CvdTracker(cvd_config)
     state_lock = asyncio.Lock()
-    account_snapshot = AccountSnapshot(
+    account_snapshot = live_runtime_types.AccountSnapshot(
         position=startup_position,
         cash=startup_cash,
         equity=trader.account_equity_usdt,
@@ -4130,7 +4071,7 @@ async def main() -> None:
         updated_ts_ms=live_time_utils.utc_ms(),
         version=1,
     )
-    execution_state = ExecutionState(
+    execution_state = live_runtime_types.ExecutionState(
         current_position_id=current_position_id,
         cash_before_position=cash_before_position,
         trading_halted=False,
@@ -4180,7 +4121,7 @@ async def main() -> None:
         trader_symbol=trader.symbol,
     )
     strategy_tick_queue: asyncio.Queue[MarketTickEvent] = asyncio.Queue(maxsize=int(os.getenv("STRATEGY_TICK_QUEUE_MAXSIZE", "20000")))
-    execution_queue: asyncio.Queue[TradeCommand] = asyncio.Queue(maxsize=int(os.getenv("EXECUTION_QUEUE_MAXSIZE", "1000")))
+    execution_queue: asyncio.Queue[live_runtime_types.TradeCommand] = asyncio.Queue(maxsize=int(os.getenv("EXECUTION_QUEUE_MAXSIZE", "1000")))
     position_sync_seconds = float(os.getenv("POSITION_SYNC_SECONDS", "5"))
     account_sync_seconds = float(os.getenv("ACCOUNT_SYNC_SECONDS", "60"))
     cash_log_min_delta_usdt = float(os.getenv("ACCOUNT_LOG_MIN_DELTA_USDT", "0.01"))

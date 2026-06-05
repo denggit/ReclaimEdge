@@ -15,13 +15,12 @@ import datetime as dt
 import unittest
 
 from scripts.run_boll_cvd_live import (
-    AccountSnapshot,
-    ExecutionState,
     StrategyPositionState,
     account_position_sync_worker,
     refresh_sidecar_state_totals,
 )
 from src.execution.trader import PositionSnapshot
+from src.live.runtime_types import AccountSnapshot, ExecutionState
 from src.position_management.sidecar.model import SidecarLegStatus
 from src.risk.simple_position_sizer import SimplePositionSizer, SimplePositionSizerConfig
 from src.strategies.boll_cvd_reclaim_strategy import BollCvdReclaimStrategyConfig
