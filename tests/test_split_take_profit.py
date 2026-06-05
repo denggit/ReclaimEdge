@@ -379,15 +379,47 @@ class SplitTakeProfitStrategyTest(unittest.TestCase):
         self.assertEqual(short_strat._tighten_middle_runner_sl("SHORT", 98.5, 99.5), 98.5)
 
     def test_middle_runner_sl_uses_net_remaining_breakeven_when_present(self) -> None:
+        # LONG protective SL = max(
+        #     (net_remaining_breakeven + middle) / 2,   ← candidate_1 (breakeven)
+        #     (lower + middle) / 2,                     ← candidate_2 (structure)
+        # )
         long_strat = strategy(middle_runner_enabled=True, breakeven_fee_buffer_pct=0.001)
         long_strat.state = StrategyPositionState(side="LONG", avg_entry_price=100.0, net_remaining_breakeven_price=95.0)
-        long_sl = long_strat._calculate_middle_runner_protective_sl("LONG", 103.0, boll(middle=102.0, lower=96.0))
-        self.assertEqual(long_sl, (95.0 + 102.0) / 2)
 
+        # Scenario A: structure candidate wins (lower is tight enough)
+        long_sl = long_strat._calculate_middle_runner_protective_sl("LONG", 103.0, boll(middle=102.0, lower=96.0))
+        candidate_breakeven = (95.0 + 102.0) / 2  # 98.5
+        candidate_structure = (96.0 + 102.0) / 2  # 99.0
+        self.assertEqual(long_sl, max(candidate_breakeven, candidate_structure))
+
+        # Scenario B: breakeven candidate wins (lower is far away → structure candidate too loose)
+        long_sl_b = long_strat._calculate_middle_runner_protective_sl("LONG", 103.0, boll(middle=102.0, lower=90.0))
+        candidate_breakeven_b = (95.0 + 102.0) / 2   # 98.5
+        candidate_structure_b = (90.0 + 102.0) / 2   # 96.0
+        self.assertEqual(long_sl_b, max(candidate_breakeven_b, candidate_structure_b))
+        # breakeven candidate wins when structure is looser
+        self.assertEqual(long_sl_b, candidate_breakeven_b)
+
+        # SHORT protective SL = min(
+        #     (net_remaining_breakeven + middle) / 2,   ← candidate_1 (breakeven)
+        #     (upper + middle) / 2,                     ← candidate_2 (structure)
+        # )
         short_strat = strategy(middle_runner_enabled=True, breakeven_fee_buffer_pct=0.001)
         short_strat.state = StrategyPositionState(side="SHORT", avg_entry_price=100.0, net_remaining_breakeven_price=105.0)
+
+        # Scenario C: structure candidate wins (upper is tight enough)
         short_sl = short_strat._calculate_middle_runner_protective_sl("SHORT", 97.0, boll(middle=98.0, upper=104.0))
-        self.assertEqual(short_sl, (105.0 + 98.0) / 2)
+        s_candidate_breakeven = (105.0 + 98.0) / 2  # 101.5
+        s_candidate_structure = (104.0 + 98.0) / 2  # 101.0
+        self.assertEqual(short_sl, min(s_candidate_breakeven, s_candidate_structure))
+
+        # Scenario D: breakeven candidate wins (upper is far away → structure candidate too loose)
+        short_sl_d = short_strat._calculate_middle_runner_protective_sl("SHORT", 97.0, boll(middle=98.0, upper=106.0))
+        s_candidate_breakeven_d = (105.0 + 98.0) / 2  # 101.5
+        s_candidate_structure_d = (106.0 + 98.0) / 2  # 102.0
+        self.assertEqual(short_sl_d, min(s_candidate_breakeven_d, s_candidate_structure_d))
+        # breakeven candidate wins when structure is looser
+        self.assertEqual(short_sl_d, s_candidate_breakeven_d)
 
     def test_middle_runner_extension_trigger_moves_sl_to_middle(self) -> None:
         long_strat = strategy(middle_runner_enabled=True, middle_runner_extension_trigger_ratio=0.6)
