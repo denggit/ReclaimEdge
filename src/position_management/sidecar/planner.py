@@ -129,11 +129,15 @@ def build_combined_entry_intent(
         eth_qty=sidecar_plan.total_qty,
         notional_usdt=sidecar_plan.total_qty * float(intent.price),
     )
+    existing_core_contracts = getattr(intent, "managed_core_contracts", None)
+    existing_core_qty = float(getattr(intent, "managed_core_eth_qty", 0.0) or 0.0)
+    managed_core_contracts = existing_core_contracts if existing_core_contracts else str(sidecar_plan.core_contracts)
+    managed_core_eth_qty = existing_core_qty if existing_core_qty > 0 else sidecar_plan.core_qty
     execution_intent = replace(
         intent,
         size=total_size,
-        managed_core_contracts=str(sidecar_plan.core_contracts),
-        managed_core_eth_qty=sidecar_plan.core_qty,
+        managed_core_contracts=managed_core_contracts,
+        managed_core_eth_qty=managed_core_eth_qty,
     )
     return CombinedEntryIntentPlan(execution_intent=execution_intent, sidecar_plan=sidecar_plan)
 

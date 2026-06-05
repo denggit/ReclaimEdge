@@ -167,8 +167,8 @@ def test_three_stage_build_specs_exact_sum_to_core_contracts() -> None:
     assert runner == Decimal("2.01"), f"runner should be 2.01, got {runner}"
 
 
-def test_three_stage_tp1_consumed_builds_only_tp2_from_remaining_core() -> None:
-    trader = make_trader(position_contracts=Decimal("0.63"))
+def test_three_stage_tp1_consumed_builds_only_tp2_share_from_remaining_core() -> None:
+    trader = make_trader(position_contracts=Decimal("0.40"))
     intent = make_intent(
         tp_plan="THREE_STAGE_RUNNER",
         tp_price=3120.0,
@@ -181,7 +181,27 @@ def test_three_stage_tp1_consumed_builds_only_tp2_from_remaining_core() -> None:
         three_stage_tp2_consumed=False,
     )
 
-    assert trader._build_three_stage_order_specs(intent) == [("tp2_outer", Decimal("0.63"), 3120.0)]
+    assert trader._build_three_stage_order_specs(intent) == [("tp2_outer", Decimal("0.20"), 3120.0)]
+
+
+def test_three_stage_tp1_consumed_keeps_runner_on_larger_remaining_core() -> None:
+    trader = make_trader(position_contracts=Decimal("4.00"))
+    intent = make_intent(
+        tp_plan="THREE_STAGE_RUNNER",
+        tp_price=3120.0,
+        three_stage_tp1_price=3050.0,
+        three_stage_tp1_ratio=0.60,
+        three_stage_tp2_price=3120.0,
+        three_stage_tp2_ratio=0.20,
+        three_stage_runner_ratio=0.20,
+        three_stage_tp1_consumed=True,
+        three_stage_tp2_consumed=False,
+    )
+
+    specs = trader._build_three_stage_order_specs(intent)
+
+    assert specs == [("tp2_outer", Decimal("2.00"), 3120.0)]
+    assert trader.position_contracts - specs[0][1] == Decimal("2.00")
 
 
 # ============================================================

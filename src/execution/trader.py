@@ -779,7 +779,38 @@ class Trader:
         tp1_ratio = Decimal(str(getattr(intent, "three_stage_tp1_ratio", 0.0)))
         tp2_ratio = Decimal(str(getattr(intent, "three_stage_tp2_ratio", 0.0)))
         if getattr(intent, "three_stage_tp1_consumed", False) and not getattr(intent, "three_stage_tp2_consumed", False):
-            return [("tp2_outer", self.position_contracts, float(tp2_price if tp2_price is not None else intent.tp_price))]
+            runner_ratio = Decimal(str(getattr(intent, "three_stage_runner_ratio", 0.0)))
+            remaining_ratio = tp2_ratio + runner_ratio
+            if tp2_price is None or tp2_ratio <= 0 or remaining_ratio <= 0:
+                logger.warning(
+                    "THREE_STAGE_TP2_AFTER_TP1_FALLBACK | reason=invalid_ratios total_contracts=%s tp2_ratio=%s runner_ratio=%s tp2_price=%s",
+                    self.position_contracts,
+                    tp2_ratio,
+                    runner_ratio,
+                    tp2_price,
+                )
+                return [("final", self.position_contracts, intent.tp_price)]
+            tp2_contracts = self.round_contracts_down(self.position_contracts * tp2_ratio / remaining_ratio)
+            runner_contracts = self.position_contracts - tp2_contracts
+            if tp2_contracts < self.min_contracts:
+                logger.warning(
+                    "THREE_STAGE_TP2_AFTER_TP1_FALLBACK | reason=tp2_too_small total_contracts=%s tp2_contracts=%s runner_contracts=%s min_contracts=%s",
+                    self.position_contracts,
+                    tp2_contracts,
+                    runner_contracts,
+                    self.min_contracts,
+                )
+                return [("final", self.position_contracts, intent.tp_price)]
+            if runner_contracts < self.min_contracts:
+                logger.warning(
+                    "THREE_STAGE_TP2_AFTER_TP1_FALLBACK | reason=runner_too_small total_contracts=%s tp2_contracts=%s runner_contracts=%s min_contracts=%s",
+                    self.position_contracts,
+                    tp2_contracts,
+                    runner_contracts,
+                    self.min_contracts,
+                )
+                return [("tp2_outer", self.position_contracts, float(tp2_price))]
+            return [("tp2_outer", tp2_contracts, float(tp2_price))]
         if tp1_price is None or tp2_price is None or tp1_ratio <= 0 or tp2_ratio <= 0:
             return [("final", self.position_contracts, intent.tp_price)]
         tp1_contracts = self.round_contracts_down(self.position_contracts * tp1_ratio)

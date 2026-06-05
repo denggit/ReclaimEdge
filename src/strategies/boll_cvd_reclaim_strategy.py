@@ -1045,17 +1045,13 @@ class BollCvdReclaimStrategy:
             self.state.middle_runner_first_tp_price = partial_tp_price
             self.state.middle_runner_final_tp_price = tp_price
         elif self.state.three_stage_runner_enabled_for_position and not self.state.trend_runner_active:
-            tp1_ratio, tp2_ratio, runner_ratio = self._normalized_three_stage_ratios()
             tp_price = boll.upper if self.state.side == "LONG" else boll.lower
             tp_mode = "UPPER" if self.state.side == "LONG" else "LOWER"
             partial_tp_price = boll.middle
+            self._update_three_stage_dynamic_targets_without_reset(self.state.side, boll)
+            tp1_ratio = self.state.three_stage_tp1_ratio
             partial_tp_ratio = tp1_ratio
             tp_plan = "THREE_STAGE_RUNNER"
-            self.state.three_stage_tp1_price = partial_tp_price
-            self.state.three_stage_tp2_price = tp_price
-            self.state.three_stage_tp1_ratio = tp1_ratio
-            self.state.three_stage_tp2_ratio = tp2_ratio
-            self.state.three_stage_runner_ratio = runner_ratio
         elif self.state.near_tp_protected or self.state.near_tp_add_disabled:
             partial_tp_price, partial_tp_ratio, tp_plan = None, 0.0, "SINGLE"
         else:
@@ -1067,7 +1063,7 @@ class BollCvdReclaimStrategy:
             if tp_plan == "MIDDLE_RUNNER":
                 self._set_middle_runner_planned(partial_tp_price, tp_price)
             elif tp_plan == "THREE_STAGE_RUNNER":
-                self._set_three_stage_runner_planned(self.state.side, boll)
+                self._update_three_stage_dynamic_targets_without_reset(self.state.side, boll)
             elif self.state.middle_runner_pending and not self.state.middle_runner_active:
                 self._reset_middle_runner_state()
             elif (
@@ -1121,7 +1117,7 @@ class BollCvdReclaimStrategy:
         if tp_plan == "MIDDLE_RUNNER":
             self._set_middle_runner_planned(partial_tp_price, tp_price)
         if tp_plan == "THREE_STAGE_RUNNER":
-            self._set_three_stage_runner_planned(self.state.side, boll)
+            self._update_three_stage_dynamic_targets_without_reset(self.state.side, boll)
         if self.state.trend_runner_active and self.config.runner_dynamic_enabled:
             self.state.trend_runner_adjust_count += 1
             self.state.trend_runner_last_update_candle_ts_ms = boll.candle_ts_ms
@@ -1650,6 +1646,15 @@ class BollCvdReclaimStrategy:
         self.state.trend_runner_sl_order_id = None
         self.state.trend_runner_exit_reason = None
         self._reset_trend_runner_reverse_state()
+
+    def _update_three_stage_dynamic_targets_without_reset(self, side: PositionSide, boll: BollSnapshot) -> None:
+        tp1_ratio, tp2_ratio, runner_ratio = self._normalized_three_stage_ratios()
+        self.state.three_stage_runner_enabled_for_position = True
+        self.state.three_stage_tp1_price = boll.middle
+        self.state.three_stage_tp2_price = boll.upper if side == "LONG" else boll.lower
+        self.state.three_stage_tp1_ratio = tp1_ratio
+        self.state.three_stage_tp2_ratio = tp2_ratio
+        self.state.three_stage_runner_ratio = runner_ratio
 
     def _normalized_three_stage_ratios(self) -> tuple[float, float, float]:
         tp1 = max(float(self.config.three_stage_tp1_ratio), 0.0)

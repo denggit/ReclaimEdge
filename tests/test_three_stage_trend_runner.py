@@ -509,6 +509,46 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
             repeated = strat._maybe_update_tp(105.5, 2_500, bands, cvd())
         self.assertIsNone(repeated)
 
+    def test_three_stage_dynamic_update_does_not_reset_consumed_flags(self) -> None:
+        strat = strategy()
+        strat.state = StrategyPositionState(
+            side="LONG",
+            layers=1,
+            total_entry_qty=1.0,
+            total_entry_notional=100.0,
+            avg_entry_price=100.0,
+            tp_price=110.0,
+            tp_mode="MIDDLE",
+            tp_plan="THREE_STAGE_RUNNER",
+            partial_tp_consumed=True,
+            three_stage_runner_enabled_for_position=True,
+            three_stage_tp1_price=101.0,
+            three_stage_tp2_price=110.0,
+            three_stage_tp1_ratio=0.6,
+            three_stage_tp2_ratio=0.2,
+            three_stage_runner_ratio=0.2,
+            three_stage_tp1_consumed=True,
+            three_stage_tp2_consumed=False,
+            trend_runner_active=False,
+            last_tp_update_candle_ts_ms=1_000,
+        )
+
+        def fail_if_reset_called(*_args, **_kwargs):
+            raise AssertionError("_set_three_stage_runner_planned must not be called during dynamic update")
+
+        strat._set_three_stage_runner_planned = fail_if_reset_called  # type: ignore[method-assign]
+
+        got = strat._maybe_update_tp(105.0, 2_000, boll(middle=102.0, upper=112.0, lower=92.0, candle_ts_ms=2_000), cvd())
+
+        self.assertIsNotNone(got)
+        self.assertTrue(strat.state.three_stage_tp1_consumed)
+        self.assertFalse(strat.state.three_stage_tp2_consumed)
+        self.assertFalse(strat.state.trend_runner_active)
+        self.assertTrue(got.three_stage_tp1_consumed)
+        self.assertFalse(got.three_stage_tp2_consumed)
+        self.assertIsNone(got.partial_tp_price)
+        self.assertEqual(got.three_stage_tp2_price, 112.0)
+
     def test_post_tp1_protective_sl_calculation_tightening_and_extension(self) -> None:
         long_strat = strategy(three_stage_post_tp1_sl_extension_trigger_ratio=0.6)
         long_strat.state = StrategyPositionState(
@@ -723,8 +763,43 @@ class ThreeStageTrendRunnerTraderTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.protective_sl_ok)
         self.assertEqual(trader.post_tp1_stop_calls, 1)
         self.assertEqual(trader.cancel_reduce_only_calls, 1)
-        self.assertEqual(trader.placed_specs, [("tp2_outer", Decimal("4"), 110.0)])
+        self.assertEqual(trader.placed_specs, [("tp2_outer", Decimal("2.00"), 110.0)])
         self.assertEqual(trader.cancelled_post_tp1_stop_ids, ["old-post"])
+
+    def test_after_tp1_build_specs_keeps_runner_contracts(self) -> None:
+        trader = RecordingTrader("LONG")
+        trader.position_contracts = Decimal("0.40")
+
+        specs = trader._build_three_stage_order_specs(
+            intent(
+                tp_plan="THREE_STAGE_RUNNER",
+                tp_price=110.0,
+                three_stage_tp2_price=110.0,
+                three_stage_tp2_ratio=0.20,
+                three_stage_runner_ratio=0.20,
+                three_stage_tp1_consumed=True,
+                three_stage_tp2_consumed=False,
+            )
+        )
+
+        self.assertEqual(specs, [("tp2_outer", Decimal("0.20"), 110.0)])
+        self.assertEqual(trader.position_contracts - specs[0][1], Decimal("0.20"))
+
+        trader.position_contracts = Decimal("4.00")
+        specs = trader._build_three_stage_order_specs(
+            intent(
+                tp_plan="THREE_STAGE_RUNNER",
+                tp_price=110.0,
+                three_stage_tp2_price=110.0,
+                three_stage_tp2_ratio=0.20,
+                three_stage_runner_ratio=0.20,
+                three_stage_tp1_consumed=True,
+                three_stage_tp2_consumed=False,
+            )
+        )
+
+        self.assertEqual(specs, [("tp2_outer", Decimal("2.00"), 110.0)])
+        self.assertEqual(trader.position_contracts - specs[0][1], Decimal("2.00"))
 
     async def test_active_trend_runner_cancels_restored_sl_order_id_from_intent(self) -> None:
         trader = RecordingTrader("LONG")

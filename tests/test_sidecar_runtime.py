@@ -178,6 +178,47 @@ async def test_combined_sidecar_entry_uses_one_total_market_order_and_core_tp_co
     assert trader.sidecar_tps == [("LONG", "0.69", pytest.approx(3012.0), combined.sidecar_plan.client_order_id)]
 
 
+def test_combined_open_uses_rounded_layer_core_when_no_managed_core_contracts() -> None:
+    state = sidecar_state()
+    execution = ExecutionState("pos-open", 1000.0)
+    trader = Trader()
+    trader.account_equity_usdt = 414.0
+    entry_intent = replace(
+        intent("OPEN_LONG", 1),
+        size=PositionSize(62.4, 624.0, 0.2089, 1, 1.0),
+        managed_core_contracts=None,
+        managed_core_eth_qty=0.0,
+    )
+
+    combined = sidecar_plan_for(entry_intent, execution, trader, state)
+
+    assert combined.sidecar_plan is not None
+    assert combined.sidecar_plan.core_contracts == Decimal("2.08")
+    assert combined.execution_intent.managed_core_contracts == "2.08"
+    assert combined.execution_intent.managed_core_eth_qty == pytest.approx(0.208)
+
+
+def test_combined_add_preserves_cumulative_managed_core_contracts() -> None:
+    state = sidecar_state()
+    execution = ExecutionState("pos-add", 1000.0)
+    trader = Trader()
+    trader.account_equity_usdt = 414.0
+    add_intent = replace(
+        intent("ADD_LONG", 2),
+        size=PositionSize(30.0, 300.0, 0.1009, 2, 1.0),
+        managed_core_contracts="3.08",
+        managed_core_eth_qty=0.308,
+    )
+
+    combined = sidecar_plan_for(add_intent, execution, trader, state)
+
+    assert combined.sidecar_plan is not None
+    assert combined.sidecar_plan.core_contracts == Decimal("1.00")
+    assert combined.execution_intent.managed_core_contracts == "3.08"
+    assert combined.execution_intent.managed_core_eth_qty == pytest.approx(0.308)
+    assert combined.execution_intent.size.eth_qty == pytest.approx(combined.sidecar_plan.core_qty + combined.sidecar_plan.sidecar_qty)
+
+
 @pytest.mark.asyncio
 async def test_open_long_success_creates_sidecar_leg_and_tp() -> None:
     state = sidecar_state()
