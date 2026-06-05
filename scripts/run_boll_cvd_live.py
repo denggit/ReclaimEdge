@@ -22,6 +22,7 @@ sys.path.insert(0, str(SRC))
 
 from src.execution.trader import PositionSnapshot, Trader  # noqa: E402
 from src.indicators.cvd_tracker import CvdTracker, CvdTrackerConfig  # noqa: E402
+from src.live import config_helpers as live_config_helpers  # noqa: E402
 from src.live import time_utils as live_time_utils  # noqa: E402
 from src.monitors.boll_band_breakout_monitor import (  # noqa: E402
     BollBandBreakoutMonitor,
@@ -80,10 +81,6 @@ THREE_STAGE_RESTART_DIRTY_HALT_REASON = "three_stage_post_tp1_sl_cancel_failed_o
 THREE_STAGE_RUNTIME_DIRTY_HALT_REASON = "three_stage_post_tp1_sl_dirty_state_blocked"
 THREE_STAGE_CANCEL_PENDING_HALT_REASON = "three_stage_post_tp1_sl_cancel_pending_on_tp2"
 DEFAULT_NET_REMAINING_FEE_BUFFER_PCT = 0.001
-
-
-def live_trading_enabled() -> bool:
-    return os.getenv("LIVE_TRADING", "false").strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
 def rolling_loss_halt_reason(action: str) -> str | None:
@@ -1851,15 +1848,6 @@ class ExecutionReport:
     finished_monotonic: float
 
 
-def _parse_optional_float(value: Any) -> float | None:
-    try:
-        if value in {None, ""}:
-            return None
-        return float(value)
-    except Exception:
-        return None
-
-
 def queue_log_level(queue_size: int) -> int | None:
     if queue_size < 500:
         return None
@@ -2294,21 +2282,21 @@ async def execution_worker(
                     if getattr(command.intent, "middle_runner_active", False):
                         if getattr(result, "protective_sl_order_id", None):
                             strategy.state.middle_runner_protective_sl_order_id = result.protective_sl_order_id
-                        if _parse_optional_float(getattr(result, "protective_sl_price", "")) is not None:
-                            strategy.state.middle_runner_protective_sl_price = _parse_optional_float(result.protective_sl_price)
+                        if live_config_helpers._parse_optional_float(getattr(result, "protective_sl_price", "")) is not None:
+                            strategy.state.middle_runner_protective_sl_price = live_config_helpers._parse_optional_float(result.protective_sl_price)
                     if getattr(command.intent, "trend_runner_active", False):
                         if getattr(result, "protective_sl_order_id", None):
                             strategy.state.trend_runner_sl_order_id = result.protective_sl_order_id
-                        if _parse_optional_float(getattr(result, "protective_sl_price", "")) is not None:
-                            strategy.state.trend_runner_sl_price = _parse_optional_float(result.protective_sl_price)
+                        if live_config_helpers._parse_optional_float(getattr(result, "protective_sl_price", "")) is not None:
+                            strategy.state.trend_runner_sl_price = live_config_helpers._parse_optional_float(result.protective_sl_price)
                         strategy.state.trend_runner_tp_order_id = result.tp_order_id
                     strategy.state.tp_order_id = result.tp_order_id
                     strategy.state.tp_order_ids = list(getattr(result, "tp_order_ids", ()) or [])
                     if getattr(command.intent, "three_stage_post_tp1_protective_sl_price", None) is not None and getattr(command.intent, "three_stage_tp1_consumed", False):
                         if getattr(result, "protective_sl_order_id", None):
                             strategy.state.three_stage_post_tp1_protective_sl_order_id = result.protective_sl_order_id
-                        if _parse_optional_float(getattr(result, "protective_sl_price", "")) is not None:
-                            strategy.state.three_stage_post_tp1_protective_sl_price = _parse_optional_float(result.protective_sl_price)
+                        if live_config_helpers._parse_optional_float(getattr(result, "protective_sl_price", "")) is not None:
+                            strategy.state.three_stage_post_tp1_protective_sl_price = live_config_helpers._parse_optional_float(result.protective_sl_price)
                         strategy.state.three_stage_post_tp1_protected = bool(getattr(result, "protective_sl_ok", False))
                     strategy_state_for_save = copy.deepcopy(strategy.state)
                     equity = account_snapshot.equity
@@ -2434,7 +2422,7 @@ async def execution_worker(
                         strategy.state.near_tp_reduce_pending = False
                         strategy_config = getattr(strategy, "config", None)
                         strategy.state.near_tp_add_disabled = bool(getattr(strategy_config, "near_tp_disable_add_after_reduce", True))
-                        strategy.state.near_tp_protective_sl_price = getattr(command.intent, "near_tp_protective_sl_price", None) or _parse_optional_float(getattr(result, "protective_sl_price", ""))
+                        strategy.state.near_tp_protective_sl_price = getattr(command.intent, "near_tp_protective_sl_price", None) or live_config_helpers._parse_optional_float(getattr(result, "protective_sl_price", ""))
                         strategy.state.near_tp_protective_sl_order_id = getattr(result, "protective_sl_order_id", None)
                         strategy.state.tp_plan = "SINGLE"
                         strategy.state.partial_tp_price = None
@@ -4066,7 +4054,7 @@ def trusted_startup_saved_state(  # type: ignore[no-untyped-def]
 
 async def main() -> None:
     load_dotenv()
-    if not live_trading_enabled():
+    if not live_config_helpers.live_trading_enabled():
         raise RuntimeError("LIVE_TRADING is not true. Refusing to start live runner.")
 
     monitor_config = BollBandBreakoutMonitorConfig.from_env()
