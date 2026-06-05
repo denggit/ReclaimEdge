@@ -49,6 +49,8 @@ class BollCvdReclaimStrategyConfig:
     first_add_block_seconds: int = 1800
     add_min_interval_seconds: int = 600
     add_min_interval_bypass_gap_pct: float = 0.005
+    add_freeze_chain_enabled: bool = True
+    add_min_interval_bypass_multiplier: float = 2.0
     tp_update_interval_seconds: int = 900
     max_entry_distance_from_extreme_pct: float = 0.002
     max_armed_seconds: int = 900
@@ -107,6 +109,19 @@ class BollCvdReclaimStrategyConfig:
     runner_reverse_min_price_damage_pct: float = 0.0015
     runner_reverse_recovery_cancel_pct: float = 0.001
     runner_max_trend_seconds_after_second_tp: int = 18000
+    three_stage_pre_tp1_degrade_enabled: bool = True
+    three_stage_pre_tp1_middle_runner_after_seconds: int = 10800
+    three_stage_pre_tp1_single_after_seconds: int = 21600
+
+    def __post_init__(self) -> None:
+        if (
+            self.three_stage_pre_tp1_degrade_enabled
+            and self.three_stage_pre_tp1_single_after_seconds <= self.three_stage_pre_tp1_middle_runner_after_seconds
+        ):
+            raise RuntimeError(
+                "THREE_STAGE_PRE_TP1_SINGLE_AFTER_SECONDS must be greater than "
+                "THREE_STAGE_PRE_TP1_MIDDLE_RUNNER_AFTER_SECONDS"
+            )
 
     @classmethod
     def from_env(cls) -> "BollCvdReclaimStrategyConfig":
@@ -131,6 +146,8 @@ class BollCvdReclaimStrategyConfig:
             first_add_block_seconds=int(os.getenv("FIRST_ADD_BLOCK_SECONDS", "1800")),
             add_min_interval_seconds=int(os.getenv("ADD_MIN_INTERVAL_SECONDS", "600")),
             add_min_interval_bypass_gap_pct=float(os.getenv("ADD_MIN_INTERVAL_BYPASS_GAP_PCT", "0.005")),
+            add_freeze_chain_enabled=_env_bool("ADD_FREEZE_CHAIN_ENABLED", True),
+            add_min_interval_bypass_multiplier=float(os.getenv("ADD_MIN_INTERVAL_BYPASS_MULTIPLIER", "2")),
             tp_update_interval_seconds=int(os.getenv("TP_UPDATE_INTERVAL_SECONDS", "900")),
             max_entry_distance_from_extreme_pct=float(os.getenv("MAX_ENTRY_DISTANCE_FROM_EXTREME_PCT", "0.002")),
             max_armed_seconds=int(os.getenv("MAX_ARMED_SECONDS", "900")),
@@ -188,6 +205,9 @@ class BollCvdReclaimStrategyConfig:
             runner_reverse_min_price_damage_pct=float(os.getenv("RUNNER_REVERSE_MIN_PRICE_DAMAGE_PCT", "0.0015")),
             runner_reverse_recovery_cancel_pct=float(os.getenv("RUNNER_REVERSE_RECOVERY_CANCEL_PCT", "0.001")),
             runner_max_trend_seconds_after_second_tp=int(os.getenv("RUNNER_MAX_TREND_SECONDS_AFTER_SECOND_TP", "18000")),
+            three_stage_pre_tp1_degrade_enabled=_env_bool("THREE_STAGE_PRE_TP1_DEGRADE_ENABLED", True),
+            three_stage_pre_tp1_middle_runner_after_seconds=int(os.getenv("THREE_STAGE_PRE_TP1_MIDDLE_RUNNER_AFTER_SECONDS", "10800")),
+            three_stage_pre_tp1_single_after_seconds=int(os.getenv("THREE_STAGE_PRE_TP1_SINGLE_AFTER_SECONDS", "21600")),
         )
 
 
@@ -282,6 +302,8 @@ class StrategyPositionState:
     tp_price: Optional[float] = None
     last_order_ts_ms: int = 0
     first_entry_ts_ms: int = 0
+    add_freeze_until_ts_ms: int = 0
+    add_freeze_penalty_count: int = 0
     last_tp_update_ts_ms: int = 0
     last_tp_update_candle_ts_ms: int = 0
     lower_armed: bool = False
@@ -343,6 +365,8 @@ class StrategyPositionState:
     three_stage_post_tp1_protective_sl_order_id: str | None = None
     three_stage_post_tp1_sl_extension_triggered: bool = False
     three_stage_post_tp1_protected: bool = False
+    three_stage_pre_tp1_degrade_stage: str | None = None
+    three_stage_pre_tp1_degraded_ts_ms: int = 0
     trend_runner_active: bool = False
     trend_runner_trend_start_ts_ms: int = 0
     trend_runner_adjust_count: int = 0
@@ -907,6 +931,11 @@ class BollCvdReclaimStrategy:
         next_layer = self.state.layers + 1
         size = self.sizer.calculate(price, layer_index=next_layer)
         if next_layer == 1:
+            self.state.first_entry_ts_ms = ts_ms
+            self.state.add_freeze_until_ts_ms = 0
+            self.state.add_freeze_penalty_count = 0
+            self.state.three_stage_pre_tp1_degrade_stage = None
+            self.state.three_stage_pre_tp1_degraded_ts_ms = 0
             self.state.sidecar_enabled_for_position = bool(getattr(self.sizer.config, "sidecar_enabled", False))
             self.state.sidecar_margin_pct = (
                 float(getattr(self.sizer.config, "sidecar_margin_pct", 0.0) or 0.0)
@@ -1069,6 +1098,7 @@ class BollCvdReclaimStrategy:
         old_trend_runner_sl = self.state.trend_runner_sl_price
         tp_price, tp_mode = self._select_tp_price(self.state.side, boll)
         middle_profit_fallback_locked = False
+        reason_override: str | None = None
 
         # ── Unified middle-profit eligibility enforcement ──
         # Before any complex TP mode is allowed, the middle band must offer
@@ -1108,6 +1138,9 @@ class BollCvdReclaimStrategy:
                 partial_tp_price = None
                 partial_tp_ratio = 0.0
                 tp_plan = "SINGLE"
+                self.state.three_stage_pre_tp1_degrade_stage = "SINGLE"
+                self.state.three_stage_pre_tp1_degraded_ts_ms = ts_ms
+                reason_override = "three_stage_pre_tp1_degraded_to_single"
                 middle_profit_fallback_locked = True
 
             # Middle Runner pending (first close NOT done): reset
@@ -1129,6 +1162,10 @@ class BollCvdReclaimStrategy:
                 partial_tp_price = None
                 partial_tp_ratio = 0.0
                 tp_plan = "SINGLE"
+                if self.state.three_stage_pre_tp1_degrade_stage == "MIDDLE_RUNNER":
+                    self.state.three_stage_pre_tp1_degrade_stage = "SINGLE"
+                    self.state.three_stage_pre_tp1_degraded_ts_ms = ts_ms
+                    reason_override = "three_stage_pre_tp1_degraded_to_single"
                 middle_profit_fallback_locked = True
 
             # SPLIT partial NOT consumed: fall back to SINGLE outer
@@ -1180,6 +1217,18 @@ class BollCvdReclaimStrategy:
 
         if middle_profit_fallback_locked:
             pass
+        elif (degrade_target := self._three_stage_pre_tp1_degrade_target(ts_ms)) == "SINGLE":
+            tp_price, tp_mode = self._degrade_three_stage_pre_tp1_to_single(ts_ms, boll)
+            partial_tp_price, partial_tp_ratio, tp_plan = None, 0.0, "SINGLE"
+            reason_override = "three_stage_pre_tp1_degraded_to_single"
+        elif degrade_target == "MIDDLE_RUNNER":
+            self._degrade_three_stage_pre_tp1_to_middle_runner(ts_ms, boll)
+            tp_price = self.state.tp_price or (boll.upper if self.state.side == "LONG" else boll.lower)
+            tp_mode = self.state.tp_mode
+            partial_tp_price = self.state.partial_tp_price
+            partial_tp_ratio = self.state.partial_tp_ratio
+            tp_plan = "MIDDLE_RUNNER"
+            reason_override = "three_stage_pre_tp1_degraded_to_middle_runner"
         elif self.state.trend_runner_active:
             tp_mode = "UPPER" if self.state.side == "LONG" else "LOWER"
             partial_tp_price, partial_tp_ratio, tp_plan = None, 0.0, "SINGLE"
@@ -1274,7 +1323,13 @@ class BollCvdReclaimStrategy:
                 or abs(self.state.trend_runner_sl_price - old_trend_runner_sl) / self.state.trend_runner_sl_price >= 0.0001
             )
         )
-        if self._tp_plan_unchanged(tp_price, partial_tp_price, partial_tp_ratio, tp_plan) and not runner_sl_changed and not trend_runner_orders_changed and not force_reconcile:
+        if (
+            reason_override is None
+            and self._tp_plan_unchanged(tp_price, partial_tp_price, partial_tp_ratio, tp_plan)
+            and not runner_sl_changed
+            and not trend_runner_orders_changed
+            and not force_reconcile
+        ):
             self.state.startup_force_tp_reconcile = False
             logger.info(
                 "TP_UPDATE_SKIPPED | reason=plan_unchanged side=%s mode=%s plan=%s candle_ts=%s current_tp=%.4f target_tp=%.4f partial_tp=%s avg_entry=%.4f breakeven=%.4f",
@@ -1304,7 +1359,10 @@ class BollCvdReclaimStrategy:
             self.state.trend_runner_adjust_count += 1
             self.state.trend_runner_last_update_candle_ts_ms = boll.candle_ts_ms
         size = self.sizer.calculate(price, layer_index=self.state.layers)
-        reason_text = f"startup_force_tp_reconcile" if force_reconcile else f"新15m K线更新止盈到{tp_mode}轨"
+        if reason_override is not None:
+            reason_text = reason_override
+        else:
+            reason_text = f"startup_force_tp_reconcile" if force_reconcile else f"新15m K线更新止盈到{tp_mode}轨"
         logger.warning(
             "TP_SELECTED | reason=%s side=%s mode=%s plan=%s partial_tp=%s partial_ratio=%.2f avg_entry=%.4f breakeven=%.4f candle_ts=%s middle=%.4f upper=%.4f lower=%.4f final_tp=%.4f force_reconcile=%s",
             reason_text,
@@ -1323,6 +1381,102 @@ class BollCvdReclaimStrategy:
             force_reconcile,
         )
         return self._intent("UPDATE_TP", self.state.side, price, self.state.layers, tp_price, reason_text, size, boll, cvd, ts_ms)
+
+    def _three_stage_pre_tp1_age_seconds(self, ts_ms: int) -> float:
+        first_entry_ts_ms = int(getattr(self.state, "first_entry_ts_ms", 0) or 0)
+        if first_entry_ts_ms <= 0:
+            first_entry_ts_ms = int(getattr(self.state, "last_order_ts_ms", 0) or 0)
+        if first_entry_ts_ms <= 0:
+            return 0.0
+        return max((ts_ms - first_entry_ts_ms) / 1000, 0.0)
+
+    def _three_stage_pre_tp1_degrade_target(self, ts_ms: int) -> str | None:
+        if not self.config.three_stage_pre_tp1_degrade_enabled:
+            return None
+        if self.state.three_stage_tp1_consumed:
+            return None
+        if self.state.three_stage_tp2_consumed:
+            return None
+        if self.state.trend_runner_active:
+            return None
+        if self.state.middle_runner_active:
+            return None
+        if self.state.partial_tp_consumed:
+            return None
+
+        age = self._three_stage_pre_tp1_age_seconds(ts_ms)
+        if self.state.three_stage_pre_tp1_degrade_stage == "MIDDLE_RUNNER":
+            if age >= self.config.three_stage_pre_tp1_single_after_seconds:
+                return "SINGLE"
+            return None
+
+        if not self.state.three_stage_runner_enabled_for_position:
+            return None
+        if age >= self.config.three_stage_pre_tp1_single_after_seconds:
+            return "SINGLE"
+        if age >= self.config.three_stage_pre_tp1_middle_runner_after_seconds:
+            return "MIDDLE_RUNNER"
+        return None
+
+    def _degrade_three_stage_pre_tp1_to_middle_runner(self, ts_ms: int, boll: BollSnapshot) -> None:
+        if self.state.side is None:
+            return
+        old_tp1 = self.state.three_stage_tp1_price
+        old_tp2 = self.state.three_stage_tp2_price
+        old_tp_plan = self.state.tp_plan
+        age_seconds = self._three_stage_pre_tp1_age_seconds(ts_ms)
+        final_tp = boll.upper if self.state.side == "LONG" else boll.lower
+        first_tp = boll.middle
+
+        self._reset_three_stage_runner_state()
+        self._set_middle_runner_planned(first_tp, final_tp)
+        self.state.tp_plan = "MIDDLE_RUNNER"
+        self.state.tp_price = final_tp
+        self.state.tp_mode = "UPPER" if self.state.side == "LONG" else "LOWER"
+        self.state.partial_tp_price = first_tp
+        self.state.partial_tp_ratio = self.state.middle_runner_first_close_ratio
+        self.state.three_stage_pre_tp1_degrade_stage = "MIDDLE_RUNNER"
+        self.state.three_stage_pre_tp1_degraded_ts_ms = ts_ms
+        logger.warning(
+            "THREE_STAGE_PRE_TP1_DEGRADED | from=%s to=MIDDLE_RUNNER side=%s age_seconds=%.1f old_tp1=%s old_tp2=%s new_first_tp=%.4f new_final_tp=%.4f first_entry_ts_ms=%s",
+            old_tp_plan,
+            self.state.side,
+            age_seconds,
+            f"{old_tp1:.4f}" if old_tp1 is not None else "-",
+            f"{old_tp2:.4f}" if old_tp2 is not None else "-",
+            first_tp,
+            final_tp,
+            self.state.first_entry_ts_ms,
+        )
+
+    def _degrade_three_stage_pre_tp1_to_single(self, ts_ms: int, boll: BollSnapshot) -> tuple[float, TpMode]:
+        if self.state.side is None:
+            return boll.middle, "MIDDLE"
+        old_plan = self.state.tp_plan
+        tp_price, tp_mode = self._select_tp_price(self.state.side, boll)
+        age_seconds = self._three_stage_pre_tp1_age_seconds(ts_ms)
+        self._reset_three_stage_runner_state()
+        self._reset_middle_runner_state()
+        self.state.tp_plan = "SINGLE"
+        self.state.tp_price = tp_price
+        self.state.tp_mode = tp_mode
+        self.state.partial_tp_price = None
+        self.state.partial_tp_ratio = 0.0
+        self.state.three_stage_pre_tp1_degrade_stage = "SINGLE"
+        self.state.three_stage_pre_tp1_degraded_ts_ms = ts_ms
+        logger.warning(
+            "THREE_STAGE_PRE_TP1_DEGRADED | from=%s to=SINGLE side=%s age_seconds=%.1f tp_price=%.4f tp_mode=%s middle=%.4f upper=%.4f lower=%.4f first_entry_ts_ms=%s",
+            old_plan,
+            self.state.side,
+            age_seconds,
+            tp_price,
+            tp_mode,
+            boll.middle,
+            boll.upper,
+            boll.lower,
+            self.state.first_entry_ts_ms,
+        )
+        return tp_price, tp_mode
 
     def _maybe_trend_runner_market_exit(self, price: float, ts_ms: int, boll: BollSnapshot, cvd: CvdSnapshot) -> TradeIntent | None:
         if not self.state.trend_runner_active or self.state.side is None:
@@ -2116,6 +2270,13 @@ class BollCvdReclaimStrategy:
         tp_mode: TpMode | None = None,
         boll: BollSnapshot | None = None,
     ) -> tuple[float | None, float, TpPlan]:
+        if self.state.three_stage_pre_tp1_degrade_stage == "SINGLE":
+            return None, 0.0, "SINGLE"
+        if self.state.three_stage_pre_tp1_degrade_stage == "MIDDLE_RUNNER":
+            if tp_mode == "MIDDLE" and boll is not None:
+                first_close_ratio = min(max(self.config.middle_runner_first_close_ratio, 0.1), 0.95)
+                return boll.middle, first_close_ratio, "MIDDLE_RUNNER"
+            return None, 0.0, "SINGLE"
         if self._three_stage_runner_plan_allowed(tp_mode, boll):
             tp1_ratio, _tp2_ratio, _runner_ratio = self._normalized_three_stage_ratios()
             return boll.middle, tp1_ratio, "THREE_STAGE_RUNNER"
@@ -2162,6 +2323,8 @@ class BollCvdReclaimStrategy:
 
     def _three_stage_runner_plan_allowed(self, tp_mode: TpMode | None, boll: BollSnapshot | None) -> bool:
         if not self.config.three_stage_runner_enabled:
+            return False
+        if self.state.three_stage_pre_tp1_degrade_stage is not None:
             return False
         if tp_mode != "MIDDLE" or boll is None:
             return False
@@ -2310,7 +2473,7 @@ class BollCvdReclaimStrategy:
         ids: list[str] = []
         max_legs = int(getattr(self.sizer.config, "sidecar_max_legs", 10) or 10)
         for leg in trim_sidecar_legs_for_state(self.state.sidecar_legs, max_legs):
-            if leg.get("status") == "OPEN" and leg.get("tp_order_id"):
+            if leg.get("status") in {"OPEN", "OPEN_UNPROTECTED"} and leg.get("tp_order_id"):
                 ids.append(str(leg["tp_order_id"]))
         for order_id in (
             self.state.near_tp_protective_sl_order_id,

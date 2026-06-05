@@ -96,6 +96,38 @@ def intent(**overrides) -> TradeIntent:
     return TradeIntent(**values)  # type: ignore[arg-type]
 
 
+def three_stage_pre_tp1_state(**overrides) -> StrategyPositionState:
+    first_ts = int(overrides.pop("first_entry_ts_ms", 100_000))
+    values = dict(
+        side="LONG",
+        layers=1,
+        last_entry_price=100.0,
+        first_entry_ts_ms=first_ts,
+        last_order_ts_ms=first_ts,
+        total_entry_qty=1.0,
+        total_entry_notional=100.0,
+        avg_entry_price=100.0,
+        net_remaining_breakeven_price=100.0,
+        tp_price=110.0,
+        tp_mode="UPPER",
+        tp_plan="THREE_STAGE_RUNNER",
+        partial_tp_price=101.0,
+        partial_tp_ratio=0.6,
+        three_stage_runner_enabled_for_position=True,
+        three_stage_tp1_price=101.0,
+        three_stage_tp2_price=110.0,
+        three_stage_tp1_ratio=0.6,
+        three_stage_tp2_ratio=0.2,
+        three_stage_runner_ratio=0.2,
+        three_stage_tp1_consumed=False,
+        three_stage_tp2_consumed=False,
+        trend_runner_active=False,
+        last_tp_update_candle_ts_ms=1_000,
+    )
+    values.update(overrides)
+    return StrategyPositionState(**values)
+
+
 class RecordingJournal:
     def __init__(self) -> None:
         self.events = []
@@ -1108,6 +1140,138 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
         self.assertEqual(strat.state.tp_plan, "SINGLE")
         self.assertIsNone(strat.state.partial_tp_price)
         self.assertEqual(strat.state.partial_tp_ratio, 0.0)
+
+    def test_three_stage_pre_tp1_middle_profit_insufficient_immediately_single_before_3h(self) -> None:
+        strat = strategy(breakeven_fee_buffer_pct=0.0, tp_min_net_profit_pct=0.002)
+        first_ts = 100_000
+        strat.state = three_stage_pre_tp1_state(first_entry_ts_ms=first_ts)
+
+        got = strat._maybe_update_tp(99.0, first_ts + 60_000, boll(middle=100.1, upper=110.0, candle_ts_ms=2_000), cvd())
+
+        self.assertIsNotNone(got)
+        self.assertEqual(got.tp_plan, "SINGLE")
+        self.assertEqual(got.tp_mode, "UPPER")
+        self.assertAlmostEqual(got.tp_price, 110.0)
+        self.assertFalse(strat.state.three_stage_runner_enabled_for_position)
+        self.assertFalse(strat.state.middle_runner_pending)
+
+    def test_three_stage_pre_tp1_middle_profit_insufficient_after_3h_still_single_not_middle_runner(self) -> None:
+        strat = strategy(breakeven_fee_buffer_pct=0.0, tp_min_net_profit_pct=0.002)
+        first_ts = 100_000
+        strat.state = three_stage_pre_tp1_state(first_entry_ts_ms=first_ts)
+
+        got = strat._maybe_update_tp(99.0, first_ts + 10_801_000, boll(middle=100.1, upper=110.0, candle_ts_ms=2_000), cvd())
+
+        self.assertIsNotNone(got)
+        self.assertEqual(got.tp_plan, "SINGLE")
+        self.assertFalse(strat.state.middle_runner_pending)
+        self.assertEqual(strat.state.three_stage_pre_tp1_degrade_stage, "SINGLE")
+
+    def test_three_stage_pre_tp1_degrades_to_middle_runner_after_3h_when_middle_profit_sufficient(self) -> None:
+        strat = strategy(breakeven_fee_buffer_pct=0.0, tp_min_net_profit_pct=0.002)
+        first_ts = 100_000
+        strat.state = three_stage_pre_tp1_state(first_entry_ts_ms=first_ts)
+
+        got = strat._maybe_update_tp(99.0, first_ts + 10_801_000, boll(middle=101.0, upper=110.0, candle_ts_ms=2_000), cvd())
+
+        self.assertIsNotNone(got)
+        self.assertEqual(got.reason, "three_stage_pre_tp1_degraded_to_middle_runner")
+        self.assertEqual(got.tp_plan, "MIDDLE_RUNNER")
+        self.assertEqual(strat.state.tp_plan, "MIDDLE_RUNNER")
+        self.assertTrue(strat.state.middle_runner_pending)
+        self.assertFalse(strat.state.three_stage_runner_enabled_for_position)
+        self.assertEqual(strat.state.three_stage_pre_tp1_degrade_stage, "MIDDLE_RUNNER")
+
+    def test_three_stage_pre_tp1_degrades_to_single_after_6h(self) -> None:
+        strat = strategy(breakeven_fee_buffer_pct=0.0, tp_min_net_profit_pct=0.002)
+        first_ts = 100_000
+        strat.state = three_stage_pre_tp1_state(first_entry_ts_ms=first_ts)
+
+        got = strat._maybe_update_tp(99.0, first_ts + 21_601_000, boll(middle=101.0, upper=110.0, candle_ts_ms=2_000), cvd())
+
+        self.assertIsNotNone(got)
+        self.assertEqual(got.reason, "three_stage_pre_tp1_degraded_to_single")
+        self.assertEqual(got.tp_plan, "SINGLE")
+        self.assertAlmostEqual(got.tp_price, 101.0)
+        self.assertEqual(strat.state.tp_plan, "SINGLE")
+        self.assertFalse(strat.state.middle_runner_pending)
+        self.assertFalse(strat.state.three_stage_runner_enabled_for_position)
+        self.assertIsNone(strat.state.partial_tp_price)
+
+    def test_degraded_middle_runner_degrades_to_single_after_6h_if_no_first_close(self) -> None:
+        strat = strategy(breakeven_fee_buffer_pct=0.0, tp_min_net_profit_pct=0.002)
+        first_ts = 100_000
+        strat.state = StrategyPositionState(
+            side="LONG",
+            layers=1,
+            first_entry_ts_ms=first_ts,
+            last_order_ts_ms=first_ts + 7_200_000,
+            total_entry_qty=1.0,
+            total_entry_notional=100.0,
+            avg_entry_price=100.0,
+            net_remaining_breakeven_price=100.0,
+            tp_price=110.0,
+            tp_plan="MIDDLE_RUNNER",
+            partial_tp_price=101.0,
+            partial_tp_ratio=0.8,
+            middle_runner_enabled_for_position=True,
+            middle_runner_pending=True,
+            middle_runner_active=False,
+            middle_runner_first_close_ratio=0.8,
+            middle_runner_keep_ratio=0.2,
+            middle_runner_first_tp_price=101.0,
+            middle_runner_final_tp_price=110.0,
+            three_stage_pre_tp1_degrade_stage="MIDDLE_RUNNER",
+            last_tp_update_candle_ts_ms=1_000,
+        )
+
+        got = strat._maybe_update_tp(99.0, first_ts + 21_601_000, boll(middle=101.0, upper=110.0, candle_ts_ms=2_000), cvd())
+
+        self.assertIsNotNone(got)
+        self.assertEqual(got.reason, "three_stage_pre_tp1_degraded_to_single")
+        self.assertEqual(strat.state.tp_plan, "SINGLE")
+        self.assertFalse(strat.state.middle_runner_pending)
+
+    def test_three_stage_pre_tp1_timeout_does_not_reset_after_add(self) -> None:
+        strat = strategy(breakeven_fee_buffer_pct=0.0, tp_min_net_profit_pct=0.002)
+        first_ts = 100_000
+        strat.state = three_stage_pre_tp1_state(first_entry_ts_ms=first_ts, layers=2, last_order_ts_ms=first_ts + 7_200_000)
+
+        got = strat._maybe_update_tp(99.0, first_ts + 10_801_000, boll(middle=101.0, upper=110.0, candle_ts_ms=2_000), cvd())
+
+        self.assertIsNotNone(got)
+        self.assertEqual(got.reason, "three_stage_pre_tp1_degraded_to_middle_runner")
+
+    def test_three_stage_after_tp1_consumed_does_not_degrade(self) -> None:
+        strat = strategy()
+        strat.state = three_stage_pre_tp1_state(three_stage_tp1_consumed=True, partial_tp_consumed=True)
+
+        self.assertIsNone(strat._three_stage_pre_tp1_degrade_target(100_000 + 21_601_000))
+
+    def test_middle_runner_active_does_not_degrade_to_single(self) -> None:
+        strat = strategy()
+        strat.state = StrategyPositionState(
+            side="LONG",
+            layers=1,
+            first_entry_ts_ms=100_000,
+            middle_runner_active=True,
+            three_stage_pre_tp1_degrade_stage="MIDDLE_RUNNER",
+        )
+
+        self.assertIsNone(strat._three_stage_pre_tp1_degrade_target(100_000 + 21_601_000))
+
+    def test_single_degrade_uses_outer_when_middle_profit_insufficient(self) -> None:
+        long_strat = strategy(breakeven_fee_buffer_pct=0.0, tp_min_net_profit_pct=0.002)
+        long_strat.state = StrategyPositionState(side="LONG", avg_entry_price=100.0, net_remaining_breakeven_price=100.0)
+        long_tp, long_mode = long_strat._degrade_three_stage_pre_tp1_to_single(21_601_000, boll(middle=100.1, upper=110.0, lower=90.0))
+        self.assertAlmostEqual(long_tp, 110.0)
+        self.assertEqual(long_mode, "UPPER")
+
+        short_strat = strategy(breakeven_fee_buffer_pct=0.0, tp_min_net_profit_pct=0.002)
+        short_strat.state = StrategyPositionState(side="SHORT", avg_entry_price=100.0, net_remaining_breakeven_price=100.0)
+        short_tp, short_mode = short_strat._degrade_three_stage_pre_tp1_to_single(21_601_000, boll(middle=99.9, upper=110.0, lower=90.0))
+        self.assertAlmostEqual(short_tp, 90.0)
+        self.assertEqual(short_mode, "LOWER")
 
     def test_tp_selection_uses_net_remaining_breakeven(self) -> None:
         """_select_tp_price uses net_remaining_breakeven_price over avg_entry_price."""

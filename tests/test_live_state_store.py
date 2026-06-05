@@ -94,6 +94,40 @@ class LiveStateStoreTest(unittest.TestCase):
             self.assertTrue(loaded.middle_runner_size_mismatch_protected)
             self.assertEqual(loaded.middle_runner_size_mismatch_warning_ts_ms, 123_456)
 
+    def test_add_freeze_and_three_stage_degrade_fields_save_and_restore(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "live_state.json"
+            store = LiveStateStore(path)
+            strategy_state = StrategyPositionState(
+                side="LONG",
+                layers=2,
+                total_entry_qty=1.0,
+                total_entry_notional=100.0,
+                avg_entry_price=100.0,
+                add_freeze_until_ts_ms=3_700_000,
+                add_freeze_penalty_count=2,
+                three_stage_pre_tp1_degrade_stage="MIDDLE_RUNNER",
+                three_stage_pre_tp1_degraded_ts_ms=10_800_001,
+            )
+
+            store.save(
+                LiveStateStore.from_strategy_state(
+                    position_id="pos-1",
+                    symbol="ETH-USDT-SWAP",
+                    strategy_state=strategy_state,
+                    cash_before_position=100.0,
+                )
+            )
+
+            loaded = store.load()
+
+            self.assertIsNotNone(loaded)
+            assert loaded is not None
+            self.assertEqual(loaded.add_freeze_until_ts_ms, 3_700_000)
+            self.assertEqual(loaded.add_freeze_penalty_count, 2)
+            self.assertEqual(loaded.three_stage_pre_tp1_degrade_stage, "MIDDLE_RUNNER")
+            self.assertEqual(loaded.three_stage_pre_tp1_degraded_ts_ms, 10_800_001)
+
 
 if __name__ == "__main__":
     unittest.main()

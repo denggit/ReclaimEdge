@@ -526,6 +526,7 @@ class Trader:
             )
 
         await self._cancel_existing_take_profit_orders_for_intent(intent)
+        await self._cancel_stale_runner_protective_stops_for_degrade(intent)
 
         specs = self._build_take_profit_order_specs(intent)
         placed_order_ids: list[str] = []
@@ -707,6 +708,21 @@ class Trader:
             self._protected_reduce_only_order_ids = set()
             self._managed_reduce_only_order_ids = set()
             self._allow_cancel_unmanaged_reduce_only = True
+
+    async def _cancel_stale_runner_protective_stops_for_degrade(self, intent: TradeIntent) -> None:
+        reason = str(getattr(intent, "reason", "") or "")
+        if "three_stage_pre_tp1_degraded" not in reason:
+            return
+        protected_order_ids = {str(order_id) for order_id in (getattr(intent, "protected_order_ids", ()) or ()) if order_id}
+        middle_runner_sl_order_id = getattr(self, "middle_runner_protective_sl_order_id", None)
+        if middle_runner_sl_order_id and str(middle_runner_sl_order_id) not in protected_order_ids:
+            await self.cancel_middle_runner_protective_stop(middle_runner_sl_order_id)
+        three_stage_post_tp1_sl_order_id = getattr(self, "three_stage_post_tp1_protective_sl_order_id", None)
+        if three_stage_post_tp1_sl_order_id and str(three_stage_post_tp1_sl_order_id) not in protected_order_ids:
+            await self.cancel_three_stage_post_tp1_protective_stop(three_stage_post_tp1_sl_order_id)
+        trend_runner_sl_order_id = getattr(self, "trend_runner_sl_order_id", None)
+        if trend_runner_sl_order_id and str(trend_runner_sl_order_id) not in protected_order_ids:
+            await self.cancel_trend_runner_protective_stop(trend_runner_sl_order_id)
 
     def _protected_order_ids_from_intent(self, intent: TradeIntent) -> set[str]:
         ids = set(getattr(intent, "protected_order_ids", ()) or ())

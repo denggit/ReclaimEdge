@@ -94,12 +94,23 @@ class BollCvdShockReclaimStrategy(BollCvdReclaimStrategy):
         reason: str,
     ) -> TradeIntent:
         previous_layers = self.state.layers
+        was_active_freeze = self._add_freeze_active(ts_ms)
         intent = super()._open_position(side, intent_type, price, ts_ms, boll, cvd, reason)
         if previous_layers <= 0:
-            # Keep the first-entry clock stable. The first-add block must not be
-            # reset by an early 5x-distance add; until this original 30m window
-            # ends, every extra add still needs the same 5x distance exception.
             self.state.first_entry_ts_ms = ts_ms
+            if self.config.add_freeze_chain_enabled:
+                self.state.add_freeze_until_ts_ms = ts_ms + int(self.config.first_add_block_seconds * 1000)
+                self.state.add_freeze_penalty_count = 0
+                logger.warning(
+                    "ADD_FREEZE_STARTED | reason=first_entry side=%s layers=%s freeze_until_ts_ms=%s freeze_seconds=%s first_entry_ts_ms=%s",
+                    side,
+                    self.state.layers,
+                    self.state.add_freeze_until_ts_ms,
+                    self.config.first_add_block_seconds,
+                    self.state.first_entry_ts_ms,
+                )
+        else:
+            self._extend_add_freeze_after_successful_add(ts_ms, was_active_freeze=was_active_freeze)
         return intent
 
     def _add_timing_passed(self, side: PositionSide, price: float, ts_ms: int, target_layer: int) -> tuple[bool, str]:
@@ -107,26 +118,66 @@ class BollCvdShockReclaimStrategy(BollCvdReclaimStrategy):
         if last is None or last <= 0:
             return False, "missing_last_entry"
 
-        first_elapsed_seconds = self._first_entry_elapsed_seconds(ts_ms)
-        if self.state.layers >= 1 and first_elapsed_seconds < self.config.first_add_block_seconds:
+        if not self.config.add_freeze_chain_enabled:
+            first_elapsed_seconds = self._first_entry_elapsed_seconds(ts_ms)
+            if self.state.layers >= 1 and first_elapsed_seconds < self.config.first_add_block_seconds:
+                adverse_gap_pct = self._adverse_gap_pct(side, price)
+                required_gap_pct = self._first_add_block_required_gap_pct_for_target_layer(target_layer)
+                if adverse_gap_pct < required_gap_pct:
+                    return False, "first_add_block"
+                logger.warning(
+                    "FIRST_ADD_BLOCK_BYPASSED | side=%s price=%.4f layers=%s target_layer=%s last_entry=%.4f first_elapsed_seconds=%.1f required_seconds=%s adverse_gap_pct=%.4f%% required_gap_pct=%.4f%% multiplier=%.2f",
+                    side,
+                    price,
+                    self.state.layers,
+                    target_layer,
+                    last,
+                    first_elapsed_seconds,
+                    self.config.first_add_block_seconds,
+                    adverse_gap_pct * 100,
+                    required_gap_pct * 100,
+                    self.first_add_block_bypass_multiplier,
+                )
+                return True, "first_add_block_bypassed"
+            if self.state.layers == 1:
+                return True, "ok"
+
+        self._reset_add_freeze_if_expired(ts_ms)
+        if self._add_freeze_active(ts_ms):
             adverse_gap_pct = self._adverse_gap_pct(side, price)
-            required_gap_pct = self._first_add_block_required_gap_pct_for_target_layer(target_layer)
+            multiplier = self._active_add_freeze_bypass_multiplier()
+            required_gap_pct = self._add_layer_gap_pct_for_target_layer(target_layer) * multiplier
             if adverse_gap_pct < required_gap_pct:
-                return False, "first_add_block"
+                return False, "add_freeze"
+            if self.state.layers == 1 and int(self.state.add_freeze_penalty_count or 0) <= 0:
+                logger.warning(
+                    "FIRST_ADD_BLOCK_BYPASSED | side=%s price=%.4f layers=%s target_layer=%s last_entry=%.4f freeze_remaining_seconds=%.1f required_seconds=%s adverse_gap_pct=%.4f%% required_gap_pct=%.4f%% multiplier=%.2f",
+                    side,
+                    price,
+                    self.state.layers,
+                    target_layer,
+                    last,
+                    self._add_freeze_remaining_seconds(ts_ms),
+                    self.config.first_add_block_seconds,
+                    adverse_gap_pct * 100,
+                    required_gap_pct * 100,
+                    multiplier,
+                )
+                return True, "first_add_block_bypassed"
             logger.warning(
-                "FIRST_ADD_BLOCK_BYPASSED | side=%s price=%.4f layers=%s target_layer=%s last_entry=%.4f first_elapsed_seconds=%.1f required_seconds=%s adverse_gap_pct=%.4f%% required_gap_pct=%.4f%% multiplier=%.2f",
+                "ADD_FREEZE_BYPASSED | side=%s price=%.4f layers=%s target_layer=%s last_entry=%.4f freeze_remaining_seconds=%.1f adverse_gap_pct=%.4f%% required_gap_pct=%.4f%% multiplier=%.2f penalty_count=%s",
                 side,
                 price,
                 self.state.layers,
                 target_layer,
                 last,
-                first_elapsed_seconds,
-                self.config.first_add_block_seconds,
+                self._add_freeze_remaining_seconds(ts_ms),
                 adverse_gap_pct * 100,
                 required_gap_pct * 100,
-                self.first_add_block_bypass_multiplier,
+                multiplier,
+                self.state.add_freeze_penalty_count,
             )
-            return True, "first_add_block_bypassed"
+            return True, "add_freeze_bypassed"
 
         if self.state.layers == 1:
             return True, "ok"
@@ -134,11 +185,55 @@ class BollCvdShockReclaimStrategy(BollCvdReclaimStrategy):
         if self.state.layers >= 2:
             elapsed_seconds = self._add_elapsed_seconds(ts_ms)
             adverse_gap_pct = self._adverse_gap_pct(side, price)
-            bypass_gap_pct = self._add_min_interval_bypass_gap_pct_for_target_layer(target_layer)
+            bypass_gap_pct = self._add_layer_gap_pct_for_target_layer(target_layer) * self.config.add_min_interval_bypass_multiplier
             if elapsed_seconds < self.config.add_min_interval_seconds and adverse_gap_pct < bypass_gap_pct:
                 return False, "add_interval"
 
         return True, "ok"
+
+    def _add_freeze_active(self, ts_ms: int) -> bool:
+        return bool(
+            self.config.add_freeze_chain_enabled
+            and int(getattr(self.state, "add_freeze_until_ts_ms", 0) or 0) > ts_ms
+        )
+
+    def _add_freeze_remaining_seconds(self, ts_ms: int) -> float:
+        until = int(getattr(self.state, "add_freeze_until_ts_ms", 0) or 0)
+        return max((until - ts_ms) / 1000, 0.0)
+
+    def _reset_add_freeze_if_expired(self, ts_ms: int) -> None:
+        if int(getattr(self.state, "add_freeze_until_ts_ms", 0) or 0) <= ts_ms:
+            self.state.add_freeze_until_ts_ms = 0
+            self.state.add_freeze_penalty_count = 0
+
+    def _active_add_freeze_bypass_multiplier(self) -> float:
+        penalty = int(getattr(self.state, "add_freeze_penalty_count", 0) or 0)
+        if self.state.layers == 1 and penalty <= 0:
+            return self.first_add_block_bypass_multiplier
+        return float(self.config.add_min_interval_bypass_multiplier) + penalty
+
+    def _extend_add_freeze_after_successful_add(self, ts_ms: int, *, was_active_freeze: bool) -> None:
+        if not self.config.add_freeze_chain_enabled:
+            return
+        extension_ms = int(self.config.add_min_interval_seconds * 1000)
+        if extension_ms <= 0:
+            return
+        if was_active_freeze:
+            base_until = max(int(self.state.add_freeze_until_ts_ms or 0), ts_ms)
+            self.state.add_freeze_until_ts_ms = base_until + extension_ms
+            self.state.add_freeze_penalty_count = int(self.state.add_freeze_penalty_count or 0) + 1
+        else:
+            self.state.add_freeze_until_ts_ms = ts_ms + extension_ms
+            self.state.add_freeze_penalty_count = 0
+        logger.warning(
+            "ADD_FREEZE_EXTENDED | layers=%s freeze_until_ts_ms=%s freeze_remaining_seconds=%.1f penalty_count=%s extension_seconds=%s was_active_freeze=%s",
+            self.state.layers,
+            self.state.add_freeze_until_ts_ms,
+            self._add_freeze_remaining_seconds(ts_ms),
+            self.state.add_freeze_penalty_count,
+            self.config.add_min_interval_seconds,
+            was_active_freeze,
+        )
 
     def _first_entry_elapsed_seconds(self, ts_ms: int) -> float:
         first_entry_ts_ms = int(getattr(self.state, "first_entry_ts_ms", 0) or 0)
@@ -150,6 +245,26 @@ class BollCvdShockReclaimStrategy(BollCvdReclaimStrategy):
         return self._add_layer_gap_pct_for_target_layer(target_layer) * self.first_add_block_bypass_multiplier
 
     def _log_add_timing_skipped(self, side: PositionSide, reason: str, price: float, ts_ms: int, target_layer: int) -> None:
+        if reason == "add_freeze":
+            last = self.state.last_entry_price if self.state.last_entry_price is not None else 0.0
+            adverse_gap_pct = self._adverse_gap_pct(side, price)
+            multiplier = self._active_add_freeze_bypass_multiplier()
+            required_gap_pct = self._add_layer_gap_pct_for_target_layer(target_layer) * multiplier
+            logger.info(
+                "ADD_SKIPPED | reason=add_freeze side=%s price=%.4f layers=%s target_layer=%s last_entry=%.4f freeze_remaining_seconds=%.1f required_seconds=%s adverse_gap_pct=%.4f%% required_gap_pct=%.4f%% multiplier=%.2f penalty_count=%s",
+                side,
+                price,
+                self.state.layers,
+                target_layer,
+                last,
+                self._add_freeze_remaining_seconds(ts_ms),
+                self.config.add_min_interval_seconds,
+                adverse_gap_pct * 100,
+                required_gap_pct * 100,
+                multiplier,
+                self.state.add_freeze_penalty_count,
+            )
+            return
         if reason == "first_add_block":
             last = self.state.last_entry_price if self.state.last_entry_price is not None else 0.0
             first_elapsed_seconds = self._first_entry_elapsed_seconds(ts_ms)

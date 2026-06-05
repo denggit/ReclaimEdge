@@ -66,8 +66,10 @@ def cvd_snapshot(*, up_burst: bool = False, down_burst: bool = False) -> CvdSnap
     )
 
 
-def strategy() -> BollCvdShockReclaimStrategy:
-    config = BollCvdReclaimStrategyConfig(min_outside_pct=0.001)
+def strategy(**overrides) -> BollCvdShockReclaimStrategy:
+    values = dict(min_outside_pct=0.001)
+    values.update(overrides)
+    config = BollCvdReclaimStrategyConfig(**values)
     sizer = SimplePositionSizer(SimplePositionSizerConfig())
     return BollCvdShockReclaimStrategy(config, sizer)
 
@@ -118,6 +120,109 @@ class BollCvdShockReclaimStrategyTest(unittest.TestCase):
         self.assertEqual(first, [])
         self.assertEqual(second, [])
         self.assertEqual(third, [])
+
+    def test_first_entry_starts_add_freeze_chain(self) -> None:
+        strat = strategy(first_add_block_seconds=2700, add_min_interval_seconds=1800)
+        ts_ms = 100_000
+
+        strat._open_position("LONG", "OPEN_LONG", 100.0, ts_ms, boll_snapshot(), cvd_snapshot(), "test")
+
+        self.assertEqual(strat.state.first_entry_ts_ms, ts_ms)
+        self.assertEqual(strat.state.add_freeze_until_ts_ms, ts_ms + 2_700_000)
+        self.assertEqual(strat.state.add_freeze_penalty_count, 0)
+
+    def test_first_add_in_freeze_requires_first_bypass_multiplier(self) -> None:
+        strat = strategy(first_add_block_seconds=2700, add_layer_gap_pct=0.003)
+        strat.state.layers = 1
+        strat.state.last_entry_price = 100.0
+        strat.state.last_order_ts_ms = 100_000
+        strat.state.first_entry_ts_ms = 100_000
+        strat.state.add_freeze_until_ts_ms = 100_000 + 2_700_000
+        strat.first_add_block_bypass_multiplier = 5.0
+
+        ok, reason = strat._add_timing_passed("LONG", 98.6, 200_000, 2)
+
+        self.assertFalse(ok)
+        self.assertEqual(reason, "add_freeze")
+
+    def test_first_add_in_freeze_bypasses_at_5x_and_extends_freeze(self) -> None:
+        strat = strategy(first_add_block_seconds=2700, add_min_interval_seconds=1800, add_layer_gap_pct=0.003)
+        ts_ms = 100_000
+        strat._open_position("LONG", "OPEN_LONG", 100.0, ts_ms, boll_snapshot(), cvd_snapshot(), "test")
+        old_freeze_until = strat.state.add_freeze_until_ts_ms
+        add_ts_ms = old_freeze_until - 300_000
+        ok, reason = strat._add_timing_passed("LONG", 98.5, add_ts_ms, 2)
+        self.assertTrue(ok)
+        self.assertEqual(reason, "first_add_block_bypassed")
+
+        strat._open_position("LONG", "ADD_LONG", 98.5, add_ts_ms, boll_snapshot(), cvd_snapshot(), "add")
+
+        self.assertEqual(strat.state.add_freeze_until_ts_ms, old_freeze_until + 1_800_000)
+        self.assertEqual(strat.state.add_freeze_penalty_count, 1)
+        self.assertEqual(strat.state.first_entry_ts_ms, ts_ms)
+
+    def test_second_add_same_freeze_requires_3x(self) -> None:
+        strat = strategy(add_layer_gap_pct=0.003, add_min_interval_bypass_multiplier=2.0)
+        strat.state.layers = 2
+        strat.state.last_entry_price = 100.0
+        strat.state.add_freeze_until_ts_ms = 2_000_000
+        strat.state.add_freeze_penalty_count = 1
+
+        too_small, reason = strat._add_timing_passed("LONG", 99.2, 1_000_000, 3)
+        enough, enough_reason = strat._add_timing_passed("LONG", 99.1, 1_000_000, 3)
+
+        self.assertFalse(too_small)
+        self.assertEqual(reason, "add_freeze")
+        self.assertTrue(enough)
+        self.assertEqual(enough_reason, "add_freeze_bypassed")
+
+    def test_penalty_increments_to_4x_after_second_freeze_add(self) -> None:
+        strat = strategy(add_layer_gap_pct=0.003, add_min_interval_seconds=1800, add_min_interval_bypass_multiplier=2.0)
+        strat.state.side = "LONG"
+        strat.state.layers = 2
+        strat.state.last_entry_price = 100.0
+        strat.state.total_entry_qty = 1.0
+        strat.state.total_entry_notional = 100.0
+        strat.state.avg_entry_price = 100.0
+        strat.state.add_freeze_until_ts_ms = 2_000_000
+        strat.state.add_freeze_penalty_count = 1
+
+        strat._open_position("LONG", "ADD_LONG", 99.1, 1_000_000, boll_snapshot(), cvd_snapshot(), "add")
+
+        self.assertEqual(strat.state.add_freeze_penalty_count, 2)
+        self.assertAlmostEqual(strat._active_add_freeze_bypass_multiplier(), 4.0)
+
+    def test_freeze_expiry_resets_penalty(self) -> None:
+        strat = strategy(add_layer_gap_pct=0.003)
+        strat.state.layers = 2
+        strat.state.last_entry_price = 100.0
+        strat.state.last_order_ts_ms = 900_000
+        strat.state.add_freeze_until_ts_ms = 1_000_000
+        strat.state.add_freeze_penalty_count = 2
+
+        ok, reason = strat._add_timing_passed("LONG", 99.39, 1_000_001, 3)
+
+        self.assertTrue(ok)
+        self.assertEqual(reason, "ok")
+        self.assertEqual(strat.state.add_freeze_until_ts_ms, 0)
+        self.assertEqual(strat.state.add_freeze_penalty_count, 0)
+
+    def test_add_after_freeze_inactive_starts_new_interval_freeze(self) -> None:
+        strat = strategy(add_min_interval_seconds=1800)
+        strat.state.side = "LONG"
+        strat.state.layers = 2
+        strat.state.last_entry_price = 100.0
+        strat.state.total_entry_qty = 1.0
+        strat.state.total_entry_notional = 100.0
+        strat.state.avg_entry_price = 100.0
+        strat.state.add_freeze_until_ts_ms = 0
+        strat.state.add_freeze_penalty_count = 0
+
+        strat._open_position("LONG", "ADD_LONG", 99.0, 3_000_000, boll_snapshot(), cvd_snapshot(), "add")
+
+        self.assertEqual(strat.state.add_freeze_until_ts_ms, 3_000_000 + 1_800_000)
+        self.assertEqual(strat.state.add_freeze_penalty_count, 0)
+        self.assertAlmostEqual(strat._active_add_freeze_bypass_multiplier(), 2.0)
 
 
 if __name__ == "__main__":

@@ -38,6 +38,8 @@ class LivePositionState:
     tp_mode: str = "MIDDLE"
     last_order_ts_ms: int = 0
     first_entry_ts_ms: int = 0
+    add_freeze_until_ts_ms: int = 0
+    add_freeze_penalty_count: int = 0
     last_tp_update_ts_ms: int = 0
     last_tp_update_candle_ts_ms: int = 0
     near_tp_armed: bool = False
@@ -76,6 +78,8 @@ class LivePositionState:
     three_stage_post_tp1_protective_sl_order_id: str | None = None
     three_stage_post_tp1_sl_extension_triggered: bool = False
     three_stage_post_tp1_protected: bool = False
+    three_stage_pre_tp1_degrade_stage: str | None = None
+    three_stage_pre_tp1_degraded_ts_ms: int = 0
     trend_runner_active: bool = False
     trend_runner_trend_start_ts_ms: int = 0
     trend_runner_adjust_count: int = 0
@@ -171,6 +175,8 @@ class LiveStateStore:
             tp_mode=strategy_state.tp_mode,
             last_order_ts_ms=int(strategy_state.last_order_ts_ms or 0),
             first_entry_ts_ms=int(getattr(strategy_state, "first_entry_ts_ms", 0) or 0),
+            add_freeze_until_ts_ms=int(getattr(strategy_state, "add_freeze_until_ts_ms", 0) or 0),
+            add_freeze_penalty_count=int(getattr(strategy_state, "add_freeze_penalty_count", 0) or 0),
             last_tp_update_ts_ms=int(strategy_state.last_tp_update_ts_ms or 0),
             last_tp_update_candle_ts_ms=int(getattr(strategy_state, "last_tp_update_candle_ts_ms", 0) or 0),
             near_tp_armed=bool(getattr(strategy_state, "near_tp_armed", False)),
@@ -209,6 +215,8 @@ class LiveStateStore:
             three_stage_post_tp1_protective_sl_order_id=getattr(strategy_state, "three_stage_post_tp1_protective_sl_order_id", None),
             three_stage_post_tp1_sl_extension_triggered=bool(getattr(strategy_state, "three_stage_post_tp1_sl_extension_triggered", False)),
             three_stage_post_tp1_protected=bool(getattr(strategy_state, "three_stage_post_tp1_protected", False)),
+            three_stage_pre_tp1_degrade_stage=getattr(strategy_state, "three_stage_pre_tp1_degrade_stage", None),
+            three_stage_pre_tp1_degraded_ts_ms=int(getattr(strategy_state, "three_stage_pre_tp1_degraded_ts_ms", 0) or 0),
             trend_runner_active=bool(getattr(strategy_state, "trend_runner_active", False)),
             trend_runner_trend_start_ts_ms=int(getattr(strategy_state, "trend_runner_trend_start_ts_ms", 0) or 0),
             trend_runner_adjust_count=int(getattr(strategy_state, "trend_runner_adjust_count", 0) or 0),

@@ -48,6 +48,9 @@ class IsolationTrader(Trader):
         self.three_stage_post_tp1_protective_sl_order_id = None
         self.trend_runner_sl_order_id = None
         self.cancelled: list[str] = []
+        self.cancelled_middle_runner_stops: list[str | None] = []
+        self.cancelled_post_tp1_stops: list[str | None] = []
+        self.cancelled_trend_runner_stops: list[str | None] = []
         self.placed = []
 
     async def fetch_position_snapshot(self) -> PositionSnapshot:
@@ -69,6 +72,24 @@ class IsolationTrader(Trader):
     async def _place_reduce_only_take_profit_orders(self, intent_: TradeIntent, specs):  # type: ignore[no-untyped-def]
         self.placed = specs
         return ["new-tp"]
+
+    async def cancel_middle_runner_protective_stop(self, order_id: str | None) -> bool:
+        self.cancelled_middle_runner_stops.append(order_id)
+        if self.middle_runner_protective_sl_order_id == order_id:
+            self.middle_runner_protective_sl_order_id = None
+        return True
+
+    async def cancel_three_stage_post_tp1_protective_stop(self, order_id: str | None) -> bool:
+        self.cancelled_post_tp1_stops.append(order_id)
+        if self.three_stage_post_tp1_protective_sl_order_id == order_id:
+            self.three_stage_post_tp1_protective_sl_order_id = None
+        return True
+
+    async def cancel_trend_runner_protective_stop(self, order_id: str | None) -> bool:
+        self.cancelled_trend_runner_stops.append(order_id)
+        if self.trend_runner_sl_order_id == order_id:
+            self.trend_runner_sl_order_id = None
+        return True
 
 
 @pytest.mark.asyncio
@@ -92,6 +113,54 @@ async def test_update_tp_uses_core_contracts_not_okx_net_contracts() -> None:
     assert result.ok
     assert result.contracts == "10"
     assert trader.placed == [("final", Decimal("10"), 101.0)]
+
+
+@pytest.mark.asyncio
+async def test_three_stage_degrade_to_single_does_not_cancel_sidecar_tp() -> None:
+    trader = IsolationTrader()
+    trader.middle_runner_protective_sl_order_id = "middle-sl"
+    trader.three_stage_post_tp1_protective_sl_order_id = "post-tp1-sl"
+    trader.trend_runner_sl_order_id = "trend-sl"
+
+    result = await trader.replace_take_profit(
+        intent(
+            reason="three_stage_pre_tp1_degraded_to_single",
+            protected_order_ids=("sidecar-tp",),
+            managed_core_contracts="10",
+            tp_plan="SINGLE",
+        )
+    )
+
+    assert result.ok
+    assert trader.cancelled == ["core-old"]
+    assert "sidecar-tp" not in trader.cancelled
+    assert trader.cancelled_middle_runner_stops == ["middle-sl"]
+    assert trader.cancelled_post_tp1_stops == ["post-tp1-sl"]
+    assert trader.cancelled_trend_runner_stops == ["trend-sl"]
+    assert trader.placed == [("final", Decimal("10"), 101.0)]
+
+
+@pytest.mark.asyncio
+async def test_three_stage_degrade_to_middle_runner_does_not_cancel_sidecar_tp() -> None:
+    trader = IsolationTrader()
+    trader.three_stage_post_tp1_protective_sl_order_id = "post-tp1-sl"
+
+    result = await trader.replace_take_profit(
+        intent(
+            reason="three_stage_pre_tp1_degraded_to_middle_runner",
+            protected_order_ids=("sidecar-tp",),
+            managed_core_contracts="10",
+            tp_plan="MIDDLE_RUNNER",
+            partial_tp_price=100.0,
+            partial_tp_ratio=0.8,
+        )
+    )
+
+    assert result.ok
+    assert trader.cancelled == ["core-old"]
+    assert "sidecar-tp" not in trader.cancelled
+    assert trader.cancelled_post_tp1_stops == ["post-tp1-sl"]
+    assert trader.placed == [("middle", Decimal("8.00"), 100.0), ("runner", Decimal("2.00"), 101.0)]
 
 
 class UnknownReduceOnlyTrader(IsolationTrader):
