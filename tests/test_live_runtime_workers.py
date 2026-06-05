@@ -2274,6 +2274,132 @@ class LiveRuntimeWorkerTest(unittest.IsolatedAsyncioTestCase):
         result = trusted_startup_saved_state(saved, pos)
         self.assertIsNone(result, "Zero avg_entry in saved_state must be rejected")
 
+    # ── expected remaining qty after partial exits ──────────────────────
+
+    def test_trusted_startup_saved_state_after_three_stage_tp1_uses_remaining_qty(self) -> None:
+        """After TP1 consumed, expected qty = total_entry * (tp2_ratio + runner_ratio)."""
+        saved = types.SimpleNamespace(
+            position_id="pos-1",
+            side="LONG",
+            layers=1,
+            avg_entry_price=100.0,
+            total_entry_qty=10.0,
+            three_stage_runner_enabled_for_position=True,
+            three_stage_tp1_consumed=True,
+            three_stage_tp2_consumed=False,
+            three_stage_tp1_ratio=0.6,
+            three_stage_tp2_ratio=0.2,
+            three_stage_runner_ratio=0.2,
+            trend_runner_active=False,
+            sidecar_enabled_for_position=False,
+        )
+        # expected remaining: 10 * (0.2 + 0.2) = 4.0
+        pos = PositionSnapshot("LONG", Decimal("6"), 100.0, 4.0, Decimal("6"))
+
+        result = trusted_startup_saved_state(saved, pos)
+        self.assertIs(result, saved,
+                      "Three-Stage TP1 consumed must use remaining qty, not total_entry_qty=10")
+
+    def test_trusted_startup_saved_state_after_three_stage_tp2_uses_runner_qty(self) -> None:
+        """After TP2 consumed, expected qty = total_entry * runner_ratio."""
+        saved = types.SimpleNamespace(
+            position_id="pos-1",
+            side="LONG",
+            layers=1,
+            avg_entry_price=100.0,
+            total_entry_qty=10.0,
+            three_stage_runner_enabled_for_position=True,
+            three_stage_tp1_consumed=True,
+            three_stage_tp2_consumed=True,
+            three_stage_tp1_ratio=0.6,
+            three_stage_tp2_ratio=0.2,
+            three_stage_runner_ratio=0.2,
+            trend_runner_active=True,
+            sidecar_enabled_for_position=False,
+        )
+        # expected remaining: 10 * 0.2 = 2.0
+        pos = PositionSnapshot("LONG", Decimal("6"), 100.0, 2.0, Decimal("6"))
+
+        result = trusted_startup_saved_state(saved, pos)
+        self.assertIs(result, saved,
+                      "Three-Stage TP2 consumed must use runner qty, not total_entry_qty=10")
+
+    def test_trusted_startup_saved_state_middle_runner_active_uses_keep_ratio(self) -> None:
+        """Middle Runner active: expected qty = total_entry * keep_ratio."""
+        saved = types.SimpleNamespace(
+            position_id="pos-1",
+            side="LONG",
+            layers=1,
+            avg_entry_price=100.0,
+            total_entry_qty=10.0,
+            middle_runner_enabled_for_position=True,
+            middle_runner_pending=False,
+            middle_runner_active=True,
+            middle_runner_keep_ratio=0.2,
+            sidecar_enabled_for_position=False,
+        )
+        # expected remaining: 10 * 0.2 = 2.0
+        pos = PositionSnapshot("LONG", Decimal("6"), 100.0, 2.0, Decimal("6"))
+
+        result = trusted_startup_saved_state(saved, pos)
+        self.assertIs(result, saved,
+                      "Middle Runner active must use keep_ratio qty, not total_entry_qty=10")
+
+    def test_trusted_startup_saved_state_prefers_core_eth_qty(self) -> None:
+        """core_eth_qty takes priority over total_entry_qty for remaining qty."""
+        saved = types.SimpleNamespace(
+            position_id="pos-1",
+            side="LONG",
+            layers=1,
+            avg_entry_price=100.0,
+            total_entry_qty=10.0,
+            core_eth_qty=4.0,
+            sidecar_enabled_for_position=False,
+        )
+        pos = PositionSnapshot("LONG", Decimal("6"), 100.0, 4.0, Decimal("6"))
+
+        result = trusted_startup_saved_state(saved, pos)
+        self.assertIs(result, saved, "core_eth_qty must be preferred over total_entry_qty=10")
+
+    def test_trusted_startup_saved_state_position_cost_remaining_qty_fallback(self) -> None:
+        """position_cost_remaining_qty used when core_eth_qty is zero/absent."""
+        saved = types.SimpleNamespace(
+            position_id="pos-1",
+            side="LONG",
+            layers=1,
+            avg_entry_price=100.0,
+            total_entry_qty=10.0,
+            core_eth_qty=0.0,
+            position_cost_remaining_qty=4.0,
+            sidecar_enabled_for_position=False,
+        )
+        pos = PositionSnapshot("LONG", Decimal("6"), 100.0, 4.0, Decimal("6"))
+
+        result = trusted_startup_saved_state(saved, pos)
+        self.assertIs(result, saved, "position_cost_remaining_qty must be used when core_eth_qty=0")
+
+    def test_trusted_startup_saved_state_remaining_qty_still_rejects_mismatch(self) -> None:
+        """Even with correct remaining qty calc, a genuine mismatch is still rejected."""
+        saved = types.SimpleNamespace(
+            position_id="pos-1",
+            side="LONG",
+            layers=1,
+            avg_entry_price=100.0,
+            total_entry_qty=10.0,
+            three_stage_runner_enabled_for_position=True,
+            three_stage_tp1_consumed=True,
+            three_stage_tp2_consumed=False,
+            three_stage_tp1_ratio=0.6,
+            three_stage_tp2_ratio=0.2,
+            three_stage_runner_ratio=0.2,
+            sidecar_enabled_for_position=False,
+        )
+        # expected remaining: 10 * (0.2 + 0.2) = 4.0, but OKX qty = 6.0 → diff 50%
+        pos = PositionSnapshot("LONG", Decimal("6"), 100.0, 6.0, Decimal("6"))
+
+        result = trusted_startup_saved_state(saved, pos)
+        self.assertIsNone(result, "Genuine remaining qty mismatch must still be rejected")
+
 
 if __name__ == "__main__":
     unittest.main()
