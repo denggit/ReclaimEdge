@@ -1470,7 +1470,11 @@ class Trader:
         return res
 
     def headers(self, method: str, endpoint: str, body: str) -> dict[str, str]:
-        timestamp = datetime.datetime.utcnow().isoformat(timespec="milliseconds") + "Z"
+        timestamp = (
+            datetime.datetime.now(datetime.timezone.utc)
+            .isoformat(timespec="milliseconds")
+            .replace("+00:00", "Z")
+        )
         message = timestamp + method + endpoint + body
         digest = hmac.new(self.secret_key.encode("utf-8"), message.encode("utf-8"), digestmod="sha256").digest()
         signature = base64.b64encode(digest).decode("utf-8")
