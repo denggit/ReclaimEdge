@@ -3028,13 +3028,15 @@ async def account_position_sync_worker(
                     if pending_order_count > 0 and three_stage_event is not None:
                         logger.warning(
                             "THREE_STAGE_POSITION_REDUCTION_DETECTED_WITH_PENDING_ORDERS | "
-                            "event=%s pending_order_count=%s side=%s old_qty=%s new_qty=%s net_contracts=%s",
+                            "event=%s pending_order_count=%s side=%s old_total_eth_qty=%.8f new_core_eth_qty=%.8f core_contracts=%s net_contracts=%s sidecar_open_eth_qty=%.8f",
                             three_stage_event,
                             pending_order_count,
                             core_position.side,
-                            getattr(strategy.state, "total_entry_qty", 0.0),
+                            float(getattr(strategy.state, "total_entry_qty", 0.0) or 0.0),
+                            float(core_position.eth_qty or 0.0),
                             core_position.contracts,
                             position.contracts if position.has_position else 0,
+                            sidecar_open_qty(list(getattr(strategy.state, "sidecar_legs", []) or [])),
                         )
                     if three_stage_event is not None:
                         if three_stage_event in {"TP1", "TP1_TP2"} and three_stage_event != "TP1_TP2":

@@ -717,6 +717,78 @@ class SidecarSLNetContractsTest(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(net_contracts, Decimal("4"),
                            "Net contracts should be > core_remaining(4) when sidecar is open")
 
+    async def test_three_stage_tp1_pending_order_reduction_log_fields(self) -> None:
+        """Verify THREE_STAGE_POSITION_REDUCTION_DETECTED_WITH_PENDING_ORDERS log
+        uses correct, unambiguous field names (not mixed qty/contracts units)."""
+        net_contracts = Decimal("4")
+        core_eth_qty = 0.35  # Between TP1 threshold (≤0.43) and TP2 threshold (≤0.22)
+
+        class Tp1Trader(FullProtectiveTrader):
+            async def fetch_position_snapshot(inner_self) -> PositionSnapshot:
+                return PositionSnapshot("LONG", net_contracts, 100.0, core_eth_qty, net_contracts)
+
+        strategy = BollCvdShockReclaimStrategy(
+            BollCvdReclaimStrategyConfig(
+                three_stage_runner_enabled=True,
+                three_stage_post_tp1_protective_sl_enabled=True,
+            ),
+            SimplePositionSizer(SimplePositionSizerConfig()),
+        )
+        strategy.state = StrategyPositionState(
+            side="LONG", layers=1, total_entry_qty=1.0, total_entry_notional=100.0,
+            avg_entry_price=100.0, tp_price=110.0,
+            net_remaining_breakeven_price=99.0,
+            tp_plan="THREE_STAGE_RUNNER", three_stage_runner_enabled_for_position=True,
+            three_stage_tp1_price=101.0, three_stage_tp2_price=110.0,
+            three_stage_tp1_ratio=0.6, three_stage_tp2_ratio=0.2, three_stage_runner_ratio=0.2,
+            three_stage_tp1_consumed=False, three_stage_tp2_consumed=False,
+        )
+        trader = Tp1Trader()
+        journal = FakeJournal()
+        state_store = FakeStateStore()
+        latest_ts_ms = int(dt.datetime.now().timestamp() * 1000)
+        account_snapshot = AccountSnapshot(
+            None, 1000.0, 1000.0, asyncio.get_running_loop().time(), 0, 1,
+            latest_market_price=102.0, latest_market_price_ts_ms=latest_ts_ms,
+        )
+        execution_state = ExecutionState("pos-1", 1000.0)
+        execution_state.pending_order_count = 1
+
+        with self.assertLogs(level="WARNING") as log_ctx:
+            await self.run_account_sync_until(
+                lambda: len(trader.post_tp1_stop_orders) >= 1,
+                account_snapshot=account_snapshot, execution_state=execution_state,
+                trader=trader, strategy=strategy, journal=journal, state_store=state_store,
+            )
+
+        reduction_logs = [
+            r for r in log_ctx.output
+            if "THREE_STAGE_POSITION_REDUCTION_DETECTED_WITH_PENDING_ORDERS" in r
+        ]
+        self.assertEqual(len(reduction_logs), 1,
+                         "Must emit exactly one PENDING_ORDERS log")
+        log_line = reduction_logs[0]
+
+        # Verify new unambiguous field names are present
+        self.assertIn("old_total_eth_qty=", log_line,
+                      "Must use old_total_eth_qty (not old_qty)")
+        self.assertIn("new_core_eth_qty=", log_line,
+                      "Must use new_core_eth_qty (not new_qty)")
+        self.assertIn("core_contracts=", log_line)
+        self.assertIn("net_contracts=", log_line)
+        self.assertIn("sidecar_open_eth_qty=", log_line)
+
+        # Verify old ambiguous field names are NOT present
+        self.assertNotIn("old_qty=", log_line,
+                         "old_qty (ambiguous) must not appear in log")
+        self.assertNotIn("new_qty=", log_line,
+                         "new_qty (ambiguous) must not appear in log")
+
+        # Verify the pending order context is included
+        self.assertIn("pending_order_count=1", log_line)
+        self.assertIn("event=TP1", log_line)
+
+
     # ── Regression tests ──────────────────────────────────────────
 
     async def test_three_stage_tp1_already_consumed_does_not_repeat_journal(self) -> None:
