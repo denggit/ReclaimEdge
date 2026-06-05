@@ -1138,9 +1138,7 @@ class BollCvdReclaimStrategy:
                 partial_tp_price = None
                 partial_tp_ratio = 0.0
                 tp_plan = "SINGLE"
-                self.state.three_stage_pre_tp1_degrade_stage = "SINGLE"
-                self.state.three_stage_pre_tp1_degraded_ts_ms = ts_ms
-                reason_override = "three_stage_pre_tp1_degraded_to_single"
+                reason_override = "three_stage_middle_profit_insufficient_single_outer"
                 middle_profit_fallback_locked = True
 
             # Middle Runner pending (first close NOT done): reset
@@ -1162,10 +1160,7 @@ class BollCvdReclaimStrategy:
                 partial_tp_price = None
                 partial_tp_ratio = 0.0
                 tp_plan = "SINGLE"
-                if self.state.three_stage_pre_tp1_degrade_stage == "MIDDLE_RUNNER":
-                    self.state.three_stage_pre_tp1_degrade_stage = "SINGLE"
-                    self.state.three_stage_pre_tp1_degraded_ts_ms = ts_ms
-                    reason_override = "three_stage_pre_tp1_degraded_to_single"
+                reason_override = "middle_runner_middle_profit_insufficient_single_outer"
                 middle_profit_fallback_locked = True
 
             # SPLIT partial NOT consumed: fall back to SINGLE outer
@@ -1405,12 +1400,14 @@ class BollCvdReclaimStrategy:
             return None
 
         age = self._three_stage_pre_tp1_age_seconds(ts_ms)
+        if self.state.three_stage_pre_tp1_degrade_stage == "SINGLE":
+            return None
         if self.state.three_stage_pre_tp1_degrade_stage == "MIDDLE_RUNNER":
             if age >= self.config.three_stage_pre_tp1_single_after_seconds:
                 return "SINGLE"
             return None
 
-        if not self.state.three_stage_runner_enabled_for_position:
+        if not self.state.three_stage_runner_enabled_for_position and not self.config.three_stage_runner_enabled:
             return None
         if age >= self.config.three_stage_pre_tp1_single_after_seconds:
             return "SINGLE"

@@ -163,6 +163,31 @@ async def test_three_stage_degrade_to_middle_runner_does_not_cancel_sidecar_tp()
     assert trader.placed == [("middle", Decimal("8.00"), 100.0), ("runner", Decimal("2.00"), 101.0)]
 
 
+@pytest.mark.asyncio
+async def test_three_stage_degrade_cancels_stale_sl_even_if_intent_protected_ids_contains_them() -> None:
+    trader = IsolationTrader()
+    trader.middle_runner_protective_sl_order_id = "middle-sl"
+    trader.three_stage_post_tp1_protective_sl_order_id = "post-tp1-sl"
+    trader.trend_runner_sl_order_id = "trend-sl"
+
+    result = await trader.replace_take_profit(
+        intent(
+            reason="three_stage_pre_tp1_degraded_to_single",
+            protected_order_ids=("sidecar-tp", "middle-sl", "post-tp1-sl", "trend-sl"),
+            managed_core_contracts="10",
+            tp_plan="SINGLE",
+        )
+    )
+
+    assert result.ok
+    assert trader.cancelled == ["core-old"]
+    assert "sidecar-tp" not in trader.cancelled
+    assert trader.cancelled_middle_runner_stops == ["middle-sl"]
+    assert trader.cancelled_post_tp1_stops == ["post-tp1-sl"]
+    assert trader.cancelled_trend_runner_stops == ["trend-sl"]
+    assert trader.placed == [("final", Decimal("10"), 101.0)]
+
+
 class UnknownReduceOnlyTrader(IsolationTrader):
     async def fetch_pending_orders(self):  # type: ignore[no-untyped-def]
         return [{"instId": self.symbol, "reduceOnly": "true", "ordId": "unknown"}]
