@@ -3475,12 +3475,14 @@ async def account_position_sync_worker(
             if cash_transfer_payload is not None:
                 journal.record_cash_transfer(**cash_transfer_payload)
                 if rolling_loss_guard is not None and rolling_loss_guard.state is not None and rolling_loss_guard.state.enabled:
-                    transfer_flat_equity = cash_transfer_payload.get("equity_after") or cash_transfer_payload.get("cash_after")
-                    if transfer_flat_equity is not None and not core_position.has_position:
+                    transfer_equity_after = cash_transfer_payload.get("equity_after")
+                    transfer_cash_after = cash_transfer_payload.get("cash_after")
+                    new_reference = transfer_equity_after if transfer_equity_after is not None else transfer_cash_after
+                    if new_reference is not None:
                         rolling_loss_guard.adjust_flat_reference_for_cash_transfer(
                             now_ms=utc_ms(),
-                            new_flat_equity=float(transfer_flat_equity),
-                            reason=str(cash_transfer_payload.get("reason") or "cash_transfer"),
+                            new_flat_equity=float(new_reference),
+                            reason=str(cash_transfer_payload.get("reason") or "safe_flat_cash_transfer"),
                         )
             if cash_drift_payload is not None:
                 journal.record_account_cash_drift(**cash_drift_payload)

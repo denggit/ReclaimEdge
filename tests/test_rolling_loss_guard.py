@@ -191,6 +191,65 @@ class RollingLossGuardTest(unittest.IsolatedAsyncioTestCase):
             self.assertAlmostEqual(second.cumulative_retention, 0.81)
             self.assertAlmostEqual(second.drawdown_pct, 0.19)
 
+    async def test_safe_flat_cash_transfer_adjusts_rolling_drawdown_reference_in_worker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            guard = self.make_guard(Path(tmp), soft_halt_pct=0.15, hard_halt_pct=0.25)
+            guard.load_or_initialize(NOW_MS, 100.0)
+            first = guard.evaluate_after_flat(now_ms=NOW_MS + 1, flat_equity=90.0, flat_event_id="flat-1")
+            self.assertAlmostEqual(first.drawdown_pct, 0.10)
+            self.assertAlmostEqual(guard.state.reference_flat_equity, 90.0)
+
+            transfer_recorded = asyncio.Event()
+
+            class RecordingJournal(FakeJournal):
+                def record_cash_transfer(inner_self, **kwargs) -> None:  # type: ignore[no-untyped-def]
+                    super().record_cash_transfer(**kwargs)
+                    transfer_recorded.set()
+
+            trader = FakeTrader(position=flat_position(), equity=100.0, cash=100.0)
+            journal = RecordingJournal()
+
+            with patch.dict(
+                os.environ,
+                {
+                    "CASH_TRANSFER_MIN_DELTA_USDT": "0.5",
+                    "CASH_TRANSFER_SETTLE_SECONDS": "0",
+                    "CASH_TRANSFER_AFTER_FLAT_COOLDOWN_SECONDS": "0",
+                    "CASH_DRIFT_MIN_DELTA_USDT": "0.5",
+                },
+            ):
+                task = asyncio.create_task(
+                    account_position_sync_worker(
+                        state_lock=asyncio.Lock(),
+                        account_snapshot=AccountSnapshot(flat_position(), 90.0, 90.0, asyncio.get_running_loop().time(), 0, 1),
+                        execution_state=ExecutionState(None, None),
+                        trader=trader,  # type: ignore[arg-type]
+                        sizer=SimplePositionSizer(SimplePositionSizerConfig()),
+                        strategy=FakeStrategy(),  # type: ignore[arg-type]
+                        journal=journal,  # type: ignore[arg-type]
+                        state_store=FakeStateStore(),  # type: ignore[arg-type]
+                        position_sync_seconds=0,
+                        account_sync_seconds=0,
+                        cash_log_min_delta_usdt=999,
+                        rolling_loss_guard=guard,
+                        email_sender=None,
+                    )
+                )
+                await asyncio.wait_for(transfer_recorded.wait(), timeout=1)
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+
+            self.assertEqual(len(journal.cash_transfers), 1)
+            self.assertEqual(journal.cash_transfers[0]["cash_after"], 100.0)
+            self.assertAlmostEqual(guard.state.reference_flat_equity, 100.0)
+            self.assertAlmostEqual(guard.state.cumulative_retention, 0.90)
+            self.assertAlmostEqual(guard.state.drawdown_pct, 0.10)
+
+            second = guard.evaluate_after_flat(now_ms=NOW_MS + 2, flat_equity=90.0, flat_event_id="flat-2")
+            self.assertAlmostEqual(second.cumulative_retention, 0.81)
+            self.assertAlmostEqual(second.drawdown_pct, 0.19)
+
     def test_profit_recovers_drawdown_and_resets_flags(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             guard = self.make_guard(Path(tmp), warn_pct=0.10, soft_halt_pct=0.15)
@@ -260,6 +319,7 @@ class RollingLossGuardTest(unittest.IsolatedAsyncioTestCase):
             )
             trader = FakeTrader(position=live_position(), equity=120.0, cash=120.0)
             execution_state = ExecutionState("pos-1", 100.0)
+            journal = FakeJournal()
 
             with patch.dict(
                 os.environ,
@@ -278,7 +338,7 @@ class RollingLossGuardTest(unittest.IsolatedAsyncioTestCase):
                         trader=trader,  # type: ignore[arg-type]
                         sizer=SimplePositionSizer(SimplePositionSizerConfig()),
                         strategy=strategy,  # type: ignore[arg-type]
-                        journal=FakeJournal(),  # type: ignore[arg-type]
+                        journal=journal,  # type: ignore[arg-type]
                         state_store=FakeStateStore(),  # type: ignore[arg-type]
                         position_sync_seconds=0,
                         account_sync_seconds=0,
@@ -294,6 +354,8 @@ class RollingLossGuardTest(unittest.IsolatedAsyncioTestCase):
                     await task
 
             self.assertAlmostEqual(guard.state.reference_flat_equity, 100.0)
+            self.assertEqual(journal.cash_transfers, [])
+            self.assertEqual(len(journal.cash_drifts), 1)
 
     def test_old_state_migrates_without_crash(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
