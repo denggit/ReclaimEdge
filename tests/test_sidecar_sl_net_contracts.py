@@ -566,3 +566,195 @@ class SidecarSLNetContractsTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("net_contracts", pp)
         self.assertIn("sl_contracts", pp)
         self.assertIn("manual_intervention_required", pp)
+
+    # ── TP1 detection with pending orders ──────────────────────────
+
+    async def test_three_stage_tp1_detected_even_when_pending_orders_exist(self) -> None:
+        """TP1 position reduction must be detected and protective SL placed
+        even when pending_order_count > 0 (e.g. TP2 order still active).
+        eth_qty=0.35 sits between TP1 threshold (≤0.43) and TP2 threshold (≤0.22)."""
+        net_contracts = Decimal("4")  # ~0.35 eth at contract multiplier
+        core_eth_qty = 0.35  # Between after_tp1(0.4)+tolerance(0.03)=0.43 and after_tp2(0.2)+tolerance(0.02)=0.22
+
+        class Tp1Trader(FullProtectiveTrader):
+            async def fetch_position_snapshot(inner_self) -> PositionSnapshot:
+                return PositionSnapshot("LONG", net_contracts, 100.0, core_eth_qty, net_contracts)
+
+        # No sidecar: position = core position directly
+        strategy = BollCvdShockReclaimStrategy(
+            BollCvdReclaimStrategyConfig(
+                three_stage_runner_enabled=True,
+                three_stage_post_tp1_protective_sl_enabled=True,
+            ),
+            SimplePositionSizer(SimplePositionSizerConfig()),
+        )
+        strategy.state = StrategyPositionState(
+            side="LONG", layers=1, total_entry_qty=1.0, total_entry_notional=100.0,
+            avg_entry_price=100.0, tp_price=110.0,
+            net_remaining_breakeven_price=99.0,
+            tp_plan="THREE_STAGE_RUNNER", three_stage_runner_enabled_for_position=True,
+            three_stage_tp1_price=101.0, three_stage_tp2_price=110.0,
+            three_stage_tp1_ratio=0.6, three_stage_tp2_ratio=0.2, three_stage_runner_ratio=0.2,
+            three_stage_tp1_consumed=False, three_stage_tp2_consumed=False,
+        )
+        trader = Tp1Trader()
+        journal = FakeJournal()
+        state_store = FakeStateStore()
+        latest_ts_ms = int(dt.datetime.now().timestamp() * 1000)
+        account_snapshot = AccountSnapshot(
+            None, 1000.0, 1000.0, asyncio.get_running_loop().time(), 0, 1,
+            latest_market_price=102.0, latest_market_price_ts_ms=latest_ts_ms,
+        )
+        execution_state = ExecutionState("pos-1", 1000.0)
+        execution_state.pending_order_count = 1  # Simulate TP2 order still pending
+
+        await self.run_account_sync_until(
+            lambda: len(trader.post_tp1_stop_orders) >= 1,
+            account_snapshot=account_snapshot, execution_state=execution_state,
+            trader=trader, strategy=strategy, journal=journal, state_store=state_store,
+        )
+
+        self.assertEqual(len(trader.post_tp1_stop_orders), 1,
+                         "Protective SL must be placed even when pending_order_count > 0")
+        self.assertEqual(trader.post_tp1_stop_orders[0]["contracts"], net_contracts,
+                         f"SL contracts must use OKX net contracts {net_contracts}")
+        self.assertTrue(strategy.state.three_stage_tp1_consumed,
+                        "TP1 consumed flag must be set")
+        self.assertTrue(strategy.state.partial_tp_consumed,
+                        "Partial TP consumed flag must be set")
+
+        placed_events = [e for e in journal.events if e[0] == "THREE_STAGE_TP1_PROTECTIVE_SL_PLACED"]
+        self.assertEqual(len(placed_events), 1,
+                         "SL placed event must be journaled even with pending orders")
+        pp = placed_events[0][1]
+        self.assertEqual(str(pp.get("contracts")), str(net_contracts))
+        self.assertIn("core_contracts", pp)
+        self.assertIn("net_contracts", pp)
+
+    async def test_three_stage_tp1_pending_tp2_order_does_not_block_sl(self) -> None:
+        """TP2 reduce-only order still pending does NOT block post-TP1 protective SL.
+        eth_qty=0.38 is above TP1 threshold (≤0.43) but above TP2 (≤0.22)."""
+        net_contracts = Decimal("4")
+        core_eth_qty = 0.38
+
+        class Tp1Trader(FullProtectiveTrader):
+            async def fetch_position_snapshot(inner_self) -> PositionSnapshot:
+                return PositionSnapshot("LONG", net_contracts, 100.0, core_eth_qty, net_contracts)
+
+        strategy = BollCvdShockReclaimStrategy(
+            BollCvdReclaimStrategyConfig(
+                three_stage_runner_enabled=True,
+                three_stage_post_tp1_protective_sl_enabled=True,
+            ),
+            SimplePositionSizer(SimplePositionSizerConfig()),
+        )
+        strategy.state = StrategyPositionState(
+            side="LONG", layers=1, total_entry_qty=1.0, total_entry_notional=100.0,
+            avg_entry_price=100.0, tp_price=110.0,
+            net_remaining_breakeven_price=99.0,
+            tp_plan="THREE_STAGE_RUNNER", three_stage_runner_enabled_for_position=True,
+            three_stage_tp1_price=101.0, three_stage_tp2_price=110.0,
+            three_stage_tp1_ratio=0.6, three_stage_tp2_ratio=0.2, three_stage_runner_ratio=0.2,
+            three_stage_tp1_consumed=False, three_stage_tp2_consumed=False,
+        )
+        trader = Tp1Trader()
+        journal = FakeJournal()
+        state_store = FakeStateStore()
+        latest_ts_ms = int(dt.datetime.now().timestamp() * 1000)
+        account_snapshot = AccountSnapshot(
+            None, 1000.0, 1000.0, asyncio.get_running_loop().time(), 0, 1,
+            latest_market_price=102.0, latest_market_price_ts_ms=latest_ts_ms,
+        )
+        execution_state = ExecutionState("pos-1", 1000.0)
+        execution_state.pending_order_count = 2  # Simulate TP2 + some other order pending
+
+        await self.run_account_sync_until(
+            lambda: len(trader.post_tp1_stop_orders) >= 1,
+            account_snapshot=account_snapshot, execution_state=execution_state,
+            trader=trader, strategy=strategy, journal=journal, state_store=state_store,
+        )
+
+        self.assertEqual(len(trader.post_tp1_stop_orders), 1,
+                         "Protective SL must be placed even with 2 pending orders (e.g. TP2)")
+        self.assertTrue(strategy.state.three_stage_tp1_consumed)
+        self.assertEqual(trader.post_tp1_stop_orders[0]["contracts"], net_contracts)
+
+    async def test_three_stage_tp1_sidecar_tp_pending_does_not_block_sl(self) -> None:
+        """Sidecar TP order pending does NOT block post-TP1 protective SL placement.
+        Net eth_qty=0.60, sidecar=0.20 → core=0.40 → triggers TP1 (≤0.43) but not TP2 (≤0.22)."""
+        net_contracts = Decimal("6")  # core_after_tp1(4) + sidecar(2) = 6
+        net_eth_qty = 0.60  # core=0.40 + sidecar=0.20
+
+        class Tp1Trader(FullProtectiveTrader):
+            async def fetch_position_snapshot(inner_self) -> PositionSnapshot:
+                return PositionSnapshot("LONG", net_contracts, 100.0, net_eth_qty, net_contracts)
+
+        strategy = self.three_stage_strategy_with_sidecar("LONG")
+        trader = Tp1Trader()
+        journal = FakeJournal()
+        state_store = FakeStateStore()
+        latest_ts_ms = int(dt.datetime.now().timestamp() * 1000)
+        account_snapshot = AccountSnapshot(
+            None, 1000.0, 1000.0, asyncio.get_running_loop().time(), 0, 1,
+            latest_market_price=102.0, latest_market_price_ts_ms=latest_ts_ms,
+        )
+        execution_state = ExecutionState("pos-1", 1000.0)
+        execution_state.pending_order_count = 3  # TP2 + sidecar TP + something else
+
+        await self.run_account_sync_until(
+            lambda: len(trader.post_tp1_stop_orders) >= 1,
+            account_snapshot=account_snapshot, execution_state=execution_state,
+            trader=trader, strategy=strategy, journal=journal, state_store=state_store,
+        )
+
+        self.assertEqual(len(trader.post_tp1_stop_orders), 1,
+                         "Protective SL must be placed even with sidecar TP pending")
+        self.assertTrue(strategy.state.three_stage_tp1_consumed)
+        # SL contracts must use OKX net contracts (core remaining + sidecar open)
+        self.assertEqual(trader.post_tp1_stop_orders[0]["contracts"], net_contracts,
+                         f"SL must cover net contracts {net_contracts} (core_remaining + sidecar)")
+        # Verify net_contracts > core_remaining (sidecar is open)
+        self.assertGreater(net_contracts, Decimal("4"),
+                           "Net contracts should be > core_remaining(4) when sidecar is open")
+
+    # ── Regression tests ──────────────────────────────────────────
+
+    async def test_three_stage_tp1_already_consumed_does_not_repeat_journal(self) -> None:
+        """Once TP1 is consumed, subsequent syncs must not re-journal or re-place SL."""
+        net_contracts = Decimal("4")
+
+        class Tp1Trader(FullProtectiveTrader):
+            async def fetch_position_snapshot(inner_self) -> PositionSnapshot:
+                return PositionSnapshot("LONG", net_contracts, 100.0, 0.4, net_contracts)
+
+        strategy = self.three_stage_strategy_with_sidecar("LONG")
+        # Pre-mark TP1 as already consumed
+        strategy.state.three_stage_tp1_consumed = True
+        strategy.state.partial_tp_consumed = True
+        trader = Tp1Trader()
+        journal = FakeJournal()
+        state_store = FakeStateStore()
+        latest_ts_ms = int(dt.datetime.now().timestamp() * 1000)
+        account_snapshot = AccountSnapshot(
+            None, 1000.0, 1000.0, asyncio.get_running_loop().time(), 0, 1,
+            latest_market_price=102.0, latest_market_price_ts_ms=latest_ts_ms,
+        )
+        execution_state = ExecutionState("pos-1", 1000.0)
+        execution_state.pending_order_count = 0
+
+        # Run a few syncs — must not re-trigger
+        for _ in range(3):
+            await self.run_account_sync_until(
+                lambda: True,  # run once then check
+                account_snapshot=account_snapshot, execution_state=execution_state,
+                trader=trader, strategy=strategy, journal=journal, state_store=state_store,
+            )
+            trader.post_tp1_stop_orders.clear()
+
+        # After multiple syncs with TP1 already consumed, no new SL should be placed
+        self.assertEqual(len(trader.post_tp1_stop_orders), 0,
+                         "Must not re-place SL when TP1 already consumed")
+
+        tp1_filled_events = [e for e in journal.events if e[0] == "THREE_STAGE_TP1_PROTECTIVE_SL_PLACED"]
+        self.assertEqual(len(tp1_filled_events), 0,
+                         "Must not re-journal SL placement when TP1 already consumed")

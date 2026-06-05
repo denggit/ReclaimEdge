@@ -1065,6 +1065,50 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
         self.assertTrue(strat.state.three_stage_runner_enabled_for_position)
         self.assertTrue(strat.state.three_stage_tp1_consumed)
 
+    def test_three_stage_middle_profit_fallback_is_locked(self) -> None:
+        """Three-Stage disabled by middle profit must be locked to SINGLE, not re-enabled."""
+        strat = strategy(breakeven_fee_buffer_pct=0.001, tp_min_net_profit_pct=0.002)
+        strat.state = StrategyPositionState(
+            side="LONG",
+            layers=1,
+            total_entry_qty=1.0,
+            total_entry_notional=100.0,
+            avg_entry_price=100.0,
+            net_remaining_breakeven_price=100.0,
+            tp_price=110.0,
+            tp_mode="UPPER",
+            tp_plan="THREE_STAGE_RUNNER",
+            partial_tp_price=101.0,
+            partial_tp_ratio=0.6,
+            three_stage_runner_enabled_for_position=True,
+            three_stage_tp1_price=101.0,
+            three_stage_tp2_price=110.0,
+            three_stage_tp1_ratio=0.6,
+            three_stage_tp2_ratio=0.2,
+            three_stage_runner_ratio=0.2,
+            three_stage_tp1_consumed=False,
+            three_stage_tp2_consumed=False,
+            trend_runner_active=False,
+            last_tp_update_candle_ts_ms=1_000,
+        )
+
+        # middle=100.1 is too low: required_middle = 100.0*1.002 = 100.2 > 100.1 → insufficient
+        got = strat._maybe_update_tp(99.0, 2_000, boll(middle=100.1, upper=103.0, lower=97.0, candle_ts_ms=2_000), cvd())
+
+        self.assertIsNotNone(got, "Must return UPDATE_TP when middle profit insufficient")
+        self.assertEqual(got.intent_type, "UPDATE_TP")
+        self.assertEqual(got.tp_plan, "SINGLE", "Must be locked to SINGLE, not re-enabled to THREE_STAGE_RUNNER")
+        self.assertAlmostEqual(got.tp_price, 103.0)
+        self.assertIsNone(got.partial_tp_price, "Partial TP must be cleared when fallback locked")
+        self.assertEqual(got.partial_tp_ratio, 0.0)
+        # State must reflect the fallback lock
+        self.assertFalse(strat.state.three_stage_runner_enabled_for_position, "Three-Stage runner must be disabled")
+        self.assertIsNone(strat.state.three_stage_tp1_price)
+        self.assertIsNone(strat.state.three_stage_tp2_price)
+        self.assertEqual(strat.state.tp_plan, "SINGLE")
+        self.assertIsNone(strat.state.partial_tp_price)
+        self.assertEqual(strat.state.partial_tp_ratio, 0.0)
+
     def test_tp_selection_uses_net_remaining_breakeven(self) -> None:
         """_select_tp_price uses net_remaining_breakeven_price over avg_entry_price."""
         strat = strategy(breakeven_fee_buffer_pct=0.001, tp_min_net_profit_pct=0.002)

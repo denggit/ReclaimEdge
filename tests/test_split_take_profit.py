@@ -665,6 +665,39 @@ class SplitTakeProfitStrategyTest(unittest.TestCase):
         self.assertIsNone(got.partial_tp_price)
         self.assertEqual(got.partial_tp_ratio, 0.0)
 
+    def test_split_partial_disabled_when_middle_profit_insufficient_is_not_reenabled(self) -> None:
+        """SPLIT fallback to SINGLE must not be re-enabled by subsequent TP-plan selection."""
+        strat = strategy(breakeven_fee_buffer_pct=0.001, tp_min_net_profit_pct=0.002, split_tp_enabled=True, split_tp_min_layers=2, three_stage_runner_enabled=False)
+        strat.state = StrategyPositionState(
+            side="LONG",
+            layers=2,
+            total_entry_qty=1.0,
+            total_entry_notional=100.0,
+            avg_entry_price=100.0,
+            net_remaining_breakeven_price=100.0,
+            tp_price=110.0,
+            tp_mode="MIDDLE",
+            tp_plan="SPLIT_PARTIAL_FINAL",
+            partial_tp_price=108.0,
+            partial_tp_ratio=0.5,
+            partial_tp_consumed=False,
+            last_tp_update_candle_ts_ms=1_000,
+        )
+
+        # middle=100.1: required_middle = 100.0 * 1.002 = 100.2 > 100.1 → insufficient
+        got = strat._maybe_update_tp(99.0, 2_000, boll(middle=100.1, upper=103.0, lower=97.0, candle_ts_ms=2_000), cvd())
+
+        self.assertIsNotNone(got, "Must return UPDATE_TP when middle profit insufficient")
+        self.assertEqual(got.intent_type, "UPDATE_TP")
+        self.assertEqual(got.tp_plan, "SINGLE", "Must be locked to SINGLE, not re-enabled to SPLIT or other")
+        self.assertIsNone(got.partial_tp_price, "Partial TP must be cleared when fallback locked")
+        self.assertEqual(got.partial_tp_ratio, 0.0)
+        self.assertAlmostEqual(got.tp_price, 103.0)
+        # Verify state is consistent
+        self.assertEqual(strat.state.tp_plan, "SINGLE")
+        self.assertIsNone(strat.state.partial_tp_price)
+        self.assertEqual(strat.state.partial_tp_ratio, 0.0)
+
 
 class SplitTakeProfitTraderTest(unittest.IsolatedAsyncioTestCase):
     def make_trader(self) -> Trader:

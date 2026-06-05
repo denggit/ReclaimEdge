@@ -1323,7 +1323,9 @@ class LiveRuntimeWorkerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(journal.cash_transfers[0]["cash_after"], 98.5)
         self.assertEqual(journal.cash_drifts, [])
 
-    async def test_account_sync_does_not_sync_strategy_cost_while_execution_pending(self) -> None:
+    async def test_account_sync_syncs_strategy_cost_even_with_pending_orders(self) -> None:
+        """Strategy cost must sync even when execution is pending.
+        (Changed from pre-fix behavior where sync was gated on pending_order_count==0.)"""
         fetched = asyncio.Event()
         live_position = PositionSnapshot("LONG", Decimal("2"), 99.0, 2.0, Decimal("2"))
 
@@ -1366,8 +1368,11 @@ class LiveRuntimeWorkerTest(unittest.IsolatedAsyncioTestCase):
             await task
 
         self.assertEqual(trader.position_contracts, Decimal("2"))
-        self.assertEqual(strategy.state.total_entry_qty, 1.0)
-        self.assertEqual(strategy.state.avg_entry_price, 100.0)
+        # Cost is now synced even with pending orders
+        self.assertEqual(strategy.state.total_entry_qty, 2.0,
+                         "total_entry_qty must sync from position even with pending orders")
+        self.assertEqual(strategy.state.avg_entry_price, 99.0,
+                         "avg_entry_price must sync from position even with pending orders")
 
     async def test_execution_pending_does_not_produce_second_trade_command(self) -> None:
         strategy = FakeStrategy(intents=[intent(1_000), intent(1_001)])

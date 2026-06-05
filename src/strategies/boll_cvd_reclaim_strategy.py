@@ -1068,6 +1068,7 @@ class BollCvdReclaimStrategy:
         old_trend_runner_tp = self.state.trend_runner_tp_price
         old_trend_runner_sl = self.state.trend_runner_sl_price
         tp_price, tp_mode = self._select_tp_price(self.state.side, boll)
+        middle_profit_fallback_locked = False
 
         # ── Unified middle-profit eligibility enforcement ──
         # Before any complex TP mode is allowed, the middle band must offer
@@ -1107,6 +1108,7 @@ class BollCvdReclaimStrategy:
                 partial_tp_price = None
                 partial_tp_ratio = 0.0
                 tp_plan = "SINGLE"
+                middle_profit_fallback_locked = True
 
             # Middle Runner pending (first close NOT done): reset
             elif self.state.middle_runner_pending and not self.state.middle_runner_active:
@@ -1127,6 +1129,7 @@ class BollCvdReclaimStrategy:
                 partial_tp_price = None
                 partial_tp_ratio = 0.0
                 tp_plan = "SINGLE"
+                middle_profit_fallback_locked = True
 
             # SPLIT partial NOT consumed: fall back to SINGLE outer
             elif self.state.tp_plan == "SPLIT_PARTIAL_FINAL" and not self.state.partial_tp_consumed:
@@ -1146,8 +1149,38 @@ class BollCvdReclaimStrategy:
                 partial_tp_price = None
                 partial_tp_ratio = 0.0
                 tp_plan = "SINGLE"
+                middle_profit_fallback_locked = True
 
-        if self.state.trend_runner_active:
+            # Any other unfulfilled complex plan: fall back to SINGLE outer
+            elif (
+                self.state.tp_plan != "SINGLE"
+                and not self.state.trend_runner_active
+                and not self.state.middle_runner_active
+                and not self.state.three_stage_tp1_consumed
+                and not self.state.three_stage_tp2_consumed
+            ):
+                logger.warning(
+                    "COMPLEX_TP_DISABLED_MIDDLE_PROFIT_INSUFFICIENT | "
+                    "side=%s effective_breakeven=%.4f middle=%.4f required_middle=%.4f "
+                    "outer=%.4f old_plan=%s candle_ts=%s",
+                    self.state.side,
+                    effective_be,
+                    boll.middle,
+                    required_middle,
+                    outer,
+                    self.state.tp_plan,
+                    boll.candle_ts_ms,
+                )
+                tp_price = outer
+                tp_mode = outer_mode
+                partial_tp_price = None
+                partial_tp_ratio = 0.0
+                tp_plan = "SINGLE"
+                middle_profit_fallback_locked = True
+
+        if middle_profit_fallback_locked:
+            pass
+        elif self.state.trend_runner_active:
             tp_mode = "UPPER" if self.state.side == "LONG" else "LOWER"
             partial_tp_price, partial_tp_ratio, tp_plan = None, 0.0, "SINGLE"
             if self.config.runner_dynamic_enabled:
