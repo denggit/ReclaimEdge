@@ -116,17 +116,23 @@ def build_rolling_loss_guard_email(action: str, payload: dict[str, Any]) -> tupl
     halt_until_text = format_ts_ms(halt_until) if isinstance(halt_until, int) else "-"
     threshold = payload.get("threshold_pct")
     threshold_text = f"{float(threshold) * 100:.2f}%" if threshold is not None else "-"
+    reference_flat_equity = float(payload.get("reference_flat_equity") or 0.0)
+    flat_equity = float(payload.get("flat_equity") or 0.0)
+    segment_retention = float(payload.get("segment_retention") or 1.0)
+    cumulative_retention = float(payload.get("cumulative_retention") or 1.0)
+    drawdown_pct = float(payload.get("drawdown_pct") or payload.get("loss_pct") or 0.0)
     content = f"""
 <div style="font-family: Arial, Helvetica, sans-serif; line-height: 1.55; color: #222; max-width: 760px;">
   <h2>{html.escape(subject)}</h2>
   <p>This guard never force-closes an open position; this event was evaluated only after the account reached FLAT.</p>
   <table style="width: 100%; border-collapse: collapse; font-size: 14px;">
-    <tr><td style="padding: 8px; border-bottom: 1px solid #eee;">baseline_equity</td><td style="padding: 8px; border-bottom: 1px solid #eee; text-align: right;">{float(payload.get("baseline_equity") or 0.0):.4f}</td></tr>
-    <tr><td style="padding: 8px; border-bottom: 1px solid #eee;">window_start</td><td style="padding: 8px; border-bottom: 1px solid #eee; text-align: right;">{html.escape(format_ts_ms(int(payload.get("window_start_ts_ms") or 0)))}</td></tr>
-    <tr><td style="padding: 8px; border-bottom: 1px solid #eee;">window_end</td><td style="padding: 8px; border-bottom: 1px solid #eee; text-align: right;">{html.escape(format_ts_ms(int(payload.get("window_end_ts_ms") or 0)))}</td></tr>
-    <tr><td style="padding: 8px; border-bottom: 1px solid #eee;">rolling_realized_pnl</td><td style="padding: 8px; border-bottom: 1px solid #eee; text-align: right;">{float(payload.get("rolling_realized_pnl") or 0.0):.4f}</td></tr>
+    <tr><td style="padding: 8px; border-bottom: 1px solid #eee;">mode</td><td style="padding: 8px; border-bottom: 1px solid #eee; text-align: right;">{html.escape(str(payload.get("mode") or "flat_to_flat_drawdown"))}</td></tr>
+    <tr><td style="padding: 8px; border-bottom: 1px solid #eee;">reference_flat_equity</td><td style="padding: 8px; border-bottom: 1px solid #eee; text-align: right;">{reference_flat_equity:.4f}</td></tr>
+    <tr><td style="padding: 8px; border-bottom: 1px solid #eee;">flat_equity</td><td style="padding: 8px; border-bottom: 1px solid #eee; text-align: right;">{flat_equity:.4f}</td></tr>
+    <tr><td style="padding: 8px; border-bottom: 1px solid #eee;">segment_retention</td><td style="padding: 8px; border-bottom: 1px solid #eee; text-align: right;">{segment_retention * 100:.2f}%</td></tr>
+    <tr><td style="padding: 8px; border-bottom: 1px solid #eee;">cumulative_retention</td><td style="padding: 8px; border-bottom: 1px solid #eee; text-align: right;">{cumulative_retention * 100:.2f}%</td></tr>
+    <tr><td style="padding: 8px; border-bottom: 1px solid #eee;">drawdown_pct</td><td style="padding: 8px; border-bottom: 1px solid #eee; text-align: right;">{drawdown_pct * 100:.2f}%</td></tr>
     <tr><td style="padding: 8px; border-bottom: 1px solid #eee;">loss_usdt</td><td style="padding: 8px; border-bottom: 1px solid #eee; text-align: right;">{float(payload.get("loss_usdt") or 0.0):.4f}</td></tr>
-    <tr><td style="padding: 8px; border-bottom: 1px solid #eee;">loss_pct</td><td style="padding: 8px; border-bottom: 1px solid #eee; text-align: right;">{float(payload.get("loss_pct") or 0.0) * 100:.2f}%</td></tr>
     <tr><td style="padding: 8px; border-bottom: 1px solid #eee;">threshold</td><td style="padding: 8px; border-bottom: 1px solid #eee; text-align: right;">{html.escape(threshold_text)}</td></tr>
     <tr><td style="padding: 8px; border-bottom: 1px solid #eee;">halt_until</td><td style="padding: 8px; border-bottom: 1px solid #eee; text-align: right;">{html.escape(halt_until_text)}</td></tr>
   </table>
@@ -137,12 +143,19 @@ def build_rolling_loss_guard_email(action: str, payload: dict[str, Any]) -> tupl
 
 
 def rolling_loss_guard_payload(action: str, decision: RollingLossGuardDecision) -> dict[str, Any]:
-    state = decision.state
     return {
         "action": action,
-        "window_start_ts_ms": state.window_start_ts_ms,
-        "window_end_ts_ms": state.window_end_ts_ms,
-        "baseline_equity": state.baseline_equity,
+        "mode": "flat_to_flat_drawdown",
+        "window_start_ts_ms": None,
+        "window_end_ts_ms": None,
+        "baseline_equity": decision.reference_flat_equity,
+        "reference_flat_equity": decision.reference_flat_equity,
+        "flat_equity": decision.flat_equity,
+        "segment_retention": decision.segment_retention,
+        "segment_return_pct": decision.segment_return_pct,
+        "cumulative_retention": decision.cumulative_retention,
+        "drawdown_pct": decision.drawdown_pct,
+        "max_drawdown_pct": decision.max_drawdown_pct,
         "rolling_realized_pnl": decision.rolling_realized_pnl,
         "loss_usdt": decision.loss_usdt,
         "loss_pct": decision.loss_pct,
@@ -159,12 +172,20 @@ def rolling_loss_guard_state_payload(action: str, guard: RollingLossGuard, reaso
         raise RuntimeError("RollingLossGuard state is not loaded")
     return {
         "action": action,
-        "window_start_ts_ms": state.window_start_ts_ms,
-        "window_end_ts_ms": state.window_end_ts_ms,
-        "baseline_equity": state.baseline_equity,
-        "rolling_realized_pnl": state.last_window_realized_pnl,
-        "loss_usdt": max(0.0, -state.last_window_realized_pnl),
-        "loss_pct": state.last_loss_pct,
+        "mode": "flat_to_flat_drawdown",
+        "window_start_ts_ms": None,
+        "window_end_ts_ms": None,
+        "baseline_equity": state.reference_flat_equity,
+        "reference_flat_equity": state.reference_flat_equity,
+        "flat_equity": state.last_flat_equity,
+        "segment_retention": state.last_segment_retention,
+        "segment_return_pct": state.last_segment_return_pct,
+        "cumulative_retention": state.cumulative_retention,
+        "drawdown_pct": state.drawdown_pct,
+        "max_drawdown_pct": state.max_drawdown_pct,
+        "rolling_realized_pnl": 0.0,
+        "loss_usdt": 0.0,
+        "loss_pct": state.drawdown_pct,
         "threshold_pct": None,
         "halt_hours": None,
         "halt_until_ts_ms": state.halt_until_ts_ms,
@@ -230,7 +251,6 @@ async def apply_rolling_loss_guard_startup_state(
         )
     elif rolling_loss_guard.state.halt_active and not has_position:
         rolling_loss_guard.mark_resumed(now_ms, equity)
-        rolling_loss_guard.save()
         await record_and_notify_rolling_loss_guard(
             journal=journal,
             email_sender=email_sender,
@@ -240,16 +260,6 @@ async def apply_rolling_loss_guard_startup_state(
                 "startup_rolling_loss_cooldown_elapsed_and_account_flat",
             ),
             email_enabled=rolling_loss_guard.config.email_enabled,
-        )
-    elif now_ms >= rolling_loss_guard.state.window_end_ts_ms and not has_position:
-        rolling_loss_guard.reset_window(now_ms, equity)
-        rolling_loss_guard.save()
-        journal.record_rolling_loss_guard(
-            **rolling_loss_guard_state_payload(
-                "WINDOW_RESET",
-                rolling_loss_guard,
-                "startup_rolling_loss_window_expired_and_account_flat",
-            )
         )
 
 
@@ -3464,6 +3474,14 @@ async def account_position_sync_worker(
 
             if cash_transfer_payload is not None:
                 journal.record_cash_transfer(**cash_transfer_payload)
+                if rolling_loss_guard is not None and rolling_loss_guard.state is not None and rolling_loss_guard.state.enabled:
+                    transfer_flat_equity = cash_transfer_payload.get("equity_after") or cash_transfer_payload.get("cash_after")
+                    if transfer_flat_equity is not None and not core_position.has_position:
+                        rolling_loss_guard.adjust_flat_reference_for_cash_transfer(
+                            now_ms=utc_ms(),
+                            new_flat_equity=float(transfer_flat_equity),
+                            reason=str(cash_transfer_payload.get("reason") or "cash_transfer"),
+                        )
             if cash_drift_payload is not None:
                 journal.record_account_cash_drift(**cash_drift_payload)
             if three_stage_event_payload is not None and hasattr(journal, "append"):
@@ -3766,9 +3784,16 @@ async def account_position_sync_worker(
                 journal.record_flat(**record_flat_payload)
                 if rolling_loss_guard is not None and rolling_loss_guard.state is not None and rolling_loss_guard.state.enabled:
                     guard_now_ms = utc_ms()
+                    flat_equity = record_flat_payload.get("equity_after") or record_flat_payload.get("cash_after")
+                    flat_event_id = (
+                        record_flat_payload.get("position_id")
+                        or (pending_flat_payload or {}).get("position_id")
+                        or execution_state.current_position_id
+                    )
                     decision = rolling_loss_guard.evaluate_after_flat(
                         now_ms=guard_now_ms,
-                        journal_events=journal.load_events(),
+                        flat_equity=float(flat_equity) if flat_equity is not None else None,
+                        flat_event_id=str(flat_event_id) if flat_event_id else None,
                         has_position=False,
                     )
                     if decision.action is not None:
@@ -3851,7 +3876,11 @@ async def account_position_sync_worker(
                         payload=payload,
                         email_enabled=rolling_loss_guard.config.email_enabled,
                     )
-                    logger.warning("ROLLING_LOSS_GUARD_RESUMED | trading_halted=false baseline_equity=%.4f", equity)
+                    logger.warning(
+                        "ROLLING_DRAWDOWN_GUARD_RESUMED | trading_halted=false reference_flat_equity=%.4f drawdown_pct=%.6f",
+                        rolling_loss_guard.state.reference_flat_equity,
+                        rolling_loss_guard.state.drawdown_pct,
+                    )
                 elif (
                     halted
                     and halt_reason in ROLLING_LOSS_HALT_REASONS
@@ -3860,20 +3889,6 @@ async def account_position_sync_worker(
                     and has_position_now
                 ):
                     logger.warning("ROLLING_LOSS_GUARD_RESUME_DELAYED | reason=position_open halt_until_ts_ms=%s", rolling_loss_guard.state.halt_until_ts_ms)
-                elif (
-                    not halted
-                    and rolling_loss_guard.should_reset_expired_window(guard_now_ms, has_position_now)
-                ):
-                    rolling_loss_guard.reset_window(guard_now_ms, equity)
-                    rolling_loss_guard.save()
-                    journal.record_rolling_loss_guard(
-                        **rolling_loss_guard_state_payload(
-                            "WINDOW_RESET",
-                            rolling_loss_guard,
-                            "rolling_loss_window_expired_and_account_flat",
-                        )
-                    )
-                    logger.info("ROLLING_LOSS_GUARD_WINDOW_RESET | baseline_equity=%.4f", equity)
             if consecutive_failures > 0:
                 logger.warning("ACCOUNT_SYNC_RECOVERED | failures=%s", consecutive_failures)
             consecutive_failures = 0
