@@ -23,6 +23,7 @@ sys.path.insert(0, str(SRC))
 from src.execution.trader import PositionSnapshot, Trader  # noqa: E402
 from src.indicators.cvd_tracker import CvdTracker, CvdTrackerConfig  # noqa: E402
 from src.live import config_helpers as live_config_helpers  # noqa: E402
+from src.live import queue_helpers as live_queue_helpers  # noqa: E402
 from src.live import runtime_types as live_runtime_types  # noqa: E402
 from src.live import time_utils as live_time_utils  # noqa: E402
 from src.monitors.boll_band_breakout_monitor import (  # noqa: E402
@@ -1742,79 +1743,6 @@ async def apply_main_tp_startup_recovery(
             "MAIN_TP_ORDER_ID_MISSING_ON_STARTUP | pending_reduce_only_order_count=%s trading_halted=true manual_intervention_required=true",
             len(reduce_only_orders),
         )
-def queue_log_level(queue_size: int) -> int | None:
-    if queue_size < 500:
-        return None
-    if queue_size < 2000:
-        return logging.INFO
-    if queue_size < 8000:
-        return logging.WARNING
-    return logging.ERROR
-
-
-def queue_oldest_command_age_seconds(queue: asyncio.Queue[live_runtime_types.TradeCommand]) -> float:
-    try:
-        oldest = queue._queue[0]  # type: ignore[attr-defined]
-    except Exception:
-        return 0.0
-    return max(time.monotonic() - oldest.created_monotonic, 0.0)
-
-
-async def enqueue_strategy_tick(
-    event: MarketTickEvent,
-    strategy_tick_queue: asyncio.Queue[MarketTickEvent],
-    state_lock: asyncio.Lock,
-    execution_state: live_runtime_types.ExecutionState,
-) -> None:
-    if event.boll is None:
-        return
-    try:
-        strategy_tick_queue.put_nowait(event)
-    except asyncio.QueueFull:
-        logger.error(
-            "STRATEGY_TICK_QUEUE_FULL | price=%.4f tick_ts_ms=%s queue_size=%s",
-            event.tick.price,
-            event.tick.ts_ms,
-            strategy_tick_queue.qsize(),
-        )
-        async with state_lock:
-            execution_state.trading_halted = True
-
-
-async def enqueue_execution_command(
-    command: live_runtime_types.TradeCommand,
-    execution_queue: asyncio.Queue[live_runtime_types.TradeCommand],
-    state_lock: asyncio.Lock,
-    execution_state: live_runtime_types.ExecutionState,
-) -> bool:
-    async with state_lock:
-        if execution_queue.full():
-            logger.error(
-                "EXECUTION_QUEUE_FULL | intent_type=%s side=%s tick_ts_ms=%s queue_size=%s",
-                command.intent.intent_type,
-                command.intent.side,
-                command.tick_ts_ms,
-                execution_queue.qsize(),
-            )
-            execution_state.trading_halted = True
-            return False
-        execution_state.pending_order_count += 1
-        try:
-            execution_queue.put_nowait(command)
-        except asyncio.QueueFull:
-            execution_state.pending_order_count = max(execution_state.pending_order_count - 1, 0)
-            execution_state.trading_halted = True
-            logger.error(
-                "EXECUTION_QUEUE_FULL | intent_type=%s side=%s tick_ts_ms=%s queue_size=%s",
-                command.intent.intent_type,
-                command.intent.side,
-                command.tick_ts_ms,
-                execution_queue.qsize(),
-            )
-            return False
-    return True
-
-
 async def strategy_tick_worker(
     *,
     strategy_tick_queue: asyncio.Queue[MarketTickEvent],
@@ -1844,7 +1772,7 @@ async def strategy_tick_worker(
             now = time.monotonic()
             tick_lag_seconds = max(time.time() - event.tick.ts_ms / 1000, 0.0)
             queue_size = strategy_tick_queue.qsize()
-            level = queue_log_level(queue_size)
+            level = live_queue_helpers.queue_log_level(queue_size)
             if (level is not None or tick_lag_seconds >= strategy_lag_warn_seconds) and now - last_lag_log >= 30:
                 logger.log(
                     level or logging.WARNING,
@@ -1933,7 +1861,7 @@ async def strategy_tick_worker(
                     account_snapshot_updated_ts_ms=account_snapshot.updated_ts_ms,
                     reason=intent.reason,
                 )
-                ok = await enqueue_execution_command(command, execution_queue, state_lock, execution_state)
+                ok = await live_queue_helpers.enqueue_execution_command(command, execution_queue, state_lock, execution_state)
                 if not ok:
                     async with state_lock:
                         strategy.state = backup_state
@@ -1994,7 +1922,7 @@ async def execution_worker(
         result = None
         try:
             queue_size = execution_queue.qsize()
-            level = queue_log_level(queue_size)
+            level = live_queue_helpers.queue_log_level(queue_size)
             now = time.monotonic()
             if level is not None and now - last_backlog_log >= backlog_log_seconds:
                 logger.log(
@@ -2002,7 +1930,7 @@ async def execution_worker(
                     "EXECUTION_QUEUE_BACKLOG | queue_size=%s maxsize=%s oldest_command_age_seconds=%.3f",
                     queue_size,
                     execution_queue.maxsize,
-                    queue_oldest_command_age_seconds(execution_queue),
+                    live_queue_helpers.queue_oldest_command_age_seconds(execution_queue),
                 )
                 last_backlog_log = now
 
@@ -4162,7 +4090,7 @@ async def main() -> None:
                 logger.exception("Weekly overall summary report loop failed")
 
     async def on_market_tick(event: MarketTickEvent) -> None:
-        await enqueue_strategy_tick(event, strategy_tick_queue, state_lock, execution_state)
+        await live_queue_helpers.enqueue_strategy_tick(event, strategy_tick_queue, state_lock, execution_state)
 
     monitor = BollBandBreakoutMonitor(
         config=monitor_config,

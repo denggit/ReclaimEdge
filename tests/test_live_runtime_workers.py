@@ -5,8 +5,10 @@ import contextlib
 import copy
 import datetime as dt
 import importlib.util
+import logging
 import os
 import sys
+import time
 import types
 import unittest
 from unittest.mock import patch
@@ -30,6 +32,12 @@ from scripts.run_boll_cvd_live import (  # noqa: E402
     trusted_startup_saved_state,
 )
 from src.execution.trader import LiveTradeResult, PositionSnapshot  # noqa: E402
+from src.live.queue_helpers import (  # noqa: E402
+    enqueue_execution_command,
+    enqueue_strategy_tick,
+    queue_log_level,
+    queue_oldest_command_age_seconds,
+)
 from src.live.runtime_types import AccountSnapshot, ExecutionState, TradeCommand  # noqa: E402
 from src.live.time_utils import next_weekly_summary_time  # noqa: E402
 from src.indicators.cvd_tracker import CvdSnapshot  # noqa: E402
@@ -264,7 +272,95 @@ class GuardedLock:
         self._lock.release()
 
 
+class RaceFullQueue(asyncio.Queue[TradeCommand]):
+    def full(self) -> bool:
+        return False
+
+    def put_nowait(self, item: TradeCommand) -> None:
+        raise asyncio.QueueFull
+
+
 class LiveRuntimeWorkerTest(unittest.IsolatedAsyncioTestCase):
+    def test_queue_log_level_thresholds(self) -> None:
+        self.assertIsNone(queue_log_level(0))
+        self.assertIsNone(queue_log_level(499))
+        self.assertEqual(queue_log_level(500), logging.INFO)
+        self.assertEqual(queue_log_level(1999), logging.INFO)
+        self.assertEqual(queue_log_level(2000), logging.WARNING)
+        self.assertEqual(queue_log_level(7999), logging.WARNING)
+        self.assertEqual(queue_log_level(8000), logging.ERROR)
+
+    async def test_queue_oldest_command_age_seconds_returns_zero_on_empty_queue(self) -> None:
+        queue: asyncio.Queue[TradeCommand] = asyncio.Queue()
+
+        self.assertEqual(queue_oldest_command_age_seconds(queue), 0.0)
+
+    async def test_queue_oldest_command_age_seconds_uses_oldest_created_monotonic(self) -> None:
+        queue: asyncio.Queue[TradeCommand] = asyncio.Queue()
+        await queue.put(TradeCommand(intent(1_000), StrategyPositionState(), 1_000, time.monotonic() - 10.0, 0, "old"))
+        await queue.put(TradeCommand(intent(1_001), StrategyPositionState(), 1_001, time.monotonic(), 0, "new"))
+
+        self.assertGreaterEqual(queue_oldest_command_age_seconds(queue), 9.0)
+
+    async def test_enqueue_strategy_tick_skips_event_without_boll(self) -> None:
+        queue: asyncio.Queue[MarketTickEvent] = asyncio.Queue()
+        execution_state = ExecutionState(None, None)
+
+        await enqueue_strategy_tick(
+            MarketTickEvent(TradeTick("ETH-USDT-SWAP", 100.0, 1.0, "buy", 1_000), None),
+            queue,
+            asyncio.Lock(),
+            execution_state,
+        )
+
+        self.assertTrue(queue.empty())
+        self.assertFalse(execution_state.trading_halted)
+
+    async def test_enqueue_strategy_tick_halts_when_queue_full(self) -> None:
+        queue: asyncio.Queue[MarketTickEvent] = asyncio.Queue(maxsize=1)
+        await queue.put(tick(1_000))
+        execution_state = ExecutionState(None, None)
+
+        await enqueue_strategy_tick(tick(1_001), queue, asyncio.Lock(), execution_state)
+
+        self.assertTrue(execution_state.trading_halted)
+        self.assertEqual(queue.qsize(), 1)
+
+    async def test_enqueue_execution_command_success_increments_pending_order_count(self) -> None:
+        queue: asyncio.Queue[TradeCommand] = asyncio.Queue(maxsize=1)
+        execution_state = ExecutionState(None, None)
+        command = TradeCommand(intent(1_000), StrategyPositionState(), 1_000, time.monotonic(), 0, "test")
+
+        ok = await enqueue_execution_command(command, queue, asyncio.Lock(), execution_state)
+
+        self.assertTrue(ok)
+        self.assertEqual(execution_state.pending_order_count, 1)
+        self.assertIs(queue.get_nowait(), command)
+
+    async def test_enqueue_execution_command_full_queue_halts_without_incrementing_pending_order_count(self) -> None:
+        queue: asyncio.Queue[TradeCommand] = asyncio.Queue(maxsize=1)
+        await queue.put(TradeCommand(intent(999), StrategyPositionState(), 999, time.monotonic(), 0, "existing"))
+        execution_state = ExecutionState(None, None)
+        command = TradeCommand(intent(1_000), StrategyPositionState(), 1_000, time.monotonic(), 0, "test")
+
+        ok = await enqueue_execution_command(command, queue, asyncio.Lock(), execution_state)
+
+        self.assertFalse(ok)
+        self.assertEqual(execution_state.pending_order_count, 0)
+        self.assertTrue(execution_state.trading_halted)
+        self.assertEqual(queue.qsize(), 1)
+
+    async def test_enqueue_execution_command_put_nowait_race_rolls_back_pending_order_count(self) -> None:
+        queue = RaceFullQueue(maxsize=1)
+        execution_state = ExecutionState(None, None)
+        command = TradeCommand(intent(1_000), StrategyPositionState(), 1_000, time.monotonic(), 0, "test")
+
+        ok = await enqueue_execution_command(command, queue, asyncio.Lock(), execution_state)
+
+        self.assertFalse(ok)
+        self.assertEqual(execution_state.pending_order_count, 0)
+        self.assertTrue(execution_state.trading_halted)
+
     def three_stage_strategy(self, side: str = "LONG") -> BollCvdShockReclaimStrategy:
         strategy = BollCvdShockReclaimStrategy(
             BollCvdReclaimStrategyConfig(

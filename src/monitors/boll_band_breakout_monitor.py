@@ -427,7 +427,7 @@ class BollBandBreakoutMonitor:
 
     def _log_tick_queue_backlog(self) -> None:
         queue_size = self._tick_event_queue.qsize()
-        level = queue_log_level(queue_size)
+        level = _monitor_queue_log_level(queue_size)
         if level is None:
             return
         now = time.time()
@@ -531,7 +531,7 @@ class BollBandBreakoutMonitor:
         return int(time.time() * 1000)
 
 
-def queue_log_level(queue_size: int) -> int | None:
+def _monitor_queue_log_level(queue_size: int) -> int | None:
     if queue_size < 500:
         return None
     if queue_size < 2000:
