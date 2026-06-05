@@ -26,6 +26,7 @@ from src.live import config_helpers as live_config_helpers  # noqa: E402
 from src.live import queue_helpers as live_queue_helpers  # noqa: E402
 from src.live import runtime_types as live_runtime_types  # noqa: E402
 from src.live import time_utils as live_time_utils  # noqa: E402
+from src.live.account_sync import flat_balance as live_flat_balance  # noqa: E402
 from src.monitors.boll_band_breakout_monitor import (  # noqa: E402
     BollBandBreakoutMonitor,
     BollBandBreakoutMonitorConfig,
@@ -1221,89 +1222,6 @@ async def force_close_sidecar_after_core_flat(
     return True
 
 
-async def fetch_usdt_cash_balance(trader: Trader) -> float:
-    res = await trader.request("GET", "/api/v5/account/balance?ccy=USDT")
-    data = res.get("data", [])
-    if not data:
-        return 0.0
-    for item in data[0].get("details", []):
-        if item.get("ccy") == "USDT":
-            return float(item.get("cashBal") or item.get("availBal") or item.get("availEq") or item.get("eq") or 0.0)
-    return float(data[0].get("totalEq") or 0.0)
-
-
-async def fetch_settled_flat_balance(
-    trader: Trader,
-    *,
-    attempts: int,
-    interval_seconds: float,
-    stable_delta_usdt: float,
-    cash_equity_max_diff_usdt: float,
-) -> live_runtime_types.SettledFlatBalance:
-    attempts = max(int(attempts), 1)
-    previous_flat_cash: float | None = None
-    last_cash: float | None = None
-    last_equity: float | None = None
-    last_position: PositionSnapshot | None = None
-    last_attempt = 0
-    for attempt in range(1, attempts + 1):
-        last_attempt = attempt
-        try:
-            position = await trader.fetch_position_snapshot()
-            cash = await fetch_usdt_cash_balance(trader)
-            equity = await trader.fetch_usdt_equity()
-        except Exception as exc:
-            if last_cash is not None and last_equity is not None:
-                return live_runtime_types.SettledFlatBalance(
-                    cash=last_cash,
-                    equity=last_equity,
-                    attempts=last_attempt,
-                    stable=False,
-                    reason=f"error_after_last_balance:{type(exc).__name__}:{exc}",
-                )
-            raise
-
-        last_position = position
-        last_cash = cash
-        last_equity = equity
-        if position.has_position:
-            if attempt < attempts and interval_seconds > 0:
-                await asyncio.sleep(interval_seconds)
-            continue
-
-        cash_equity_stable = abs(cash - equity) <= cash_equity_max_diff_usdt
-        cash_repeat_stable = previous_flat_cash is not None and abs(cash - previous_flat_cash) <= stable_delta_usdt
-        if cash_equity_stable and cash_repeat_stable:
-            return live_runtime_types.SettledFlatBalance(
-                cash=cash,
-                equity=equity,
-                attempts=attempt,
-                stable=True,
-                reason="cash_equity_stable",
-            )
-        previous_flat_cash = cash
-        if attempt < attempts and interval_seconds > 0:
-            await asyncio.sleep(interval_seconds)
-
-    if last_cash is None or last_equity is None:
-        raise RuntimeError("flat balance settlement finished without any balance sample")
-    if last_position is not None and not last_position.has_position:
-        return live_runtime_types.SettledFlatBalance(
-            cash=last_equity,
-            equity=last_equity,
-            attempts=attempts,
-            stable=False,
-            reason="fallback_to_equity_after_timeout",
-        )
-    return live_runtime_types.SettledFlatBalance(
-        cash=last_cash,
-        equity=last_equity,
-        attempts=attempts,
-        stable=False,
-        reason="position_not_flat_after_timeout",
-    )
-
-
 def three_stage_dirty_post_tp1_sl_after_tp2(state: StrategyPositionState) -> bool:
     return bool(
         getattr(state, "trend_runner_active", False)
@@ -1810,7 +1728,7 @@ async def execution_worker(
 
             entry_cash_before = cash_before_position
             if command.intent.intent_type != "UPDATE_TP" and current_position_id is None:
-                entry_cash_before = await fetch_usdt_cash_balance(trader)
+                entry_cash_before = await live_flat_balance.fetch_usdt_cash_balance(trader)
 
             if command.intent.intent_type in {"ADD_LONG", "ADD_SHORT"} and getattr(command.strategy_state_snapshot, "tp_plan", "SINGLE") in SPLIT_TP_PLANS:
                 position = await trader.fetch_position_snapshot()
@@ -2429,7 +2347,7 @@ async def account_position_sync_worker(
             equity = account_snapshot.equity
             if now - last_account_sync >= account_sync_seconds:
                 equity = await trader.fetch_usdt_equity()
-                cash = await fetch_usdt_cash_balance(trader)
+                cash = await live_flat_balance.fetch_usdt_cash_balance(trader)
                 last_account_sync = now
 
             position = await trader.fetch_position_snapshot()
@@ -2972,7 +2890,7 @@ async def account_position_sync_worker(
 
             if pending_flat_payload is not None:
                 try:
-                    settled = await fetch_settled_flat_balance(
+                    settled = await live_flat_balance.fetch_settled_flat_balance(
                         trader,
                         attempts=flat_balance_confirm_attempts,
                         interval_seconds=flat_balance_confirm_interval_seconds,
@@ -3719,7 +3637,7 @@ async def main() -> None:
         sizer = SimplePositionSizer(SimplePositionSizerConfig.from_account_equity(trader.account_equity_usdt))
         strategy = BollCvdShockReclaimStrategy(BollCvdReclaimStrategyConfig.from_env(), sizer)
         startup_position = await trader.fetch_position_snapshot()
-        startup_cash = await fetch_usdt_cash_balance(trader)
+        startup_cash = await live_flat_balance.fetch_usdt_cash_balance(trader)
         rolling_loss_guard.load_or_initialize(live_time_utils.utc_ms(), trader.account_equity_usdt)
         journal.record_cash_baseline(
             source="startup",

@@ -23,7 +23,6 @@ from scripts.run_boll_cvd_live import (  # noqa: E402
     account_position_sync_worker,
     apply_three_stage_startup_safety_gate,
     execution_worker,
-    fetch_settled_flat_balance,
     mark_middle_runner_active_if_position_reduced,
     mark_three_stage_progress_if_position_reduced,
     restore_strategy_from_position,
@@ -32,6 +31,7 @@ from scripts.run_boll_cvd_live import (  # noqa: E402
     trusted_startup_saved_state,
 )
 from src.execution.trader import LiveTradeResult, PositionSnapshot  # noqa: E402
+from src.live.account_sync.flat_balance import fetch_settled_flat_balance  # noqa: E402
 from src.live.queue_helpers import (  # noqa: E402
     enqueue_execution_command,
     enqueue_strategy_tick,
