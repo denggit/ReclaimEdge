@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import datetime as dt
 import sys
 from pathlib import Path
 
@@ -13,6 +12,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(SRC))
 
 from src.indicators.cvd_tracker import CvdTracker, CvdTrackerConfig  # noqa: E402
+from src.live.time_utils import format_ts_ms  # noqa: E402
 from src.monitors.boll_band_breakout_monitor import (  # noqa: E402
     BollBandBreakoutMonitor,
     BollBandBreakoutMonitorConfig,
@@ -31,10 +31,6 @@ from src.utils.email_sender import EmailSender  # noqa: E402
 from src.utils.log import get_logger  # noqa: E402
 
 logger = get_logger(__name__)
-
-
-def format_ts_ms(ts_ms: int) -> str:
-    return dt.datetime.fromtimestamp(ts_ms / 1000).astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
 
 
 def build_trade_intent_email(intent: TradeIntent) -> tuple[str, str]:

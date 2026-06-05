@@ -27,13 +27,13 @@ from scripts.run_boll_cvd_live import (  # noqa: E402
     fetch_settled_flat_balance,
     mark_middle_runner_active_if_position_reduced,
     mark_three_stage_progress_if_position_reduced,
-    next_weekly_summary_time,
     restore_strategy_from_position,
     strategy_tick_worker,
     three_stage_post_tp1_current_price,
     trusted_startup_saved_state,
 )
 from src.execution.trader import LiveTradeResult, PositionSnapshot  # noqa: E402
+from src.live.time_utils import next_weekly_summary_time  # noqa: E402
 from src.indicators.cvd_tracker import CvdSnapshot  # noqa: E402
 from src.monitors.boll_band_breakout_monitor import BollSnapshot, MarketTickEvent, TradeTick  # noqa: E402
 from src.risk.simple_position_sizer import PositionSize, SimplePositionSizer, SimplePositionSizerConfig  # noqa: E402
@@ -747,7 +747,7 @@ class LiveRuntimeWorkerTest(unittest.IsolatedAsyncioTestCase):
             ),
         ]
         for now_value, expected in cases:
-            with patch("scripts.run_boll_cvd_live.dt.datetime", fixed_datetime(now_value)):
+            with patch("src.live.time_utils.dt.datetime", fixed_datetime(now_value)):
                 self.assertEqual(next_weekly_summary_time(10, 0, weekday=0), expected)
 
     async def run_strategy_worker_once(self, strategy: FakeStrategy, cvd: FakeCvd, queue: asyncio.Queue[MarketTickEvent]) -> asyncio.Queue[TradeCommand]:
