@@ -78,18 +78,6 @@ class TrendRunnerReverseConfirmDecision:
     recovery_pct: float
 
 
-@dataclass(frozen=True)
-class TrendRunnerReverseProgressDecision:
-    """Result of progressing Trend Runner reverse burst sampling / confirmation."""
-
-    reason: str | None
-    should_start_candidate: bool
-    should_reset: bool
-    new_extreme_price: float | None
-    pruned_samples: list
-    elapsed_ms: int
-
-
 # ── Reset helpers ───────────────────────────────────────────────────────────
 
 def reset_trend_runner_state_values() -> TrendRunnerStateValues:
