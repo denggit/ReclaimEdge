@@ -1661,6 +1661,66 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
         self.assertEqual(tp_mode, "MIDDLE")
         self.assertAlmostEqual(tp_price, 98.3)
 
+    def test_post_tp1_protective_sl_missing_cost_basis_diagnostic(self) -> None:
+        """Invalid basis (avg_entry <= 0, breakeven <= 0) log missing_cost_basis diagnostic."""
+        strat = strategy()
+        strat.state = StrategyPositionState(
+            side="LONG",
+            avg_entry_price=0.0,
+            net_remaining_breakeven_price=0.0,
+            three_stage_tp1_price=None,
+            three_stage_tp1_ratio=0.6,
+        )
+        logged_reasons: list[str] = []
+        _orig = strat._log_three_stage_post_tp1_sl_diagnostic_once
+
+        def _capture(side, reason, current_price, net_remaining_breakeven,
+                     candidate_cost, candidate_structure, protective_sl, boll):
+            logged_reasons.append(reason)
+            self.assertEqual(reason, "missing_cost_basis")
+            self.assertEqual(candidate_cost, 0.0)
+            self.assertEqual(candidate_structure, 0.0)
+            self.assertIsNone(protective_sl)
+
+        strat._log_three_stage_post_tp1_sl_diagnostic_once = _capture  # type: ignore[method-assign]
+
+        result = strat._calculate_three_stage_post_tp1_protective_sl(
+            "LONG", 100.0, boll(middle=100.0, upper=110.0, lower=90.0),
+        )
+        self.assertIsNone(result)
+        self.assertEqual(len(logged_reasons), 1)
+
+        # Restore
+        strat._log_three_stage_post_tp1_sl_diagnostic_once = _orig  # type: ignore[method-assign]
+
+    def test_post_tp1_protective_sl_current_price_zero_no_diagnostic(self) -> None:
+        """current_price <= 0 returns None without any diagnostic log."""
+        strat = strategy()
+        strat.state = StrategyPositionState(
+            side="LONG",
+            avg_entry_price=0.0,
+            net_remaining_breakeven_price=0.0,
+            three_stage_tp1_price=None,
+            three_stage_tp1_ratio=0.6,
+        )
+        call_count = 0
+        _orig = strat._log_three_stage_post_tp1_sl_diagnostic_once
+
+        def _never_called(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+
+        strat._log_three_stage_post_tp1_sl_diagnostic_once = _never_called  # type: ignore[method-assign]
+
+        result = strat._calculate_three_stage_post_tp1_protective_sl(
+            "LONG", 0.0, boll(middle=100.0, upper=110.0, lower=90.0),
+        )
+        self.assertIsNone(result)
+        self.assertEqual(call_count, 0)
+
+        # Restore
+        strat._log_three_stage_post_tp1_sl_diagnostic_once = _orig  # type: ignore[method-assign]
+
 
 class RecordingTrader(Trader):
     def __init__(self, side: str = "LONG") -> None:

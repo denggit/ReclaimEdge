@@ -2432,6 +2432,17 @@ class BollCvdReclaimStrategy:
             sl_tighten_ratio=ratio,
         )
         if decision.reason in ("missing_tp1_price", "missing_cost_basis", "invalid_tp1_ratio"):
+            if current_price > 0 and base_breakeven <= 0:
+                self._log_three_stage_post_tp1_sl_diagnostic_once(
+                    side,
+                    "missing_cost_basis",
+                    current_price,
+                    base_breakeven,
+                    0.0,
+                    0.0,
+                    None,
+                    boll,
+                )
             return None
         if decision.reason != "calculated":
             # Reconstruct the raw protective SL that was found invalid for the log signature.
