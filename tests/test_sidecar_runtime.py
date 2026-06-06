@@ -697,6 +697,39 @@ async def test_startup_recovery_allows_sidecar_enabled_position_with_empty_legs(
 
 
 @pytest.mark.asyncio
+async def test_startup_recovery_keeps_sidecar_disabled_when_saved_state_has_empty_legs_and_disabled_flag(monkeypatch) -> None:
+    monkeypatch.setenv("SIDECAR_ENABLED", "true")
+    state = sidecar_state()
+    state.sidecar_enabled_for_position = False
+    state.sidecar_legs = []
+    execution = ExecutionState("pos-1", 1000.0)
+    journal = Journal()
+    saved_state = type(
+        "Saved",
+        (),
+        {
+            "sidecar_enabled_for_position": False,
+            "sidecar_legs": [],
+        },
+    )()
+
+    await apply_sidecar_startup_recovery(
+        strategy=type("S", (), {"state": state})(),
+        execution_state=execution,
+        saved_state=saved_state,
+        startup_position=PositionSnapshot("LONG", Decimal("5"), 3000, 0.5, Decimal("5")),
+        trader=Trader(),
+        journal=journal,
+        state_store=Store(),
+    )
+
+    assert state.sidecar_enabled_for_position is False
+    assert state.sidecar_legs == []
+    assert state.sidecar_open_qty == 0
+    assert [event[0] for event in journal.events] == []
+
+
+@pytest.mark.asyncio
 async def test_startup_recovery_tp_filled_sidecar_position_stays_enabled() -> None:
     state = sidecar_state()
     state.sidecar_legs = [{"leg_id": "leg-1", "status": "TP_FILLED", "tp_order_id": "tp-1", "qty": 0.1, "contracts": "1", "created_ts_ms": 1, "updated_ts_ms": 2}]

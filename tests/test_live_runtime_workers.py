@@ -261,6 +261,37 @@ class FakeTrader:
         return self.cancel_post_tp1_ok
 
 
+class SidecarWorkerTrader(FakeTrader):
+    def __init__(self) -> None:
+        super().__init__()
+        self.account_equity_usdt = 100.0
+        self.leverage = "50"
+        self.contract_multiplier = Decimal("0.1")
+        self.contract_precision = Decimal("0.01")
+        self.executed_intents: list[TradeIntent] = []
+        self.sidecar_tps = []
+        self.market_exits = []
+
+    def eth_qty_to_contracts(self, qty: Decimal) -> Decimal:
+        if qty <= 0:
+            return Decimal("0")
+        return (qty / self.contract_multiplier).quantize(self.contract_precision)
+
+    async def execute_intent(self, trade_intent: TradeIntent) -> LiveTradeResult:
+        self.executed_intents.append(trade_intent)
+        self.executed.append(trade_intent.ts_ms)
+        contracts = str(self.eth_qty_to_contracts(Decimal(str(trade_intent.size.eth_qty))))
+        return LiveTradeResult(True, trade_intent.intent_type, f"ord-{trade_intent.ts_ms}", "tp", contracts, "101", "ok", True, True)
+
+    async def place_sidecar_fixed_take_profit(self, *, side, contracts, tp_price, client_order_id=None):  # type: ignore[no-untyped-def]
+        self.sidecar_tps.append((side, contracts, tp_price, client_order_id))
+        return "sidecar-tp"
+
+    async def market_exit_remaining_position_with_retries(self, side, retry_count):  # type: ignore[no-untyped-def]
+        self.market_exits.append((side, retry_count))
+        return True, "ok"
+
+
 class GuardedLock:
     def __init__(self) -> None:
         self._lock = asyncio.Lock()
@@ -1593,6 +1624,100 @@ class LiveRuntimeWorkerTest(unittest.IsolatedAsyncioTestCase):
             await task
 
         self.assertEqual(trader.executed, [1_000, 1_001, 1_002])
+
+    async def test_execution_worker_respects_sidecar_skip_first_layer_false(self) -> None:
+        execution_queue: asyncio.Queue[TradeCommand] = asyncio.Queue(maxsize=1000)
+        entry_intent = intent(1_000, "OPEN_LONG")
+        state = StrategyPositionState(
+            side="LONG",
+            sidecar_enabled_for_position=True,
+            sidecar_margin_pct=0.01,
+            sidecar_tp_pct=0.004,
+        )
+        await execution_queue.put(
+            TradeCommand(entry_intent, copy.deepcopy(state), entry_intent.ts_ms, asyncio.get_running_loop().time(), 0, "test")
+        )
+        trader = SidecarWorkerTrader()
+        journal = FakeJournal()
+        state_store = RecordingStateStore()
+        strategy = types.SimpleNamespace(state=state, config=BollCvdReclaimStrategyConfig())
+        task = asyncio.create_task(
+            execution_worker(
+                execution_queue=execution_queue,
+                state_lock=asyncio.Lock(),
+                execution_state=ExecutionState(None, None),
+                account_snapshot=AccountSnapshot(flat_position(), 100.0, 100.0, asyncio.get_running_loop().time(), 0, 1),
+                trader=trader,  # type: ignore[arg-type]
+                strategy=strategy,  # type: ignore[arg-type]
+                journal=journal,  # type: ignore[arg-type]
+                state_store=state_store,  # type: ignore[arg-type]
+                email_sender=FakeEmailSender(),  # type: ignore[arg-type]
+                backlog_log_seconds=999,
+                sidecar_skip_first_layer=False,
+            )
+        )
+        await asyncio.wait_for(execution_queue.join(), timeout=1)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+        self.assertEqual(len(trader.executed_intents), 1)
+        executed_intent = trader.executed_intents[0]
+        self.assertEqual(executed_intent.size.eth_qty, 1.0)
+        self.assertEqual(executed_intent.managed_core_contracts, "5.00")
+        self.assertEqual(executed_intent.managed_core_eth_qty, 0.5)
+        self.assertEqual(len(trader.sidecar_tps), 1)
+        self.assertEqual(trader.sidecar_tps[0][0], "LONG")
+        self.assertEqual(trader.sidecar_tps[0][1], "5.00")
+        self.assertAlmostEqual(trader.sidecar_tps[0][2], 100.4)
+        self.assertEqual([event[0] for event in journal.events], ["SIDECAR_LEG_OPENED", "SIDECAR_TP_PLACED"])
+        self.assertEqual(state.sidecar_legs[0]["layer_index"], 1)
+        self.assertEqual(trader.sidecar_tps[0][3], state.sidecar_legs[0]["sidecar_client_order_id"])
+
+    async def test_execution_worker_respects_sidecar_skip_first_layer_true(self) -> None:
+        execution_queue: asyncio.Queue[TradeCommand] = asyncio.Queue(maxsize=1000)
+        entry_intent = intent(1_000, "OPEN_LONG")
+        state = StrategyPositionState(
+            side="LONG",
+            sidecar_enabled_for_position=True,
+            sidecar_margin_pct=0.01,
+            sidecar_tp_pct=0.004,
+        )
+        await execution_queue.put(
+            TradeCommand(entry_intent, copy.deepcopy(state), entry_intent.ts_ms, asyncio.get_running_loop().time(), 0, "test")
+        )
+        trader = SidecarWorkerTrader()
+        journal = FakeJournal()
+        strategy = types.SimpleNamespace(state=state, config=BollCvdReclaimStrategyConfig())
+        task = asyncio.create_task(
+            execution_worker(
+                execution_queue=execution_queue,
+                state_lock=asyncio.Lock(),
+                execution_state=ExecutionState(None, None),
+                account_snapshot=AccountSnapshot(flat_position(), 100.0, 100.0, asyncio.get_running_loop().time(), 0, 1),
+                trader=trader,  # type: ignore[arg-type]
+                strategy=strategy,  # type: ignore[arg-type]
+                journal=journal,  # type: ignore[arg-type]
+                state_store=RecordingStateStore(),  # type: ignore[arg-type]
+                email_sender=FakeEmailSender(),  # type: ignore[arg-type]
+                backlog_log_seconds=999,
+                sidecar_skip_first_layer=True,
+            )
+        )
+        await asyncio.wait_for(execution_queue.join(), timeout=1)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+        self.assertEqual(len(trader.executed_intents), 1)
+        executed_intent = trader.executed_intents[0]
+        self.assertEqual(executed_intent.size.eth_qty, 0.5)
+        self.assertEqual(executed_intent.managed_core_contracts, "5.00")
+        self.assertEqual(executed_intent.managed_core_eth_qty, 0.5)
+        self.assertEqual(trader.sidecar_tps, [])
+        self.assertNotIn("SIDECAR_LEG_OPENED", [event[0] for event in journal.events])
+        self.assertNotIn("SIDECAR_TP_PLACED", [event[0] for event in journal.events])
+        self.assertEqual(state.sidecar_legs, [])
 
     async def test_execution_worker_skips_stale_add_after_partial_tp_consumed(self) -> None:
         class StaleAddTrader(FakeTrader):

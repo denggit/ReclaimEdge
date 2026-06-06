@@ -1069,6 +1069,7 @@ async def execution_worker(
     state_store: LiveStateStore,
     email_sender: EmailSender,
     backlog_log_seconds: float,
+    sidecar_skip_first_layer: bool = True,
 ) -> None:
     last_backlog_log = 0.0
     while True:
@@ -1236,13 +1237,6 @@ async def execution_worker(
                         )
                         execution_state.cash_before_position = entry_cash_before
                     current_position_id = execution_state.current_position_id
-                sidecar_skip_first_layer = bool(
-                    getattr(
-                        getattr(getattr(strategy, "sizer", None), "config", None),
-                        "sidecar_skip_first_layer",
-                        True,
-                    )
-                )
                 combined_plan = build_combined_entry_intent(
                     intent=command.intent,
                     sidecar_enabled=bool(getattr(strategy.state, "sidecar_enabled_for_position", False)),
@@ -3314,6 +3308,7 @@ async def main() -> None:
                 state_store=state_store,
                 email_sender=email_sender,
                 backlog_log_seconds=execution_backlog_log_seconds,
+                sidecar_skip_first_layer=sizer.config.sidecar_skip_first_layer,
             ),
             daily_report_loop(),
             weekly_summary_loop(),
