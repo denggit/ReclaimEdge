@@ -23,6 +23,8 @@ from scripts.run_boll_cvd_live import (  # noqa: E402
     account_position_sync_worker,
     execution_worker,
     strategy_tick_worker,
+)
+from src.live.startup_recovery.trust_validation import (  # noqa: E402
     trusted_startup_saved_state,
 )
 from src.execution.trader import LiveTradeResult, PositionSnapshot  # noqa: E402
