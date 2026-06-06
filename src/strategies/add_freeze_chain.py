@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
 
 from src.strategies.add_layer_gates import PositionSide, add_elapsed_seconds, adverse_gap_pct
 
@@ -36,10 +35,10 @@ AddFreezeSkipLogKey = tuple[str, int, int, int, float]
 
 
 def add_freeze_active(
-    *,
-    add_freeze_chain_enabled: bool,
-    add_freeze_until_ts_ms: int,
-    ts_ms: int,
+        *,
+        add_freeze_chain_enabled: bool,
+        add_freeze_until_ts_ms: int,
+        ts_ms: int,
 ) -> bool:
     return bool(
         add_freeze_chain_enabled
@@ -48,28 +47,28 @@ def add_freeze_active(
 
 
 def add_freeze_remaining_seconds(
-    *,
-    add_freeze_until_ts_ms: int,
-    ts_ms: int,
+        *,
+        add_freeze_until_ts_ms: int,
+        ts_ms: int,
 ) -> float:
     until = int(add_freeze_until_ts_ms or 0)
     return max((until - ts_ms) / 1000, 0.0)
 
 
 def should_reset_add_freeze_if_expired(
-    *,
-    add_freeze_until_ts_ms: int,
-    ts_ms: int,
+        *,
+        add_freeze_until_ts_ms: int,
+        ts_ms: int,
 ) -> bool:
     return int(add_freeze_until_ts_ms or 0) <= ts_ms
 
 
 def active_add_freeze_bypass_multiplier(
-    *,
-    layers: int,
-    penalty_count: int,
-    first_add_block_bypass_multiplier: float,
-    add_min_interval_bypass_multiplier: float,
+        *,
+        layers: int,
+        penalty_count: int,
+        first_add_block_bypass_multiplier: float,
+        add_min_interval_bypass_multiplier: float,
 ) -> float:
     penalty = int(penalty_count or 0)
     if layers == 1 and penalty <= 0:
@@ -78,10 +77,10 @@ def active_add_freeze_bypass_multiplier(
 
 
 def first_entry_elapsed_seconds(
-    *,
-    ts_ms: int,
-    first_entry_ts_ms: int,
-    last_order_ts_ms: int,
+        *,
+        ts_ms: int,
+        first_entry_ts_ms: int,
+        last_order_ts_ms: int,
 ) -> float:
     first = int(first_entry_ts_ms or 0)
     if first <= 0:
@@ -90,31 +89,31 @@ def first_entry_elapsed_seconds(
 
 
 def first_add_block_required_gap_pct(
-    *,
-    target_layer_gap_pct: float,
-    first_add_block_bypass_multiplier: float,
+        *,
+        target_layer_gap_pct: float,
+        first_add_block_bypass_multiplier: float,
 ) -> float:
     return target_layer_gap_pct * first_add_block_bypass_multiplier
 
 
 def check_shock_add_timing(
-    *,
-    side: PositionSide,
-    price: float,
-    ts_ms: int,
-    target_layer: int,
-    layers: int,
-    last_entry_price: float | None,
-    last_order_ts_ms: int,
-    first_entry_ts_ms: int,
-    add_freeze_chain_enabled: bool,
-    add_freeze_until_ts_ms: int,
-    add_freeze_penalty_count: int,
-    first_add_block_seconds: int,
-    add_min_interval_seconds: int,
-    add_min_interval_bypass_multiplier: float,
-    first_add_block_bypass_multiplier: float,
-    target_layer_gap_pct: float,
+        *,
+        side: PositionSide,
+        price: float,
+        ts_ms: int,
+        target_layer: int,
+        layers: int,
+        last_entry_price: float | None,
+        last_order_ts_ms: int,
+        first_entry_ts_ms: int,
+        add_freeze_chain_enabled: bool,
+        add_freeze_until_ts_ms: int,
+        add_freeze_penalty_count: int,
+        first_add_block_seconds: int,
+        add_min_interval_seconds: int,
+        add_min_interval_bypass_multiplier: float,
+        first_add_block_bypass_multiplier: float,
+        target_layer_gap_pct: float,
 ) -> ShockAddTimingDecision:
     if last_entry_price is None or last_entry_price <= 0:
         return ShockAddTimingDecision(ok=False, reason="missing_last_entry")
@@ -209,10 +208,10 @@ def check_shock_add_timing(
 
 
 def start_add_freeze_after_first_entry(
-    *,
-    ts_ms: int,
-    add_freeze_chain_enabled: bool,
-    first_add_block_seconds: int,
+        *,
+        ts_ms: int,
+        add_freeze_chain_enabled: bool,
+        first_add_block_seconds: int,
 ) -> AddFreezeStartDecision:
     if not add_freeze_chain_enabled:
         return AddFreezeStartDecision(enabled=False, freeze_until_ts_ms=0, penalty_count=0)
@@ -224,13 +223,13 @@ def start_add_freeze_after_first_entry(
 
 
 def extend_add_freeze_after_successful_add(
-    *,
-    ts_ms: int,
-    add_freeze_chain_enabled: bool,
-    add_min_interval_seconds: int,
-    add_freeze_until_ts_ms: int,
-    add_freeze_penalty_count: int,
-    was_active_freeze: bool,
+        *,
+        ts_ms: int,
+        add_freeze_chain_enabled: bool,
+        add_min_interval_seconds: int,
+        add_freeze_until_ts_ms: int,
+        add_freeze_penalty_count: int,
+        was_active_freeze: bool,
 ) -> AddFreezeExtensionDecision:
     if not add_freeze_chain_enabled:
         return AddFreezeExtensionDecision(
@@ -257,12 +256,12 @@ def extend_add_freeze_after_successful_add(
 
 
 def add_freeze_skip_log_key(
-    *,
-    side: PositionSide,
-    layers: int,
-    target_layer: int,
-    penalty_count: int,
-    multiplier: float,
+        *,
+        side: PositionSide,
+        layers: int,
+        target_layer: int,
+        penalty_count: int,
+        multiplier: float,
 ) -> AddFreezeSkipLogKey:
     return (
         side,
@@ -274,12 +273,12 @@ def add_freeze_skip_log_key(
 
 
 def should_emit_add_freeze_skip_log(
-    *,
-    last_key: AddFreezeSkipLogKey | None,
-    current_key: AddFreezeSkipLogKey,
-    last_ts_ms: int,
-    ts_ms: int,
-    interval_ms: int,
+        *,
+        last_key: AddFreezeSkipLogKey | None,
+        current_key: AddFreezeSkipLogKey,
+        last_ts_ms: int,
+        ts_ms: int,
+        interval_ms: int,
 ) -> bool:
     if last_key == current_key and ts_ms - last_ts_ms < interval_ms:
         return False

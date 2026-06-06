@@ -211,8 +211,8 @@ class BollCvdShockReclaimStrategy(BollCvdReclaimStrategy):
 
     def _reset_add_freeze_if_expired(self, ts_ms: int) -> None:
         if add_freeze_chain.should_reset_add_freeze_if_expired(
-            add_freeze_until_ts_ms=int(getattr(self.state, "add_freeze_until_ts_ms", 0) or 0),
-            ts_ms=ts_ms,
+                add_freeze_until_ts_ms=int(getattr(self.state, "add_freeze_until_ts_ms", 0) or 0),
+                ts_ms=ts_ms,
         ):
             self.state.add_freeze_until_ts_ms = 0
             self.state.add_freeze_penalty_count = 0
@@ -276,11 +276,11 @@ class BollCvdShockReclaimStrategy(BollCvdReclaimStrategy):
             last_ts = int(getattr(self, "_last_add_freeze_skip_log_ts_ms", 0) or 0)
             last_key = getattr(self, "_last_add_freeze_skip_log_key", None)
             if not add_freeze_chain.should_emit_add_freeze_skip_log(
-                last_key=last_key,
-                current_key=current_key,
-                last_ts_ms=last_ts,
-                ts_ms=ts_ms,
-                interval_ms=self.ADD_FREEZE_SKIP_LOG_INTERVAL_MS,
+                    last_key=last_key,
+                    current_key=current_key,
+                    last_ts_ms=last_ts,
+                    ts_ms=ts_ms,
+                    interval_ms=self.ADD_FREEZE_SKIP_LOG_INTERVAL_MS,
             ):
                 return
             self._last_add_freeze_skip_log_ts_ms = ts_ms

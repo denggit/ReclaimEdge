@@ -251,7 +251,6 @@ class BollCvdShockReclaimStrategyTest(unittest.TestCase):
         self.assertEqual(strat.state.add_freeze_penalty_count, 0)
         self.assertAlmostEqual(strat._active_add_freeze_bypass_multiplier(), 2.0)
 
-
     def test_add_freeze_expired_state_reset_when_chain_disabled(self) -> None:
         """Regression: _reset_add_freeze_if_expired must still run when add_freeze_chain_enabled=False.
 

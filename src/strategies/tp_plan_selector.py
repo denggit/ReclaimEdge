@@ -59,46 +59,46 @@ class TpPlanUnchangedDecision:
 # ── TP_BOLL availability ────────────────────────────────────────────────
 
 def tp_boll_available(
-    *,
-    tp_boll_enabled: bool,
-    tp_middle: float | None,
-    tp_upper: float | None,
-    tp_lower: float | None,
+        *,
+        tp_boll_enabled: bool,
+        tp_middle: float | None,
+        tp_upper: float | None,
+        tp_lower: float | None,
 ) -> bool:
     """True when a valid TP-only BOLL snapshot is present."""
     return (
-        tp_boll_enabled
-        and tp_middle is not None
-        and tp_upper is not None
-        and tp_lower is not None
+            tp_boll_enabled
+            and tp_middle is not None
+            and tp_upper is not None
+            and tp_lower is not None
     )
 
 
 # ── Middle price selection ──────────────────────────────────────────────
 
 def select_tp_middle(
-    *,
-    tp_band: TpBandSnapshot,
-    tp_boll_enabled: bool,
+        *,
+        tp_band: TpBandSnapshot,
+        tp_boll_enabled: bool,
 ) -> TpMiddleSelection:
     """Return (middle_price, source) preferring TP_BOLL15 middle."""
     if tp_boll_available(
-        tp_boll_enabled=tp_boll_enabled,
-        tp_middle=tp_band.tp_middle,
-        tp_upper=tp_band.tp_upper,
-        tp_lower=tp_band.tp_lower,
+            tp_boll_enabled=tp_boll_enabled,
+            tp_middle=tp_band.tp_middle,
+            tp_upper=tp_band.tp_upper,
+            tp_lower=tp_band.tp_lower,
     ):
         return TpMiddleSelection(price=float(tp_band.tp_middle), source="TP_BOLL")  # type: ignore[arg-type]
     return TpMiddleSelection(price=float(tp_band.middle), source="STRUCTURE_BOLL")
 
 
 def select_tp_middle_with_profit_fallback(
-    *,
-    side: PositionSide,
-    effective_be: float,
-    min_net_profit: float,
-    tp_band: TpBandSnapshot,
-    tp_boll_enabled: bool,
+        *,
+        side: PositionSide,
+        effective_be: float,
+        min_net_profit: float,
+        tp_band: TpBandSnapshot,
+        tp_boll_enabled: bool,
 ) -> TpMiddleSelection:
     """Return (middle_price, source) for TP1 / first TP with profit-distance fallback.
 
@@ -146,17 +146,17 @@ def select_tp_middle_with_profit_fallback(
 # ── Outer price selection ───────────────────────────────────────────────
 
 def select_tp_outer(
-    *,
-    side: PositionSide,
-    tp_band: TpBandSnapshot,
-    tp_boll_enabled: bool,
+        *,
+        side: PositionSide,
+        tp_band: TpBandSnapshot,
+        tp_boll_enabled: bool,
 ) -> TpOuterSelection:
     """Return (outer_price, source) for the given side."""
     if tp_boll_available(
-        tp_boll_enabled=tp_boll_enabled,
-        tp_middle=tp_band.tp_middle,
-        tp_upper=tp_band.tp_upper,
-        tp_lower=tp_band.tp_lower,
+            tp_boll_enabled=tp_boll_enabled,
+            tp_middle=tp_band.tp_middle,
+            tp_upper=tp_band.tp_upper,
+            tp_lower=tp_band.tp_lower,
     ):
         if side == "LONG":
             return TpOuterSelection(price=float(tp_band.tp_upper), source="TP_BOLL")  # type: ignore[arg-type]
@@ -169,11 +169,11 @@ def select_tp_outer(
 # ── Effective breakeven ─────────────────────────────────────────────────
 
 def effective_breakeven_for_tp_selection(
-    *,
-    side: PositionSide,
-    net_remaining_breakeven_price: float,
-    avg_entry_price: float,
-    breakeven_fee_buffer_pct: float,
+        *,
+        side: PositionSide,
+        net_remaining_breakeven_price: float,
+        avg_entry_price: float,
+        breakeven_fee_buffer_pct: float,
 ) -> float:
     """Compute the effective breakeven price used for TP selection."""
     if net_remaining_breakeven_price > 0:
@@ -188,12 +188,12 @@ def effective_breakeven_for_tp_selection(
 # ── TP price selection ──────────────────────────────────────────────────
 
 def select_tp_price(
-    *,
-    side: PositionSide,
-    effective_be: float,
-    min_net_profit: float,
-    tp_band: TpBandSnapshot,
-    tp_boll_enabled: bool,
+        *,
+        side: PositionSide,
+        effective_be: float,
+        min_net_profit: float,
+        tp_band: TpBandSnapshot,
+        tp_boll_enabled: bool,
 ) -> TpPriceSelection:
     """Select TP price preferring TP_BOLL15, with fallback to structure BOLL20.
 
@@ -236,19 +236,19 @@ def select_tp_price(
 # ── Plan-allowed gates ──────────────────────────────────────────────────
 
 def three_stage_runner_plan_allowed(
-    *,
-    three_stage_runner_enabled: bool,
-    three_stage_pre_tp1_degrade_stage: str | None,
-    tp_mode: TpMode | None,
-    boll_exists: bool,
-    near_tp_protected: bool,
-    near_tp_add_disabled: bool,
-    partial_tp_consumed: bool,
-    middle_runner_enabled_for_position: bool,
-    middle_runner_pending: bool,
-    middle_runner_active: bool,
-    tp_plan: TpPlan | None,
-    trend_runner_active: bool,
+        *,
+        three_stage_runner_enabled: bool,
+        three_stage_pre_tp1_degrade_stage: str | None,
+        tp_mode: TpMode | None,
+        boll_exists: bool,
+        near_tp_protected: bool,
+        near_tp_add_disabled: bool,
+        partial_tp_consumed: bool,
+        middle_runner_enabled_for_position: bool,
+        middle_runner_pending: bool,
+        middle_runner_active: bool,
+        tp_plan: TpPlan | None,
+        trend_runner_active: bool,
 ) -> bool:
     """Return True when Three-Stage Runner plan is allowed."""
     if not three_stage_runner_enabled:
@@ -262,29 +262,29 @@ def three_stage_runner_plan_allowed(
     if partial_tp_consumed:
         return False
     if (
-        middle_runner_enabled_for_position
-        or middle_runner_pending
-        or middle_runner_active
-        or tp_plan == "MIDDLE_RUNNER"
-        or trend_runner_active
+            middle_runner_enabled_for_position
+            or middle_runner_pending
+            or middle_runner_active
+            or tp_plan == "MIDDLE_RUNNER"
+            or trend_runner_active
     ):
         return False
     return True
 
 
 def middle_runner_plan_allowed(
-    *,
-    middle_runner_enabled: bool,
-    tp_mode: TpMode | None,
-    boll_exists: bool,
-    near_tp_protected: bool,
-    near_tp_add_disabled: bool,
-    partial_tp_consumed: bool,
-    middle_runner_active: bool,
-    three_stage_runner_enabled_for_position: bool,
-    tp_plan: TpPlan | None,
-    three_stage_tp1_consumed: bool,
-    three_stage_tp2_consumed: bool,
+        *,
+        middle_runner_enabled: bool,
+        tp_mode: TpMode | None,
+        boll_exists: bool,
+        near_tp_protected: bool,
+        near_tp_add_disabled: bool,
+        partial_tp_consumed: bool,
+        middle_runner_active: bool,
+        three_stage_runner_enabled_for_position: bool,
+        tp_plan: TpPlan | None,
+        three_stage_tp1_consumed: bool,
+        three_stage_tp2_consumed: bool,
 ) -> bool:
     """Return True when Middle Runner plan is allowed."""
     if not middle_runner_enabled:
@@ -298,10 +298,10 @@ def middle_runner_plan_allowed(
     if middle_runner_active:
         return False
     if (
-        three_stage_runner_enabled_for_position
-        or tp_plan == "THREE_STAGE_RUNNER"
-        or three_stage_tp1_consumed
-        or three_stage_tp2_consumed
+            three_stage_runner_enabled_for_position
+            or tp_plan == "THREE_STAGE_RUNNER"
+            or three_stage_tp1_consumed
+            or three_stage_tp2_consumed
     ):
         return False
     return True
@@ -310,26 +310,26 @@ def middle_runner_plan_allowed(
 # ── TP plan selection ───────────────────────────────────────────────────
 
 def select_tp_plan(
-    *,
-    side: PositionSide,
-    final_tp: float,
-    layers: int,
-    tp_mode: TpMode | None,
-    boll_exists: bool,
-    three_stage_pre_tp1_degrade_stage: str | None,
-    middle_runner_first_close_ratio: float,
-    tp_middle_profit_fallback_price: float,
-    three_stage_runner_plan_allowed: bool,
-    three_stage_tp1_ratio: float,
-    three_stage_runner_enabled: bool,
-    middle_runner_plan_allowed: bool,
-    split_tp_enabled: bool,
-    split_tp_min_layers: int,
-    partial_tp_consumed: bool,
-    avg_entry: float,
-    split_tp_partial_ratio: float,
-    split_tp_path_ratio: float,
-    split_tp_min_profit_pct: float,
+        *,
+        side: PositionSide,
+        final_tp: float,
+        layers: int,
+        tp_mode: TpMode | None,
+        boll_exists: bool,
+        three_stage_pre_tp1_degrade_stage: str | None,
+        middle_runner_first_close_ratio: float,
+        tp_middle_profit_fallback_price: float,
+        three_stage_runner_plan_allowed: bool,
+        three_stage_tp1_ratio: float,
+        three_stage_runner_enabled: bool,
+        middle_runner_plan_allowed: bool,
+        split_tp_enabled: bool,
+        split_tp_min_layers: int,
+        partial_tp_consumed: bool,
+        avg_entry: float,
+        split_tp_partial_ratio: float,
+        split_tp_path_ratio: float,
+        split_tp_min_profit_pct: float,
 ) -> TpPlanSelection:
     """Select the TP plan (SINGLE / SPLIT / MIDDLE_RUNNER / THREE_STAGE_RUNNER).
 
@@ -388,7 +388,8 @@ def select_tp_plan(
         partial_tp = max(path_tp, min_tp)
         if partial_tp >= final_tp:
             return TpPlanSelection(partial_tp_price=None, partial_tp_ratio=0.0, tp_plan="SINGLE")
-        return TpPlanSelection(partial_tp_price=partial_tp, partial_tp_ratio=partial_ratio, tp_plan="SPLIT_PARTIAL_FINAL")
+        return TpPlanSelection(partial_tp_price=partial_tp, partial_tp_ratio=partial_ratio,
+                               tp_plan="SPLIT_PARTIAL_FINAL")
 
     # SHORT
     min_tp = avg_entry * (1 - min_profit_pct)
@@ -404,15 +405,15 @@ def select_tp_plan(
 # ── TP plan unchanged check ─────────────────────────────────────────────
 
 def tp_plan_unchanged(
-    *,
-    current_tp_price: float | None,
-    current_tp_plan: TpPlan | None,
-    current_partial_tp_price: float | None,
-    current_partial_tp_ratio: float,
-    new_tp_price: float,
-    new_partial_tp_price: float | None,
-    new_partial_tp_ratio: float,
-    new_tp_plan: TpPlan,
+        *,
+        current_tp_price: float | None,
+        current_tp_plan: TpPlan | None,
+        current_partial_tp_price: float | None,
+        current_partial_tp_ratio: float,
+        new_tp_price: float,
+        new_partial_tp_price: float | None,
+        new_partial_tp_ratio: float,
+        new_tp_plan: TpPlan,
 ) -> TpPlanUnchangedDecision:
     """Return True when the new TP plan is unchanged vs the current one."""
     if current_tp_price is None:

@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import os
 import unittest
 from decimal import Decimal
 
 import src.execution.trader as trader_module
-from src.execution.trader import Trader
 from src.execution.tp_sl_execution_manager import TpSlExecutionManager
+from src.execution.trader import Trader
 from src.risk.simple_position_sizer import PositionSize
 from src.strategies.boll_cvd_reclaim_strategy import TradeIntent
 
@@ -493,7 +492,8 @@ class TpSlExecutionManagerTest(unittest.IsolatedAsyncioTestCase):
         trader = make_trader()
         delegation_called = [False]
 
-        async def tracking_place(side, contracts, stop_price, retry_count, retry_interval_seconds):  # type: ignore[no-untyped-def]
+        async def tracking_place(side, contracts, stop_price, retry_count,
+                                 retry_interval_seconds):  # type: ignore[no-untyped-def]
             delegation_called[0] = True
             return True, "algo-1", "placed"
 
@@ -530,7 +530,6 @@ class TpSlExecutionManagerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(order_id, "tp-1")
         self.assertEqual(requests[0][2]["clOrdId"], "SC97644895deL147229")
         self.assertLessEqual(len(requests[0][2]["clOrdId"]), 32)
-
 
     # ------------------------------------------------------------------
     # Regression: LiveTradeResult / PositionSnapshot runtime import

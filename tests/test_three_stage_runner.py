@@ -43,9 +43,9 @@ class TestNormalizeThreeStageRatios(unittest.TestCase):
 
     def test_extreme_ratios_sum_to_one(self) -> None:
         r = tsr.normalize_three_stage_ratios(tp1_ratio=1.0, tp2_ratio=1.0, runner_ratio=1.0)
-        self.assertAlmostEqual(r.tp1_ratio, 1/3)
-        self.assertAlmostEqual(r.tp2_ratio, 1/3)
-        self.assertAlmostEqual(r.runner_ratio, 1/3)
+        self.assertAlmostEqual(r.tp1_ratio, 1 / 3)
+        self.assertAlmostEqual(r.tp2_ratio, 1 / 3)
+        self.assertAlmostEqual(r.runner_ratio, 1 / 3)
 
 
 class TestResetThreeStageStateValues(unittest.TestCase):

@@ -28,10 +28,10 @@ class OkxPrivateClient:
     """
 
     def __init__(
-        self,
-        config: OkxPrivateClientConfig,
-        *,
-        timestamp_factory: Callable[[], str] | None = None,
+            self,
+            config: OkxPrivateClientConfig,
+            *,
+            timestamp_factory: Callable[[], str] | None = None,
     ) -> None:
         self._config = config
         self._timestamp_factory = timestamp_factory

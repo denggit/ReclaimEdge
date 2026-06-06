@@ -82,10 +82,10 @@ class ThreeStagePostTp1ExtensionDecision:
 # ── Ratio normalization ─────────────────────────────────────────────────────
 
 def normalize_three_stage_ratios(
-    *,
-    tp1_ratio: float,
-    tp2_ratio: float,
-    runner_ratio: float,
+        *,
+        tp1_ratio: float,
+        tp2_ratio: float,
+        runner_ratio: float,
 ) -> ThreeStageRatios:
     """Normalize the three ratios so they sum to 1.0.
 
@@ -134,10 +134,10 @@ def reset_three_stage_state_values() -> ThreeStageStateValues:
 
 
 def planned_three_stage_state_values(
-    *,
-    tp1_price: float | None,
-    tp2_price: float | None,
-    ratios: ThreeStageRatios,
+        *,
+        tp1_price: float | None,
+        tp2_price: float | None,
+        ratios: ThreeStageRatios,
 ) -> ThreeStageStateValues:
     """Return the planned / initial values for Three-Stage Runner state.
 
@@ -165,10 +165,10 @@ def planned_three_stage_state_values(
 
 
 def update_three_stage_dynamic_target_values(
-    *,
-    tp1_price: float | None,
-    tp2_price: float | None,
-    ratios: ThreeStageRatios,
+        *,
+        tp1_price: float | None,
+        tp2_price: float | None,
+        ratios: ThreeStageRatios,
 ) -> ThreeStageDynamicTargetValues:
     """Return dynamic target update values (no reset of consumed/protective).
 
@@ -197,10 +197,10 @@ def reset_three_stage_post_tp1_sl_time_tighten_values() -> tuple[int, int, int]:
 # ── SL tightening helpers ───────────────────────────────────────────────────
 
 def tighten_three_stage_post_tp1_sl(
-    *,
-    side: PositionSide,
-    old_sl: float,
-    new_sl: float,
+        *,
+        side: PositionSide,
+        old_sl: float,
+        new_sl: float,
 ) -> float:
     """Tighten the Three-Stage post-TP1 protective SL in the correct direction.
 
@@ -213,10 +213,10 @@ def tighten_three_stage_post_tp1_sl(
 
 
 def tighten_optional_three_stage_post_tp1_sl(
-    *,
-    side: PositionSide,
-    old_sl: float | None,
-    new_sl: float | None,
+        *,
+        side: PositionSide,
+        old_sl: float | None,
+        new_sl: float | None,
 ) -> float | None:
     """Tighten optional Three-Stage post-TP1 SL.
 
@@ -234,18 +234,18 @@ def tighten_optional_three_stage_post_tp1_sl(
 # ── Post-TP1 protective SL calculation ──────────────────────────────────────
 
 def calculate_three_stage_post_tp1_protective_sl(
-    *,
-    side: PositionSide,
-    current_price: float,
-    avg_entry_price: float,
-    net_remaining_breakeven_price: float,
-    breakeven_fee_buffer_pct: float,
-    tp1_price: float | None,
-    tp1_ratio: float,
-    boll_middle: float,
-    boll_upper: float,
-    boll_lower: float,
-    sl_tighten_ratio: float,
+        *,
+        side: PositionSide,
+        current_price: float,
+        avg_entry_price: float,
+        net_remaining_breakeven_price: float,
+        breakeven_fee_buffer_pct: float,
+        tp1_price: float | None,
+        tp1_ratio: float,
+        boll_middle: float,
+        boll_upper: float,
+        boll_lower: float,
+        sl_tighten_ratio: float,
 ) -> ThreeStagePostTp1ProtectiveSlDecision:
     """Pure calculation of the Three-Stage post-TP1 protective SL.
 
@@ -346,14 +346,14 @@ def calculate_three_stage_post_tp1_protective_sl(
 # ── Post-TP1 extension trigger ──────────────────────────────────────────────
 
 def apply_three_stage_post_tp1_extension_trigger(
-    *,
-    side: PositionSide,
-    current_price: float,
-    protective_sl: float | None,
-    boll_middle: float,
-    boll_upper: float,
-    boll_lower: float,
-    extension_trigger_ratio: float,
+        *,
+        side: PositionSide,
+        current_price: float,
+        protective_sl: float | None,
+        boll_middle: float,
+        boll_upper: float,
+        boll_lower: float,
+        extension_trigger_ratio: float,
 ) -> ThreeStagePostTp1ExtensionDecision:
     """Pure evaluation of the Three-Stage post-TP1 extension trigger.
 

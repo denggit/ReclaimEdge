@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import datetime as dt
+import os
 import time
+from zoneinfo import ZoneInfo
 
 
 def format_ts_ms(ts_ms: int) -> str:
@@ -21,8 +23,17 @@ def parse_weekly_report_time(value: str) -> tuple[int, int]:
     return parse_daily_report_time(value)
 
 
+def live_report_timezone() -> ZoneInfo:
+    name = os.getenv("LIVE_REPORT_TIMEZONE", "Asia/Singapore").strip() or "Asia/Singapore"
+    try:
+        return ZoneInfo(name)
+    except Exception:
+        return ZoneInfo("Asia/Singapore")
+
+
 def next_daily_report_time(hour: int, minute: int) -> dt.datetime:
-    now = dt.datetime.now().astimezone()
+    tz = live_report_timezone()
+    now = dt.datetime.now(tz)
     target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
     if target <= now:
         target += dt.timedelta(days=1)
@@ -30,15 +41,10 @@ def next_daily_report_time(hour: int, minute: int) -> dt.datetime:
 
 
 def next_weekly_summary_time(hour: int, minute: int, weekday: int = 0) -> dt.datetime:
-    now = dt.datetime.now().astimezone()
+    tz = live_report_timezone()
+    now = dt.datetime.now(tz)
     days_ahead = weekday - now.weekday()
     target_date = now.date() + dt.timedelta(days=days_ahead)
-    # Normalize to fixed-offset timezone for consistent comparison across Python versions.
-    # On Python 3.12+, astimezone() may return a zoneinfo.ZoneInfo tzinfo;
-    # datetime.combine with ZoneInfo can produce comparison mismatches when
-    # compared against expected values using dt.timezone in tests.
-    utc_offset = now.utcoffset()
-    tz = dt.timezone(utc_offset) if utc_offset is not None else now.tzinfo
     target = dt.datetime.combine(target_date, dt.time(hour, minute), tzinfo=tz)
     if target <= now:
         target += dt.timedelta(days=7)

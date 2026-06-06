@@ -110,19 +110,19 @@ def reset_trend_runner_reverse_state_values() -> TrendRunnerReverseStateValues:
 # ── Dynamic TP/SL calculation ───────────────────────────────────────────────
 
 def calculate_trend_runner_dynamic_orders(
-    *,
-    side: PositionSide,
-    boll_middle: float,
-    boll_upper: float,
-    boll_lower: float,
-    adjust_count: int,
-    current_sl_price: float | None,
-    runner_tp_initial_outer_extra_pct: float,
-    runner_tp_step_pct: float,
-    runner_tp_min_outer_extra_pct: float,
-    runner_sl_initial_outer_distance_ratio: float,
-    runner_sl_step_ratio: float,
-    runner_sl_min_outer_distance_ratio: float,
+        *,
+        side: PositionSide,
+        boll_middle: float,
+        boll_upper: float,
+        boll_lower: float,
+        adjust_count: int,
+        current_sl_price: float | None,
+        runner_tp_initial_outer_extra_pct: float,
+        runner_tp_step_pct: float,
+        runner_tp_min_outer_extra_pct: float,
+        runner_sl_initial_outer_distance_ratio: float,
+        runner_sl_step_ratio: float,
+        runner_sl_min_outer_distance_ratio: float,
 ) -> TrendRunnerDynamicOrders:
     """Calculate Trend Runner dynamic TP/SL prices.
 
@@ -164,15 +164,15 @@ def calculate_trend_runner_dynamic_orders(
 # ── Market exit reason ──────────────────────────────────────────────────────
 
 def trend_runner_market_exit_reason(
-    *,
-    side: PositionSide,
-    price: float,
-    boll_middle: float,
-    tp_price: float | None,
-    sl_price: float | None,
-    trend_start_ts_ms: int,
-    ts_ms: int,
-    runner_max_trend_seconds_after_second_tp: int,
+        *,
+        side: PositionSide,
+        price: float,
+        boll_middle: float,
+        tp_price: float | None,
+        sl_price: float | None,
+        trend_start_ts_ms: int,
+        ts_ms: int,
+        runner_max_trend_seconds_after_second_tp: int,
 ) -> TrendRunnerExitDecision:
     """Evaluate static Trend Runner market-exit conditions (no reverse burst).
 
@@ -216,16 +216,16 @@ def trend_runner_market_exit_reason(
 # ── Reverse burst candidate ─────────────────────────────────────────────────
 
 def trend_runner_reverse_candidate(
-    *,
-    side: PositionSide,
-    up_burst: bool,
-    down_burst: bool,
-    buy_ratio: float,
-    sell_ratio: float,
-    fast_cvd: float,
-    cvd_increasing: bool,
-    cvd_decreasing: bool,
-    runner_reverse_strong_ratio: float,
+        *,
+        side: PositionSide,
+        up_burst: bool,
+        down_burst: bool,
+        buy_ratio: float,
+        sell_ratio: float,
+        fast_cvd: float,
+        cvd_increasing: bool,
+        cvd_decreasing: bool,
+        runner_reverse_strong_ratio: float,
 ) -> TrendRunnerReverseCandidateDecision:
     """Check whether a Trend Runner reverse-burst candidate condition is met.
 
@@ -235,18 +235,18 @@ def trend_runner_reverse_candidate(
         is_candidate = bool(
             down_burst
             or (
-                sell_ratio >= runner_reverse_strong_ratio
-                and fast_cvd < 0
-                and cvd_decreasing
+                    sell_ratio >= runner_reverse_strong_ratio
+                    and fast_cvd < 0
+                    and cvd_decreasing
             )
         )
     else:  # SHORT
         is_candidate = bool(
             up_burst
             or (
-                buy_ratio >= runner_reverse_strong_ratio
-                and fast_cvd > 0
-                and cvd_increasing
+                    buy_ratio >= runner_reverse_strong_ratio
+                    and fast_cvd > 0
+                    and cvd_increasing
             )
         )
     return TrendRunnerReverseCandidateDecision(is_candidate=is_candidate)
@@ -255,10 +255,10 @@ def trend_runner_reverse_candidate(
 # ── Reverse extreme price ───────────────────────────────────────────────────
 
 def update_trend_runner_reverse_extreme_price(
-    *,
-    side: PositionSide,
-    current_extreme_price: float | None,
-    price: float,
+        *,
+        side: PositionSide,
+        current_extreme_price: float | None,
+        price: float,
 ) -> float:
     """Update the Trend Runner reverse extreme price for the current tick.
 
@@ -273,9 +273,9 @@ def update_trend_runner_reverse_extreme_price(
 # ── Reverse sample pruning ──────────────────────────────────────────────────
 
 def prune_trend_runner_reverse_samples(
-    *,
-    samples: list,
-    cutoff_ts_ms: int,
+        *,
+        samples: list,
+        cutoff_ts_ms: int,
 ) -> list:
     """Prune Trend Runner reverse samples to those within the confirm window.
 
@@ -287,18 +287,18 @@ def prune_trend_runner_reverse_samples(
 # ── Reverse burst confirmation ──────────────────────────────────────────────
 
 def trend_runner_reverse_confirmed(
-    *,
-    side: PositionSide,
-    current_price: float,
-    samples: list,
-    start_price: float | None,
-    extreme_price: float | None,
-    fast_cvd_start: float,
-    current_fast_cvd: float,
-    runner_reverse_sell_ratio: float,
-    runner_reverse_buy_ratio: float,
-    runner_reverse_min_price_damage_pct: float,
-    runner_reverse_recovery_cancel_pct: float,
+        *,
+        side: PositionSide,
+        current_price: float,
+        samples: list,
+        start_price: float | None,
+        extreme_price: float | None,
+        fast_cvd_start: float,
+        current_fast_cvd: float,
+        runner_reverse_sell_ratio: float,
+        runner_reverse_buy_ratio: float,
+        runner_reverse_min_price_damage_pct: float,
+        runner_reverse_recovery_cancel_pct: float,
 ) -> TrendRunnerReverseConfirmDecision:
     """Confirm whether the Trend Runner reverse burst should trigger.
 
@@ -319,20 +319,20 @@ def trend_runner_reverse_confirmed(
         price_damage_pct = (start_price - current_price) / start_price
         recovery_pct = (current_price - extreme_price) / extreme_price
         confirmed = (
-            avg_ratio >= runner_reverse_sell_ratio
-            and current_fast_cvd < fast_cvd_start
-            and price_damage_pct >= runner_reverse_min_price_damage_pct
-            and recovery_pct < runner_reverse_recovery_cancel_pct
+                avg_ratio >= runner_reverse_sell_ratio
+                and current_fast_cvd < fast_cvd_start
+                and price_damage_pct >= runner_reverse_min_price_damage_pct
+                and recovery_pct < runner_reverse_recovery_cancel_pct
         )
     else:  # SHORT
         avg_ratio = sum(float(sample[1]) for sample in samples) / len(samples)
         price_damage_pct = (current_price - start_price) / start_price
         recovery_pct = (extreme_price - current_price) / extreme_price
         confirmed = (
-            avg_ratio >= runner_reverse_buy_ratio
-            and current_fast_cvd > fast_cvd_start
-            and price_damage_pct >= runner_reverse_min_price_damage_pct
-            and recovery_pct < runner_reverse_recovery_cancel_pct
+                avg_ratio >= runner_reverse_buy_ratio
+                and current_fast_cvd > fast_cvd_start
+                and price_damage_pct >= runner_reverse_min_price_damage_pct
+                and recovery_pct < runner_reverse_recovery_cancel_pct
         )
 
     return TrendRunnerReverseConfirmDecision(

@@ -2,10 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import os
+from dataclasses import replace
 from decimal import Decimal
 from typing import Any, TYPE_CHECKING
-
-from dataclasses import replace
 
 from src.execution import order_specs
 from src.execution.trader import LiveTradeResult, PositionSnapshot
@@ -133,7 +132,7 @@ class TpSlExecutionManager:
         if protective_sl_price is None:
             pct = float(os.getenv("NEAR_TP_PROTECTIVE_SL_PROFIT_PCT", "0.001"))
             protective_sl_price = intent.avg_entry_price * (
-                        1 + pct) if intent.side == "LONG" else intent.avg_entry_price * (1 - pct)
+                    1 + pct) if intent.side == "LONG" else intent.avg_entry_price * (1 - pct)
 
         if os.getenv("NEAR_TP_PROTECTIVE_SL_ENABLED", "true").strip().lower() not in {"1", "true", "yes", "y", "on"}:
             if not tp_ok:

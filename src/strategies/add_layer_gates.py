@@ -27,12 +27,12 @@ class AddAvgImprovementDecision:
 
 
 def add_layer_gap_pct_for_target_layer(
-    *,
-    target_layer: int,
-    add_layer_gap_pct: float,
-    add_layer_gap_pct_layer_7_8: float,
-    add_layer_gap_pct_layer_9_10: float,
-    add_layer_gap_pct_layer_11_plus: float,
+        *,
+        target_layer: int,
+        add_layer_gap_pct: float,
+        add_layer_gap_pct_layer_7_8: float,
+        add_layer_gap_pct_layer_9_10: float,
+        add_layer_gap_pct_layer_11_plus: float,
 ) -> float:
     if target_layer >= 11:
         return add_layer_gap_pct_layer_11_plus
@@ -44,12 +44,12 @@ def add_layer_gap_pct_for_target_layer(
 
 
 def add_min_interval_bypass_gap_pct_for_target_layer(
-    *,
-    target_layer: int,
-    add_layer_gap_pct: float,
-    add_layer_gap_pct_layer_7_8: float,
-    add_layer_gap_pct_layer_9_10: float,
-    add_layer_gap_pct_layer_11_plus: float,
+        *,
+        target_layer: int,
+        add_layer_gap_pct: float,
+        add_layer_gap_pct_layer_7_8: float,
+        add_layer_gap_pct_layer_9_10: float,
+        add_layer_gap_pct_layer_11_plus: float,
 ) -> float:
     return add_layer_gap_pct_for_target_layer(
         target_layer=target_layer,
@@ -73,15 +73,15 @@ def adverse_gap_pct(*, side: PositionSide, price: float, last_entry_price: float
 
 
 def check_add_gap(
-    *,
-    side: PositionSide,
-    price: float,
-    last_entry_price: float | None,
-    target_layer: int,
-    add_layer_gap_pct: float,
-    add_layer_gap_pct_layer_7_8: float,
-    add_layer_gap_pct_layer_9_10: float,
-    add_layer_gap_pct_layer_11_plus: float,
+        *,
+        side: PositionSide,
+        price: float,
+        last_entry_price: float | None,
+        target_layer: int,
+        add_layer_gap_pct: float,
+        add_layer_gap_pct_layer_7_8: float,
+        add_layer_gap_pct_layer_9_10: float,
+        add_layer_gap_pct_layer_11_plus: float,
 ) -> AddGapDecision:
     gap_pct = add_layer_gap_pct_for_target_layer(
         target_layer=target_layer,
@@ -102,20 +102,20 @@ def check_add_gap(
 
 
 def check_base_add_timing(
-    *,
-    side: PositionSide,
-    price: float,
-    ts_ms: int,
-    target_layer: int,
-    layers: int,
-    last_entry_price: float | None,
-    last_order_ts_ms: int,
-    first_add_block_seconds: int,
-    add_min_interval_seconds: int,
-    add_layer_gap_pct: float,
-    add_layer_gap_pct_layer_7_8: float,
-    add_layer_gap_pct_layer_9_10: float,
-    add_layer_gap_pct_layer_11_plus: float,
+        *,
+        side: PositionSide,
+        price: float,
+        ts_ms: int,
+        target_layer: int,
+        layers: int,
+        last_entry_price: float | None,
+        last_order_ts_ms: int,
+        first_add_block_seconds: int,
+        add_min_interval_seconds: int,
+        add_layer_gap_pct: float,
+        add_layer_gap_pct_layer_7_8: float,
+        add_layer_gap_pct_layer_9_10: float,
+        add_layer_gap_pct_layer_11_plus: float,
 ) -> AddTimingDecision:
     if last_entry_price is None or last_entry_price <= 0:
         return AddTimingDecision(False, "missing_last_entry")
@@ -142,14 +142,14 @@ def check_base_add_timing(
 
 
 def check_add_avg_improvement(
-    *,
-    side: PositionSide,
-    price: float,
-    required_improvement_pct: float,
-    old_qty: float,
-    old_notional: float,
-    old_avg: float,
-    add_qty: float,
+        *,
+        side: PositionSide,
+        price: float,
+        required_improvement_pct: float,
+        old_qty: float,
+        old_notional: float,
+        old_avg: float,
+        add_qty: float,
 ) -> AddAvgImprovementDecision:
     if required_improvement_pct <= 0:
         return AddAvgImprovementDecision(True, 0.0, old_avg)

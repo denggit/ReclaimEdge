@@ -1176,7 +1176,7 @@ class BollCvdReclaimStrategy:
             effective_be = self._effective_breakeven_for_tp_selection(self.state.side)
             min_profit = self.config.tp_min_net_profit_pct
             required_middle = effective_be * (1 + min_profit) if self.state.side == "LONG" else effective_be * (
-                        1 - min_profit)
+                    1 - min_profit)
 
             # Three-Stage: only reset when TP1 has NOT been consumed and trend runner is NOT active
             if (
@@ -2030,7 +2030,8 @@ class BollCvdReclaimStrategy:
         self.state.trend_runner_sl_order_id = values.trend_runner_sl_order_id
         self.state.trend_runner_exit_reason = values.trend_runner_exit_reason
 
-    def _apply_trend_runner_reverse_state_values(self, values: trend_runner_helpers.TrendRunnerReverseStateValues) -> None:
+    def _apply_trend_runner_reverse_state_values(self,
+                                                 values: trend_runner_helpers.TrendRunnerReverseStateValues) -> None:
         self.state.trend_runner_reverse_candidate = values.trend_runner_reverse_candidate
         self.state.trend_runner_reverse_start_ts_ms = values.trend_runner_reverse_start_ts_ms
         self.state.trend_runner_reverse_start_price = values.trend_runner_reverse_start_price
@@ -2066,7 +2067,8 @@ class BollCvdReclaimStrategy:
         self.state.three_stage_post_tp1_sl_time_tighten_last_candle_ts_ms = values.three_stage_post_tp1_sl_time_tighten_last_candle_ts_ms
         self.state.three_stage_post_tp1_sl_time_tighten_log_candle_ts_ms = values.three_stage_post_tp1_sl_time_tighten_log_candle_ts_ms
 
-    def _apply_three_stage_dynamic_target_values(self, values: three_stage_helpers.ThreeStageDynamicTargetValues) -> None:
+    def _apply_three_stage_dynamic_target_values(self,
+                                                 values: three_stage_helpers.ThreeStageDynamicTargetValues) -> None:
         """Write back dynamic target update fields from a value object.
 
         Does NOT write consumed flags, protective SL, or extension flags.

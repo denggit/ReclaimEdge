@@ -129,7 +129,7 @@ class DailyTradeReporter:
         return await self.email_sender.send_email_async(subject, content, content_type="html")
 
     def _build_last_24h_report_sync(self, start: datetime, end: datetime, context: ReportRuntimeContext | None) -> \
-    tuple[str, str]:
+            tuple[str, str]:
         # Load all events once in a worker thread. The report window only displays
         # recent records, but all history can provide a best-effort starting cash
         # when context.period_start_cash was not supplied by the live runner.
@@ -353,7 +353,7 @@ class DailyTradeReporter:
         avg_pnl = known_closed_pnl / closed_count if closed_count else None
         profit_factor = gross_profit / gross_loss if gross_loss > 0 else None
         total_return_pct = (
-                                       latest_cash - first_cash) / first_cash * 100 if first_cash and latest_cash is not None else None
+                                   latest_cash - first_cash) / first_cash * 100 if first_cash and latest_cash is not None else None
         max_drawdown_usdt, max_drawdown_pct = self._max_drawdown(equity_points)
         first_ts = short_ts(events_sorted[0].ts_iso) if events_sorted else "-"
         last_ts = short_ts(events_sorted[-1].ts_iso) if events_sorted else "-"

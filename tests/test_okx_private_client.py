@@ -2,9 +2,8 @@ from __future__ import annotations
 
 import base64
 import hmac
-import json
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import src.execution.okx_private_client as client_module
 from src.execution.okx_private_client import OkxPrivateClient, OkxPrivateClientConfig

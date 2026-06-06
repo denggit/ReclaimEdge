@@ -11,8 +11,8 @@ from src.live import time_utils as live_time_utils
 from src.live.account_sync import flat_balance as live_flat_balance
 from src.reporting.live_state_store import LiveStateStore
 from src.reporting.trade_journal import LiveTradeJournal
-from src.risk.rolling_loss_guard import ROLLING_LOSS_HALT_REASONS, RollingLossGuard
 from src.risk import rolling_loss_live as rolling_loss_live_helpers
+from src.risk.rolling_loss_guard import ROLLING_LOSS_HALT_REASONS, RollingLossGuard
 from src.risk.simple_position_sizer import SimplePositionSizer
 from src.strategies.boll_cvd_reclaim_strategy import StrategyPositionState
 from src.strategies.boll_cvd_shock_reclaim_strategy import BollCvdShockReclaimStrategy
@@ -35,26 +35,26 @@ class AccountSyncFlatSettlementPrepareResult:
 
 
 async def prepare_account_sync_flat_settlement_phase(
-    *,
-    state_lock: asyncio.Lock,
-    account_snapshot: live_runtime_types.AccountSnapshot,
-    execution_state: live_runtime_types.ExecutionState,
-    trader: Trader,
-    sizer: SimplePositionSizer,
-    strategy: BollCvdShockReclaimStrategy,
-    rolling_loss_guard: RollingLossGuard | None,
-    pending_flat_payload: dict[str, Any] | None,
-    position: PositionSnapshot,
-    current_position_key: Any,
-    cash: float,
-    equity: float,
-    flat_balance_confirm_attempts: int,
-    flat_balance_confirm_interval_seconds: float,
-    flat_balance_stable_delta_usdt: float,
-    flat_balance_cash_equity_max_diff_usdt: float,
-    last_logged_cash: float,
-    last_logged_equity: float,
-    last_logged_position_key: Any,
+        *,
+        state_lock: asyncio.Lock,
+        account_snapshot: live_runtime_types.AccountSnapshot,
+        execution_state: live_runtime_types.ExecutionState,
+        trader: Trader,
+        sizer: SimplePositionSizer,
+        strategy: BollCvdShockReclaimStrategy,
+        rolling_loss_guard: RollingLossGuard | None,
+        pending_flat_payload: dict[str, Any] | None,
+        position: PositionSnapshot,
+        current_position_key: Any,
+        cash: float,
+        equity: float,
+        flat_balance_confirm_attempts: int,
+        flat_balance_confirm_interval_seconds: float,
+        flat_balance_stable_delta_usdt: float,
+        flat_balance_cash_equity_max_diff_usdt: float,
+        last_logged_cash: float,
+        last_logged_equity: float,
+        last_logged_position_key: Any,
 ) -> AccountSyncFlatSettlementPrepareResult:
     if pending_flat_payload is None:
         return AccountSyncFlatSettlementPrepareResult(
@@ -156,8 +156,8 @@ async def prepare_account_sync_flat_settlement_phase(
             "rolling_loss_hard_halt",
         }
         preserve_critical_halt = (
-            rolling_loss_guard is not None
-            and result_flat_previous_halt_reason not in flat_clearable_halt_reasons
+                rolling_loss_guard is not None
+                and result_flat_previous_halt_reason not in flat_clearable_halt_reasons
         )
         execution_state.trading_halted = preserve_critical_halt
         execution_state.halt_reason = result_flat_previous_halt_reason if preserve_critical_halt else None
@@ -183,17 +183,17 @@ async def prepare_account_sync_flat_settlement_phase(
 
 
 async def finalize_account_sync_flat_settlement_phase(
-    *,
-    state_lock: asyncio.Lock,
-    execution_state: live_runtime_types.ExecutionState,
-    journal: LiveTradeJournal,
-    email_sender: EmailSender | None,
-    state_store: LiveStateStore,
-    rolling_loss_guard: RollingLossGuard | None,
-    record_flat_payload: dict[str, Any] | None,
-    pending_flat_payload: dict[str, Any] | None,
-    flat_previous_halt_reason: str | None,
-    clear_state: bool,
+        *,
+        state_lock: asyncio.Lock,
+        execution_state: live_runtime_types.ExecutionState,
+        journal: LiveTradeJournal,
+        email_sender: EmailSender | None,
+        state_store: LiveStateStore,
+        rolling_loss_guard: RollingLossGuard | None,
+        record_flat_payload: dict[str, Any] | None,
+        pending_flat_payload: dict[str, Any] | None,
+        flat_previous_halt_reason: str | None,
+        clear_state: bool,
 ) -> None:
     if record_flat_payload is not None:
         record_flat_payload.pop("near_tp_protective_sl_order_id", None)
@@ -205,9 +205,9 @@ async def finalize_account_sync_flat_settlement_phase(
             guard_now_ms = live_time_utils.utc_ms()
             flat_equity = record_flat_payload.get("equity_after") or record_flat_payload.get("cash_after")
             flat_event_id = (
-                record_flat_payload.get("position_id")
-                or (pending_flat_payload or {}).get("position_id")
-                or execution_state.current_position_id
+                    record_flat_payload.get("position_id")
+                    or (pending_flat_payload or {}).get("position_id")
+                    or execution_state.current_position_id
             )
             decision = rolling_loss_guard.evaluate_after_flat(
                 now_ms=guard_now_ms,
@@ -239,9 +239,9 @@ async def finalize_account_sync_flat_settlement_phase(
                     else:
                         async with state_lock:
                             if (
-                                not execution_state.trading_halted
-                                or execution_state.halt_reason in ROLLING_LOSS_HALT_REASONS
-                                or execution_state.halt_reason is None
+                                    not execution_state.trading_halted
+                                    or execution_state.halt_reason in ROLLING_LOSS_HALT_REASONS
+                                    or execution_state.halt_reason is None
                             ):
                                 execution_state.trading_halted = True
                                 execution_state.halt_reason = halt_reason

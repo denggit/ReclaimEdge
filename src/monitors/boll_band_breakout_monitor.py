@@ -378,7 +378,7 @@ class BollBandBreakoutMonitor:
                 f"{tp_middle:.4f}" if tp_middle is not None else "-",
                 f"{tp_upper:.4f}" if tp_upper is not None else "-",
                 f"{tp_lower:.4f}" if tp_lower is not None else "-",
-                )
+            )
 
     async def _tick_loop(self) -> None:
         while self._running:

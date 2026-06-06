@@ -330,7 +330,7 @@ def run_account_sync_tp_progress_phase(
             core_position.avg_entry_price,
         )
     save_state_payload = (
-    execution_state.current_position_id, copy.deepcopy(strategy.state), execution_state.cash_before_position)
+        execution_state.current_position_id, copy.deepcopy(strategy.state), execution_state.cash_before_position)
     if current_position_key != last_logged_position_key:
         logger.info(
             "POSITION_SYNC_CHANGED | side=%s contracts=%s avg_entry=%.4f eth_qty=%.6f strategy_layers=%s",

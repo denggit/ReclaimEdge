@@ -510,7 +510,7 @@ class TestRunnerNotAffectedByTpBoll:
         tp, sl, extra, dist = s._calculate_trend_runner_dynamic_orders("LONG", b, 0, None)
         # TP should be based on boll.upper (110), not tp_upper (108)
         expected_tp = 110.0 * (
-                    1 + max(s.config.runner_tp_min_outer_extra_pct, s.config.runner_tp_initial_outer_extra_pct))
+                1 + max(s.config.runner_tp_min_outer_extra_pct, s.config.runner_tp_initial_outer_extra_pct))
         assert tp == expected_tp
 
 

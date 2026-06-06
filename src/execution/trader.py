@@ -1,16 +1,14 @@
 from __future__ import annotations
 
-import asyncio
 import math
 import os
-from dataclasses import dataclass, replace
-from decimal import Decimal, ROUND_DOWN
+from dataclasses import dataclass
+from decimal import Decimal
 from typing import Any, Optional
 
 from config.env_loader import OKX_CONFIG
 from src.execution import order_specs
 from src.execution.okx_private_client import OkxPrivateClient, OkxPrivateClientConfig
-from src.position_management.sidecar.model import sanitize_okx_client_order_id
 from src.strategies.boll_cvd_reclaim_strategy import PositionSide, TradeIntent
 from src.utils.log import get_logger
 
@@ -349,7 +347,7 @@ class Trader:
         )
 
     def _near_tp_fallback_conditional_close_body(self, side: PositionSide, contracts: Decimal, stop_price: float) -> \
-    dict[str, Any]:
+            dict[str, Any]:
         return order_specs.build_conditional_protective_sl_algo_body(
             inst_id=self.symbol,
             td_mode=self.td_mode,

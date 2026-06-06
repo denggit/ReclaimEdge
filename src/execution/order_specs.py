@@ -41,10 +41,10 @@ def close_order_side(*, side: PositionSide) -> str:
 
 
 def maybe_add_pos_side(
-    body: dict[str, Any],
-    *,
-    side: PositionSide,
-    pos_side_mode: str,
+        body: dict[str, Any],
+        *,
+        side: PositionSide,
+        pos_side_mode: str,
 ) -> dict[str, Any]:
     body = dict(body)
     ps = pos_side_for_mode(side=side, pos_side_mode=pos_side_mode)
@@ -59,9 +59,9 @@ def maybe_add_pos_side(
 
 
 def round_contracts_down(
-    *,
-    contracts: Decimal,
-    contract_precision: Decimal,
+        *,
+        contracts: Decimal,
+        contract_precision: Decimal,
 ) -> Decimal:
     lots = (contracts / contract_precision).to_integral_value(rounding=ROUND_DOWN)
     return lots * contract_precision
@@ -73,12 +73,12 @@ def round_contracts_down(
 
 
 def build_market_entry_order_body(
-    *,
-    inst_id: str,
-    td_mode: str,
-    side: PositionSide,
-    contracts_text: str,
-    pos_side_mode: str,
+        *,
+        inst_id: str,
+        td_mode: str,
+        side: PositionSide,
+        contracts_text: str,
+        pos_side_mode: str,
 ) -> dict[str, Any]:
     body: dict[str, Any] = {
         "instId": inst_id,
@@ -91,12 +91,12 @@ def build_market_entry_order_body(
 
 
 def build_reduce_only_market_order_body(
-    *,
-    inst_id: str,
-    td_mode: str,
-    side: PositionSide,
-    contracts_text: str,
-    pos_side_mode: str,
+        *,
+        inst_id: str,
+        td_mode: str,
+        side: PositionSide,
+        contracts_text: str,
+        pos_side_mode: str,
 ) -> dict[str, Any]:
     body: dict[str, Any] = {
         "instId": inst_id,
@@ -110,14 +110,14 @@ def build_reduce_only_market_order_body(
 
 
 def build_reduce_only_tp_order_body(
-    *,
-    inst_id: str,
-    td_mode: str,
-    side: PositionSide,
-    contracts_text: str,
-    price_text: str,
-    pos_side_mode: str,
-    client_order_id: str | None = None,
+        *,
+        inst_id: str,
+        td_mode: str,
+        side: PositionSide,
+        contracts_text: str,
+        price_text: str,
+        pos_side_mode: str,
+        client_order_id: str | None = None,
 ) -> dict[str, Any]:
     body: dict[str, Any] = {
         "instId": inst_id,
@@ -135,13 +135,13 @@ def build_reduce_only_tp_order_body(
 
 
 def build_conditional_protective_sl_algo_body(
-    *,
-    inst_id: str,
-    td_mode: str,
-    side: PositionSide,
-    contracts_text: str,
-    stop_price_text: str,
-    pos_side_mode: str,
+        *,
+        inst_id: str,
+        td_mode: str,
+        side: PositionSide,
+        contracts_text: str,
+        stop_price_text: str,
+        pos_side_mode: str,
 ) -> dict[str, Any]:
     body: dict[str, Any] = {
         "instId": inst_id,
@@ -158,27 +158,27 @@ def build_conditional_protective_sl_algo_body(
 
 
 def build_cancel_order_body(
-    *,
-    inst_id: str,
-    order_id: str,
+        *,
+        inst_id: str,
+        order_id: str,
 ) -> dict[str, Any]:
     return {"instId": inst_id, "ordId": order_id}
 
 
 def build_cancel_algo_body(
-    *,
-    inst_id: str,
-    algo_id: str,
+        *,
+        inst_id: str,
+        algo_id: str,
 ) -> list[dict[str, Any]]:
     return [{"instId": inst_id, "algoId": algo_id}]
 
 
 def build_set_leverage_bodies(
-    *,
-    inst_id: str,
-    td_mode: str,
-    leverage: str,
-    pos_side_mode: str,
+        *,
+        inst_id: str,
+        td_mode: str,
+        leverage: str,
+        pos_side_mode: str,
 ) -> tuple[dict[str, Any], ...]:
     base: dict[str, Any] = {"instId": inst_id, "lever": str(leverage), "mgnMode": td_mode}
     if pos_side_mode == "long_short":
@@ -196,25 +196,24 @@ def build_set_leverage_bodies(
 
 
 def build_take_profit_order_specs(
-    *,
-    position_contracts: Decimal,
-    min_contracts: Decimal,
-    contract_precision: Decimal,
-    tp_plan: str,
-    final_tp_price: float,
-    partial_tp_price: float | None,
-    partial_tp_ratio: Decimal,
-    partial_tp_consumed: bool,
-    middle_runner_active: bool,
-    three_stage_tp1_price: float | None,
-    three_stage_tp2_price: float | None,
-    three_stage_tp1_ratio: Decimal,
-    three_stage_tp2_ratio: Decimal,
-    three_stage_tp1_consumed: bool,
-    three_stage_tp2_consumed: bool,
-    three_stage_runner_ratio: Decimal,
+        *,
+        position_contracts: Decimal,
+        min_contracts: Decimal,
+        contract_precision: Decimal,
+        tp_plan: str,
+        final_tp_price: float,
+        partial_tp_price: float | None,
+        partial_tp_ratio: Decimal,
+        partial_tp_consumed: bool,
+        middle_runner_active: bool,
+        three_stage_tp1_price: float | None,
+        three_stage_tp2_price: float | None,
+        three_stage_tp1_ratio: Decimal,
+        three_stage_tp2_ratio: Decimal,
+        three_stage_tp1_consumed: bool,
+        three_stage_tp2_consumed: bool,
+        three_stage_runner_ratio: Decimal,
 ) -> TakeProfitSpecsDecision:
-
     _rnd = lambda c: round_contracts_down(contracts=c, contract_precision=contract_precision)
 
     # ── Three-Stage branch ──
@@ -248,7 +247,8 @@ def build_take_profit_order_specs(
                 )
             if runner_contracts < min_contracts:
                 return TakeProfitSpecsDecision(
-                    specs=(TakeProfitOrderSpec(label="tp2_outer", contracts=position_contracts, price=float(three_stage_tp2_price)),),
+                    specs=(TakeProfitOrderSpec(label="tp2_outer", contracts=position_contracts,
+                                               price=float(three_stage_tp2_price)),),
                     fallback_reason="THREE_STAGE_TP2_AFTER_TP1_RUNNER_TOO_SMALL",
                     fallback_context={
                         "total_contracts": position_contracts,
@@ -258,7 +258,8 @@ def build_take_profit_order_specs(
                     },
                 )
             return TakeProfitSpecsDecision(
-                specs=(TakeProfitOrderSpec(label="tp2_outer", contracts=tp2_contracts, price=float(three_stage_tp2_price)),),
+                specs=(
+                TakeProfitOrderSpec(label="tp2_outer", contracts=tp2_contracts, price=float(three_stage_tp2_price)),),
             )
 
         # Case B: normal three-stage (fresh)
@@ -293,7 +294,8 @@ def build_take_profit_order_specs(
         return TakeProfitSpecsDecision(
             specs=(TakeProfitOrderSpec(label="final", contracts=position_contracts, price=final_tp_price),),
         )
-    if tp_plan not in {"SPLIT_PARTIAL_FINAL", "SPLIT_50_50", "MIDDLE_RUNNER"} or partial_tp_price is None or partial_tp_ratio <= 0 or partial_tp_ratio >= 1:
+    if tp_plan not in {"SPLIT_PARTIAL_FINAL", "SPLIT_50_50",
+                       "MIDDLE_RUNNER"} or partial_tp_price is None or partial_tp_ratio <= 0 or partial_tp_ratio >= 1:
         return TakeProfitSpecsDecision(
             specs=(TakeProfitOrderSpec(label="final", contracts=position_contracts, price=final_tp_price),),
         )
@@ -332,18 +334,19 @@ def build_take_profit_order_specs(
 
 
 def trend_runner_sl_contracts(
-    *,
-    net_contracts_for_sl: Decimal,
-    runner_ratio: Decimal,
-    min_contracts: Decimal,
-    contract_precision: Decimal,
-    trend_runner_active: bool,
+        *,
+        net_contracts_for_sl: Decimal,
+        runner_ratio: Decimal,
+        min_contracts: Decimal,
+        contract_precision: Decimal,
+        trend_runner_active: bool,
 ) -> Decimal:
     if trend_runner_active:
         return net_contracts_for_sl
     if runner_ratio <= 0 or runner_ratio >= 1:
         return net_contracts_for_sl
-    contracts = round_contracts_down(contracts=net_contracts_for_sl * runner_ratio, contract_precision=contract_precision)
+    contracts = round_contracts_down(contracts=net_contracts_for_sl * runner_ratio,
+                                     contract_precision=contract_precision)
     if contracts < min_contracts:
         return net_contracts_for_sl
     return contracts

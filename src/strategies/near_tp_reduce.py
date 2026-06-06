@@ -84,8 +84,8 @@ def reset_near_tp_state_values() -> NearTpStateValues:
 # ── Sidecar skip gating ───────────────────────────────────────────────────
 
 def near_tp_sidecar_skip_allowed(
-    *,
-    sidecar_enabled_for_position: bool,
+        *,
+        sidecar_enabled_for_position: bool,
 ) -> NearTpGateDecision:
     """Return a gate decision for the Near-TP sidecar skip check.
 
@@ -100,13 +100,13 @@ def near_tp_sidecar_skip_allowed(
 # ── Plan / runner gating ──────────────────────────────────────────────────
 
 def near_tp_plan_allowed(
-    *,
-    tp_plan: TpPlan,
-    middle_runner_pending: bool,
-    middle_runner_active: bool,
-    three_stage_runner_enabled_for_position: bool,
-    trend_runner_active: bool,
-    partial_tp_consumed: bool,
+        *,
+        tp_plan: TpPlan,
+        middle_runner_pending: bool,
+        middle_runner_active: bool,
+        three_stage_runner_enabled_for_position: bool,
+        trend_runner_active: bool,
+        partial_tp_consumed: bool,
 ) -> NearTpGateDecision:
     """Return a gate decision for Near-TP Reduce plan eligibility.
 
@@ -129,15 +129,15 @@ def near_tp_plan_allowed(
 # ── Progress / profit / near-by-distance calculation ──────────────────────
 
 def calculate_near_tp_progress(
-    *,
-    side: PositionSide,
-    price: float,
-    avg_entry_price: float,
-    final_tp_price: float,
-    near_tp_max_distance_usd: float,
-    near_tp_min_reduce_profit_pct: float,
-    near_tp_min_profit_pct: float,
-    near_tp_min_progress_ratio: float,
+        *,
+        side: PositionSide,
+        price: float,
+        avg_entry_price: float,
+        final_tp_price: float,
+        near_tp_max_distance_usd: float,
+        near_tp_min_reduce_profit_pct: float,
+        near_tp_min_profit_pct: float,
+        near_tp_min_progress_ratio: float,
 ) -> NearTpProgress | None:
     """Calculate Near-TP progress metrics.
 
@@ -188,10 +188,10 @@ def should_arm_near_tp(*, progress: NearTpProgress) -> bool:
 # ── Best price update ─────────────────────────────────────────────────────
 
 def update_near_tp_best_price(
-    *,
-    side: PositionSide,
-    old_best_price: float | None,
-    price: float,
+        *,
+        side: PositionSide,
+        old_best_price: float | None,
+        price: float,
 ) -> NearTpBestPriceDecision:
     """Compute the new best price and whether it changed.
 
@@ -210,14 +210,14 @@ def update_near_tp_best_price(
 # ── Giveback / floating-profit-path / threshold ───────────────────────────
 
 def calculate_near_tp_giveback(
-    *,
-    side: PositionSide,
-    price: float,
-    avg_entry_price: float,
-    best_price: float,
-    near_tp_giveback_usd: float,
-    near_tp_giveback_pct: float,
-    near_tp_giveback_profit_ratio: float,
+        *,
+        side: PositionSide,
+        price: float,
+        avg_entry_price: float,
+        best_price: float,
+        near_tp_giveback_usd: float,
+        near_tp_giveback_pct: float,
+        near_tp_giveback_profit_ratio: float,
 ) -> NearTpGivebackDecision:
     """Calculate giveback and whether it triggers the near-TP reduction.
 
@@ -260,10 +260,10 @@ def calculate_near_tp_giveback(
 # ── Protective SL ─────────────────────────────────────────────────────────
 
 def calculate_near_tp_protective_sl(
-    *,
-    side: PositionSide,
-    avg_entry_price: float,
-    near_tp_protective_sl_profit_pct: float,
+        *,
+        side: PositionSide,
+        avg_entry_price: float,
+        near_tp_protective_sl_profit_pct: float,
 ) -> float:
     """Calculate the near-TP protective stop-loss price.
 

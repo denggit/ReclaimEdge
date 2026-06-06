@@ -4,7 +4,6 @@ import unittest
 from decimal import Decimal
 
 from src.execution.order_specs import (
-    TakeProfitOrderSpec,
     TakeProfitSpecsDecision,
     build_cancel_algo_body,
     build_cancel_order_body,

@@ -78,10 +78,10 @@ def reset_middle_runner_state_values() -> MiddleRunnerStateValues:
 
 
 def planned_middle_runner_state_values(
-    *,
-    first_tp_price: float | None,
-    final_tp_price: float,
-    configured_first_close_ratio: float,
+        *,
+        first_tp_price: float | None,
+        final_tp_price: float,
+        configured_first_close_ratio: float,
 ) -> MiddleRunnerStateValues:
     """Return the planned / initial values for Middle Runner state.
 
@@ -109,10 +109,10 @@ def planned_middle_runner_state_values(
 
 
 def tighten_middle_runner_sl(
-    *,
-    side: PositionSide,
-    old_sl: float,
-    new_sl: float,
+        *,
+        side: PositionSide,
+        old_sl: float,
+        new_sl: float,
 ) -> float:
     """Tighten the Middle Runner protective SL in the correct direction.
 
@@ -125,10 +125,10 @@ def tighten_middle_runner_sl(
 
 
 def tighten_optional_middle_runner_sl(
-    *,
-    side: PositionSide,
-    old_sl: float | None,
-    new_sl: float | None,
+        *,
+        side: PositionSide,
+        old_sl: float | None,
+        new_sl: float | None,
 ) -> float | None:
     """Tighten optional Middle Runner SL.
 
@@ -144,16 +144,16 @@ def tighten_optional_middle_runner_sl(
 
 
 def calculate_middle_runner_protective_sl(
-    *,
-    side: PositionSide,
-    current_price: float,
-    avg_entry_price: float,
-    net_remaining_breakeven_price: float,
-    breakeven_fee_buffer_pct: float,
-    boll_middle: float,
-    boll_upper: float,
-    boll_lower: float,
-    sl_tighten_ratio: float,
+        *,
+        side: PositionSide,
+        current_price: float,
+        avg_entry_price: float,
+        net_remaining_breakeven_price: float,
+        breakeven_fee_buffer_pct: float,
+        boll_middle: float,
+        boll_upper: float,
+        boll_lower: float,
+        sl_tighten_ratio: float,
 ) -> MiddleRunnerProtectiveSlDecision:
     """Pure calculation of the Middle Runner protective SL.
 
@@ -217,15 +217,15 @@ def calculate_middle_runner_protective_sl(
 
 
 def apply_middle_runner_extension_trigger(
-    *,
-    side: PositionSide,
-    current_price: float,
-    protective_sl: float | None,
-    boll_middle: float,
-    boll_upper: float,
-    boll_lower: float,
-    extension_trigger_ratio: float,
-    already_triggered: bool,
+        *,
+        side: PositionSide,
+        current_price: float,
+        protective_sl: float | None,
+        boll_middle: float,
+        boll_upper: float,
+        boll_lower: float,
+        extension_trigger_ratio: float,
+        already_triggered: bool,
 ) -> MiddleRunnerExtensionDecision:
     """Pure evaluation of the Middle Runner extension trigger.
 

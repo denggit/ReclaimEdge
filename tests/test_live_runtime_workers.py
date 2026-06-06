@@ -13,6 +13,7 @@ import types
 import unittest
 from decimal import Decimal
 from unittest.mock import patch
+from zoneinfo import ZoneInfo
 
 if importlib.util.find_spec("dotenv") is None:
     dotenv = types.ModuleType("dotenv")
@@ -34,7 +35,7 @@ from src.live.queue_helpers import (  # noqa: E402
     queue_oldest_command_age_seconds,
 )
 from src.live.runtime_types import AccountSnapshot, ExecutionState, TradeCommand  # noqa: E402
-from src.live.time_utils import next_weekly_summary_time  # noqa: E402
+from src.live.time_utils import next_daily_report_time, next_weekly_summary_time  # noqa: E402
 from src.indicators.cvd_tracker import CvdSnapshot  # noqa: E402
 from src.monitors.boll_band_breakout_monitor import BollSnapshot, MarketTickEvent, TradeTick  # noqa: E402
 from src.live.startup_recovery.basic_restore import (  # noqa: E402
@@ -897,8 +898,9 @@ class LiveRuntimeWorkerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(strategy.state.layers, 1)
         self.assertEqual(strategy.state.avg_entry_price, position.avg_entry_price)
 
-    def test_weekly_summary_time(self) -> None:
+    def test_daily_report_time_uses_live_report_timezone(self) -> None:
         real_datetime = dt.datetime
+        sg_tz = ZoneInfo("Asia/Singapore")
 
         def fixed_datetime(now_value: dt.datetime):
             class FixedDateTime(real_datetime):
@@ -912,21 +914,60 @@ class LiveRuntimeWorkerTest(unittest.IsolatedAsyncioTestCase):
 
         cases = [
             (
-                dt.datetime(2026, 6, 1, 9, 0, tzinfo=dt.timezone(dt.timedelta(hours=8))),
-                dt.datetime(2026, 6, 1, 10, 0, tzinfo=dt.timezone(dt.timedelta(hours=8))),
+                dt.datetime(2026, 6, 1, 0, 30, tzinfo=dt.timezone.utc),
+                dt.datetime(2026, 6, 1, 10, 0, tzinfo=sg_tz),
             ),
             (
-                dt.datetime(2026, 6, 1, 11, 0, tzinfo=dt.timezone(dt.timedelta(hours=8))),
-                dt.datetime(2026, 6, 8, 10, 0, tzinfo=dt.timezone(dt.timedelta(hours=8))),
-            ),
-            (
-                dt.datetime(2026, 6, 2, 9, 0, tzinfo=dt.timezone(dt.timedelta(hours=8))),
-                dt.datetime(2026, 6, 8, 10, 0, tzinfo=dt.timezone(dt.timedelta(hours=8))),
+                dt.datetime(2026, 6, 1, 3, 0, tzinfo=dt.timezone.utc),
+                dt.datetime(2026, 6, 2, 10, 0, tzinfo=sg_tz),
             ),
         ]
         for now_value, expected in cases:
-            with patch("src.live.time_utils.dt.datetime", fixed_datetime(now_value)):
-                self.assertEqual(next_weekly_summary_time(10, 0, weekday=0), expected)
+            with patch.dict(os.environ, {"LIVE_REPORT_TIMEZONE": "Asia/Singapore"}):
+                with patch("src.live.time_utils.dt.datetime", fixed_datetime(now_value)):
+                    actual = next_daily_report_time(10, 0)
+
+            self.assertEqual(actual, expected)
+            self.assertEqual(actual.tzinfo, sg_tz)
+            self.assertEqual(actual.utcoffset(), dt.timedelta(hours=8))
+
+    def test_weekly_summary_time_uses_live_report_timezone(self) -> None:
+        real_datetime = dt.datetime
+        sg_tz = ZoneInfo("Asia/Singapore")
+
+        def fixed_datetime(now_value: dt.datetime):
+            class FixedDateTime(real_datetime):
+                @classmethod
+                def now(cls, tz=None):  # type: ignore[no-untyped-def]
+                    if tz is not None:
+                        return now_value.astimezone(tz)
+                    return now_value
+
+            return FixedDateTime
+
+        cases = [
+            (
+                dt.datetime(2026, 6, 1, 1, 0, tzinfo=dt.timezone.utc),
+                dt.datetime(2026, 6, 1, 10, 0, tzinfo=sg_tz),
+            ),
+            (
+                dt.datetime(2026, 6, 1, 3, 0, tzinfo=dt.timezone.utc),
+                dt.datetime(2026, 6, 8, 10, 0, tzinfo=sg_tz),
+            ),
+            (
+                dt.datetime(2026, 6, 2, 1, 0, tzinfo=dt.timezone.utc),
+                dt.datetime(2026, 6, 8, 10, 0, tzinfo=sg_tz),
+            ),
+        ]
+        for now_value, expected in cases:
+            with patch.dict(os.environ, {"LIVE_REPORT_TIMEZONE": "Asia/Singapore"}):
+                with patch("src.live.time_utils.dt.datetime", fixed_datetime(now_value)):
+                    actual = next_weekly_summary_time(10, 0, weekday=0)
+
+            self.assertEqual(actual, expected)
+            self.assertEqual(actual.tzinfo, sg_tz)
+            self.assertEqual(actual.utcoffset(), dt.timedelta(hours=8))
+            self.assertEqual(actual.weekday(), 0)
 
     async def run_strategy_worker_once(self, strategy: FakeStrategy, cvd: FakeCvd,
                                        queue: asyncio.Queue[MarketTickEvent]) -> asyncio.Queue[TradeCommand]:

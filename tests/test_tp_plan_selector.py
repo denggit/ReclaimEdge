@@ -6,15 +6,8 @@ work correctly without any dependency on strategy class, state, logger, or env.
 
 from __future__ import annotations
 
-import pytest
-
 from src.strategies.tp_plan_selector import (
     TpBandSnapshot,
-    TpMiddleSelection,
-    TpOuterSelection,
-    TpPlanSelection,
-    TpPlanUnchangedDecision,
-    TpPriceSelection,
     effective_breakeven_for_tp_selection,
     middle_runner_plan_allowed,
     select_tp_middle,
@@ -31,13 +24,13 @@ from src.strategies.tp_plan_selector import (
 # ── helpers ────────────────────────────────────────────────────────────
 
 def _tp_band(
-    middle: float = 100.0,
-    upper: float = 110.0,
-    lower: float = 90.0,
-    tp_middle: float | None = 101.0,
-    tp_upper: float | None = 108.0,
-    tp_lower: float | None = 92.0,
-    tp_window: int | None = 15,
+        middle: float = 100.0,
+        upper: float = 110.0,
+        lower: float = 90.0,
+        tp_middle: float | None = 101.0,
+        tp_upper: float | None = 108.0,
+        tp_lower: float | None = 92.0,
+        tp_window: int | None = 15,
 ) -> TpBandSnapshot:
     return TpBandSnapshot(
         middle=middle,
