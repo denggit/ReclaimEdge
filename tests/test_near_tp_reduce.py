@@ -15,9 +15,7 @@ if importlib.util.find_spec("dotenv") is None:
     dotenv.load_dotenv = lambda *args, **kwargs: None
     sys.modules.setdefault("dotenv", dotenv)
 
-from scripts.run_boll_cvd_live import (  # noqa: E402
-    account_position_sync_worker,
-)
+from src.live.workers.account_position_sync_worker import account_position_sync_worker  # noqa: E402
 from src.live.workers.execution_worker import execution_worker  # noqa: E402
 from src.live.startup_recovery.basic_restore import restore_strategy_from_saved_state  # noqa: E402
 from src.execution.trader import LiveTradeResult, PositionSnapshot, Trader  # noqa: E402

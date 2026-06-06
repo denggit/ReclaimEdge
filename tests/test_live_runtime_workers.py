@@ -19,9 +19,7 @@ if importlib.util.find_spec("dotenv") is None:
     dotenv.load_dotenv = lambda *args, **kwargs: None
     sys.modules.setdefault("dotenv", dotenv)
 
-from scripts.run_boll_cvd_live import (  # noqa: E402
-    account_position_sync_worker,
-)
+from src.live.workers.account_position_sync_worker import account_position_sync_worker  # noqa: E402
 from src.live.workers.execution_worker import execution_worker  # noqa: E402
 from src.live.workers.strategy_tick_worker import strategy_tick_worker  # noqa: E402
 from src.live.startup_recovery.trust_validation import (  # noqa: E402
@@ -2035,7 +2033,7 @@ class LiveRuntimeWorkerTest(unittest.IsolatedAsyncioTestCase):
                 cash_log_min_delta_usdt=999,
             )
         )
-        with self.assertLogs("scripts.run_boll_cvd_live", level="WARNING"):
+        with self.assertLogs("src.live.workers.account_position_sync_worker", level="WARNING"):
             await asyncio.wait_for(fetched.wait(), timeout=0.2)
             await asyncio.sleep(0)
         task.cancel()
@@ -2080,7 +2078,7 @@ class LiveRuntimeWorkerTest(unittest.IsolatedAsyncioTestCase):
                     cash_log_min_delta_usdt=999,
                 )
             )
-            with self.assertLogs("scripts.run_boll_cvd_live", level="WARNING") as logs:
+            with self.assertLogs("src.live.workers.account_position_sync_worker", level="WARNING") as logs:
                 await asyncio.wait_for(fetched.wait(), timeout=0.2)
                 await asyncio.sleep(0)
         task.cancel()
@@ -2126,7 +2124,7 @@ class LiveRuntimeWorkerTest(unittest.IsolatedAsyncioTestCase):
                     cash_log_min_delta_usdt=999,
                 )
             )
-            with self.assertLogs("scripts.run_boll_cvd_live", level="WARNING") as logs:
+            with self.assertLogs("src.live.workers.account_position_sync_worker", level="WARNING") as logs:
                 await asyncio.wait_for(fetched_after_recovery.wait(), timeout=0.2)
                 await asyncio.sleep(0)
         task.cancel()
