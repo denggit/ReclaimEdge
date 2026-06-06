@@ -252,9 +252,9 @@ async def account_position_sync_worker(
                                 three_stage_post_tp1_sl_payload = {
                                     "position_id": execution_state.current_position_id,
                                     "side": core_position.side,
-                                    "contracts": float(position.contracts),
-                                    "core_contracts": float(core_position.contracts),
-                                    "net_contracts": float(position.contracts),
+                                    "contracts": position.contracts,
+                                    "core_contracts": core_position.contracts,
+                                    "net_contracts": position.contracts,
                                     "protective_sl_price": protective_sl,
                                     "old_sl_order_id": getattr(strategy.state, "three_stage_post_tp1_protective_sl_order_id", None),
                                     "current_price": current_price,
@@ -362,9 +362,9 @@ async def account_position_sync_worker(
                             middle_runner_sl_payload = {
                                 "position_id": execution_state.current_position_id,
                                 "side": core_position.side,
-                                "contracts": float(position.contracts),
-                                "core_contracts": float(core_position.contracts),
-                                "net_contracts": float(position.contracts),
+                                "contracts": position.contracts,
+                                "core_contracts": core_position.contracts,
+                                "net_contracts": position.contracts,
                                 "protective_sl_price": protective_sl,
                                 "old_sl_order_id": getattr(strategy.state, "middle_runner_protective_sl_order_id", None),
                                 "reason": "partial_tp_filled",
@@ -415,9 +415,9 @@ async def account_position_sync_worker(
                         middle_runner_sl_payload = {
                             "position_id": execution_state.current_position_id,
                             "side": core_position.side,
-                            "contracts": float(position.contracts),
-                            "core_contracts": float(core_position.contracts),
-                            "net_contracts": float(position.contracts),
+                            "contracts": position.contracts,
+                            "core_contracts": core_position.contracts,
+                            "net_contracts": position.contracts,
                             "protective_sl_price": protective_sl,
                             "old_sl_order_id": getattr(strategy.state, "middle_runner_protective_sl_order_id", None),
                             "reason": "partial_size_mismatch_degraded",
@@ -679,13 +679,18 @@ async def account_position_sync_worker(
                 sl_ok = False
                 sl_message = "protective_sl_price_missing"
                 if sl_price is not None and three_stage_post_tp1_sl_payload.get("side") is not None:
-                    sl_ok, sl_order_id, sl_message = await trader.place_three_stage_post_tp1_protective_stop_with_retries(
-                        three_stage_post_tp1_sl_payload["side"],
-                        three_stage_post_tp1_sl_payload["contracts"],
-                        float(sl_price),
-                        retry_count=int(os.getenv("NEAR_TP_PROTECTIVE_SL_RETRY_COUNT", "3")),
-                        retry_interval_seconds=float(os.getenv("NEAR_TP_PROTECTIVE_SL_RETRY_INTERVAL_SECONDS", "1")),
-                    )
+                    try:
+                        sl_ok, sl_order_id, sl_message = await trader.place_three_stage_post_tp1_protective_stop_with_retries(
+                            three_stage_post_tp1_sl_payload["side"],
+                            three_stage_post_tp1_sl_payload["contracts"],
+                            float(sl_price),
+                            retry_count=int(os.getenv("NEAR_TP_PROTECTIVE_SL_RETRY_COUNT", "3")),
+                            retry_interval_seconds=float(os.getenv("NEAR_TP_PROTECTIVE_SL_RETRY_INTERVAL_SECONDS", "1")),
+                        )
+                    except Exception as exc:
+                        sl_ok = False
+                        sl_order_id = None
+                        sl_message = f"trader_exception: {type(exc).__name__}: {exc}"
                 if sl_ok:
                     old_sl_order_id = three_stage_post_tp1_sl_payload.get("old_sl_order_id")
                     if old_sl_order_id and old_sl_order_id != sl_order_id:
@@ -702,8 +707,8 @@ async def account_position_sync_worker(
                                 "position_id": three_stage_post_tp1_sl_payload.get("position_id"),
                                 "side": three_stage_post_tp1_sl_payload.get("side"),
                                 "contracts": str(three_stage_post_tp1_sl_payload.get("contracts")),
-                                "core_contracts": three_stage_post_tp1_sl_payload.get("core_contracts"),
-                                "net_contracts": three_stage_post_tp1_sl_payload.get("net_contracts"),
+                                "core_contracts": str(three_stage_post_tp1_sl_payload.get("core_contracts")),
+                                "net_contracts": str(three_stage_post_tp1_sl_payload.get("net_contracts")),
                                 "sl_contracts": str(three_stage_post_tp1_sl_payload.get("contracts")),
                                 "protective_sl_price": sl_price,
                                 "protective_sl_order_id": sl_order_id,
@@ -772,8 +777,8 @@ async def account_position_sync_worker(
                                 "market_exit_attempted": True,
                                 "market_exit_ok": exit_ok,
                                 "market_exit_message": exit_message,
-                                "core_contracts": core_contracts,
-                                "net_contracts": net_contracts,
+                                "core_contracts": str(core_contracts) if core_contracts is not None else None,
+                                "net_contracts": str(net_contracts) if net_contracts is not None else None,
                                 "sl_contracts": str(sl_contracts) if sl_contracts is not None else None,
                                 "manual_intervention_required": manual_intervention_required,
                             },
@@ -799,13 +804,18 @@ async def account_position_sync_worker(
                 sl_ok = False
                 sl_message = "protective_sl_price_missing"
                 if sl_price is not None and middle_runner_sl_payload.get("side") is not None:
-                    sl_ok, sl_order_id, sl_message = await trader.place_middle_runner_protective_stop_with_retries(
-                        middle_runner_sl_payload["side"],
-                        middle_runner_sl_payload["contracts"],
-                        float(sl_price),
-                        retry_count=int(os.getenv("NEAR_TP_PROTECTIVE_SL_RETRY_COUNT", "3")),
-                        retry_interval_seconds=float(os.getenv("NEAR_TP_PROTECTIVE_SL_RETRY_INTERVAL_SECONDS", "1")),
-                    )
+                    try:
+                        sl_ok, sl_order_id, sl_message = await trader.place_middle_runner_protective_stop_with_retries(
+                            middle_runner_sl_payload["side"],
+                            middle_runner_sl_payload["contracts"],
+                            float(sl_price),
+                            retry_count=int(os.getenv("NEAR_TP_PROTECTIVE_SL_RETRY_COUNT", "3")),
+                            retry_interval_seconds=float(os.getenv("NEAR_TP_PROTECTIVE_SL_RETRY_INTERVAL_SECONDS", "1")),
+                        )
+                    except Exception as exc:
+                        sl_ok = False
+                        sl_order_id = None
+                        sl_message = f"trader_exception: {type(exc).__name__}: {exc}"
                 if sl_ok:
                     old_sl_order_id = middle_runner_sl_payload.get("old_sl_order_id")
                     if old_sl_order_id and old_sl_order_id != sl_order_id:
@@ -828,8 +838,8 @@ async def account_position_sync_worker(
                                 **(middle_runner_activation_payload or {}),
                                 "side": middle_runner_sl_payload.get("side"),
                                 "contracts": str(middle_runner_sl_payload.get("contracts")),
-                                "core_contracts": middle_runner_sl_payload.get("core_contracts"),
-                                "net_contracts": middle_runner_sl_payload.get("net_contracts"),
+                                "core_contracts": str(middle_runner_sl_payload.get("core_contracts")),
+                                "net_contracts": str(middle_runner_sl_payload.get("net_contracts")),
                                 "sl_contracts": str(middle_runner_sl_payload.get("contracts")),
                                 "protective_sl_price": sl_price,
                                 "protective_sl_order_id": sl_order_id,

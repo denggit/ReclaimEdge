@@ -221,6 +221,12 @@ class FakeTrader:
         self.post_tp1_stop_orders = []
         self.cancelled_post_tp1_stop_ids = []
         self.cancel_post_tp1_ok = True
+        self.middle_runner_stop_orders: list[dict] = []
+        self.cancelled_middle_runner_stop_ids: list[str | None] = []
+        self.cancel_middle_runner_ok = True
+        self.market_exits: list[tuple] = []
+        self.market_exit_ok = True
+        self.market_exit_message = "ok"
         self.tp_order_id = ""
         self.pending_orders: list[dict[str, str]] = []
 
@@ -264,6 +270,28 @@ class FakeTrader:
     async def cancel_three_stage_post_tp1_protective_stop(self, order_id: str | None) -> bool:
         self.cancelled_post_tp1_stop_ids.append(order_id)
         return self.cancel_post_tp1_ok
+
+    async def place_middle_runner_protective_stop_with_retries(self, side, contracts, stop_price, retry_count, retry_interval_seconds):  # type: ignore[no-untyped-def]
+        order_id = f"mid-runner-{len(self.middle_runner_stop_orders) + 1}"
+        self.middle_runner_stop_orders.append(
+            {
+                "side": side,
+                "contracts": contracts,
+                "stop_price": stop_price,
+                "retry_count": retry_count,
+                "retry_interval_seconds": retry_interval_seconds,
+                "order_id": order_id,
+            }
+        )
+        return True, order_id, "protective_sl_placed"
+
+    async def cancel_middle_runner_protective_stop(self, order_id: str | None) -> bool:
+        self.cancelled_middle_runner_stop_ids.append(order_id)
+        return self.cancel_middle_runner_ok
+
+    async def market_exit_remaining_position_with_retries(self, side, retry_count):  # type: ignore[no-untyped-def]
+        self.market_exits.append((side, retry_count))
+        return self.market_exit_ok, self.market_exit_message
 
 
 class SidecarWorkerTrader(FakeTrader):
@@ -2701,6 +2729,212 @@ class LiveRuntimeWorkerTest(unittest.IsolatedAsyncioTestCase):
 
         result = trusted_startup_saved_state(saved, pos)
         self.assertIsNone(result, "Genuine remaining qty mismatch must still be rejected")
+
+    # ── helpers for Decimal contracts tests ──
+
+    def _middle_runner_strategy(self, side: str = "LONG") -> BollCvdShockReclaimStrategy:
+        strategy = BollCvdShockReclaimStrategy(
+            BollCvdReclaimStrategyConfig(
+                middle_runner_enabled=True,
+                middle_runner_protective_sl_enabled=True,
+                breakeven_fee_buffer_pct=0.001,
+            ),
+            SimplePositionSizer(SimplePositionSizerConfig()),
+        )
+        strategy.state = StrategyPositionState(
+            side=side,  # type: ignore[arg-type]
+            layers=1,
+            total_entry_qty=1.0,
+            total_entry_notional=100.0,
+            avg_entry_price=100.0,
+            tp_price=110.0 if side == "LONG" else 90.0,
+            tp_plan="MIDDLE_RUNNER",
+            middle_runner_pending=True,
+            middle_runner_first_close_ratio=0.8,
+            middle_runner_keep_ratio=0.2,
+            middle_runner_first_tp_price=105.0 if side == "LONG" else 95.0,
+            middle_runner_final_tp_price=110.0 if side == "LONG" else 90.0,
+            position_cost_entry_notional=100.0,
+            position_cost_remaining_qty=0.2,
+            net_remaining_breakeven_price=100.0,
+        )
+        return strategy
+
+    # ── Test: three_stage post-TP1 payload passes Decimal contracts to Trader ──
+
+    async def test_three_stage_post_tp1_sl_payload_passes_decimal_contracts_to_trader(self) -> None:
+        class Tp1Trader(FakeTrader):
+            async def fetch_position_snapshot(inner_self) -> PositionSnapshot:
+                return PositionSnapshot("LONG", Decimal("4"), 100.0, 0.4, Decimal("4"))
+
+        strategy = self.three_stage_strategy("LONG")
+        trader = Tp1Trader()
+        journal = FakeJournal()
+        state_store = RecordingStateStore()
+        latest_ts_ms = int(dt.datetime.now().timestamp() * 1000)
+        account_snapshot = AccountSnapshot(
+            None, 100.0, 100.0, asyncio.get_running_loop().time(), 0, 1,
+            latest_market_price=106.4, latest_market_price_ts_ms=latest_ts_ms,
+        )
+        execution_state = ExecutionState("pos-1", 100.0)
+
+        await self.run_account_sync_until(
+            lambda: len(trader.post_tp1_stop_orders) >= 1,
+            account_snapshot=account_snapshot,
+            execution_state=execution_state,
+            trader=trader,
+            strategy=strategy,
+            journal=journal,
+            state_store=state_store,
+        )
+
+        received = trader.post_tp1_stop_orders[0]
+        self.assertIsInstance(received["contracts"], Decimal, "contracts must be Decimal, not float")
+        self.assertEqual(received["contracts"], Decimal("4"))
+        self.assertNotIsInstance(received["contracts"], float)
+
+    # ── Test: middle_runner payload passes Decimal contracts to Trader ──
+
+    async def test_middle_runner_sl_payload_passes_decimal_contracts_to_trader(self) -> None:
+        class MidRunnerTrader(FakeTrader):
+            async def fetch_position_snapshot(inner_self) -> PositionSnapshot:
+                return PositionSnapshot("LONG", Decimal("2"), 100.0, 0.2, Decimal("2"))
+
+        strategy = self._middle_runner_strategy("LONG")
+        trader = MidRunnerTrader()
+        journal = FakeJournal()
+        state_store = RecordingStateStore()
+        account_snapshot = AccountSnapshot(
+            None, 100.0, 100.0, asyncio.get_running_loop().time(), 0, 1,
+            latest_market_price=106.4,
+        )
+        execution_state = ExecutionState("pos-1", 100.0)
+
+        await self.run_account_sync_until(
+            lambda: len(trader.middle_runner_stop_orders) >= 1,
+            account_snapshot=account_snapshot,
+            execution_state=execution_state,
+            trader=trader,
+            strategy=strategy,
+            journal=journal,
+            state_store=state_store,
+        )
+
+        received = trader.middle_runner_stop_orders[0]
+        self.assertIsInstance(received["contracts"], Decimal, "contracts must be Decimal, not float")
+        self.assertEqual(received["contracts"], Decimal("2"))
+        self.assertNotIsInstance(received["contracts"], float)
+
+    # ── Test: Trader.decimal_to_str accepts Decimal, str, int, float ──
+
+    def test_trader_decimal_to_str_accepts_decimal_str_int_float(self) -> None:
+        from src.execution.trader import Trader
+
+        # Decimal
+        self.assertEqual(Trader.decimal_to_str(Decimal("0.54")), "0.54")
+        # str
+        self.assertEqual(Trader.decimal_to_str("0.54"), "0.54")
+        # float — must not raise
+        result_float = Trader.decimal_to_str(0.54)
+        self.assertIsInstance(result_float, str)
+        # int
+        self.assertEqual(Trader.decimal_to_str(1), "1")
+
+    # ── Test: Trader._to_decimal converts various types ──
+
+    def test_trader_to_decimal_converts_decimal_str_int_float(self) -> None:
+        from src.execution.trader import Trader
+
+        self.assertEqual(Trader._to_decimal(Decimal("0.54")), Decimal("0.54"))
+        self.assertEqual(Trader._to_decimal("0.54"), Decimal("0.54"))
+        self.assertIsInstance(Trader._to_decimal(0.54), Decimal)
+        self.assertEqual(Trader._to_decimal(1), Decimal("1"))
+
+    # ── Test: three_stage post-TP1 SL exception enters failure fallback ──
+
+    async def test_three_stage_post_tp1_sl_exception_enters_failure_fallback(self) -> None:
+        class ExceptionTrader(FakeTrader):
+            async def fetch_position_snapshot(inner_self) -> PositionSnapshot:
+                return PositionSnapshot("LONG", Decimal("4"), 100.0, 0.4, Decimal("4"))
+
+            async def place_three_stage_post_tp1_protective_stop_with_retries(
+                inner_self, side, contracts, stop_price, retry_count, retry_interval_seconds,
+            ):
+                raise AttributeError("'float' object has no attribute 'normalize'")
+
+        strategy = self.three_stage_strategy("LONG")
+        trader = ExceptionTrader()
+        journal = FakeJournal()
+        state_store = RecordingStateStore()
+        latest_ts_ms = int(dt.datetime.now().timestamp() * 1000)
+        account_snapshot = AccountSnapshot(
+            None, 100.0, 100.0, asyncio.get_running_loop().time(), 0, 1,
+            latest_market_price=106.4, latest_market_price_ts_ms=latest_ts_ms,
+        )
+        execution_state = ExecutionState("pos-1", 100.0)
+
+        await self.run_account_sync_until(
+            lambda: execution_state.trading_halted,
+            account_snapshot=account_snapshot,
+            execution_state=execution_state,
+            trader=trader,
+            strategy=strategy,
+            journal=journal,
+            state_store=state_store,
+        )
+
+        self.assertTrue(execution_state.trading_halted)
+        self.assertIn(
+            execution_state.halt_reason,
+            ("three_stage_post_tp1_sl_failed_market_exit_waiting_flat", "three_stage_post_tp1_protective_sl_failure"),
+            f"Expected SL failure halt reason, got: {execution_state.halt_reason}",
+        )
+        self.assertGreater(
+            len(trader.market_exits), 0,
+            "market_exit_remaining_position_with_retries must be called on SL failure",
+        )
+        failed_events = [e for e in journal.events if e[0] == "THREE_STAGE_POST_TP1_PROTECTIVE_SL_FAILED"]
+        self.assertEqual(len(failed_events), 1, "THREE_STAGE_POST_TP1_PROTECTIVE_SL_FAILED journal event must be logged")
+
+    # ── Test: middle_runner SL exception enters failure fallback ──
+
+    async def test_middle_runner_sl_exception_enters_failure_fallback(self) -> None:
+        class ExceptionTrader(FakeTrader):
+            async def fetch_position_snapshot(inner_self) -> PositionSnapshot:
+                return PositionSnapshot("LONG", Decimal("2"), 100.0, 0.2, Decimal("2"))
+
+            async def place_middle_runner_protective_stop_with_retries(
+                inner_self, side, contracts, stop_price, retry_count, retry_interval_seconds,
+            ):
+                raise AttributeError("'float' object has no attribute 'normalize'")
+
+        strategy = self._middle_runner_strategy("LONG")
+        trader = ExceptionTrader()
+        journal = FakeJournal()
+        state_store = RecordingStateStore()
+        account_snapshot = AccountSnapshot(
+            None, 100.0, 100.0, asyncio.get_running_loop().time(), 0, 1,
+            latest_market_price=106.4,
+        )
+        execution_state = ExecutionState("pos-1", 100.0)
+
+        await self.run_account_sync_until(
+            lambda: execution_state.trading_halted,
+            account_snapshot=account_snapshot,
+            execution_state=execution_state,
+            trader=trader,
+            strategy=strategy,
+            journal=journal,
+            state_store=state_store,
+        )
+
+        self.assertTrue(execution_state.trading_halted)
+        self.assertGreater(
+            len(trader.market_exits), 0,
+            "market_exit_remaining_position_with_retries must be called on SL failure",
+        )
+        warning_events = [e for e in journal.events if e[0] == "MIDDLE_RUNNER_ORDER_WARNING"]
+        self.assertEqual(len(warning_events), 1, "MIDDLE_RUNNER_ORDER_WARNING journal event must be logged")
 
 
 if __name__ == "__main__":

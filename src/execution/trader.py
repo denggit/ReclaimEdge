@@ -909,11 +909,12 @@ class Trader:
     async def place_near_tp_protective_stop_with_retries(
         self,
         side: PositionSide,
-        contracts: Decimal,
+        contracts: Decimal | str | int | float,
         stop_price: float,
         retry_count: int,
         retry_interval_seconds: float,
     ) -> tuple[bool, str | None, str]:
+        contracts = self._to_decimal(contracts)
         retry_count = max(int(retry_count), 1)
         last_error = ""
         for attempt in range(1, retry_count + 1):
@@ -1520,7 +1521,15 @@ class Trader:
         return str(algo_id)
 
     @staticmethod
-    def decimal_to_str(value: Decimal) -> str:
+    def _to_decimal(value: Decimal | str | int | float) -> Decimal:
+        if isinstance(value, Decimal):
+            return value
+        return Decimal(str(value))
+
+    @staticmethod
+    def decimal_to_str(value: Decimal | str | int | float) -> str:
+        if not isinstance(value, Decimal):
+            value = Decimal(str(value))
         return format(value.normalize(), "f")
 
     @staticmethod
