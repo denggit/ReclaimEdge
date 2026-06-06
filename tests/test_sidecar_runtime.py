@@ -8,7 +8,6 @@ import pytest
 import asyncio
 
 from scripts.run_boll_cvd_live import (
-    attach_sidecar_after_combined_entry,
     apply_main_tp_startup_recovery,
     apply_sidecar_startup_recovery,
     force_close_sidecar_after_core_flat,
@@ -20,6 +19,7 @@ from src.execution.trader import PositionSnapshot
 from src.live.runtime_types import ExecutionState, SidecarPreCoreReconcileResult
 from src.position_management.core_position_view import sidecar_position_mismatch, with_entry_add_managed_core_contracts
 from src.position_management.sidecar.model import SidecarLegStatus, sidecar_open_qty
+from src.position_management.sidecar.entry_runtime import attach_sidecar_after_combined_entry
 from src.position_management.sidecar.planner import build_combined_entry_intent
 from src.position_management.sidecar.reconciler import build_core_position_view
 from src.position_management.sidecar.runtime_state import (
