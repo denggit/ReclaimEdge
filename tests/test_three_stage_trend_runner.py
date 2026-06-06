@@ -5,10 +5,10 @@ import unittest
 from decimal import Decimal
 from unittest.mock import patch
 
-from scripts.run_boll_cvd_live import append_three_stage_progress_journal_events, mark_three_stage_progress_if_position_reduced
 from src.execution.trader import PositionSnapshot, Trader
 from src.indicators.cvd_tracker import CvdSnapshot
 from src.monitors.boll_band_breakout_monitor import BollSnapshot
+from src.position_management.tp_progress import append_three_stage_progress_journal_events, mark_three_stage_progress_if_position_reduced
 from src.risk.simple_position_sizer import PositionSize, SimplePositionSizer, SimplePositionSizerConfig
 from src.strategies.boll_cvd_reclaim_strategy import BollCvdReclaimStrategy, BollCvdReclaimStrategyConfig, StrategyPositionState, TradeIntent
 

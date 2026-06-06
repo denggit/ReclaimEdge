@@ -9,8 +9,6 @@ from types import MethodType
 from unittest.mock import patch
 
 from scripts.run_boll_cvd_live import (
-    mark_middle_runner_active_if_position_reduced,
-    mark_partial_tp_consumed_if_position_reduced,
     middle_runner_size_mismatch_needs_degraded_protection,
 )
 from src.execution.trader import PositionSnapshot, Trader
@@ -18,6 +16,10 @@ from src.indicators.cvd_tracker import CvdSnapshot
 from src.monitors.boll_band_breakout_monitor import BollSnapshot
 from src.reporting.trade_journal import LiveTradeJournal
 from src.risk.simple_position_sizer import PositionSize, SimplePositionSizer, SimplePositionSizerConfig
+from src.position_management.tp_progress import (
+    mark_middle_runner_active_if_position_reduced,
+    mark_partial_tp_consumed_if_position_reduced,
+)
 from src.strategies.boll_cvd_reclaim_strategy import (
     BollCvdReclaimStrategy,
     BollCvdReclaimStrategyConfig,

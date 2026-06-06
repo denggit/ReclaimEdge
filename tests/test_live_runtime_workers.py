@@ -23,8 +23,6 @@ from scripts.run_boll_cvd_live import (  # noqa: E402
     account_position_sync_worker,
     apply_three_stage_startup_safety_gate,
     execution_worker,
-    mark_middle_runner_active_if_position_reduced,
-    mark_three_stage_progress_if_position_reduced,
     restore_strategy_from_position,
     strategy_tick_worker,
     three_stage_post_tp1_current_price,
@@ -42,6 +40,10 @@ from src.live.runtime_types import AccountSnapshot, ExecutionState, TradeCommand
 from src.live.time_utils import next_weekly_summary_time  # noqa: E402
 from src.indicators.cvd_tracker import CvdSnapshot  # noqa: E402
 from src.monitors.boll_band_breakout_monitor import BollSnapshot, MarketTickEvent, TradeTick  # noqa: E402
+from src.position_management.tp_progress import (  # noqa: E402
+    mark_middle_runner_active_if_position_reduced,
+    mark_three_stage_progress_if_position_reduced,
+)
 from src.risk.simple_position_sizer import PositionSize, SimplePositionSizer, SimplePositionSizerConfig  # noqa: E402
 from src.strategies.boll_cvd_reclaim_strategy import BollCvdReclaimStrategyConfig, StrategyPositionState, TradeIntent  # noqa: E402
 from src.strategies.boll_cvd_shock_reclaim_strategy import BollCvdShockReclaimStrategy  # noqa: E402
@@ -411,7 +413,7 @@ class LiveRuntimeWorkerTest(unittest.IsolatedAsyncioTestCase):
         )
         position = PositionSnapshot("LONG", Decimal("2"), 100.0, 0.2, Decimal("2"))
 
-        with self.assertLogs("scripts.run_boll_cvd_live", level="WARNING") as logs:
+        with self.assertLogs("src.position_management.tp_progress", level="WARNING") as logs:
             activated = mark_middle_runner_active_if_position_reduced(strategy, position)
 
         self.assertTrue(activated)
@@ -426,7 +428,7 @@ class LiveRuntimeWorkerTest(unittest.IsolatedAsyncioTestCase):
         strategy.state.position_cost_remaining_qty = 1.0
         position = PositionSnapshot("LONG", Decimal("4"), 100.0, 0.4, Decimal("4"))
 
-        with self.assertLogs("scripts.run_boll_cvd_live", level="WARNING") as logs:
+        with self.assertLogs("src.position_management.tp_progress", level="WARNING") as logs:
             event = mark_three_stage_progress_if_position_reduced(strategy, position, 10_000)
 
         self.assertEqual(event, "TP1")
