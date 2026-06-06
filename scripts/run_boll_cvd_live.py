@@ -27,6 +27,7 @@ from src.live import queue_helpers as live_queue_helpers  # noqa: E402
 from src.live import runtime_types as live_runtime_types  # noqa: E402
 from src.live import time_utils as live_time_utils  # noqa: E402
 from src.live.account_sync import flat_balance as live_flat_balance  # noqa: E402
+from src.position_management import core_position_view as core_position_view_helpers  # noqa: E402
 from src.monitors.boll_band_breakout_monitor import (  # noqa: E402
     BollBandBreakoutMonitor,
     BollBandBreakoutMonitorConfig,
@@ -307,12 +308,6 @@ def middle_runner_size_mismatch_needs_degraded_protection(strategy: BollCvdRecla
     return reduction_ratio >= 0.5
 
 
-def position_log_key(position: PositionSnapshot) -> tuple[str, str, float]:
-    if not position.has_position or position.side is None:
-        return ("FLAT", "0", 0.0)
-    return (position.side, str(position.contracts), round(position.avg_entry_price, 2))
-
-
 def open_sidecar_legs_exceed_limit(state: StrategyPositionState, max_legs: int) -> bool:
     open_count = sum(
         1
@@ -334,42 +329,8 @@ def refresh_sidecar_state_totals(state: StrategyPositionState, max_legs: int = 1
     )
 
 
-def apply_core_position_view_to_state(state: StrategyPositionState, core_position: PositionSnapshot) -> None:
-    if core_position.has_position:
-        state.core_contracts = str(core_position.contracts)
-        state.core_eth_qty = float(core_position.eth_qty)
-    else:
-        state.core_contracts = None
-        state.core_eth_qty = 0.0
-
-
-def with_runtime_managed_core(intent: TradeIntent, account_position: PositionSnapshot | None) -> TradeIntent:
-    if not getattr(intent, "managed_core_contracts", None) and account_position is not None and account_position.has_position:
-        if intent.intent_type in {"UPDATE_TP", "NEAR_TP_REDUCE", "MARKET_EXIT_RUNNER"}:
-            return replace(
-                intent,
-                managed_core_contracts=str(account_position.contracts),
-                managed_core_eth_qty=float(account_position.eth_qty),
-            )
-    return intent
-
-
 def sidecar_client_order_id(position_id: str | None, layer_index: int, ts_ms: int) -> str:
     return build_sidecar_client_order_id(position_id, layer_index, ts_ms)
-
-
-def sidecar_position_mismatch(okx_position: PositionSnapshot, state: StrategyPositionState, tolerance_qty: float = 0.000001) -> bool:
-    if not getattr(state, "sidecar_enabled_for_position", False):
-        return False
-    open_qty = sidecar_open_qty(list(getattr(state, "sidecar_legs", []) or []))
-    if open_qty <= 0:
-        return False
-    if not okx_position.has_position or okx_position.side != state.side:
-        return True
-    if open_qty - float(okx_position.eth_qty) > tolerance_qty:
-        return True
-    core_position = build_core_position_view(okx_position, open_qty, sidecar_open_contracts(state.sidecar_legs))
-    return abs((core_position.eth_qty + open_qty) - okx_position.eth_qty) > tolerance_qty
 
 
 async def attach_sidecar_after_combined_entry(
@@ -1245,7 +1206,7 @@ async def strategy_tick_worker(
                 intents = [intent for intent in intents if intent.intent_type in POSITION_MANAGEMENT_INTENTS]
             for intent in intents:
                 if getattr(strategy.state, "sidecar_enabled_for_position", False):
-                    intent = with_runtime_managed_core(intent, account_snapshot.position)
+                    intent = core_position_view_helpers.with_runtime_managed_core(intent, account_snapshot.position)
                 command = live_runtime_types.TradeCommand(
                     intent=intent,
                     strategy_state_snapshot=backup_state,
@@ -1263,37 +1224,6 @@ async def strategy_tick_worker(
             logger.exception("Strategy tick worker failed")
         finally:
             strategy_tick_queue.task_done()
-
-
-def with_entry_add_managed_core_contracts(
-    *,
-    intent: TradeIntent,
-    strategy_state: StrategyPositionState,
-    account_core_position: PositionSnapshot | None,
-    trader: Trader,
-) -> TradeIntent:
-    if not strategy_state.sidecar_enabled_for_position:
-        return intent
-    if intent.intent_type not in {"OPEN_LONG", "OPEN_SHORT", "ADD_LONG", "ADD_SHORT"}:
-        return intent
-    if intent.managed_core_contracts:
-        return intent
-
-    current_core_contracts = Decimal("0")
-    current_core_eth_qty = 0.0
-
-    if account_core_position is not None and account_core_position.has_position and account_core_position.side == intent.side:
-        current_core_contracts = account_core_position.contracts
-        current_core_eth_qty = account_core_position.eth_qty
-
-    new_core_contracts = trader.eth_qty_to_contracts(Decimal(str(intent.size.eth_qty)))
-    expected_core_contracts = current_core_contracts + new_core_contracts
-
-    return replace(
-        intent,
-        managed_core_contracts=str(expected_core_contracts),
-        managed_core_eth_qty=current_core_eth_qty + float(intent.size.eth_qty),
-    )
 
 
 async def execution_worker(
@@ -1420,7 +1350,7 @@ async def execution_worker(
                         )
                         continue
 
-            entry_intent = with_entry_add_managed_core_contracts(
+            entry_intent = core_position_view_helpers.with_entry_add_managed_core_contracts(
                 intent=command.intent,
                 strategy_state=strategy.state,
                 account_core_position=account_snapshot.position,
@@ -1976,7 +1906,11 @@ async def account_position_sync_worker(
     last_account_sync = 0.0
     last_logged_cash = account_snapshot.cash
     last_logged_equity = account_snapshot.equity
-    last_logged_position_key = position_log_key(account_snapshot.position) if account_snapshot.position is not None else ("FLAT", "0", 0.0)
+    last_logged_position_key = (
+        core_position_view_helpers.position_log_key(account_snapshot.position)
+        if account_snapshot.position is not None
+        else ("FLAT", "0", 0.0)
+    )
     consecutive_failures = 0
     first_failure_monotonic = 0.0
     last_failure_log = 0.0
@@ -2009,7 +1943,7 @@ async def account_position_sync_worker(
 
             position = await trader.fetch_position_snapshot()
             core_position = position
-            current_position_key = position_log_key(core_position)
+            current_position_key = core_position_view_helpers.position_log_key(core_position)
             record_flat_payload: dict[str, Any] | None = None
             pending_flat_payload: dict[str, Any] | None = None
             cash_transfer_payload: dict[str, Any] | None = None
@@ -2070,9 +2004,9 @@ async def account_position_sync_worker(
                         )
                 open_sidecar_qty = sidecar_open_qty(strategy.state.sidecar_legs)
                 core_position = build_core_position_view(position, open_sidecar_qty, sidecar_open_contracts(strategy.state.sidecar_legs))
-                apply_core_position_view_to_state(strategy.state, core_position)
-                current_position_key = position_log_key(core_position)
-                if sidecar_position_mismatch(position, strategy.state):
+                core_position_view_helpers.apply_core_position_view_to_state(strategy.state, core_position)
+                current_position_key = core_position_view_helpers.position_log_key(core_position)
+                if core_position_view_helpers.sidecar_position_mismatch(position, strategy.state):
                     execution_state.trading_halted = True
                     execution_state.halt_reason = "core_sidecar_position_mismatch"
                     strategy.state.sidecar_dirty = True
@@ -3384,7 +3318,7 @@ async def main() -> None:
         sidecar_open_qty(strategy.state.sidecar_legs),
         sidecar_open_contracts(strategy.state.sidecar_legs),
     )
-    apply_core_position_view_to_state(strategy.state, startup_core_position)
+    core_position_view_helpers.apply_core_position_view_to_state(strategy.state, startup_core_position)
     account_snapshot.position = startup_core_position
     if startup_position.has_position:
         state_store.save(LiveStateStore.from_strategy_state(position_id=current_position_id, symbol=trader.symbol, strategy_state=strategy.state, cash_before_position=cash_before_position))

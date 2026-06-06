@@ -16,10 +16,10 @@ from scripts.run_boll_cvd_live import (
     reconcile_sidecar_orders_before_core_view,
     refresh_sidecar_state_totals,
     sidecar_open_contracts,
-    sidecar_position_mismatch,
 )
 from src.execution.trader import PositionSnapshot
 from src.live.runtime_types import ExecutionState, SidecarPreCoreReconcileResult
+from src.position_management.core_position_view import sidecar_position_mismatch, with_entry_add_managed_core_contracts
 from src.position_management.sidecar.model import SidecarLegStatus, sidecar_open_qty
 from src.position_management.sidecar.planner import build_combined_entry_intent
 from src.position_management.sidecar.reconciler import build_core_position_view
@@ -607,9 +607,6 @@ def test_flat_cleanup_resets_sidecar_fields() -> None:
 # ---------------------------------------------------------------------------
 # Tests for with_entry_add_managed_core_contracts
 # ---------------------------------------------------------------------------
-
-from scripts.run_boll_cvd_live import with_entry_add_managed_core_contracts  # noqa: E402
-
 
 class FakeTraderForManagedCore:
     """Minimal fake trader for with_entry_add_managed_core_contracts tests."""
