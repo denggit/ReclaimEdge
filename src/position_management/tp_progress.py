@@ -122,6 +122,8 @@ def mark_middle_runner_active_if_position_reduced(strategy: BollCvdReclaimStrate
     state.middle_runner_pending = False
     state.middle_runner_active = True
     state.middle_runner_add_disabled = True
+    if hasattr(strategy, "_reset_middle_runner_sl_time_tighten_state"):
+        strategy._reset_middle_runner_sl_time_tighten_state()
     state.partial_tp_consumed = True
     state.partial_tp_price = None
     state.partial_tp_ratio = 0.0
@@ -185,6 +187,8 @@ def mark_three_stage_progress_if_position_reduced(strategy: BollCvdReclaimStrate
             remaining_ratio,
         )
         state.three_stage_tp1_consumed = True
+        if hasattr(strategy, "_reset_three_stage_post_tp1_sl_time_tighten_state"):
+            strategy._reset_three_stage_post_tp1_sl_time_tighten_state()
         state.partial_tp_consumed = True
         event = "TP1"
         logger.warning(
@@ -209,6 +213,8 @@ def mark_three_stage_progress_if_position_reduced(strategy: BollCvdReclaimStrate
             fee_buffer_pct=strategy.config.breakeven_fee_buffer_pct,
         )
         state.three_stage_tp2_consumed = True
+        if hasattr(strategy, "_reset_three_stage_post_tp1_sl_time_tighten_state"):
+            strategy._reset_three_stage_post_tp1_sl_time_tighten_state()
         state.trend_runner_active = True
         state.trend_runner_trend_start_ts_ms = ts_ms
         state.trend_runner_adjust_count = 0

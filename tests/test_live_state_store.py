@@ -35,6 +35,8 @@ class LiveStateStoreTest(unittest.TestCase):
                 three_stage_post_tp1_protective_sl_order_id="old-post",
                 three_stage_post_tp1_sl_extension_triggered=True,
                 three_stage_post_tp1_protected=True,
+                three_stage_post_tp1_sl_time_tighten_candle_count=4,
+                three_stage_post_tp1_sl_time_tighten_last_candle_ts_ms=4_000,
             )
 
             store.save(
@@ -55,6 +57,8 @@ class LiveStateStoreTest(unittest.TestCase):
             self.assertEqual(loaded.three_stage_post_tp1_protective_sl_price, 101.0)
             self.assertTrue(loaded.three_stage_post_tp1_sl_extension_triggered)
             self.assertTrue(loaded.three_stage_post_tp1_protected)
+            self.assertEqual(loaded.three_stage_post_tp1_sl_time_tighten_candle_count, 4)
+            self.assertEqual(loaded.three_stage_post_tp1_sl_time_tighten_last_candle_ts_ms, 4_000)
             self.assertEqual(loaded.position_cost_entry_notional, 120.0)
             self.assertEqual(loaded.position_cost_exit_notional, 20.0)
             self.assertEqual(loaded.position_cost_remaining_qty, 0.8)
@@ -76,6 +80,8 @@ class LiveStateStoreTest(unittest.TestCase):
                 middle_runner_add_disabled=True,
                 middle_runner_size_mismatch_protected=True,
                 middle_runner_size_mismatch_warning_ts_ms=123_456,
+                middle_runner_sl_time_tighten_candle_count=3,
+                middle_runner_sl_time_tighten_last_candle_ts_ms=3_000,
             )
 
             store.save(
@@ -93,6 +99,39 @@ class LiveStateStoreTest(unittest.TestCase):
             assert loaded is not None
             self.assertTrue(loaded.middle_runner_size_mismatch_protected)
             self.assertEqual(loaded.middle_runner_size_mismatch_warning_ts_ms, 123_456)
+            self.assertEqual(loaded.middle_runner_sl_time_tighten_candle_count, 3)
+            self.assertEqual(loaded.middle_runner_sl_time_tighten_last_candle_ts_ms, 3_000)
+
+    def test_time_tighten_state_persists(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "live_state.json"
+            store = LiveStateStore(path)
+            strategy_state = StrategyPositionState(
+                side="LONG",
+                layers=1,
+                middle_runner_sl_time_tighten_candle_count=7,
+                middle_runner_sl_time_tighten_last_candle_ts_ms=70_000,
+                three_stage_post_tp1_sl_time_tighten_candle_count=8,
+                three_stage_post_tp1_sl_time_tighten_last_candle_ts_ms=80_000,
+            )
+
+            store.save(
+                LiveStateStore.from_strategy_state(
+                    position_id="pos-1",
+                    symbol="ETH-USDT-SWAP",
+                    strategy_state=strategy_state,
+                    cash_before_position=100.0,
+                )
+            )
+
+            loaded = store.load()
+
+            self.assertIsNotNone(loaded)
+            assert loaded is not None
+            self.assertEqual(loaded.middle_runner_sl_time_tighten_candle_count, 7)
+            self.assertEqual(loaded.middle_runner_sl_time_tighten_last_candle_ts_ms, 70_000)
+            self.assertEqual(loaded.three_stage_post_tp1_sl_time_tighten_candle_count, 8)
+            self.assertEqual(loaded.three_stage_post_tp1_sl_time_tighten_last_candle_ts_ms, 80_000)
 
     def test_add_freeze_and_three_stage_degrade_fields_save_and_restore(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

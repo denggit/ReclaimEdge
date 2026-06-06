@@ -743,6 +743,131 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
 
         self.assertEqual(got, ((95.0 + 102.0) / 2))
 
+    def test_three_stage_time_tighten_long_moves_both_candidates_to_55pct(self) -> None:
+        strat = strategy()
+        strat.state = StrategyPositionState(
+            side="LONG",
+            net_remaining_breakeven_price=100.0,
+            three_stage_tp1_consumed=True,
+            three_stage_post_tp1_sl_time_tighten_candle_count=1,
+        )
+
+        got = strat._calculate_three_stage_post_tp1_protective_sl("LONG", 250.0, boll(middle=200.0, upper=220.0, lower=100.0))
+
+        self.assertEqual(strat._runner_sl_time_tighten_ratio(1), 0.55)
+        self.assertEqual(got, 155.0)
+
+    def test_three_stage_time_tighten_long_uses_more_conservative_of_two_candidates(self) -> None:
+        strat = strategy()
+        strat.state = StrategyPositionState(
+            side="LONG",
+            net_remaining_breakeven_price=120.0,
+            three_stage_tp1_consumed=True,
+            three_stage_post_tp1_sl_time_tighten_candle_count=1,
+        )
+
+        got = strat._calculate_three_stage_post_tp1_protective_sl("LONG", 250.0, boll(middle=200.0, upper=220.0, lower=100.0))
+
+        self.assertEqual(got, 164.0)
+
+    def test_three_stage_time_tighten_short_moves_both_candidates_to_55pct(self) -> None:
+        strat = strategy()
+        strat.state = StrategyPositionState(
+            side="SHORT",
+            net_remaining_breakeven_price=200.0,
+            three_stage_tp1_consumed=True,
+            three_stage_post_tp1_sl_time_tighten_candle_count=1,
+        )
+
+        got = strat._calculate_three_stage_post_tp1_protective_sl("SHORT", 50.0, boll(middle=100.0, upper=200.0, lower=80.0))
+
+        self.assertEqual(got, 145.0)
+
+    def test_three_stage_time_tighten_short_uses_more_conservative_of_two_candidates(self) -> None:
+        strat = strategy()
+        strat.state = StrategyPositionState(
+            side="SHORT",
+            net_remaining_breakeven_price=180.0,
+            three_stage_tp1_consumed=True,
+            three_stage_post_tp1_sl_time_tighten_candle_count=1,
+        )
+
+        got = strat._calculate_three_stage_post_tp1_protective_sl("SHORT", 50.0, boll(middle=100.0, upper=200.0, lower=80.0))
+
+        self.assertEqual(got, 136.0)
+
+    def test_time_tighten_reaches_middle_after_10_candles(self) -> None:
+        long_strat = strategy()
+        long_strat.state = StrategyPositionState(
+            side="LONG",
+            net_remaining_breakeven_price=100.0,
+            three_stage_tp1_consumed=True,
+            three_stage_post_tp1_sl_time_tighten_candle_count=10,
+        )
+        long_sl = long_strat._calculate_three_stage_post_tp1_protective_sl("LONG", 250.0, boll(middle=200.0, upper=220.0, lower=100.0))
+
+        short_strat = strategy()
+        short_strat.state = StrategyPositionState(
+            side="SHORT",
+            net_remaining_breakeven_price=200.0,
+            three_stage_tp1_consumed=True,
+            three_stage_post_tp1_sl_time_tighten_candle_count=10,
+        )
+        short_sl = short_strat._calculate_three_stage_post_tp1_protective_sl("SHORT", 50.0, boll(middle=100.0, upper=200.0, lower=80.0))
+
+        self.assertEqual(long_strat._runner_sl_time_tighten_ratio(10), 1.0)
+        self.assertEqual(long_sl, 200.0)
+        self.assertLessEqual(long_sl or 0.0, 200.0)
+        self.assertEqual(short_sl, 100.0)
+        self.assertGreaterEqual(short_sl or 0.0, 100.0)
+
+    def test_extension_trigger_still_overrides_to_middle(self) -> None:
+        strat = strategy(three_stage_post_tp1_sl_extension_trigger_ratio=0.6)
+        strat.state = StrategyPositionState(
+            side="LONG",
+            net_remaining_breakeven_price=100.0,
+            three_stage_tp1_consumed=True,
+            three_stage_post_tp1_sl_time_tighten_candle_count=1,
+        )
+        bands = boll(middle=200.0, upper=220.0, lower=100.0)
+
+        base_sl = strat._calculate_three_stage_post_tp1_protective_sl("LONG", 213.0, bands)
+        final_sl = strat._apply_three_stage_post_tp1_extension_trigger("LONG", 213.0, bands, base_sl)
+
+        self.assertEqual(final_sl, 200.0)
+
+    def test_tighten_only_prevents_sl_from_moving_back_when_boll_changes(self) -> None:
+        long_strat = strategy()
+        long_strat.state = StrategyPositionState(
+            side="LONG",
+            net_remaining_breakeven_price=100.0,
+            three_stage_tp1_consumed=True,
+            three_stage_post_tp1_sl_time_tighten_candle_count=1,
+        )
+        long_calculated = long_strat._calculate_three_stage_post_tp1_protective_sl(
+            "LONG",
+            250.0,
+            boll(middle=200.0, upper=220.0, lower=100.0),
+        )
+
+        short_strat = strategy()
+        short_strat.state = StrategyPositionState(
+            side="SHORT",
+            net_remaining_breakeven_price=200.0,
+            three_stage_tp1_consumed=True,
+            three_stage_post_tp1_sl_time_tighten_candle_count=1,
+        )
+        short_calculated = short_strat._calculate_three_stage_post_tp1_protective_sl(
+            "SHORT",
+            50.0,
+            boll(middle=100.0, upper=200.0, lower=80.0),
+        )
+
+        self.assertEqual(long_calculated, 155.0)
+        self.assertEqual(long_strat._tighten_optional_three_stage_post_tp1_sl("LONG", 160.0, long_calculated), 160.0)
+        self.assertEqual(short_calculated, 145.0)
+        self.assertEqual(short_strat._tighten_optional_three_stage_post_tp1_sl("SHORT", 140.0, short_calculated), 140.0)
+
     def test_three_stage_post_tp1_sl_diag_logs_once_per_signature(self) -> None:
         strat = strategy()
         strat.state = StrategyPositionState(

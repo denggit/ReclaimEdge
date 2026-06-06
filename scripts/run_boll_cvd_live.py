@@ -165,6 +165,9 @@ def restore_strategy_from_saved_state(strategy: BollCvdReclaimStrategy, saved_st
         middle_runner_size_mismatch_protected=getattr(saved_state, "middle_runner_size_mismatch_protected", False),
         middle_runner_size_mismatch_warning_ts_ms=getattr(saved_state, "middle_runner_size_mismatch_warning_ts_ms", 0),
         middle_runner_sl_diag_last_signature=getattr(saved_state, "middle_runner_sl_diag_last_signature", None),
+        middle_runner_sl_time_tighten_candle_count=getattr(saved_state, "middle_runner_sl_time_tighten_candle_count", 0),
+        middle_runner_sl_time_tighten_last_candle_ts_ms=getattr(saved_state, "middle_runner_sl_time_tighten_last_candle_ts_ms", 0),
+        middle_runner_sl_time_tighten_log_candle_ts_ms=getattr(saved_state, "middle_runner_sl_time_tighten_log_candle_ts_ms", 0),
         three_stage_runner_enabled_for_position=getattr(saved_state, "three_stage_runner_enabled_for_position", False),
         three_stage_tp1_price=getattr(saved_state, "three_stage_tp1_price", None),
         three_stage_tp2_price=getattr(saved_state, "three_stage_tp2_price", None),
@@ -179,6 +182,9 @@ def restore_strategy_from_saved_state(strategy: BollCvdReclaimStrategy, saved_st
         three_stage_post_tp1_sl_extension_triggered=getattr(saved_state, "three_stage_post_tp1_sl_extension_triggered", False),
         three_stage_post_tp1_protected=getattr(saved_state, "three_stage_post_tp1_protected", False),
         three_stage_post_tp1_sl_diag_last_signature=getattr(saved_state, "three_stage_post_tp1_sl_diag_last_signature", None),
+        three_stage_post_tp1_sl_time_tighten_candle_count=getattr(saved_state, "three_stage_post_tp1_sl_time_tighten_candle_count", 0),
+        three_stage_post_tp1_sl_time_tighten_last_candle_ts_ms=getattr(saved_state, "three_stage_post_tp1_sl_time_tighten_last_candle_ts_ms", 0),
+        three_stage_post_tp1_sl_time_tighten_log_candle_ts_ms=getattr(saved_state, "three_stage_post_tp1_sl_time_tighten_log_candle_ts_ms", 0),
         three_stage_pre_tp1_degrade_stage=getattr(saved_state, "three_stage_pre_tp1_degrade_stage", None),
         three_stage_pre_tp1_degraded_ts_ms=getattr(saved_state, "three_stage_pre_tp1_degraded_ts_ms", 0),
         trend_runner_active=getattr(saved_state, "trend_runner_active", False),
@@ -1874,6 +1880,10 @@ async def account_position_sync_worker(
                                 price_source = "missing"
                                 if post_tp1_boll is not None and core_position.side is not None:
                                     current_price, price_source = runner_live_helpers.three_stage_post_tp1_current_price(account_snapshot, core_position, post_tp1_boll, live_time_utils.utc_ms())
+                                    strategy._advance_runner_sl_time_tighten_candle_count(
+                                        target="three_stage_post_tp1",
+                                        candle_ts_ms=int(getattr(post_tp1_boll, "candle_ts_ms", 0) or 0),
+                                    )
                                     base_sl = strategy._calculate_three_stage_post_tp1_protective_sl(core_position.side, current_price, post_tp1_boll)
                                     extension_sl = strategy._apply_three_stage_post_tp1_extension_trigger(core_position.side, current_price, post_tp1_boll, base_sl)
                                     protective_sl = strategy._tighten_optional_three_stage_post_tp1_sl(core_position.side, base_sl, extension_sl)
@@ -1982,6 +1992,11 @@ async def account_position_sync_worker(
                         if bool(getattr(config, "middle_runner_protective_sl_enabled", True)):
                             runner_boll = runner_live_helpers.middle_runner_activation_boll(strategy)
                             current_price = getattr(runner_boll, "middle", 0.0) if runner_boll is not None else 0.0
+                            if runner_boll is not None:
+                                strategy._advance_runner_sl_time_tighten_candle_count(
+                                    target="middle_runner",
+                                    candle_ts_ms=int(getattr(runner_boll, "candle_ts_ms", 0) or 0),
+                                )
                             protective_sl = (
                                 strategy._calculate_middle_runner_protective_sl(core_position.side, current_price, runner_boll)
                                 if runner_boll is not None and core_position.side is not None
@@ -2035,6 +2050,11 @@ async def account_position_sync_worker(
                     elif runner_live_helpers.middle_runner_size_mismatch_needs_degraded_protection(strategy, core_position):
                         runner_boll = runner_live_helpers.middle_runner_activation_boll(strategy)
                         current_price = getattr(runner_boll, "middle", 0.0) if runner_boll is not None else 0.0
+                        if runner_boll is not None:
+                            strategy._advance_runner_sl_time_tighten_candle_count(
+                                target="middle_runner",
+                                candle_ts_ms=int(getattr(runner_boll, "candle_ts_ms", 0) or 0),
+                            )
                         protective_sl = (
                             strategy._calculate_middle_runner_protective_sl(core_position.side, current_price, runner_boll)
                             if runner_boll is not None and core_position.side is not None

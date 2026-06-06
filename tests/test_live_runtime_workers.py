@@ -2155,6 +2155,10 @@ class LiveRuntimeWorkerTest(unittest.IsolatedAsyncioTestCase):
             tp_mode="MIDDLE",
             three_stage_pre_tp1_degrade_stage="MIDDLE_RUNNER",
             three_stage_pre_tp1_degraded_ts_ms=10_900_000,
+            middle_runner_sl_time_tighten_candle_count=5,
+            middle_runner_sl_time_tighten_last_candle_ts_ms=50_000,
+            three_stage_post_tp1_sl_time_tighten_candle_count=6,
+            three_stage_post_tp1_sl_time_tighten_last_candle_ts_ms=60_000,
             startup_force_tp_reconcile=True,  # saved as True from a previous interrupted startup
         )
 
@@ -2166,6 +2170,10 @@ class LiveRuntimeWorkerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(strategy.state.add_freeze_penalty_count, 1)
         self.assertEqual(strategy.state.three_stage_pre_tp1_degrade_stage, "MIDDLE_RUNNER")
         self.assertEqual(strategy.state.three_stage_pre_tp1_degraded_ts_ms, 10_900_000)
+        self.assertEqual(strategy.state.middle_runner_sl_time_tighten_candle_count, 5)
+        self.assertEqual(strategy.state.middle_runner_sl_time_tighten_last_candle_ts_ms, 50_000)
+        self.assertEqual(strategy.state.three_stage_post_tp1_sl_time_tighten_candle_count, 6)
+        self.assertEqual(strategy.state.three_stage_post_tp1_sl_time_tighten_last_candle_ts_ms, 60_000)
 
     def test_force_tp_reconcile_not_armed_when_flat(self) -> None:
         """When startup position is FLAT, startup_force_tp_reconcile should remain False."""

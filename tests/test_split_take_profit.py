@@ -423,6 +423,44 @@ class SplitTakeProfitStrategyTest(unittest.TestCase):
         # breakeven candidate wins when structure is looser
         self.assertEqual(short_sl_d, s_candidate_breakeven_d)
 
+    def test_middle_runner_uses_same_time_tighten_formula(self) -> None:
+        long_strat = strategy(middle_runner_enabled=True)
+        long_strat.state = StrategyPositionState(
+            side="LONG",
+            avg_entry_price=100.0,
+            net_remaining_breakeven_price=100.0,
+            middle_runner_active=True,
+            middle_runner_sl_time_tighten_candle_count=1,
+        )
+        long_sl = long_strat._calculate_middle_runner_protective_sl("LONG", 250.0, boll(middle=200.0, upper=220.0, lower=100.0))
+
+        short_strat = strategy(middle_runner_enabled=True)
+        short_strat.state = StrategyPositionState(
+            side="SHORT",
+            avg_entry_price=200.0,
+            net_remaining_breakeven_price=200.0,
+            middle_runner_active=True,
+            middle_runner_sl_time_tighten_candle_count=1,
+        )
+        short_sl = short_strat._calculate_middle_runner_protective_sl("SHORT", 50.0, boll(middle=100.0, upper=200.0, lower=80.0))
+
+        self.assertEqual(long_strat._runner_sl_time_tighten_ratio(1), 0.55)
+        self.assertEqual(long_sl, 155.0)
+        self.assertEqual(short_sl, 145.0)
+
+    def test_candle_count_starts_at_zero_on_activation(self) -> None:
+        strat = strategy(middle_runner_enabled=True)
+
+        first_count = strat._advance_runner_sl_time_tighten_candle_count(target="middle_runner", candle_ts_ms=1_000)
+        same_count = strat._advance_runner_sl_time_tighten_candle_count(target="middle_runner", candle_ts_ms=1_000)
+        next_count = strat._advance_runner_sl_time_tighten_candle_count(target="middle_runner", candle_ts_ms=2_000)
+
+        self.assertEqual(first_count, 0)
+        self.assertEqual(same_count, 0)
+        self.assertEqual(strat._runner_sl_time_tighten_ratio(first_count), 0.50)
+        self.assertEqual(next_count, 1)
+        self.assertEqual(strat._runner_sl_time_tighten_ratio(next_count), 0.55)
+
     def test_middle_runner_sl_diag_logs_once_per_signature(self) -> None:
         strat = strategy(middle_runner_enabled=True, breakeven_fee_buffer_pct=0.001)
         strat.state = StrategyPositionState(
