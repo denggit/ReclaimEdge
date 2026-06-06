@@ -18,6 +18,7 @@ class SimplePositionSizerConfig:
     sidecar_close_when_core_flat: bool = True
     sidecar_order_status_check_seconds: float = 5.0
     sidecar_max_legs: int = 10
+    sidecar_skip_first_layer: bool = True
 
     @classmethod
     def from_env(cls) -> "SimplePositionSizerConfig":
@@ -31,6 +32,7 @@ class SimplePositionSizerConfig:
             sidecar_close_when_core_flat=_env_bool("SIDECAR_CLOSE_WHEN_CORE_FLAT", True),
             sidecar_order_status_check_seconds=float(os.getenv("SIDECAR_ORDER_STATUS_CHECK_SECONDS", "5")),
             sidecar_max_legs=int(os.getenv("SIDECAR_MAX_LEGS", "10")),
+            sidecar_skip_first_layer=_env_bool("SIDECAR_SKIP_FIRST_LAYER", True),
         )
         config.validate_sidecar()
         return config
@@ -47,6 +49,7 @@ class SimplePositionSizerConfig:
             sidecar_close_when_core_flat=_env_bool("SIDECAR_CLOSE_WHEN_CORE_FLAT", True),
             sidecar_order_status_check_seconds=float(os.getenv("SIDECAR_ORDER_STATUS_CHECK_SECONDS", "5")),
             sidecar_max_legs=int(os.getenv("SIDECAR_MAX_LEGS", "10")),
+            sidecar_skip_first_layer=_env_bool("SIDECAR_SKIP_FIRST_LAYER", True),
         )
         config.validate_sidecar()
         return config
@@ -96,6 +99,7 @@ class SimplePositionSizer:
             sidecar_close_when_core_flat=self.config.sidecar_close_when_core_flat,
             sidecar_order_status_check_seconds=self.config.sidecar_order_status_check_seconds,
             sidecar_max_legs=self.config.sidecar_max_legs,
+            sidecar_skip_first_layer=self.config.sidecar_skip_first_layer,
         )
 
     @property

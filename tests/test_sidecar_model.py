@@ -57,6 +57,26 @@ def test_sidecar_enabled_core_and_sidecar_sizing() -> None:
     assert sidecar_qty == pytest.approx((1000 * 0.01 * 1.15 * 50) / 100.0)
 
 
+def test_sidecar_skip_first_layer_config_defaults_true_and_preserves_on_equity_update(monkeypatch) -> None:
+    monkeypatch.delenv("SIDECAR_SKIP_FIRST_LAYER", raising=False)
+
+    config = SimplePositionSizerConfig.from_env()
+    sizer = SimplePositionSizer(config)
+    sizer.update_account_equity(1234.0)
+
+    assert config.sidecar_skip_first_layer is True
+    assert sizer.config.sidecar_skip_first_layer is True
+    assert sizer.config.dry_run_equity_usdt == pytest.approx(1234.0)
+
+
+def test_sidecar_skip_first_layer_config_reads_false_from_env(monkeypatch) -> None:
+    monkeypatch.setenv("SIDECAR_SKIP_FIRST_LAYER", "false")
+
+    config = SimplePositionSizerConfig.from_account_equity(1000.0)
+
+    assert config.sidecar_skip_first_layer is False
+
+
 def test_sidecar_tp_price() -> None:
     assert calculate_sidecar_tp_price("LONG", 3000, 0.004) == pytest.approx(3012)
     assert calculate_sidecar_tp_price("SHORT", 3000, 0.004) == pytest.approx(2988)

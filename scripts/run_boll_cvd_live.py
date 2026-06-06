@@ -787,7 +787,11 @@ async def apply_sidecar_startup_recovery(
                 )
             )
             return
-        if not saved_legs and os.getenv("SIDECAR_ENABLED", "false").strip().lower() in {"1", "true", "yes", "y", "on"} and hasattr(journal, "append"):
+        if (
+            saved_state is None
+            and os.getenv("SIDECAR_ENABLED", "false").strip().lower() in {"1", "true", "yes", "y", "on"}
+            and hasattr(journal, "append")
+        ):
             strategy.state.sidecar_enabled_for_position = False
             strategy.state.sidecar_margin_pct = 0.0
             strategy.state.sidecar_tp_pct = 0.0
@@ -1232,6 +1236,13 @@ async def execution_worker(
                         )
                         execution_state.cash_before_position = entry_cash_before
                     current_position_id = execution_state.current_position_id
+                sidecar_skip_first_layer = bool(
+                    getattr(
+                        getattr(getattr(strategy, "sizer", None), "config", None),
+                        "sidecar_skip_first_layer",
+                        True,
+                    )
+                )
                 combined_plan = build_combined_entry_intent(
                     intent=command.intent,
                     sidecar_enabled=bool(getattr(strategy.state, "sidecar_enabled_for_position", False)),
@@ -1240,6 +1251,7 @@ async def execution_worker(
                     sidecar_margin_pct=float(getattr(strategy.state, "sidecar_margin_pct", 0.0) or 0.0),
                     sidecar_tp_pct=float(getattr(strategy.state, "sidecar_tp_pct", 0.0) or 0.0),
                     position_id=current_position_id,
+                    sidecar_skip_first_layer=sidecar_skip_first_layer,
                     contract_multiplier=getattr(trader, "contract_multiplier", Decimal("0.1")),
                     contract_precision=getattr(trader, "contract_precision", Decimal("0.01")),
                 )

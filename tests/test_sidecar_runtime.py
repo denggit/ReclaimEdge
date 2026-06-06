@@ -112,7 +112,14 @@ class Trader:
         return True, "ok"
 
 
-def sidecar_plan_for(intent_: TradeIntent, execution: ExecutionState, trader: Trader, state: StrategyPositionState):
+def sidecar_plan_for(
+    intent_: TradeIntent,
+    execution: ExecutionState,
+    trader: Trader,
+    state: StrategyPositionState,
+    *,
+    sidecar_skip_first_layer: bool = False,
+):
     return build_combined_entry_intent(
         intent=intent_,
         sidecar_enabled=state.sidecar_enabled_for_position,
@@ -121,6 +128,7 @@ def sidecar_plan_for(intent_: TradeIntent, execution: ExecutionState, trader: Tr
         sidecar_margin_pct=state.sidecar_margin_pct,
         sidecar_tp_pct=state.sidecar_tp_pct,
         position_id=execution.current_position_id,
+        sidecar_skip_first_layer=sidecar_skip_first_layer,
         contract_multiplier=trader.contract_multiplier,
         contract_precision=trader.contract_precision,
     )
@@ -136,6 +144,126 @@ def sidecar_state() -> StrategyPositionState:
         sidecar_margin_pct=0.01,
         sidecar_tp_pct=0.004,
     )
+
+
+def test_sidecar_skip_first_layer_builds_core_only_open_intent() -> None:
+    state = sidecar_state()
+    execution = ExecutionState("pos-skip", 1000.0)
+    trader = Trader()
+    trader.account_equity_usdt = 414.0
+    entry_intent = replace(
+        intent("OPEN_LONG", 1),
+        size=PositionSize(62.4, 624.0, 0.208, 1, 1.0),
+        managed_core_contracts="2.08",
+        managed_core_eth_qty=0.208,
+    )
+
+    combined = sidecar_plan_for(entry_intent, execution, trader, state, sidecar_skip_first_layer=True)
+
+    assert combined.sidecar_plan is None
+    assert combined.execution_intent.size.eth_qty == pytest.approx(entry_intent.size.eth_qty)
+    assert combined.execution_intent.size.notional_usdt == pytest.approx(entry_intent.size.notional_usdt)
+    assert combined.execution_intent.managed_core_contracts == "2.08"
+    assert combined.execution_intent.managed_core_eth_qty == pytest.approx(0.208)
+
+
+def test_sidecar_skip_first_layer_false_preserves_old_behavior() -> None:
+    state = sidecar_state()
+    execution = ExecutionState("pos-old", 1000.0)
+    trader = Trader()
+    trader.account_equity_usdt = 414.0
+    entry_intent = replace(
+        intent("OPEN_LONG", 1),
+        size=PositionSize(62.4, 624.0, 0.208, 1, 1.0),
+    )
+
+    combined = sidecar_plan_for(entry_intent, execution, trader, state, sidecar_skip_first_layer=False)
+
+    assert combined.sidecar_plan is not None
+    assert combined.sidecar_plan.layer_index == 1
+    assert combined.execution_intent.size.eth_qty == pytest.approx(
+        combined.sidecar_plan.core_qty + combined.sidecar_plan.sidecar_qty
+    )
+
+
+def test_sidecar_add_layer_still_creates_sidecar_when_first_skipped() -> None:
+    state = sidecar_state()
+    execution = ExecutionState("pos-add-skip", 1000.0)
+    trader = Trader()
+    trader.account_equity_usdt = 414.0
+    add_intent = replace(
+        intent("ADD_LONG", 2),
+        size=PositionSize(71.76, 717.6, 0.2392, 2, 1.15),
+    )
+
+    combined = sidecar_plan_for(add_intent, execution, trader, state, sidecar_skip_first_layer=True)
+
+    assert combined.sidecar_plan is not None
+    assert combined.sidecar_plan.layer_index == 2
+    assert combined.execution_intent.size.eth_qty == pytest.approx(
+        combined.sidecar_plan.core_qty + combined.sidecar_plan.sidecar_qty
+    )
+
+
+@pytest.mark.asyncio
+async def test_first_layer_skip_does_not_append_sidecar_leg_or_place_tp() -> None:
+    state = sidecar_state()
+    execution = ExecutionState("pos-skip", 1000.0)
+    trader = Trader()
+    journal = Journal()
+    store = Store()
+    entry_intent = intent("OPEN_LONG", 1)
+
+    combined = sidecar_plan_for(entry_intent, execution, trader, state, sidecar_skip_first_layer=True)
+    sidecar_ok = True
+    if combined.sidecar_plan is not None:
+        sidecar_ok = await attach_sidecar_after_combined_entry(
+            trader=trader,
+            strategy_state=state,
+            execution_state=execution,
+            intent=combined.execution_intent,
+            sidecar_plan=combined.sidecar_plan,
+            journal=journal,
+            state_store=store,
+            trader_symbol="ETH-USDT-SWAP",
+        )
+
+    assert sidecar_ok
+    assert trader.sidecar_tps == []
+    assert [event[0] for event in journal.events] == []
+    assert state.sidecar_legs == []
+    assert state.sidecar_open_qty == 0
+    assert state.sidecar_total_qty == 0
+    assert state.sidecar_dirty is False
+    assert state.sidecar_halt_reason is None
+
+
+@pytest.mark.asyncio
+async def test_second_layer_after_first_skip_places_sidecar_tp() -> None:
+    state = sidecar_state()
+    execution = ExecutionState("pos-skip-add", 1000.0)
+    trader = Trader()
+    journal = Journal()
+    store = Store()
+    add_intent = intent("ADD_LONG", 2)
+
+    combined = sidecar_plan_for(add_intent, execution, trader, state, sidecar_skip_first_layer=True)
+    assert combined.sidecar_plan is not None
+    ok = await attach_sidecar_after_combined_entry(
+        trader=trader,
+        strategy_state=state,
+        execution_state=execution,
+        intent=combined.execution_intent,
+        sidecar_plan=combined.sidecar_plan,
+        journal=journal,
+        state_store=store,
+        trader_symbol="ETH-USDT-SWAP",
+    )
+
+    assert ok
+    assert trader.sidecar_tps == [("LONG", str(combined.sidecar_plan.sidecar_contracts), pytest.approx(combined.sidecar_plan.sidecar_tp_price), combined.sidecar_plan.client_order_id)]
+    assert [event[0] for event in journal.events] == ["SIDECAR_LEG_OPENED", "SIDECAR_TP_PLACED"]
+    assert state.sidecar_legs[0]["layer_index"] == 2
 
 
 @pytest.mark.asyncio
@@ -518,7 +646,7 @@ async def test_recovered_position_without_saved_sidecar_does_not_backfill(monkey
     await apply_sidecar_startup_recovery(
         strategy=type("S", (), {"state": state})(),
         execution_state=execution,
-        saved_state=type("Saved", (), {"sidecar_legs": []})(),
+        saved_state=None,
         startup_position=PositionSnapshot("LONG", Decimal("5"), 3000, 0.5, Decimal("5")),
         trader=Trader(),
         journal=journal,
@@ -527,6 +655,45 @@ async def test_recovered_position_without_saved_sidecar_does_not_backfill(monkey
 
     assert state.sidecar_enabled_for_position is False
     assert journal.events[0][0] == "SIDECAR_DISABLED_FOR_RECOVERED_POSITION"
+
+
+@pytest.mark.asyncio
+async def test_startup_recovery_allows_sidecar_enabled_position_with_empty_legs(monkeypatch) -> None:
+    monkeypatch.setenv("SIDECAR_ENABLED", "true")
+    state = sidecar_state()
+    state.sidecar_legs = []
+    execution = ExecutionState("pos-1", 1000.0)
+    journal = Journal()
+    store = Store()
+    saved_state = type(
+        "Saved",
+        (),
+        {
+            "sidecar_enabled_for_position": True,
+            "sidecar_margin_pct": 0.01,
+            "sidecar_tp_pct": 0.004,
+            "sidecar_legs": [],
+        },
+    )()
+
+    await apply_sidecar_startup_recovery(
+        strategy=type("S", (), {"state": state})(),
+        execution_state=execution,
+        saved_state=saved_state,
+        startup_position=PositionSnapshot("LONG", Decimal("5"), 3000, 0.5, Decimal("5")),
+        trader=Trader(),
+        journal=journal,
+        state_store=store,
+    )
+
+    assert state.sidecar_enabled_for_position is True
+    assert state.sidecar_legs == []
+    assert state.sidecar_open_qty == 0
+    assert state.sidecar_total_qty == 0
+    assert state.sidecar_dirty is False
+    assert state.sidecar_halt_reason is None
+    assert [event[0] for event in journal.events] == []
+    assert store.saved
 
 
 @pytest.mark.asyncio

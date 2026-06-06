@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 from dataclasses import dataclass, replace
 from decimal import Decimal, ROUND_DOWN
 
@@ -13,6 +14,8 @@ from src.position_management.sidecar.model import (
 )
 from src.risk.simple_position_sizer import PositionSize
 from src.strategies.boll_cvd_reclaim_strategy import TradeIntent
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -98,10 +101,33 @@ def build_combined_entry_intent(
     sidecar_margin_pct: float,
     sidecar_tp_pct: float,
     position_id: str | None,
+    sidecar_skip_first_layer: bool = True,
     contract_multiplier: Decimal | str | float = Decimal("0.1"),
     contract_precision: Decimal | str | float = Decimal("0.01"),
 ) -> CombinedEntryIntentPlan:
     if intent.intent_type not in {"OPEN_LONG", "OPEN_SHORT", "ADD_LONG", "ADD_SHORT"}:
+        return CombinedEntryIntentPlan(execution_intent=intent, sidecar_plan=None)
+    if (
+        sidecar_enabled
+        and sidecar_skip_first_layer
+        and int(intent.layer_index) <= 1
+        and intent.intent_type in {"OPEN_LONG", "OPEN_SHORT"}
+    ):
+        layer_multiplier = float(intent.size.layer_multiplier or 1.0)
+        core_margin_pct = (
+            float(intent.size.margin_usdt) / float(account_equity_usdt) / layer_multiplier
+            if account_equity_usdt > 0 and layer_multiplier > 0
+            else 0.0
+        )
+        logger.info(
+            "SIDECAR_FIRST_LAYER_SKIPPED | side=%s layer_index=%s intent_type=%s sidecar_skip_first_layer=%s core_margin_pct=%.8f sidecar_margin_pct=%.8f reason=skip_first_layer_enabled",
+            intent.side,
+            intent.layer_index,
+            intent.intent_type,
+            sidecar_skip_first_layer,
+            core_margin_pct,
+            sidecar_margin_pct,
+        )
         return CombinedEntryIntentPlan(execution_intent=intent, sidecar_plan=None)
     sidecar_plan = build_sidecar_execution_plan(
         enabled=sidecar_enabled,
