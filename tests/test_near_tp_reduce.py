@@ -19,8 +19,8 @@ if importlib.util.find_spec("dotenv") is None:
 from scripts.run_boll_cvd_live import (  # noqa: E402
     account_position_sync_worker,
     execution_worker,
-    restore_strategy_from_saved_state,
 )
+from src.live.startup_recovery.basic_restore import restore_strategy_from_saved_state  # noqa: E402
 from src.execution.trader import LiveTradeResult, PositionSnapshot, Trader  # noqa: E402
 from src.indicators.cvd_tracker import CvdSnapshot  # noqa: E402
 from src.live.runtime_types import AccountSnapshot, ExecutionState, TradeCommand  # noqa: E402

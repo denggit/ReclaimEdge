@@ -22,7 +22,6 @@ if importlib.util.find_spec("dotenv") is None:
 from scripts.run_boll_cvd_live import (  # noqa: E402
     account_position_sync_worker,
     execution_worker,
-    restore_strategy_from_position,
     strategy_tick_worker,
     trusted_startup_saved_state,
 )
@@ -38,6 +37,10 @@ from src.live.runtime_types import AccountSnapshot, ExecutionState, TradeCommand
 from src.live.time_utils import next_weekly_summary_time  # noqa: E402
 from src.indicators.cvd_tracker import CvdSnapshot  # noqa: E402
 from src.monitors.boll_band_breakout_monitor import BollSnapshot, MarketTickEvent, TradeTick  # noqa: E402
+from src.live.startup_recovery.basic_restore import (  # noqa: E402
+    restore_strategy_from_position,
+    restore_strategy_from_saved_state,
+)
 from src.position_management.runner_live_helpers import (  # noqa: E402
     apply_three_stage_startup_safety_gate,
     three_stage_post_tp1_current_price,
@@ -2072,7 +2075,7 @@ class LiveRuntimeWorkerTest(unittest.IsolatedAsyncioTestCase):
 
     def test_startup_recovery_sets_force_tp_reconcile_flag(self) -> None:
         """After startup recovery with has_position, startup_force_tp_reconcile must be True."""
-        from scripts.run_boll_cvd_live import restore_strategy_from_saved_state
+        from src.live.startup_recovery.basic_restore import restore_strategy_from_saved_state
         import types
 
         sizer = SimplePositionSizer(SimplePositionSizerConfig())
@@ -2119,7 +2122,7 @@ class LiveRuntimeWorkerTest(unittest.IsolatedAsyncioTestCase):
 
     def test_saved_state_restore_preserves_startup_force_tp_reconcile(self) -> None:
         """Restore from saved state reads startup_force_tp_reconcile."""
-        from scripts.run_boll_cvd_live import restore_strategy_from_saved_state
+        from src.live.startup_recovery.basic_restore import restore_strategy_from_saved_state
         import types
 
         sizer = SimplePositionSizer(SimplePositionSizerConfig())
