@@ -39,7 +39,7 @@ from src.monitors.boll_band_breakout_monitor import (  # noqa: E402
     BollBandBreakoutMonitorConfig,
     MarketTickEvent,
 )
-from src.position_management import cost_runtime as position_cost_runtime  # noqa: E402
+
 from src.position_management import tp_progress as tp_progress_helpers  # noqa: E402
 from src.position_management.sidecar import runtime_state as sidecar_runtime_state  # noqa: E402
 from src.position_management.sidecar.model import (  # noqa: E402
@@ -176,7 +176,6 @@ async def account_position_sync_worker(
             clear_state = False
             flat_previous_halt_reason: str | None = None
             if pending_flat_payload is None and core_position.has_position:
-                trader.position_contracts = core_position.contracts
                 tp_progress_result = account_sync_tp_progress_phase.run_account_sync_tp_progress_phase(
                     account_snapshot=account_snapshot,
                     execution_state=execution_state,

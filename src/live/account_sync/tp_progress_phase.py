@@ -50,6 +50,7 @@ def run_account_sync_tp_progress_phase(
     # even when pending orders exist (e.g. TP2 / Sidecar TP still
     # pending after TP1 fill). The mark_* helpers are internally
     # idempotent via consumed/active flags.
+    trader.position_contracts = core_position.contracts
     three_stage_post_tp1_sl_payload: dict[str, Any] | None = None
     three_stage_post_tp1_cancel_payload: dict[str, Any] | None = None
     three_stage_event_payload: dict[str, Any] | None = None
