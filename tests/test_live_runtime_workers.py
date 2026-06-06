@@ -22,8 +22,8 @@ if importlib.util.find_spec("dotenv") is None:
 from scripts.run_boll_cvd_live import (  # noqa: E402
     account_position_sync_worker,
     execution_worker,
-    strategy_tick_worker,
 )
+from src.live.workers.strategy_tick_worker import strategy_tick_worker  # noqa: E402
 from src.live.startup_recovery.trust_validation import (  # noqa: E402
     trusted_startup_saved_state,
 )
@@ -1882,7 +1882,7 @@ class LiveRuntimeWorkerTest(unittest.IsolatedAsyncioTestCase):
                 strategy_lag_warn_seconds=1_000_000_000_000,
             )
         )
-        with self.assertLogs("scripts.run_boll_cvd_live", level="WARNING") as logs:
+        with self.assertLogs("src.live.workers.strategy_tick_worker", level="WARNING") as logs:
             await queue.put(tick(1_000))
             await asyncio.wait_for(processed.wait(), timeout=0.2)
 
