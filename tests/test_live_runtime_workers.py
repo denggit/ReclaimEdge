@@ -1260,7 +1260,7 @@ class LiveRuntimeWorkerTest(unittest.IsolatedAsyncioTestCase):
                     "CASH_DRIFT_MIN_DELTA_USDT": "0.5",
                 },
         ):
-            with self.assertLogs("scripts.run_boll_cvd_live", level="WARNING") as logs:
+            with self.assertLogs("src.live.account_sync.flat_settlement_phase", level="WARNING") as logs:
                 task = asyncio.create_task(
                     account_position_sync_worker(
                         state_lock=asyncio.Lock(),

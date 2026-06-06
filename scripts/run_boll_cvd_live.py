@@ -30,6 +30,7 @@ from src.live.account_sync import flat_balance as live_flat_balance  # noqa: E40
 from src.live.account_sync import pre_core_position as account_sync_pre_core_position  # noqa: E402
 from src.live.account_sync import protective_orders_phase as account_sync_protective_orders_phase  # noqa: E402
 from src.live.account_sync import tp_progress_phase as account_sync_tp_progress_phase  # noqa: E402
+from src.live.account_sync import flat_settlement_phase as account_sync_flat_settlement_phase  # noqa: E402
 from src.position_management import core_position_view as core_position_view_helpers  # noqa: E402
 from src.position_management import runner_live_helpers  # noqa: E402
 from src.monitors.boll_band_breakout_monitor import (  # noqa: E402
@@ -232,106 +233,35 @@ async def account_position_sync_worker(
                     fee_buffer_pct=strategy.config.breakeven_fee_buffer_pct,
                 )
 
-            if pending_flat_payload is not None:
-                try:
-                    settled = await live_flat_balance.fetch_settled_flat_balance(
-                        trader,
-                        attempts=flat_balance_confirm_attempts,
-                        interval_seconds=flat_balance_confirm_interval_seconds,
-                        stable_delta_usdt=flat_balance_stable_delta_usdt,
-                        cash_equity_max_diff_usdt=flat_balance_cash_equity_max_diff_usdt,
-                    )
-                except Exception as exc:
-                    logger.exception(
-                        "FLAT_BALANCE_SETTLE_FAILED | falling back to latest account equity before FLAT journal")
-                    settled = live_runtime_types.SettledFlatBalance(
-                        cash=equity,
-                        equity=equity,
-                        attempts=0,
-                        stable=False,
-                        reason=f"fallback_to_equity_after_error:{type(exc).__name__}:{exc}",
-                    )
-                logger.warning(
-                    "FLAT_BALANCE_SETTLED | cash=%.4f equity=%.4f attempts=%s stable=%s reason=%s",
-                    settled.cash,
-                    settled.equity,
-                    settled.attempts,
-                    settled.stable,
-                    settled.reason,
-                )
-                record_flat_payload = {
-                    **pending_flat_payload,
-                    "cash_after": settled.cash,
-                    "equity_after": settled.equity,
-                }
-                cash = settled.cash
-                equity = settled.equity
-                protective_sl_order_id = pending_flat_payload.get("near_tp_protective_sl_order_id")
-                if protective_sl_order_id:
-                    try:
-                        await trader.cancel_near_tp_protective_stop(protective_sl_order_id)
-                    except Exception:
-                        logger.warning("NEAR_TP_PROTECTIVE_SL_CANCEL_ON_FLAT | algoId=%s failed_unhandled",
-                                       protective_sl_order_id)
-                middle_runner_sl_order_id = pending_flat_payload.get("middle_runner_protective_sl_order_id")
-                if middle_runner_sl_order_id:
-                    try:
-                        await trader.cancel_middle_runner_protective_stop(middle_runner_sl_order_id)
-                    except Exception:
-                        logger.warning("MIDDLE_RUNNER_CANCELLED | reason=flat_sl_cancel_failed algoId=%s",
-                                       middle_runner_sl_order_id)
-                three_stage_post_tp1_sl_order_id = pending_flat_payload.get(
-                    "three_stage_post_tp1_protective_sl_order_id")
-                if three_stage_post_tp1_sl_order_id:
-                    try:
-                        await trader.cancel_three_stage_post_tp1_protective_stop(three_stage_post_tp1_sl_order_id)
-                    except Exception:
-                        logger.warning(
-                            "THREE_STAGE_TP1_PROTECTIVE_SL_CANCELLED | reason=flat_sl_cancel_failed algoId=%s",
-                            three_stage_post_tp1_sl_order_id)
-                trend_runner_sl_order_id = pending_flat_payload.get("trend_runner_sl_order_id")
-                if trend_runner_sl_order_id:
-                    try:
-                        await trader.cancel_trend_runner_protective_stop(trend_runner_sl_order_id)
-                    except Exception:
-                        logger.warning("TREND_RUNNER_CANCELLED | reason=flat_sl_cancel_failed algoId=%s",
-                                       trend_runner_sl_order_id)
-                async with state_lock:
-                    flat_previous_halt_reason = execution_state.halt_reason if execution_state.trading_halted else None
-                    account_snapshot.position = position
-                    account_snapshot.cash = settled.cash
-                    account_snapshot.equity = settled.equity
-                    account_snapshot.updated_monotonic = time.monotonic()
-                    account_snapshot.updated_ts_ms = live_time_utils.utc_ms()
-                    account_snapshot.version += 1
-                    trader.account_equity_usdt = settled.equity
-                    sizer.update_account_equity(settled.equity)
-                    strategy.state = StrategyPositionState()
-                    trader.mark_flat()
-                    flat_clearable_halt_reasons = {
-                        None,
-                        "near_tp_exit_all_waiting_flat",
-                        "near_tp_protected_sync_failed",
-                        "trend_runner_market_exit_waiting_flat",
-                        "three_stage_post_tp1_sl_failed_market_exit_waiting_flat",
-                        "sidecar_tp_place_failed_market_exit_waiting_flat",
-                        "rolling_loss_soft_halt",
-                        "rolling_loss_hard_halt",
-                    }
-                    preserve_critical_halt = (
-                            rolling_loss_guard is not None
-                            and flat_previous_halt_reason not in flat_clearable_halt_reasons
-                    )
-                    execution_state.trading_halted = preserve_critical_halt
-                    execution_state.halt_reason = flat_previous_halt_reason if preserve_critical_halt else None
-                    execution_state.halt_until_ts_ms = None
-                    execution_state.current_position_id = None
-                    execution_state.cash_before_position = None
-                    clear_state = True
-                    last_logged_cash = settled.cash
-                    last_logged_equity = settled.equity
-                    last_logged_position_key = current_position_key
-                    logger.warning("NEAR_TP_STATE_CLEARED_ON_FLAT | protective_sl_order_id=%s", protective_sl_order_id)
+            flat_settlement_result = await account_sync_flat_settlement_phase.prepare_account_sync_flat_settlement_phase(
+                state_lock=state_lock,
+                account_snapshot=account_snapshot,
+                execution_state=execution_state,
+                trader=trader,
+                sizer=sizer,
+                strategy=strategy,
+                rolling_loss_guard=rolling_loss_guard,
+                pending_flat_payload=pending_flat_payload,
+                position=position,
+                current_position_key=current_position_key,
+                cash=cash,
+                equity=equity,
+                flat_balance_confirm_attempts=flat_balance_confirm_attempts,
+                flat_balance_confirm_interval_seconds=flat_balance_confirm_interval_seconds,
+                flat_balance_stable_delta_usdt=flat_balance_stable_delta_usdt,
+                flat_balance_cash_equity_max_diff_usdt=flat_balance_cash_equity_max_diff_usdt,
+                last_logged_cash=last_logged_cash,
+                last_logged_equity=last_logged_equity,
+                last_logged_position_key=last_logged_position_key,
+            )
+            cash = flat_settlement_result.cash
+            equity = flat_settlement_result.equity
+            record_flat_payload = flat_settlement_result.record_flat_payload
+            clear_state = flat_settlement_result.clear_state
+            flat_previous_halt_reason = flat_settlement_result.flat_previous_halt_reason
+            last_logged_cash = flat_settlement_result.last_logged_cash
+            last_logged_equity = flat_settlement_result.last_logged_equity
+            last_logged_position_key = flat_settlement_result.last_logged_position_key
 
             if cash_transfer_payload is not None:
                 journal.record_cash_transfer(**cash_transfer_payload)
@@ -363,74 +293,18 @@ async def account_position_sync_worker(
                 middle_runner_activation_payload=middle_runner_activation_payload,
             )
             save_state_payload = protective_result.save_state_payload
-            if record_flat_payload is not None:
-                record_flat_payload.pop("near_tp_protective_sl_order_id", None)
-                record_flat_payload.pop("middle_runner_protective_sl_order_id", None)
-                record_flat_payload.pop("three_stage_post_tp1_protective_sl_order_id", None)
-                record_flat_payload.pop("trend_runner_sl_order_id", None)
-                journal.record_flat(**record_flat_payload)
-                if rolling_loss_guard is not None and rolling_loss_guard.state is not None and rolling_loss_guard.state.enabled:
-                    guard_now_ms = live_time_utils.utc_ms()
-                    flat_equity = record_flat_payload.get("equity_after") or record_flat_payload.get("cash_after")
-                    flat_event_id = (
-                            record_flat_payload.get("position_id")
-                            or (pending_flat_payload or {}).get("position_id")
-                            or execution_state.current_position_id
-                    )
-                    decision = rolling_loss_guard.evaluate_after_flat(
-                        now_ms=guard_now_ms,
-                        flat_equity=float(flat_equity) if flat_equity is not None else None,
-                        flat_event_id=str(flat_event_id) if flat_event_id else None,
-                        has_position=False,
-                    )
-                    if decision.action is not None:
-                        halt_reason = rolling_loss_live_helpers.rolling_loss_halt_reason(decision.action)
-                        critical_halt_preserved = False
-                        if halt_reason is not None:
-                            can_apply_rolling_halt = flat_previous_halt_reason in {
-                                None,
-                                "near_tp_exit_all_waiting_flat",
-                                "near_tp_protected_sync_failed",
-                                "trend_runner_market_exit_waiting_flat",
-                                "sidecar_tp_place_failed_market_exit_waiting_flat",
-                                "rolling_loss_soft_halt",
-                                "rolling_loss_hard_halt",
-                            }
-                            critical_halt_preserved = halt_reason is not None and not can_apply_rolling_halt
-                            if critical_halt_preserved:
-                                logger.warning(
-                                    "ROLLING_LOSS_GUARD_TRIGGERED_BUT_CRITICAL_HALT_PRESERVED | action=%s existing_halt_reason=%s loss_pct=%.6f halt_not_applied=true",
-                                    decision.action,
-                                    flat_previous_halt_reason,
-                                    decision.loss_pct,
-                                )
-                            else:
-                                async with state_lock:
-                                    if (
-                                            not execution_state.trading_halted
-                                            or execution_state.halt_reason in ROLLING_LOSS_HALT_REASONS
-                                            or execution_state.halt_reason is None
-                                    ):
-                                        execution_state.trading_halted = True
-                                        execution_state.halt_reason = halt_reason
-                                        execution_state.halt_until_ts_ms = decision.halt_until_ts_ms
-                        payload = rolling_loss_live_helpers.rolling_loss_guard_payload(decision.action, decision)
-                        if critical_halt_preserved:
-                            payload.update(
-                                {
-                                    "critical_halt_preserved": True,
-                                    "existing_halt_reason": flat_previous_halt_reason,
-                                    "rolling_loss_halt_not_applied": True,
-                                }
-                            )
-                        await rolling_loss_live_helpers.record_and_notify_rolling_loss_guard(
-                            journal=journal,
-                            email_sender=email_sender,
-                            payload=payload,
-                            email_enabled=rolling_loss_guard.config.email_enabled and not critical_halt_preserved,
-                        )
-            if clear_state:
-                state_store.clear()
+            await account_sync_flat_settlement_phase.finalize_account_sync_flat_settlement_phase(
+                state_lock=state_lock,
+                execution_state=execution_state,
+                journal=journal,
+                email_sender=email_sender,
+                state_store=state_store,
+                rolling_loss_guard=rolling_loss_guard,
+                record_flat_payload=record_flat_payload,
+                pending_flat_payload=pending_flat_payload,
+                flat_previous_halt_reason=flat_previous_halt_reason,
+                clear_state=clear_state,
+            )
             if save_state_payload is not None:
                 position_id, strategy_state, cash_before_position = save_state_payload
                 state_store.save(LiveStateStore.from_strategy_state(position_id=position_id, symbol=trader.symbol,
