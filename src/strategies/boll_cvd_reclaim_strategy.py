@@ -11,6 +11,7 @@ from src.position_management.sidecar.model import trim_sidecar_legs_for_state
 from src.risk.simple_position_sizer import PositionSize, SimplePositionSizer
 from src.strategies import add_layer_gates
 from src.strategies import middle_runner as middle_runner_helpers
+from src.strategies import three_stage_runner as three_stage_helpers
 from src.strategies import tp_plan_selector
 from src.utils.log import get_logger
 
@@ -2023,21 +2024,45 @@ class BollCvdReclaimStrategy:
         values = middle_runner_helpers.reset_middle_runner_state_values()
         self._apply_middle_runner_state_values(values)
 
+    # ── Three-Stage state value appliers ──────────────────────────────────
+
+    def _apply_three_stage_state_values(self, values: three_stage_helpers.ThreeStageStateValues) -> None:
+        """Write back all Three-Stage state fields from a value object.
+
+        Does NOT write Trend Runner fields.
+        """
+        self.state.three_stage_runner_enabled_for_position = values.three_stage_runner_enabled_for_position
+        self.state.three_stage_tp1_price = values.three_stage_tp1_price
+        self.state.three_stage_tp2_price = values.three_stage_tp2_price
+        self.state.three_stage_runner_initial_tp_price = values.three_stage_runner_initial_tp_price
+        self.state.three_stage_tp1_ratio = values.three_stage_tp1_ratio
+        self.state.three_stage_tp2_ratio = values.three_stage_tp2_ratio
+        self.state.three_stage_runner_ratio = values.three_stage_runner_ratio
+        self.state.three_stage_tp1_consumed = values.three_stage_tp1_consumed
+        self.state.three_stage_tp2_consumed = values.three_stage_tp2_consumed
+        self.state.three_stage_post_tp1_protective_sl_price = values.three_stage_post_tp1_protective_sl_price
+        self.state.three_stage_post_tp1_protective_sl_order_id = values.three_stage_post_tp1_protective_sl_order_id
+        self.state.three_stage_post_tp1_sl_extension_triggered = values.three_stage_post_tp1_sl_extension_triggered
+        self.state.three_stage_post_tp1_protected = values.three_stage_post_tp1_protected
+        self.state.three_stage_post_tp1_sl_time_tighten_candle_count = values.three_stage_post_tp1_sl_time_tighten_candle_count
+        self.state.three_stage_post_tp1_sl_time_tighten_last_candle_ts_ms = values.three_stage_post_tp1_sl_time_tighten_last_candle_ts_ms
+        self.state.three_stage_post_tp1_sl_time_tighten_log_candle_ts_ms = values.three_stage_post_tp1_sl_time_tighten_log_candle_ts_ms
+
+    def _apply_three_stage_dynamic_target_values(self, values: three_stage_helpers.ThreeStageDynamicTargetValues) -> None:
+        """Write back dynamic target update fields from a value object.
+
+        Does NOT write consumed flags, protective SL, or extension flags.
+        """
+        self.state.three_stage_runner_enabled_for_position = values.three_stage_runner_enabled_for_position
+        self.state.three_stage_tp1_price = values.three_stage_tp1_price
+        self.state.three_stage_tp2_price = values.three_stage_tp2_price
+        self.state.three_stage_tp1_ratio = values.three_stage_tp1_ratio
+        self.state.three_stage_tp2_ratio = values.three_stage_tp2_ratio
+        self.state.three_stage_runner_ratio = values.three_stage_runner_ratio
+
     def _reset_three_stage_runner_state(self) -> None:
-        self.state.three_stage_runner_enabled_for_position = False
-        self.state.three_stage_tp1_price = None
-        self.state.three_stage_tp2_price = None
-        self.state.three_stage_runner_initial_tp_price = None
-        self.state.three_stage_tp1_ratio = 0.0
-        self.state.three_stage_tp2_ratio = 0.0
-        self.state.three_stage_runner_ratio = 0.0
-        self.state.three_stage_tp1_consumed = False
-        self.state.three_stage_tp2_consumed = False
-        self.state.three_stage_post_tp1_protective_sl_price = None
-        self.state.three_stage_post_tp1_protective_sl_order_id = None
-        self.state.three_stage_post_tp1_sl_extension_triggered = False
-        self.state.three_stage_post_tp1_protected = False
-        self._reset_three_stage_post_tp1_sl_time_tighten_state()
+        values = three_stage_helpers.reset_three_stage_state_values()
+        self._apply_three_stage_state_values(values)
         self.state.trend_runner_active = False
         self.state.trend_runner_trend_start_ts_ms = 0
         self.state.trend_runner_adjust_count = 0
@@ -2063,9 +2088,10 @@ class BollCvdReclaimStrategy:
         self.state.middle_runner_sl_time_tighten_log_candle_ts_ms = 0
 
     def _reset_three_stage_post_tp1_sl_time_tighten_state(self) -> None:
-        self.state.three_stage_post_tp1_sl_time_tighten_candle_count = 0
-        self.state.three_stage_post_tp1_sl_time_tighten_last_candle_ts_ms = 0
-        self.state.three_stage_post_tp1_sl_time_tighten_log_candle_ts_ms = 0
+        count, last_ts, log_ts = three_stage_helpers.reset_three_stage_post_tp1_sl_time_tighten_values()
+        self.state.three_stage_post_tp1_sl_time_tighten_candle_count = count
+        self.state.three_stage_post_tp1_sl_time_tighten_last_candle_ts_ms = last_ts
+        self.state.three_stage_post_tp1_sl_time_tighten_log_candle_ts_ms = log_ts
 
     def _set_middle_runner_planned(self, first_tp_price: float | None, final_tp_price: float) -> None:
         values = middle_runner_helpers.planned_middle_runner_state_values(
@@ -2079,20 +2105,17 @@ class BollCvdReclaimStrategy:
         tp1_ratio, tp2_ratio, runner_ratio = self._normalized_three_stage_ratios()
         tp_mid, _tp_mid_src = self._select_tp_middle_with_profit_fallback(side, boll)
         tp_outer, _tp_outer_src = self._select_tp_outer(side, boll)
-        self.state.three_stage_runner_enabled_for_position = True
-        self.state.three_stage_tp1_price = tp_mid
-        self.state.three_stage_tp2_price = tp_outer
-        self.state.three_stage_runner_initial_tp_price = None
-        self.state.three_stage_tp1_ratio = tp1_ratio
-        self.state.three_stage_tp2_ratio = tp2_ratio
-        self.state.three_stage_runner_ratio = runner_ratio
-        self.state.three_stage_tp1_consumed = False
-        self.state.three_stage_tp2_consumed = False
-        self.state.three_stage_post_tp1_protective_sl_price = None
-        self.state.three_stage_post_tp1_protective_sl_order_id = None
-        self.state.three_stage_post_tp1_sl_extension_triggered = False
-        self.state.three_stage_post_tp1_protected = False
-        self._reset_three_stage_post_tp1_sl_time_tighten_state()
+        ratios = three_stage_helpers.ThreeStageRatios(
+            tp1_ratio=tp1_ratio,
+            tp2_ratio=tp2_ratio,
+            runner_ratio=runner_ratio,
+        )
+        values = three_stage_helpers.planned_three_stage_state_values(
+            tp1_price=tp_mid,
+            tp2_price=tp_outer,
+            ratios=ratios,
+        )
+        self._apply_three_stage_state_values(values)
         self.state.trend_runner_active = False
         self.state.trend_runner_trend_start_ts_ms = 0
         self.state.trend_runner_adjust_count = 0
@@ -2108,21 +2131,25 @@ class BollCvdReclaimStrategy:
         tp1_ratio, tp2_ratio, runner_ratio = self._normalized_three_stage_ratios()
         tp_mid, _tp_mid_src = self._select_tp_middle_with_profit_fallback(side, boll)
         tp_outer, _tp_outer_src = self._select_tp_outer(side, boll)
-        self.state.three_stage_runner_enabled_for_position = True
-        self.state.three_stage_tp1_price = tp_mid
-        self.state.three_stage_tp2_price = tp_outer
-        self.state.three_stage_tp1_ratio = tp1_ratio
-        self.state.three_stage_tp2_ratio = tp2_ratio
-        self.state.three_stage_runner_ratio = runner_ratio
+        ratios = three_stage_helpers.ThreeStageRatios(
+            tp1_ratio=tp1_ratio,
+            tp2_ratio=tp2_ratio,
+            runner_ratio=runner_ratio,
+        )
+        values = three_stage_helpers.update_three_stage_dynamic_target_values(
+            tp1_price=tp_mid,
+            tp2_price=tp_outer,
+            ratios=ratios,
+        )
+        self._apply_three_stage_dynamic_target_values(values)
 
     def _normalized_three_stage_ratios(self) -> tuple[float, float, float]:
-        tp1 = max(float(self.config.three_stage_tp1_ratio), 0.0)
-        tp2 = max(float(self.config.three_stage_tp2_ratio), 0.0)
-        runner = max(float(self.config.three_stage_runner_ratio), 0.0)
-        total = tp1 + tp2 + runner
-        if total <= 0:
-            return 0.60, 0.20, 0.20
-        return tp1 / total, tp2 / total, runner / total
+        ratios = three_stage_helpers.normalize_three_stage_ratios(
+            tp1_ratio=self.config.three_stage_tp1_ratio,
+            tp2_ratio=self.config.three_stage_tp2_ratio,
+            runner_ratio=self.config.three_stage_runner_ratio,
+        )
+        return ratios.tp1_ratio, ratios.tp2_ratio, ratios.runner_ratio
 
     def _calculate_runner_initial_tp(self, side: PositionSide, boll: BollSnapshot) -> float:
         extra = max(float(self.config.runner_tp_initial_outer_extra_pct), 0.0)
@@ -2381,99 +2408,55 @@ class BollCvdReclaimStrategy:
 
     def _calculate_three_stage_post_tp1_protective_sl(self, side: PositionSide, current_price: float,
                                                       boll: BollSnapshot) -> float | None:
-        avg_entry = self.state.avg_entry_price
+        avg_entry = float(self.state.avg_entry_price or 0.0)
         tp1_price = self.state.three_stage_tp1_price
         tp1_ratio = float(self.state.three_stage_tp1_ratio or 0.0)
         base_breakeven = float(getattr(self.state, "net_remaining_breakeven_price", 0.0) or 0.0)
-        if current_price <= 0:
-            return None
-        if base_breakeven <= 0 and (avg_entry <= 0 or tp1_price is None or tp1_ratio <= 0 or tp1_ratio >= 1):
-            self._log_three_stage_post_tp1_sl_diagnostic_once(
-                side,
-                "missing_cost_basis",
-                current_price,
-                base_breakeven,
-                0.0,
-                0.0,
-                None,
-                boll,
-            )
-            return None
         fee = self.config.breakeven_fee_buffer_pct
         ratio = (
             self._runner_sl_time_tighten_ratio(self.state.three_stage_post_tp1_sl_time_tighten_candle_count)
             if self.config.runner_protective_sl_time_tighten_enabled
             else 0.50
         )
-        if side == "LONG":
-            if base_breakeven > 0:
-                post_tp1_breakeven_buffered = base_breakeven
-            else:
-                post_tp1_breakeven = avg_entry - tp1_ratio * (float(tp1_price) - avg_entry) / (1 - tp1_ratio)
-                post_tp1_breakeven_buffered = post_tp1_breakeven * (1 + fee)
-            candidate_cost = _interpolate_to_middle(post_tp1_breakeven_buffered, boll.middle, ratio)
-            candidate_structure = _interpolate_to_middle(boll.lower, boll.middle, ratio)
-            protective_sl = max(candidate_cost, candidate_structure)
-            protective_sl = min(protective_sl, boll.middle)
-            if protective_sl >= current_price:
-                self._log_three_stage_post_tp1_sl_diagnostic_once(
-                    side,
-                    "long_sl_not_below_current",
-                    current_price,
-                    base_breakeven,
-                    candidate_cost,
-                    candidate_structure,
-                    protective_sl,
-                    boll,
-                )
-                return None
-            self._log_three_stage_post_tp1_sl_time_tightened_once(
-                side,
-                ratio,
-                candidate_cost,
-                candidate_structure,
-                protective_sl,
-                boll,
+        decision = three_stage_helpers.calculate_three_stage_post_tp1_protective_sl(
+            side=side,
+            current_price=current_price,
+            avg_entry_price=avg_entry,
+            net_remaining_breakeven_price=base_breakeven,
+            breakeven_fee_buffer_pct=fee,
+            tp1_price=tp1_price,
+            tp1_ratio=tp1_ratio,
+            boll_middle=boll.middle,
+            boll_upper=boll.upper,
+            boll_lower=boll.lower,
+            sl_tighten_ratio=ratio,
+        )
+        if decision.reason in ("missing_tp1_price", "missing_cost_basis", "invalid_tp1_ratio"):
+            return None
+        if decision.reason != "calculated":
+            # Reconstruct the raw protective SL that was found invalid for the log signature.
+            _raw_sl = (
+                min(max(decision.candidate_cost, decision.candidate_structure), boll.middle)
+                if side == "LONG"
+                else max(min(decision.candidate_cost, decision.candidate_structure), boll.middle)
             )
             self._log_three_stage_post_tp1_sl_diagnostic_once(
                 side,
-                "calculated",
+                decision.reason,
                 current_price,
                 base_breakeven,
-                candidate_cost,
-                candidate_structure,
-                protective_sl,
-                boll,
-            )
-            return protective_sl
-
-        if base_breakeven > 0:
-            post_tp1_breakeven_buffered = base_breakeven
-        else:
-            post_tp1_breakeven = avg_entry + tp1_ratio * (avg_entry - float(tp1_price)) / (1 - tp1_ratio)
-            post_tp1_breakeven_buffered = post_tp1_breakeven * (1 - fee)
-        candidate_cost = _interpolate_to_middle(post_tp1_breakeven_buffered, boll.middle, ratio)
-        candidate_structure = _interpolate_to_middle(boll.upper, boll.middle, ratio)
-        protective_sl = min(candidate_cost, candidate_structure)
-        protective_sl = max(protective_sl, boll.middle)
-        if protective_sl <= current_price:
-            self._log_three_stage_post_tp1_sl_diagnostic_once(
-                side,
-                "short_sl_not_above_current",
-                current_price,
-                base_breakeven,
-                candidate_cost,
-                candidate_structure,
-                protective_sl,
+                decision.candidate_cost,
+                decision.candidate_structure,
+                _raw_sl,
                 boll,
             )
             return None
         self._log_three_stage_post_tp1_sl_time_tightened_once(
             side,
             ratio,
-            candidate_cost,
-            candidate_structure,
-            protective_sl,
+            decision.candidate_cost,
+            decision.candidate_structure,
+            decision.protective_sl,
             boll,
         )
         self._log_three_stage_post_tp1_sl_diagnostic_once(
@@ -2481,12 +2464,12 @@ class BollCvdReclaimStrategy:
             "calculated",
             current_price,
             base_breakeven,
-            candidate_cost,
-            candidate_structure,
-            protective_sl,
+            decision.candidate_cost,
+            decision.candidate_structure,
+            decision.protective_sl,
             boll,
         )
-        return protective_sl
+        return decision.protective_sl
 
     def _log_three_stage_post_tp1_sl_diagnostic_once(
             self,
@@ -2565,17 +2548,11 @@ class BollCvdReclaimStrategy:
         )
 
     def _tighten_three_stage_post_tp1_sl(self, side: PositionSide, old_sl: float, new_sl: float) -> float:
-        if side == "LONG":
-            return max(old_sl, new_sl)
-        return min(old_sl, new_sl)
+        return three_stage_helpers.tighten_three_stage_post_tp1_sl(side=side, old_sl=old_sl, new_sl=new_sl)
 
     def _tighten_optional_three_stage_post_tp1_sl(self, side: PositionSide, old_sl: float | None,
                                                   new_sl: float | None) -> float | None:
-        if new_sl is None:
-            return old_sl
-        if old_sl is None:
-            return new_sl
-        return self._tighten_three_stage_post_tp1_sl(side, old_sl, new_sl)
+        return three_stage_helpers.tighten_optional_three_stage_post_tp1_sl(side=side, old_sl=old_sl, new_sl=new_sl)
 
     def _apply_three_stage_post_tp1_extension_trigger(
             self,
@@ -2584,30 +2561,29 @@ class BollCvdReclaimStrategy:
             boll: BollSnapshot,
             protective_sl: float | None,
     ) -> float | None:
-        ratio = min(max(self.config.three_stage_post_tp1_sl_extension_trigger_ratio, 0.0), 1.0)
-        if side == "LONG":
-            trigger_price = boll.middle + (boll.upper - boll.middle) * ratio
-            if current_price < trigger_price:
-                return protective_sl
-            new_sl = boll.middle if protective_sl is None else max(protective_sl, boll.middle)
-        else:
-            trigger_price = boll.middle - (boll.middle - boll.lower) * ratio
-            if current_price > trigger_price:
-                return protective_sl
-            new_sl = boll.middle if protective_sl is None else min(protective_sl, boll.middle)
-        if not self.state.three_stage_post_tp1_sl_extension_triggered:
-            logger.warning(
-                "THREE_STAGE_POST_TP1_EXTENSION_TRIGGERED | side=%s current_price=%.4f extension_trigger_price=%.4f protective_sl_price=%.4f boll_middle=%.4f boll_upper=%.4f boll_lower=%.4f",
-                side,
-                current_price,
-                trigger_price,
-                new_sl,
-                boll.middle,
-                boll.upper,
-                boll.lower,
-            )
-        self.state.three_stage_post_tp1_sl_extension_triggered = True
-        return new_sl
+        decision = three_stage_helpers.apply_three_stage_post_tp1_extension_trigger(
+            side=side,
+            current_price=current_price,
+            protective_sl=protective_sl,
+            boll_middle=boll.middle,
+            boll_upper=boll.upper,
+            boll_lower=boll.lower,
+            extension_trigger_ratio=self.config.three_stage_post_tp1_sl_extension_trigger_ratio,
+        )
+        if decision.extension_triggered:
+            if not self.state.three_stage_post_tp1_sl_extension_triggered:
+                logger.warning(
+                    "THREE_STAGE_POST_TP1_EXTENSION_TRIGGERED | side=%s current_price=%.4f extension_trigger_price=%.4f protective_sl_price=%.4f boll_middle=%.4f boll_upper=%.4f boll_lower=%.4f",
+                    side,
+                    current_price,
+                    decision.trigger_price,
+                    decision.protective_sl,
+                    boll.middle,
+                    boll.upper,
+                    boll.lower,
+                )
+            self.state.three_stage_post_tp1_sl_extension_triggered = True
+        return decision.protective_sl
 
     # ── TP BOLL resolver ──────────────────────────────────────────────
     # Centralised helpers that select the correct price source for every
