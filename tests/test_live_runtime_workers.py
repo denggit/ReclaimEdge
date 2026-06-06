@@ -21,8 +21,8 @@ if importlib.util.find_spec("dotenv") is None:
 
 from scripts.run_boll_cvd_live import (  # noqa: E402
     account_position_sync_worker,
-    execution_worker,
 )
+from src.live.workers.execution_worker import execution_worker  # noqa: E402
 from src.live.workers.strategy_tick_worker import strategy_tick_worker  # noqa: E402
 from src.live.startup_recovery.trust_validation import (  # noqa: E402
     trusted_startup_saved_state,
