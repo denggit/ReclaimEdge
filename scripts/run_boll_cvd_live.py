@@ -30,6 +30,7 @@ from src.live.startup_recovery import basic_restore as startup_basic_restore  # 
 from src.live.startup_recovery import order_recovery as startup_order_recovery  # noqa: E402
 from src.live.startup_recovery import trust_validation as startup_trust_validation  # noqa: E402
 from src.live.account_sync import flat_balance as live_flat_balance  # noqa: E402
+from src.live.account_sync import pre_core_position as account_sync_pre_core_position  # noqa: E402
 from src.position_management import core_position_view as core_position_view_helpers  # noqa: E402
 from src.position_management import runner_live_helpers  # noqa: E402
 from src.monitors.boll_band_breakout_monitor import (  # noqa: E402
@@ -129,392 +130,104 @@ async def account_position_sync_worker(
         try:
             await asyncio.sleep(position_sync_seconds)
             now = time.monotonic()
-            cash = account_snapshot.cash
-            equity = account_snapshot.equity
-            if now - last_account_sync >= account_sync_seconds:
-                equity = await trader.fetch_usdt_equity()
-                cash = await live_flat_balance.fetch_usdt_cash_balance(trader)
-                last_account_sync = now
-
-            position = await trader.fetch_position_snapshot()
-            core_position = position
-            current_position_key = core_position_view_helpers.position_log_key(core_position)
+            pre_core_result = await account_sync_pre_core_position.run_account_sync_pre_core_position_phase(
+                state_lock=state_lock,
+                account_snapshot=account_snapshot,
+                execution_state=execution_state,
+                trader=trader,
+                sizer=sizer,
+                strategy=strategy,
+                journal=journal,
+                state_store=state_store,
+                now=now,
+                last_account_sync=last_account_sync,
+                account_sync_seconds=account_sync_seconds,
+                cash_transfer_detect_enabled=cash_transfer_detect_enabled,
+                cash_transfer_min_delta_usdt=cash_transfer_min_delta_usdt,
+                cash_transfer_settle_seconds=cash_transfer_settle_seconds,
+                cash_transfer_after_flat_cooldown_seconds=cash_transfer_after_flat_cooldown_seconds,
+                cash_drift_min_delta_usdt=cash_drift_min_delta_usdt,
+                cash_event_log_interval_seconds=cash_event_log_interval_seconds,
+                cash_log_min_delta_usdt=cash_log_min_delta_usdt,
+                last_logged_cash=last_logged_cash,
+                last_logged_equity=last_logged_equity,
+                last_cash_event_log=last_cash_event_log,
+                last_flat_detected_monotonic=last_flat_detected_monotonic,
+            )
+            cash = pre_core_result.cash
+            equity = pre_core_result.equity
+            position = pre_core_result.position
+            core_position = pre_core_result.core_position
+            current_position_key = pre_core_result.current_position_key
+            pending_order_count = pre_core_result.pending_order_count
+            force_close_sidecar = pre_core_result.force_close_sidecar
+            pending_flat_payload = pre_core_result.pending_flat_payload
+            cash_transfer_payload = pre_core_result.cash_transfer_payload
+            cash_drift_payload = pre_core_result.cash_drift_payload
+            sidecar_reconciled_this_sync = pre_core_result.sidecar_reconciled_this_sync
+            sidecar_state_changed_this_sync = pre_core_result.sidecar_state_changed_this_sync
+            last_account_sync = pre_core_result.last_account_sync
+            last_logged_cash = pre_core_result.last_logged_cash
+            last_logged_equity = pre_core_result.last_logged_equity
+            last_cash_event_log = pre_core_result.last_cash_event_log
+            last_flat_detected_monotonic = pre_core_result.last_flat_detected_monotonic
             record_flat_payload: dict[str, Any] | None = None
-            pending_flat_payload: dict[str, Any] | None = None
-            cash_transfer_payload: dict[str, Any] | None = None
-            cash_drift_payload: dict[str, Any] | None = None
             save_state_payload: tuple[str | None, StrategyPositionState, float | None] | None = None
             middle_runner_sl_payload: dict[str, Any] | None = None
             middle_runner_activation_payload: dict[str, Any] | None = None
             three_stage_post_tp1_sl_payload: dict[str, Any] | None = None
             three_stage_post_tp1_cancel_payload: dict[str, Any] | None = None
             three_stage_event_payload: dict[str, Any] | None = None
-            force_close_sidecar = False
             clear_state = False
             flat_previous_halt_reason: str | None = None
-            # ── Pre-core sidecar reconciliation ──────────────────────────
-            # Sidecar TP may have already filled on OKX but local state still
-            # counts it as open.  If we compute core_position = OKX_net -
-            # stale_sidecar_open_qty first and discover the fill later via
-            # monitor_sidecar_orders_once, the stale core view can incorrectly
-            # trigger TP progress markers or pollute strategy cost.
-            #
-            # Reconcile sidecar orders NOW so that refresh_sidecar_state_totals
-            # and build_core_position_view inside the main state_lock block
-            # always see up-to-date sidecar_open_qty.
-            _sidecar_pre_core_result = await sidecar_pre_core_reconcile.reconcile_sidecar_orders_before_core_view(
-                trader=trader,
-                strategy=strategy,
-                execution_state=execution_state,
-                journal=journal,
-                state_store=state_store,
-                trader_symbol=trader.symbol,
-                ts_ms=live_time_utils.utc_ms(),
-                state_lock=state_lock,
-            )
-            sidecar_reconciled_this_sync = _sidecar_pre_core_result.queried
-            sidecar_state_changed_this_sync = _sidecar_pre_core_result.changed
-            # ── End pre-core reconciliation ──────────────────────────────
-            async with state_lock:
-                pending_order_count = execution_state.pending_order_count
-                sidecar_runtime_state.refresh_sidecar_state_totals(strategy.state, int(os.getenv("SIDECAR_MAX_LEGS", "10")))
-                if sidecar_runtime_state.open_sidecar_legs_exceed_limit(strategy.state, int(os.getenv("SIDECAR_MAX_LEGS", "10"))):
-                    execution_state.trading_halted = True
-                    execution_state.halt_reason = "sidecar_open_legs_exceed_max"
-                    strategy.state.sidecar_dirty = True
-                    strategy.state.sidecar_halt_reason = "sidecar_open_legs_exceed_max"
-                    if hasattr(journal, "append"):
-                        journal.append(
-                            "SIDECAR_OPEN_LEGS_EXCEED_MAX",
-                            {
-                                "open_leg_count": sum(
-                                    1
-                                    for leg in strategy.state.sidecar_legs
-                                    if leg.get("status") in {SidecarLegStatus.OPEN.value, SidecarLegStatus.OPEN_UNPROTECTED.value}
-                                ),
-                                "sidecar_max_legs": int(os.getenv("SIDECAR_MAX_LEGS", "10")),
-                                "manual_intervention_required": True,
-                            },
-                            position_id=execution_state.current_position_id,
-                        )
-                open_sidecar_qty = sidecar_open_qty(strategy.state.sidecar_legs)
-                core_position = build_core_position_view(position, open_sidecar_qty, sidecar_open_contracts(strategy.state.sidecar_legs))
-                core_position_view_helpers.apply_core_position_view_to_state(strategy.state, core_position)
-                current_position_key = core_position_view_helpers.position_log_key(core_position)
-                if core_position_view_helpers.sidecar_position_mismatch(position, strategy.state):
-                    execution_state.trading_halted = True
-                    execution_state.halt_reason = "core_sidecar_position_mismatch"
-                    strategy.state.sidecar_dirty = True
-                    strategy.state.sidecar_halt_reason = "core_sidecar_position_mismatch"
-                    if hasattr(journal, "append"):
-                        journal.append(
-                            "CORE_SIDECAR_POSITION_MISMATCH",
-                            {
-                                "okx_eth_qty": position.eth_qty,
-                                "core_eth_qty": core_position.eth_qty,
-                                "sidecar_open_qty": open_sidecar_qty,
-                                "manual_intervention_required": True,
-                            },
-                            position_id=execution_state.current_position_id,
-                        )
-                    logger.error(
-                        "CORE_SIDECAR_POSITION_MISMATCH | position_id=%s okx_eth_qty=%.8f core_eth_qty=%.8f sidecar_open_qty=%.8f trading_halted=true manual_intervention_required=true",
-                        execution_state.current_position_id,
-                        position.eth_qty,
-                        core_position.eth_qty,
-                        open_sidecar_qty,
-                    )
-                force_close_sidecar = bool(
-                    pending_order_count == 0
-                    and not core_position.has_position
-                    and open_sidecar_qty > 0
-                    and getattr(strategy.state, "sidecar_enabled_for_position", False)
-                    and getattr(sizer.config, "sidecar_close_when_core_flat", True)
+            if pending_flat_payload is None and core_position.has_position:
+                trader.position_contracts = core_position.contracts
+                # Position reduction detection must run every account sync,
+                # even when pending orders exist (e.g. TP2 / Sidecar TP still
+                # pending after TP1 fill). The mark_* helpers are internally
+                # idempotent via consumed/active flags.
+                middle_runner_activated = tp_progress_helpers.mark_middle_runner_active_if_position_reduced(strategy, core_position)
+                three_stage_event = tp_progress_helpers.mark_three_stage_progress_if_position_reduced(strategy, core_position, live_time_utils.utc_ms())
+                tp_progress_helpers.mark_partial_tp_consumed_if_position_reduced(strategy, core_position)
+                position_cost_runtime.sync_strategy_cost_from_position(
+                    strategy,
+                    core_position,
+                    restore_from_position=startup_basic_restore.restore_strategy_from_position,
                 )
-                flat_transition_detected = (
-                    pending_order_count == 0
-                    and not core_position.has_position
-                    and not force_close_sidecar
-                    and strategy.state.layers > 0
-                )
-                if flat_transition_detected:
-                    pending_flat_payload = {
-                        "position_id": execution_state.current_position_id,
-                        "symbol": trader.symbol,
-                        "side": strategy.state.side,
-                        "cash_before_position": execution_state.cash_before_position,
-                        "reason": "OKX position is flat. TP filled or manual close detected.",
-                        "layers": strategy.state.layers,
-                        "avg_entry_price": strategy.state.avg_entry_price,
-                        "last_tp_price": strategy.state.tp_price,
-                        "last_partial_tp_price": getattr(strategy.state, "partial_tp_price", None),
-                        "last_tp_plan": getattr(strategy.state, "tp_plan", "SINGLE"),
-                        "partial_tp_consumed": getattr(strategy.state, "partial_tp_consumed", False),
-                        "near_tp_protective_sl_order_id": getattr(strategy.state, "near_tp_protective_sl_order_id", None),
-                        "middle_runner_protective_sl_order_id": getattr(strategy.state, "middle_runner_protective_sl_order_id", None),
-                        "three_stage_post_tp1_protective_sl_order_id": getattr(strategy.state, "three_stage_post_tp1_protective_sl_order_id", None),
-                        "trend_runner_sl_order_id": getattr(strategy.state, "trend_runner_sl_order_id", None),
-                        "trend_runner_exit_reason": getattr(strategy.state, "trend_runner_exit_reason", None),
-                    }
-                    execution_state.trading_halted = True
-                    last_flat_detected_monotonic = now
-                    logger.warning("POSITION_SYNC_CHANGED | flat_on_okx=true. Confirming settled balance before FLAT journal.")
-                else:
-                    account_snapshot.position = core_position
-                    account_snapshot.cash = cash
-                    account_snapshot.equity = equity
-                    account_snapshot.updated_monotonic = time.monotonic()
-                    account_snapshot.updated_ts_ms = live_time_utils.utc_ms()
-                    account_snapshot.version += 1
-                    trader.account_equity_usdt = equity
-                    sizer.update_account_equity(equity)
-
-                    cash_delta = cash - last_logged_cash
-                    seconds_since_last_order = (
-                        cash_transfer_settle_seconds
-                        if execution_state.last_order_ts_ms == 0
-                        else max((live_time_utils.utc_ms() - execution_state.last_order_ts_ms) / 1000, 0.0)
+                if pending_order_count > 0 and three_stage_event is not None:
+                    logger.warning(
+                        "THREE_STAGE_POSITION_REDUCTION_DETECTED_WITH_PENDING_ORDERS | "
+                        "event=%s pending_order_count=%s side=%s old_total_eth_qty=%.8f new_core_eth_qty=%.8f core_contracts=%s net_contracts=%s sidecar_open_eth_qty=%.8f",
+                        three_stage_event,
+                        pending_order_count,
+                        core_position.side,
+                        float(getattr(strategy.state, "total_entry_qty", 0.0) or 0.0),
+                        float(core_position.eth_qty or 0.0),
+                        core_position.contracts,
+                        position.contracts if position.has_position else 0,
+                        sidecar_open_qty(list(getattr(strategy.state, "sidecar_legs", []) or [])),
                     )
-                    unsafe_reasons = []
-                    if pending_order_count > 0:
-                        unsafe_reasons.append("pending_order")
-                    if core_position.has_position:
-                        unsafe_reasons.append("has_position")
-                    if strategy.state.layers != 0:
-                        unsafe_reasons.append("strategy_layers")
-                    if execution_state.current_position_id is not None:
-                        unsafe_reasons.append("current_position_id")
-                    if seconds_since_last_order < cash_transfer_settle_seconds:
-                        unsafe_reasons.append("order_settle")
-                    in_flat_settle_cooldown = (
-                        last_flat_detected_monotonic > 0
-                        and now - last_flat_detected_monotonic < cash_transfer_after_flat_cooldown_seconds
-                    )
-                    if in_flat_settle_cooldown:
-                        unsafe_reasons.append("flat_settle_cooldown")
-                    safe_for_cash_transfer = (
-                        cash_transfer_detect_enabled
-                        and pending_order_count == 0
-                        and not core_position.has_position
-                        and strategy.state.layers == 0
-                        and execution_state.current_position_id is None
-                        and seconds_since_last_order >= cash_transfer_settle_seconds
-                        and not in_flat_settle_cooldown
-                        and abs(cash_delta) >= cash_transfer_min_delta_usdt
-                    )
-                    if safe_for_cash_transfer:
-                        direction = "DEPOSIT" if cash_delta > 0 else "WITHDRAWAL"
-                        cash_transfer_payload = {
-                            "direction": direction,
-                            "amount": cash_delta,
-                            "cash_before": last_logged_cash,
-                            "cash_after": cash,
-                            "equity_before": last_logged_equity,
-                            "equity_after": equity,
-                            "reason": "safe_flat_account_sync",
-                        }
-                        if now - last_cash_event_log >= cash_event_log_interval_seconds:
-                            logger.warning(
-                                "CASH_TRANSFER_DETECTED | direction=%s amount=%.4f cash_before=%.4f cash_after=%.4f",
-                                direction,
-                                cash_delta,
-                                last_logged_cash,
-                                cash,
-                            )
-                            last_cash_event_log = now
-                    elif unsafe_reasons and abs(cash_delta) >= cash_drift_min_delta_usdt:
-                        drift_reason = "unsafe_state:" + ",".join(unsafe_reasons)
-                        cash_drift_payload = {
-                            "amount": cash_delta,
-                            "cash_before": last_logged_cash,
-                            "cash_after": cash,
-                            "equity_before": last_logged_equity,
-                            "equity_after": equity,
-                            "reason": drift_reason,
-                        }
-                        if now - last_cash_event_log >= cash_event_log_interval_seconds:
-                            logger.warning(
-                                "ACCOUNT_CASH_DRIFT | amount=%.4f cash_before=%.4f cash_after=%.4f reason=%s",
-                                cash_delta,
-                                last_logged_cash,
-                                cash,
-                                drift_reason,
-                            )
-                            last_cash_event_log = now
-
-                    if abs(cash - last_logged_cash) >= cash_log_min_delta_usdt:
-                        logger.info(
-                            "CASH_SYNC_CHANGED | cash=%.4f previous=%.4f equity=%.4f layer_margin_pct=%.4f leverage=%.2f",
-                            cash,
-                            last_logged_cash,
-                            equity,
-                            sizer.config.layer_margin_pct,
-                            sizer.config.leverage,
-                        )
-                        last_logged_cash = cash
-                        last_logged_equity = equity
-                    elif cash_transfer_payload is not None or cash_drift_payload is not None:
-                        last_logged_cash = cash
-                        last_logged_equity = equity
-
-                if not flat_transition_detected and core_position.has_position:
-                    trader.position_contracts = core_position.contracts
-                    # Position reduction detection must run every account sync,
-                    # even when pending orders exist (e.g. TP2 / Sidecar TP still
-                    # pending after TP1 fill). The mark_* helpers are internally
-                    # idempotent via consumed/active flags.
-                    middle_runner_activated = tp_progress_helpers.mark_middle_runner_active_if_position_reduced(strategy, core_position)
-                    three_stage_event = tp_progress_helpers.mark_three_stage_progress_if_position_reduced(strategy, core_position, live_time_utils.utc_ms())
-                    tp_progress_helpers.mark_partial_tp_consumed_if_position_reduced(strategy, core_position)
-                    position_cost_runtime.sync_strategy_cost_from_position(
-                        strategy,
-                        core_position,
-                        restore_from_position=startup_basic_restore.restore_strategy_from_position,
-                    )
-                    if pending_order_count > 0 and three_stage_event is not None:
-                        logger.warning(
-                            "THREE_STAGE_POSITION_REDUCTION_DETECTED_WITH_PENDING_ORDERS | "
-                            "event=%s pending_order_count=%s side=%s old_total_eth_qty=%.8f new_core_eth_qty=%.8f core_contracts=%s net_contracts=%s sidecar_open_eth_qty=%.8f",
-                            three_stage_event,
-                            pending_order_count,
-                            core_position.side,
-                            float(getattr(strategy.state, "total_entry_qty", 0.0) or 0.0),
-                            float(core_position.eth_qty or 0.0),
-                            core_position.contracts,
-                            position.contracts if position.has_position else 0,
-                            sidecar_open_qty(list(getattr(strategy.state, "sidecar_legs", []) or [])),
-                        )
-                    if three_stage_event is not None:
-                        if three_stage_event in {"TP1", "TP1_TP2"} and three_stage_event != "TP1_TP2":
-                            config = getattr(strategy, "config", None)
-                            if bool(getattr(config, "three_stage_post_tp1_protective_sl_enabled", True)):
-                                post_tp1_boll = runner_live_helpers.three_stage_post_tp1_boll(strategy)
-                                protective_sl = None
-                                current_price = None
-                                price_source = "missing"
-                                if post_tp1_boll is not None and core_position.side is not None:
-                                    current_price, price_source = runner_live_helpers.three_stage_post_tp1_current_price(account_snapshot, core_position, post_tp1_boll, live_time_utils.utc_ms())
-                                    base_sl = strategy._calculate_three_stage_post_tp1_protective_sl(core_position.side, current_price, post_tp1_boll)
-                                    extension_sl = strategy._apply_three_stage_post_tp1_extension_trigger(core_position.side, current_price, post_tp1_boll, base_sl)
-                                    protective_sl = strategy._tighten_optional_three_stage_post_tp1_sl(core_position.side, base_sl, extension_sl)
-                                strategy.state.three_stage_post_tp1_protective_sl_price = protective_sl
-                                # Global protective SL must cover OKX net position (core + sidecar)
-                                if not position.has_position or position.side != core_position.side or position.contracts <= 0:
-                                    execution_state.trading_halted = True
-                                    execution_state.halt_reason = "three_stage_post_tp1_global_sl_net_position_missing"
-                                    if hasattr(journal, "append"):
-                                        journal.append(
-                                            "THREE_STAGE_POST_TP1_GLOBAL_SL_NET_POSITION_MISSING",
-                                            {
-                                                "position_id": execution_state.current_position_id,
-                                                "core_side": core_position.side,
-                                                "core_contracts": float(core_position.contracts),
-                                                "net_side": position.side if position.has_position else None,
-                                                "net_contracts": float(position.contracts) if position.has_position else 0,
-                                                "trading_halted": True,
-                                                "halt_reason": "three_stage_post_tp1_global_sl_net_position_missing",
-                                                "manual_intervention_required": True,
-                                            },
-                                            position_id=execution_state.current_position_id,
-                                        )
-                                    state_store.save(LiveStateStore.from_strategy_state(
-                                        position_id=execution_state.current_position_id,
-                                        symbol=trader.symbol,
-                                        strategy_state=strategy.state,
-                                        cash_before_position=execution_state.cash_before_position,
-                                    ))
-                                    logger.error(
-                                        "THREE_STAGE_POST_TP1_GLOBAL_SL_NET_POSITION_MISSING | position_id=%s core_side=%s core_contracts=%s net_side=%s net_contracts=%s trading_halted=true halt_reason=three_stage_post_tp1_global_sl_net_position_missing manual_intervention_required=true",
-                                        execution_state.current_position_id,
-                                        core_position.side,
-                                        core_position.contracts,
-                                        position.side if position.has_position else None,
-                                        position.contracts if position.has_position else 0,
-                                    )
-                                else:
-                                    three_stage_post_tp1_sl_payload = {
-                                        "position_id": execution_state.current_position_id,
-                                        "side": core_position.side,
-                                        "contracts": float(position.contracts),
-                                        "core_contracts": float(core_position.contracts),
-                                        "net_contracts": float(position.contracts),
-                                        "protective_sl_price": protective_sl,
-                                        "old_sl_order_id": getattr(strategy.state, "three_stage_post_tp1_protective_sl_order_id", None),
-                                        "current_price": current_price,
-                                        "current_price_source": price_source,
-                                        "reason": "three_stage_tp1_filled",
-                                    }
-                        if three_stage_event in {"TP2", "TP1_TP2"}:
-                            old_post_tp1_sl_order_id = getattr(strategy.state, "three_stage_post_tp1_protective_sl_order_id", None)
-                            three_stage_post_tp1_cancel_payload = {
-                                "position_id": execution_state.current_position_id,
-                                "side": position.side,
-                                "protective_sl_order_id": old_post_tp1_sl_order_id,
-                                "protective_sl_price": getattr(strategy.state, "three_stage_post_tp1_protective_sl_price", None),
-                                "pending_halt_applied": False,
-                                "existing_halt_reason": execution_state.halt_reason if execution_state.trading_halted else None,
-                            }
-                            if old_post_tp1_sl_order_id:
-                                if not execution_state.trading_halted:
-                                    execution_state.trading_halted = True
-                                    execution_state.halt_reason = runner_live_helpers.THREE_STAGE_CANCEL_PENDING_HALT_REASON
-                                    three_stage_post_tp1_cancel_payload["pending_halt_applied"] = True
-                                else:
-                                    logger.error(
-                                        "THREE_STAGE_TP1_PROTECTIVE_SL_CANCEL_PENDING_ON_TP2 | position_id=%s algoId=%s existing_halt_reason=%s pending_halt_not_applied=true",
-                                        execution_state.current_position_id,
-                                        old_post_tp1_sl_order_id,
-                                        execution_state.halt_reason,
-                                    )
-                        three_stage_event_payload = {
-                            "event": three_stage_event,
-                            "position_id": execution_state.current_position_id,
-                            "side": core_position.side,
-                            "layers": strategy.state.layers,
-                            "avg_entry_price": strategy.state.avg_entry_price,
-                            "tp_plan": "THREE_STAGE_RUNNER",
-                            "tp1_price": getattr(strategy.state, "three_stage_tp1_price", None),
-                            "tp1_ratio": getattr(strategy.state, "three_stage_tp1_ratio", 0.0),
-                            "tp2_price": getattr(strategy.state, "three_stage_tp2_price", None),
-                            "tp2_ratio": getattr(strategy.state, "three_stage_tp2_ratio", 0.0),
-                            "runner_tp_price": getattr(strategy.state, "trend_runner_tp_price", None),
-                            "runner_sl_price": getattr(strategy.state, "trend_runner_sl_price", None),
-                            "runner_ratio": getattr(strategy.state, "three_stage_runner_ratio", 0.0),
-                            "trend_runner_active": getattr(strategy.state, "trend_runner_active", False),
-                            "trend_runner_adjust_count": getattr(strategy.state, "trend_runner_adjust_count", 0),
-                            "trend_runner_trend_start_ts_ms": getattr(strategy.state, "trend_runner_trend_start_ts_ms", 0),
-                        }
-                    if middle_runner_activated:
+                if three_stage_event is not None:
+                    if three_stage_event in {"TP1", "TP1_TP2"} and three_stage_event != "TP1_TP2":
                         config = getattr(strategy, "config", None)
-                        if bool(getattr(config, "middle_runner_disable_add_after_partial", True)):
-                            strategy.state.middle_runner_add_disabled = True
-                        middle_runner_activation_payload = {
-                            "position_id": execution_state.current_position_id,
-                            "side": core_position.side,
-                            "layers": strategy.state.layers,
-                            "avg_entry_price": strategy.state.avg_entry_price,
-                            "first_tp_price": getattr(strategy.state, "middle_runner_first_tp_price", None),
-                            "final_tp_price": getattr(strategy.state, "middle_runner_final_tp_price", None),
-                            "first_close_ratio": getattr(strategy.state, "middle_runner_first_close_ratio", 0.0),
-                            "keep_ratio": getattr(strategy.state, "middle_runner_keep_ratio", 0.0),
-                            "reason": "partial_tp_filled",
-                        }
-                        if bool(getattr(config, "middle_runner_protective_sl_enabled", True)):
-                            runner_boll = runner_live_helpers.middle_runner_activation_boll(strategy)
-                            current_price = getattr(runner_boll, "middle", 0.0) if runner_boll is not None else 0.0
-                            protective_sl = (
-                                strategy._calculate_middle_runner_protective_sl(core_position.side, current_price, runner_boll)
-                                if runner_boll is not None and core_position.side is not None
-                                else None
-                            )
-                            strategy.state.middle_runner_protective_sl_price = protective_sl
+                        if bool(getattr(config, "three_stage_post_tp1_protective_sl_enabled", True)):
+                            post_tp1_boll = runner_live_helpers.three_stage_post_tp1_boll(strategy)
+                            protective_sl = None
+                            current_price = None
+                            price_source = "missing"
+                            if post_tp1_boll is not None and core_position.side is not None:
+                                current_price, price_source = runner_live_helpers.three_stage_post_tp1_current_price(account_snapshot, core_position, post_tp1_boll, live_time_utils.utc_ms())
+                                base_sl = strategy._calculate_three_stage_post_tp1_protective_sl(core_position.side, current_price, post_tp1_boll)
+                                extension_sl = strategy._apply_three_stage_post_tp1_extension_trigger(core_position.side, current_price, post_tp1_boll, base_sl)
+                                protective_sl = strategy._tighten_optional_three_stage_post_tp1_sl(core_position.side, base_sl, extension_sl)
+                            strategy.state.three_stage_post_tp1_protective_sl_price = protective_sl
                             # Global protective SL must cover OKX net position (core + sidecar)
                             if not position.has_position or position.side != core_position.side or position.contracts <= 0:
                                 execution_state.trading_halted = True
-                                execution_state.halt_reason = "middle_runner_global_sl_net_position_missing"
+                                execution_state.halt_reason = "three_stage_post_tp1_global_sl_net_position_missing"
                                 if hasattr(journal, "append"):
                                     journal.append(
-                                        "MIDDLE_RUNNER_GLOBAL_SL_NET_POSITION_MISSING",
+                                        "THREE_STAGE_POST_TP1_GLOBAL_SL_NET_POSITION_MISSING",
                                         {
                                             "position_id": execution_state.current_position_id,
                                             "core_side": core_position.side,
@@ -522,7 +235,7 @@ async def account_position_sync_worker(
                                             "net_side": position.side if position.has_position else None,
                                             "net_contracts": float(position.contracts) if position.has_position else 0,
                                             "trading_halted": True,
-                                            "halt_reason": "middle_runner_global_sl_net_position_missing",
+                                            "halt_reason": "three_stage_post_tp1_global_sl_net_position_missing",
                                             "manual_intervention_required": True,
                                         },
                                         position_id=execution_state.current_position_id,
@@ -534,7 +247,7 @@ async def account_position_sync_worker(
                                     cash_before_position=execution_state.cash_before_position,
                                 ))
                                 logger.error(
-                                    "MIDDLE_RUNNER_GLOBAL_SL_NET_POSITION_MISSING | position_id=%s core_side=%s core_contracts=%s net_side=%s net_contracts=%s trading_halted=true halt_reason=middle_runner_global_sl_net_position_missing manual_intervention_required=true",
+                                    "THREE_STAGE_POST_TP1_GLOBAL_SL_NET_POSITION_MISSING | position_id=%s core_side=%s core_contracts=%s net_side=%s net_contracts=%s trading_halted=true halt_reason=three_stage_post_tp1_global_sl_net_position_missing manual_intervention_required=true",
                                     execution_state.current_position_id,
                                     core_position.side,
                                     core_position.contracts,
@@ -542,17 +255,74 @@ async def account_position_sync_worker(
                                     position.contracts if position.has_position else 0,
                                 )
                             else:
-                                middle_runner_sl_payload = {
+                                three_stage_post_tp1_sl_payload = {
                                     "position_id": execution_state.current_position_id,
                                     "side": core_position.side,
                                     "contracts": float(position.contracts),
                                     "core_contracts": float(core_position.contracts),
                                     "net_contracts": float(position.contracts),
                                     "protective_sl_price": protective_sl,
-                                    "old_sl_order_id": getattr(strategy.state, "middle_runner_protective_sl_order_id", None),
-                                    "reason": "partial_tp_filled",
+                                    "old_sl_order_id": getattr(strategy.state, "three_stage_post_tp1_protective_sl_order_id", None),
+                                    "current_price": current_price,
+                                    "current_price_source": price_source,
+                                    "reason": "three_stage_tp1_filled",
                                 }
-                    elif runner_live_helpers.middle_runner_size_mismatch_needs_degraded_protection(strategy, core_position):
+                    if three_stage_event in {"TP2", "TP1_TP2"}:
+                        old_post_tp1_sl_order_id = getattr(strategy.state, "three_stage_post_tp1_protective_sl_order_id", None)
+                        three_stage_post_tp1_cancel_payload = {
+                            "position_id": execution_state.current_position_id,
+                            "side": position.side,
+                            "protective_sl_order_id": old_post_tp1_sl_order_id,
+                            "protective_sl_price": getattr(strategy.state, "three_stage_post_tp1_protective_sl_price", None),
+                            "pending_halt_applied": False,
+                            "existing_halt_reason": execution_state.halt_reason if execution_state.trading_halted else None,
+                        }
+                        if old_post_tp1_sl_order_id:
+                            if not execution_state.trading_halted:
+                                execution_state.trading_halted = True
+                                execution_state.halt_reason = runner_live_helpers.THREE_STAGE_CANCEL_PENDING_HALT_REASON
+                                three_stage_post_tp1_cancel_payload["pending_halt_applied"] = True
+                            else:
+                                logger.error(
+                                    "THREE_STAGE_TP1_PROTECTIVE_SL_CANCEL_PENDING_ON_TP2 | position_id=%s algoId=%s existing_halt_reason=%s pending_halt_not_applied=true",
+                                    execution_state.current_position_id,
+                                    old_post_tp1_sl_order_id,
+                                    execution_state.halt_reason,
+                                )
+                    three_stage_event_payload = {
+                        "event": three_stage_event,
+                        "position_id": execution_state.current_position_id,
+                        "side": core_position.side,
+                        "layers": strategy.state.layers,
+                        "avg_entry_price": strategy.state.avg_entry_price,
+                        "tp_plan": "THREE_STAGE_RUNNER",
+                        "tp1_price": getattr(strategy.state, "three_stage_tp1_price", None),
+                        "tp1_ratio": getattr(strategy.state, "three_stage_tp1_ratio", 0.0),
+                        "tp2_price": getattr(strategy.state, "three_stage_tp2_price", None),
+                        "tp2_ratio": getattr(strategy.state, "three_stage_tp2_ratio", 0.0),
+                        "runner_tp_price": getattr(strategy.state, "trend_runner_tp_price", None),
+                        "runner_sl_price": getattr(strategy.state, "trend_runner_sl_price", None),
+                        "runner_ratio": getattr(strategy.state, "three_stage_runner_ratio", 0.0),
+                        "trend_runner_active": getattr(strategy.state, "trend_runner_active", False),
+                        "trend_runner_adjust_count": getattr(strategy.state, "trend_runner_adjust_count", 0),
+                        "trend_runner_trend_start_ts_ms": getattr(strategy.state, "trend_runner_trend_start_ts_ms", 0),
+                    }
+                if middle_runner_activated:
+                    config = getattr(strategy, "config", None)
+                    if bool(getattr(config, "middle_runner_disable_add_after_partial", True)):
+                        strategy.state.middle_runner_add_disabled = True
+                    middle_runner_activation_payload = {
+                        "position_id": execution_state.current_position_id,
+                        "side": core_position.side,
+                        "layers": strategy.state.layers,
+                        "avg_entry_price": strategy.state.avg_entry_price,
+                        "first_tp_price": getattr(strategy.state, "middle_runner_first_tp_price", None),
+                        "final_tp_price": getattr(strategy.state, "middle_runner_final_tp_price", None),
+                        "first_close_ratio": getattr(strategy.state, "middle_runner_first_close_ratio", 0.0),
+                        "keep_ratio": getattr(strategy.state, "middle_runner_keep_ratio", 0.0),
+                        "reason": "partial_tp_filled",
+                    }
+                    if bool(getattr(config, "middle_runner_protective_sl_enabled", True)):
                         runner_boll = runner_live_helpers.middle_runner_activation_boll(strategy)
                         current_price = getattr(runner_boll, "middle", 0.0) if runner_boll is not None else 0.0
                         protective_sl = (
@@ -603,43 +373,96 @@ async def account_position_sync_worker(
                                 "net_contracts": float(position.contracts),
                                 "protective_sl_price": protective_sl,
                                 "old_sl_order_id": getattr(strategy.state, "middle_runner_protective_sl_order_id", None),
-                                "reason": "partial_size_mismatch_degraded",
+                                "reason": "partial_tp_filled",
                             }
-                        middle_runner_activation_payload = {
+                elif runner_live_helpers.middle_runner_size_mismatch_needs_degraded_protection(strategy, core_position):
+                    runner_boll = runner_live_helpers.middle_runner_activation_boll(strategy)
+                    current_price = getattr(runner_boll, "middle", 0.0) if runner_boll is not None else 0.0
+                    protective_sl = (
+                        strategy._calculate_middle_runner_protective_sl(core_position.side, current_price, runner_boll)
+                        if runner_boll is not None and core_position.side is not None
+                        else None
+                    )
+                    strategy.state.middle_runner_protective_sl_price = protective_sl
+                    # Global protective SL must cover OKX net position (core + sidecar)
+                    if not position.has_position or position.side != core_position.side or position.contracts <= 0:
+                        execution_state.trading_halted = True
+                        execution_state.halt_reason = "middle_runner_global_sl_net_position_missing"
+                        if hasattr(journal, "append"):
+                            journal.append(
+                                "MIDDLE_RUNNER_GLOBAL_SL_NET_POSITION_MISSING",
+                                {
+                                    "position_id": execution_state.current_position_id,
+                                    "core_side": core_position.side,
+                                    "core_contracts": float(core_position.contracts),
+                                    "net_side": position.side if position.has_position else None,
+                                    "net_contracts": float(position.contracts) if position.has_position else 0,
+                                    "trading_halted": True,
+                                    "halt_reason": "middle_runner_global_sl_net_position_missing",
+                                    "manual_intervention_required": True,
+                                },
+                                position_id=execution_state.current_position_id,
+                            )
+                        state_store.save(LiveStateStore.from_strategy_state(
+                            position_id=execution_state.current_position_id,
+                            symbol=trader.symbol,
+                            strategy_state=strategy.state,
+                            cash_before_position=execution_state.cash_before_position,
+                        ))
+                        logger.error(
+                            "MIDDLE_RUNNER_GLOBAL_SL_NET_POSITION_MISSING | position_id=%s core_side=%s core_contracts=%s net_side=%s net_contracts=%s trading_halted=true halt_reason=middle_runner_global_sl_net_position_missing manual_intervention_required=true",
+                            execution_state.current_position_id,
+                            core_position.side,
+                            core_position.contracts,
+                            position.side if position.has_position else None,
+                            position.contracts if position.has_position else 0,
+                        )
+                    else:
+                        middle_runner_sl_payload = {
                             "position_id": execution_state.current_position_id,
                             "side": core_position.side,
-                            "layers": strategy.state.layers,
-                            "avg_entry_price": strategy.state.avg_entry_price,
-                            "first_tp_price": getattr(strategy.state, "middle_runner_first_tp_price", None),
-                            "final_tp_price": getattr(strategy.state, "middle_runner_final_tp_price", None),
-                            "first_close_ratio": getattr(strategy.state, "middle_runner_first_close_ratio", 0.0),
-                            "keep_ratio": getattr(strategy.state, "middle_runner_keep_ratio", 0.0),
+                            "contracts": float(position.contracts),
+                            "core_contracts": float(core_position.contracts),
+                            "net_contracts": float(position.contracts),
+                            "protective_sl_price": protective_sl,
+                            "old_sl_order_id": getattr(strategy.state, "middle_runner_protective_sl_order_id", None),
                             "reason": "partial_size_mismatch_degraded",
                         }
-                    if (
-                        execution_state.trading_halted
-                        and execution_state.halt_reason == "near_tp_protected_sync_failed"
-                        and getattr(strategy.state, "near_tp_protected", False)
-                    ):
-                        execution_state.trading_halted = False
-                        execution_state.halt_reason = None
-                        logger.warning(
-                            "NEAR_TP_PROTECTED_SYNC_RECOVERED | trading_halted=false side=%s contracts=%s avg_entry=%.4f",
-                            core_position.side,
-                            core_position.contracts,
-                            core_position.avg_entry_price,
-                        )
-                    save_state_payload = (execution_state.current_position_id, copy.deepcopy(strategy.state), execution_state.cash_before_position)
-                    if current_position_key != last_logged_position_key:
-                        logger.info(
-                            "POSITION_SYNC_CHANGED | side=%s contracts=%s avg_entry=%.4f eth_qty=%.6f strategy_layers=%s",
-                            core_position.side,
-                            core_position.contracts,
-                            core_position.avg_entry_price,
-                            core_position.eth_qty,
-                            strategy.state.layers,
-                        )
-                        last_logged_position_key = current_position_key
+                    middle_runner_activation_payload = {
+                        "position_id": execution_state.current_position_id,
+                        "side": core_position.side,
+                        "layers": strategy.state.layers,
+                        "avg_entry_price": strategy.state.avg_entry_price,
+                        "first_tp_price": getattr(strategy.state, "middle_runner_first_tp_price", None),
+                        "final_tp_price": getattr(strategy.state, "middle_runner_final_tp_price", None),
+                        "first_close_ratio": getattr(strategy.state, "middle_runner_first_close_ratio", 0.0),
+                        "keep_ratio": getattr(strategy.state, "middle_runner_keep_ratio", 0.0),
+                        "reason": "partial_size_mismatch_degraded",
+                    }
+                if (
+                    execution_state.trading_halted
+                    and execution_state.halt_reason == "near_tp_protected_sync_failed"
+                    and getattr(strategy.state, "near_tp_protected", False)
+                ):
+                    execution_state.trading_halted = False
+                    execution_state.halt_reason = None
+                    logger.warning(
+                        "NEAR_TP_PROTECTED_SYNC_RECOVERED | trading_halted=false side=%s contracts=%s avg_entry=%.4f",
+                        core_position.side,
+                        core_position.contracts,
+                        core_position.avg_entry_price,
+                    )
+                save_state_payload = (execution_state.current_position_id, copy.deepcopy(strategy.state), execution_state.cash_before_position)
+                if current_position_key != last_logged_position_key:
+                    logger.info(
+                        "POSITION_SYNC_CHANGED | side=%s contracts=%s avg_entry=%.4f eth_qty=%.6f strategy_layers=%s",
+                        core_position.side,
+                        core_position.contracts,
+                        core_position.avg_entry_price,
+                        core_position.eth_qty,
+                        strategy.state.layers,
+                    )
+                    last_logged_position_key = current_position_key
 
             if force_close_sidecar:
                 await sidecar_force_close_runtime.force_close_sidecar_after_core_flat(
