@@ -8,6 +8,7 @@ from unittest.mock import patch
 from src.execution.trader import PositionSnapshot, Trader
 from src.indicators.cvd_tracker import CvdSnapshot
 from src.monitors.boll_band_breakout_monitor import BollSnapshot
+from src.position_management.runner_live_helpers import three_stage_post_tp1_boll
 from src.position_management.tp_progress import append_three_stage_progress_journal_events, mark_three_stage_progress_if_position_reduced
 from src.risk.simple_position_sizer import PositionSize, SimplePositionSizer, SimplePositionSizerConfig
 from src.strategies.boll_cvd_reclaim_strategy import BollCvdReclaimStrategy, BollCvdReclaimStrategyConfig, StrategyPositionState, TradeIntent
@@ -820,6 +821,58 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
         self.assertLessEqual(long_sl or 0.0, 200.0)
         self.assertEqual(short_sl, 100.0)
         self.assertGreaterEqual(short_sl or 0.0, 100.0)
+
+    def test_three_stage_time_tighten_seeded_activation_next_real_candle_advances_to_55pct(self) -> None:
+        strat = strategy()
+        strat.state = StrategyPositionState(last_tp_update_candle_ts_ms=1_000)
+
+        strat._seed_runner_sl_time_tighten_activation_candle(target="three_stage_post_tp1", candle_ts_ms=0)
+
+        self.assertEqual(strat.state.three_stage_post_tp1_sl_time_tighten_candle_count, 0)
+        self.assertEqual(strat.state.three_stage_post_tp1_sl_time_tighten_last_candle_ts_ms, 1_000)
+        self.assertEqual(strat._runner_sl_time_tighten_ratio(0), 0.50)
+
+        count = strat._advance_runner_sl_time_tighten_candle_count(target="three_stage_post_tp1", candle_ts_ms=2_000)
+
+        self.assertEqual(count, 1)
+        self.assertEqual(strat.state.three_stage_post_tp1_sl_time_tighten_candle_count, 1)
+        self.assertEqual(strat._runner_sl_time_tighten_ratio(count), 0.55)
+
+    def test_account_sync_synthetic_boll_does_not_delay_time_tighten(self) -> None:
+        strat = strategy()
+        strat.state = StrategyPositionState(
+            side="LONG",
+            layers=1,
+            total_entry_qty=1.0,
+            total_entry_notional=100.0,
+            avg_entry_price=100.0,
+            tp_plan="THREE_STAGE_RUNNER",
+            three_stage_runner_enabled_for_position=True,
+            three_stage_tp1_price=101.0,
+            three_stage_tp2_price=110.0,
+            three_stage_tp1_ratio=0.6,
+            three_stage_tp2_ratio=0.2,
+            three_stage_runner_ratio=0.2,
+            last_tp_update_candle_ts_ms=1_000,
+        )
+
+        event = mark_three_stage_progress_if_position_reduced(
+            strat,
+            PositionSnapshot("LONG", Decimal("4"), 100.0, 0.4, Decimal("4")),
+            10_000,
+        )
+        synthetic_boll = three_stage_post_tp1_boll(strat)
+
+        self.assertEqual(event, "TP1")
+        self.assertIsNotNone(synthetic_boll)
+        self.assertFalse(hasattr(synthetic_boll, "candle_ts_ms"))
+        self.assertEqual(strat.state.three_stage_post_tp1_sl_time_tighten_candle_count, 0)
+        self.assertEqual(strat.state.three_stage_post_tp1_sl_time_tighten_last_candle_ts_ms, 1_000)
+
+        count = strat._advance_runner_sl_time_tighten_candle_count(target="three_stage_post_tp1", candle_ts_ms=2_000)
+
+        self.assertEqual(count, 1)
+        self.assertEqual(strat._runner_sl_time_tighten_ratio(count), 0.55)
 
     def test_extension_trigger_still_overrides_to_middle(self) -> None:
         strat = strategy(three_stage_post_tp1_sl_extension_trigger_ratio=0.6)

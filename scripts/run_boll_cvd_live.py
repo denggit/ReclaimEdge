@@ -1880,10 +1880,6 @@ async def account_position_sync_worker(
                                 price_source = "missing"
                                 if post_tp1_boll is not None and core_position.side is not None:
                                     current_price, price_source = runner_live_helpers.three_stage_post_tp1_current_price(account_snapshot, core_position, post_tp1_boll, live_time_utils.utc_ms())
-                                    strategy._advance_runner_sl_time_tighten_candle_count(
-                                        target="three_stage_post_tp1",
-                                        candle_ts_ms=int(getattr(post_tp1_boll, "candle_ts_ms", 0) or 0),
-                                    )
                                     base_sl = strategy._calculate_three_stage_post_tp1_protective_sl(core_position.side, current_price, post_tp1_boll)
                                     extension_sl = strategy._apply_three_stage_post_tp1_extension_trigger(core_position.side, current_price, post_tp1_boll, base_sl)
                                     protective_sl = strategy._tighten_optional_three_stage_post_tp1_sl(core_position.side, base_sl, extension_sl)
@@ -1992,11 +1988,6 @@ async def account_position_sync_worker(
                         if bool(getattr(config, "middle_runner_protective_sl_enabled", True)):
                             runner_boll = runner_live_helpers.middle_runner_activation_boll(strategy)
                             current_price = getattr(runner_boll, "middle", 0.0) if runner_boll is not None else 0.0
-                            if runner_boll is not None:
-                                strategy._advance_runner_sl_time_tighten_candle_count(
-                                    target="middle_runner",
-                                    candle_ts_ms=int(getattr(runner_boll, "candle_ts_ms", 0) or 0),
-                                )
                             protective_sl = (
                                 strategy._calculate_middle_runner_protective_sl(core_position.side, current_price, runner_boll)
                                 if runner_boll is not None and core_position.side is not None
@@ -2050,11 +2041,6 @@ async def account_position_sync_worker(
                     elif runner_live_helpers.middle_runner_size_mismatch_needs_degraded_protection(strategy, core_position):
                         runner_boll = runner_live_helpers.middle_runner_activation_boll(strategy)
                         current_price = getattr(runner_boll, "middle", 0.0) if runner_boll is not None else 0.0
-                        if runner_boll is not None:
-                            strategy._advance_runner_sl_time_tighten_candle_count(
-                                target="middle_runner",
-                                candle_ts_ms=int(getattr(runner_boll, "candle_ts_ms", 0) or 0),
-                            )
                         protective_sl = (
                             strategy._calculate_middle_runner_protective_sl(core_position.side, current_price, runner_boll)
                             if runner_boll is not None and core_position.side is not None

@@ -2112,6 +2112,26 @@ class BollCvdReclaimStrategy:
             setattr(self.state, last_attr, candle_ts_ms)
         return count
 
+    def _seed_runner_sl_time_tighten_activation_candle(
+        self,
+        *,
+        target: Literal["middle_runner", "three_stage_post_tp1"],
+        candle_ts_ms: int,
+    ) -> None:
+        if candle_ts_ms <= 0:
+            candle_ts_ms = int(getattr(self.state, "last_tp_update_candle_ts_ms", 0) or 0)
+        if candle_ts_ms <= 0:
+            return
+
+        if target == "middle_runner":
+            self.state.middle_runner_sl_time_tighten_candle_count = 0
+            self.state.middle_runner_sl_time_tighten_last_candle_ts_ms = candle_ts_ms
+            self.state.middle_runner_sl_time_tighten_log_candle_ts_ms = 0
+        else:
+            self.state.three_stage_post_tp1_sl_time_tighten_candle_count = 0
+            self.state.three_stage_post_tp1_sl_time_tighten_last_candle_ts_ms = candle_ts_ms
+            self.state.three_stage_post_tp1_sl_time_tighten_log_candle_ts_ms = 0
+
     def _runner_sl_time_tighten_ratio(self, candle_count: int) -> float:
         base_ratio = 0.50
         step = max(float(self.config.runner_protective_sl_time_tighten_step_ratio), 0.0)

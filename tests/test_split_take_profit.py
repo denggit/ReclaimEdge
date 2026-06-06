@@ -461,6 +461,22 @@ class SplitTakeProfitStrategyTest(unittest.TestCase):
         self.assertEqual(next_count, 1)
         self.assertEqual(strat._runner_sl_time_tighten_ratio(next_count), 0.55)
 
+    def test_middle_runner_time_tighten_seeded_activation_next_real_candle_advances_to_55pct(self) -> None:
+        strat = strategy(middle_runner_enabled=True)
+        strat.state = StrategyPositionState(last_tp_update_candle_ts_ms=1_000)
+
+        strat._seed_runner_sl_time_tighten_activation_candle(target="middle_runner", candle_ts_ms=0)
+
+        self.assertEqual(strat.state.middle_runner_sl_time_tighten_candle_count, 0)
+        self.assertEqual(strat.state.middle_runner_sl_time_tighten_last_candle_ts_ms, 1_000)
+        self.assertEqual(strat._runner_sl_time_tighten_ratio(0), 0.50)
+
+        count = strat._advance_runner_sl_time_tighten_candle_count(target="middle_runner", candle_ts_ms=2_000)
+
+        self.assertEqual(count, 1)
+        self.assertEqual(strat.state.middle_runner_sl_time_tighten_candle_count, 1)
+        self.assertEqual(strat._runner_sl_time_tighten_ratio(count), 0.55)
+
     def test_middle_runner_sl_diag_logs_once_per_signature(self) -> None:
         strat = strategy(middle_runner_enabled=True, breakeven_fee_buffer_pct=0.001)
         strat.state = StrategyPositionState(
@@ -933,6 +949,7 @@ class SplitTakeProfitLifecycleTest(unittest.TestCase):
             middle_runner_keep_ratio=0.2,
             middle_runner_first_tp_price=105.0,
             middle_runner_final_tp_price=110.0,
+            last_tp_update_candle_ts_ms=1_000,
         )
         position = PositionSnapshot("LONG", Decimal("2"), 100.0, 0.2, Decimal("2"))
 
@@ -944,6 +961,9 @@ class SplitTakeProfitLifecycleTest(unittest.TestCase):
         self.assertTrue(strat.state.middle_runner_add_disabled)
         self.assertTrue(strat.state.partial_tp_consumed)
         self.assertEqual(strat.state.tp_plan, "SINGLE")
+        self.assertEqual(strat.state.middle_runner_sl_time_tighten_candle_count, 0)
+        self.assertEqual(strat.state.middle_runner_sl_time_tighten_last_candle_ts_ms, 1_000)
+        self.assertEqual(strat._advance_runner_sl_time_tighten_candle_count(target="middle_runner", candle_ts_ms=2_000), 1)
 
     def test_middle_runner_partial_size_mismatch_disables_add_without_activation(self) -> None:
         strat = strategy(middle_runner_enabled=True)
