@@ -10,6 +10,7 @@ from src.position_management.cost_basis import calculate_remaining_breakeven_pri
 from src.position_management.sidecar.model import trim_sidecar_legs_for_state
 from src.risk.simple_position_sizer import PositionSize, SimplePositionSizer
 from src.strategies import add_layer_gates
+from src.strategies import middle_runner as middle_runner_helpers
 from src.strategies import tp_plan_selector
 from src.utils.log import get_logger
 
@@ -2000,21 +2001,27 @@ class BollCvdReclaimStrategy:
         self.state.near_tp_add_disabled = False
         self.state.near_tp_sidecar_skip_logged = False
 
+    def _apply_middle_runner_state_values(self, values: middle_runner_helpers.MiddleRunnerStateValues) -> None:
+        self.state.middle_runner_enabled_for_position = values.middle_runner_enabled_for_position
+        self.state.middle_runner_pending = values.middle_runner_pending
+        self.state.middle_runner_active = values.middle_runner_active
+        self.state.middle_runner_first_close_ratio = values.middle_runner_first_close_ratio
+        self.state.middle_runner_keep_ratio = values.middle_runner_keep_ratio
+        self.state.middle_runner_first_tp_price = values.middle_runner_first_tp_price
+        self.state.middle_runner_final_tp_price = values.middle_runner_final_tp_price
+        self.state.middle_runner_protective_sl_price = values.middle_runner_protective_sl_price
+        self.state.middle_runner_protective_sl_order_id = values.middle_runner_protective_sl_order_id
+        self.state.middle_runner_extension_triggered = values.middle_runner_extension_triggered
+        self.state.middle_runner_add_disabled = values.middle_runner_add_disabled
+        self.state.middle_runner_size_mismatch_protected = values.middle_runner_size_mismatch_protected
+        self.state.middle_runner_size_mismatch_warning_ts_ms = values.middle_runner_size_mismatch_warning_ts_ms
+        self.state.middle_runner_sl_time_tighten_candle_count = values.middle_runner_sl_time_tighten_candle_count
+        self.state.middle_runner_sl_time_tighten_last_candle_ts_ms = values.middle_runner_sl_time_tighten_last_candle_ts_ms
+        self.state.middle_runner_sl_time_tighten_log_candle_ts_ms = values.middle_runner_sl_time_tighten_log_candle_ts_ms
+
     def _reset_middle_runner_state(self) -> None:
-        self.state.middle_runner_enabled_for_position = False
-        self.state.middle_runner_pending = False
-        self.state.middle_runner_active = False
-        self.state.middle_runner_first_close_ratio = 0.0
-        self.state.middle_runner_keep_ratio = 0.0
-        self.state.middle_runner_first_tp_price = None
-        self.state.middle_runner_final_tp_price = None
-        self.state.middle_runner_protective_sl_price = None
-        self.state.middle_runner_protective_sl_order_id = None
-        self.state.middle_runner_extension_triggered = False
-        self.state.middle_runner_add_disabled = False
-        self.state.middle_runner_size_mismatch_protected = False
-        self.state.middle_runner_size_mismatch_warning_ts_ms = 0
-        self._reset_middle_runner_sl_time_tighten_state()
+        values = middle_runner_helpers.reset_middle_runner_state_values()
+        self._apply_middle_runner_state_values(values)
 
     def _reset_three_stage_runner_state(self) -> None:
         self.state.three_stage_runner_enabled_for_position = False
@@ -2061,21 +2068,12 @@ class BollCvdReclaimStrategy:
         self.state.three_stage_post_tp1_sl_time_tighten_log_candle_ts_ms = 0
 
     def _set_middle_runner_planned(self, first_tp_price: float | None, final_tp_price: float) -> None:
-        first_close_ratio = min(max(self.config.middle_runner_first_close_ratio, 0.1), 0.95)
-        self.state.middle_runner_enabled_for_position = True
-        self.state.middle_runner_pending = True
-        self.state.middle_runner_active = False
-        self.state.middle_runner_first_close_ratio = first_close_ratio
-        self.state.middle_runner_keep_ratio = 1 - first_close_ratio
-        self.state.middle_runner_first_tp_price = first_tp_price
-        self.state.middle_runner_final_tp_price = final_tp_price
-        self.state.middle_runner_protective_sl_price = None
-        self.state.middle_runner_protective_sl_order_id = None
-        self.state.middle_runner_extension_triggered = False
-        self.state.middle_runner_add_disabled = False
-        self.state.middle_runner_size_mismatch_protected = False
-        self.state.middle_runner_size_mismatch_warning_ts_ms = 0
-        self._reset_middle_runner_sl_time_tighten_state()
+        values = middle_runner_helpers.planned_middle_runner_state_values(
+            first_tp_price=first_tp_price,
+            final_tp_price=final_tp_price,
+            configured_first_close_ratio=self.config.middle_runner_first_close_ratio,
+        )
+        self._apply_middle_runner_state_values(values)
 
     def _set_three_stage_runner_planned(self, side: PositionSide, boll: BollSnapshot) -> None:
         tp1_ratio, tp2_ratio, runner_ratio = self._normalized_three_stage_ratios()
@@ -2211,77 +2209,51 @@ class BollCvdReclaimStrategy:
 
     def _calculate_middle_runner_protective_sl(self, side: PositionSide, current_price: float,
                                                boll: BollSnapshot) -> float | None:
-        avg_entry = self.state.avg_entry_price
+        avg_entry = float(self.state.avg_entry_price or 0.0)
         base_breakeven = float(getattr(self.state, "net_remaining_breakeven_price", 0.0) or 0.0)
-        if current_price <= 0 or (base_breakeven <= 0 and avg_entry <= 0):
-            return None
         fee = self.config.breakeven_fee_buffer_pct
         ratio = (
             self._runner_sl_time_tighten_ratio(self.state.middle_runner_sl_time_tighten_candle_count)
             if self.config.runner_protective_sl_time_tighten_enabled
             else 0.50
         )
-        if side == "LONG":
-            after_partial_breakeven = base_breakeven if base_breakeven > 0 else avg_entry * (1 + fee)
-            candidate_cost = _interpolate_to_middle(after_partial_breakeven, boll.middle, ratio)
-            candidate_structure = _interpolate_to_middle(boll.lower, boll.middle, ratio)
-            protective_sl = max(candidate_cost, candidate_structure)
-            protective_sl = min(protective_sl, boll.middle)
-            if protective_sl >= current_price:
-                self._log_middle_runner_sl_diagnostic_once(
-                    side,
-                    "long_sl_not_below_current",
-                    current_price,
-                    base_breakeven,
-                    candidate_cost,
-                    candidate_structure,
-                    protective_sl,
-                    boll,
-                )
-                return None
-            self._log_middle_runner_sl_time_tightened_once(
-                side,
-                ratio,
-                candidate_cost,
-                candidate_structure,
-                protective_sl,
-                boll,
+        decision = middle_runner_helpers.calculate_middle_runner_protective_sl(
+            side=side,
+            current_price=current_price,
+            avg_entry_price=avg_entry,
+            net_remaining_breakeven_price=base_breakeven,
+            breakeven_fee_buffer_pct=fee,
+            boll_middle=boll.middle,
+            boll_upper=boll.upper,
+            boll_lower=boll.lower,
+            sl_tighten_ratio=ratio,
+        )
+        if decision.reason == "missing_cost_basis":
+            return None
+        if decision.reason != "calculated":
+            # Reconstruct the raw protective SL that was found invalid for the log signature.
+            _raw_sl = (
+                min(max(decision.candidate_cost, decision.candidate_structure), boll.middle)
+                if side == "LONG"
+                else max(min(decision.candidate_cost, decision.candidate_structure), boll.middle)
             )
             self._log_middle_runner_sl_diagnostic_once(
                 side,
-                "calculated",
+                decision.reason,
                 current_price,
                 base_breakeven,
-                candidate_cost,
-                candidate_structure,
-                protective_sl,
-                boll,
-            )
-            return protective_sl
-
-        after_partial_breakeven = base_breakeven if base_breakeven > 0 else avg_entry * (1 - fee)
-        candidate_cost = _interpolate_to_middle(after_partial_breakeven, boll.middle, ratio)
-        candidate_structure = _interpolate_to_middle(boll.upper, boll.middle, ratio)
-        protective_sl = min(candidate_cost, candidate_structure)
-        protective_sl = max(protective_sl, boll.middle)
-        if protective_sl <= current_price:
-            self._log_middle_runner_sl_diagnostic_once(
-                side,
-                "short_sl_not_above_current",
-                current_price,
-                base_breakeven,
-                candidate_cost,
-                candidate_structure,
-                protective_sl,
+                decision.candidate_cost,
+                decision.candidate_structure,
+                _raw_sl,
                 boll,
             )
             return None
         self._log_middle_runner_sl_time_tightened_once(
             side,
             ratio,
-            candidate_cost,
-            candidate_structure,
-            protective_sl,
+            decision.candidate_cost,
+            decision.candidate_structure,
+            decision.protective_sl,
             boll,
         )
         self._log_middle_runner_sl_diagnostic_once(
@@ -2289,12 +2261,12 @@ class BollCvdReclaimStrategy:
             "calculated",
             current_price,
             base_breakeven,
-            candidate_cost,
-            candidate_structure,
-            protective_sl,
+            decision.candidate_cost,
+            decision.candidate_structure,
+            decision.protective_sl,
             boll,
         )
-        return protective_sl
+        return decision.protective_sl
 
     def _log_middle_runner_sl_diagnostic_once(
             self,
@@ -2369,17 +2341,11 @@ class BollCvdReclaimStrategy:
         )
 
     def _tighten_middle_runner_sl(self, side: PositionSide, old_sl: float, new_sl: float) -> float:
-        if side == "LONG":
-            return max(old_sl, new_sl)
-        return min(old_sl, new_sl)
+        return middle_runner_helpers.tighten_middle_runner_sl(side=side, old_sl=old_sl, new_sl=new_sl)
 
     def _tighten_optional_middle_runner_sl(self, side: PositionSide, old_sl: float | None,
                                            new_sl: float | None) -> float | None:
-        if new_sl is None:
-            return old_sl
-        if old_sl is None:
-            return new_sl
-        return self._tighten_middle_runner_sl(side, old_sl, new_sl)
+        return middle_runner_helpers.tighten_optional_middle_runner_sl(side=side, old_sl=old_sl, new_sl=new_sl)
 
     def _apply_middle_runner_extension_trigger(
             self,
@@ -2388,30 +2354,30 @@ class BollCvdReclaimStrategy:
             boll: BollSnapshot,
             protective_sl: float | None,
     ) -> float | None:
-        ratio = min(max(self.config.middle_runner_extension_trigger_ratio, 0.0), 1.0)
-        if side == "LONG":
-            trigger_price = boll.middle + (boll.upper - boll.middle) * ratio
-            if current_price < trigger_price:
-                return protective_sl
-            new_sl = boll.middle if protective_sl is None else max(protective_sl, boll.middle)
-        else:
-            trigger_price = boll.middle - (boll.middle - boll.lower) * ratio
-            if current_price > trigger_price:
-                return protective_sl
-            new_sl = boll.middle if protective_sl is None else min(protective_sl, boll.middle)
-        if not self.state.middle_runner_extension_triggered:
-            logger.warning(
-                "MIDDLE_RUNNER_EXTENSION_TRIGGERED | side=%s current_price=%.4f extension_trigger_price=%.4f protective_sl_price=%.4f boll_middle=%.4f boll_upper=%.4f boll_lower=%.4f",
-                side,
-                current_price,
-                trigger_price,
-                new_sl,
-                boll.middle,
-                boll.upper,
-                boll.lower,
-            )
-        self.state.middle_runner_extension_triggered = True
-        return new_sl
+        decision = middle_runner_helpers.apply_middle_runner_extension_trigger(
+            side=side,
+            current_price=current_price,
+            protective_sl=protective_sl,
+            boll_middle=boll.middle,
+            boll_upper=boll.upper,
+            boll_lower=boll.lower,
+            extension_trigger_ratio=self.config.middle_runner_extension_trigger_ratio,
+            already_triggered=self.state.middle_runner_extension_triggered,
+        )
+        if decision.extension_triggered:
+            if not self.state.middle_runner_extension_triggered:
+                logger.warning(
+                    "MIDDLE_RUNNER_EXTENSION_TRIGGERED | side=%s current_price=%.4f extension_trigger_price=%.4f protective_sl_price=%.4f boll_middle=%.4f boll_upper=%.4f boll_lower=%.4f",
+                    side,
+                    current_price,
+                    decision.trigger_price,
+                    decision.protective_sl,
+                    boll.middle,
+                    boll.upper,
+                    boll.lower,
+                )
+            self.state.middle_runner_extension_triggered = True
+        return decision.protective_sl
 
     def _calculate_three_stage_post_tp1_protective_sl(self, side: PositionSide, current_price: float,
                                                       boll: BollSnapshot) -> float | None:
