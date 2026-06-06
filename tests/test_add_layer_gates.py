@@ -482,5 +482,445 @@ class AddLayerGateTest(unittest.TestCase):
         self.assertIn("reason=middle_runner_active", "\n".join(logs.output))
 
 
+class AddLayerGatesPureTest(unittest.TestCase):
+    """Direct tests for src.strategies.add_layer_gates pure functions."""
+
+    def test_add_layer_gap_pct_layer_2_to_6_uses_base(self) -> None:
+        from src.strategies.add_layer_gates import add_layer_gap_pct_for_target_layer
+
+        for target_layer in range(2, 7):
+            with self.subTest(target_layer=target_layer):
+                result = add_layer_gap_pct_for_target_layer(
+                    target_layer=target_layer,
+                    add_layer_gap_pct=0.003,
+                    add_layer_gap_pct_layer_7_8=0.004,
+                    add_layer_gap_pct_layer_9_10=0.006,
+                    add_layer_gap_pct_layer_11_plus=0.008,
+                )
+                self.assertAlmostEqual(result, 0.003)
+
+    def test_add_layer_gap_pct_layer_7_to_8_uses_layer_7_8(self) -> None:
+        from src.strategies.add_layer_gates import add_layer_gap_pct_for_target_layer
+
+        for target_layer in range(7, 9):
+            with self.subTest(target_layer=target_layer):
+                result = add_layer_gap_pct_for_target_layer(
+                    target_layer=target_layer,
+                    add_layer_gap_pct=0.003,
+                    add_layer_gap_pct_layer_7_8=0.004,
+                    add_layer_gap_pct_layer_9_10=0.006,
+                    add_layer_gap_pct_layer_11_plus=0.008,
+                )
+                self.assertAlmostEqual(result, 0.004)
+
+    def test_add_layer_gap_pct_layer_9_to_10_uses_layer_9_10(self) -> None:
+        from src.strategies.add_layer_gates import add_layer_gap_pct_for_target_layer
+
+        for target_layer in range(9, 11):
+            with self.subTest(target_layer=target_layer):
+                result = add_layer_gap_pct_for_target_layer(
+                    target_layer=target_layer,
+                    add_layer_gap_pct=0.003,
+                    add_layer_gap_pct_layer_7_8=0.004,
+                    add_layer_gap_pct_layer_9_10=0.006,
+                    add_layer_gap_pct_layer_11_plus=0.008,
+                )
+                self.assertAlmostEqual(result, 0.006)
+
+    def test_add_layer_gap_pct_layer_11_plus_uses_layer_11_plus(self) -> None:
+        from src.strategies.add_layer_gates import add_layer_gap_pct_for_target_layer
+
+        for target_layer in (11, 12, 15, 20):
+            with self.subTest(target_layer=target_layer):
+                result = add_layer_gap_pct_for_target_layer(
+                    target_layer=target_layer,
+                    add_layer_gap_pct=0.003,
+                    add_layer_gap_pct_layer_7_8=0.004,
+                    add_layer_gap_pct_layer_9_10=0.006,
+                    add_layer_gap_pct_layer_11_plus=0.008,
+                )
+                self.assertAlmostEqual(result, 0.008)
+
+    def test_check_add_gap_long_passed(self) -> None:
+        from src.strategies.add_layer_gates import check_add_gap
+
+        decision = check_add_gap(
+            side="LONG",
+            price=99.70,
+            last_entry_price=100.0,
+            target_layer=2,
+            add_layer_gap_pct=0.003,
+            add_layer_gap_pct_layer_7_8=0.004,
+            add_layer_gap_pct_layer_9_10=0.006,
+            add_layer_gap_pct_layer_11_plus=0.008,
+        )
+        self.assertTrue(decision.ok)
+        self.assertAlmostEqual(decision.gap_pct, 0.003)
+        self.assertAlmostEqual(decision.required_price, 99.70)
+
+    def test_check_add_gap_long_blocked(self) -> None:
+        from src.strategies.add_layer_gates import check_add_gap
+
+        decision = check_add_gap(
+            side="LONG",
+            price=99.80,
+            last_entry_price=100.0,
+            target_layer=2,
+            add_layer_gap_pct=0.003,
+            add_layer_gap_pct_layer_7_8=0.004,
+            add_layer_gap_pct_layer_9_10=0.006,
+            add_layer_gap_pct_layer_11_plus=0.008,
+        )
+        self.assertFalse(decision.ok)
+        self.assertAlmostEqual(decision.gap_pct, 0.003)
+        self.assertAlmostEqual(decision.required_price, 99.70)
+
+    def test_check_add_gap_short_passed(self) -> None:
+        from src.strategies.add_layer_gates import check_add_gap
+
+        decision = check_add_gap(
+            side="SHORT",
+            price=100.30,
+            last_entry_price=100.0,
+            target_layer=2,
+            add_layer_gap_pct=0.003,
+            add_layer_gap_pct_layer_7_8=0.004,
+            add_layer_gap_pct_layer_9_10=0.006,
+            add_layer_gap_pct_layer_11_plus=0.008,
+        )
+        self.assertTrue(decision.ok)
+        self.assertAlmostEqual(decision.gap_pct, 0.003)
+        self.assertAlmostEqual(decision.required_price, 100.30)
+
+    def test_check_add_gap_short_blocked(self) -> None:
+        from src.strategies.add_layer_gates import check_add_gap
+
+        decision = check_add_gap(
+            side="SHORT",
+            price=100.20,
+            last_entry_price=100.0,
+            target_layer=2,
+            add_layer_gap_pct=0.003,
+            add_layer_gap_pct_layer_7_8=0.004,
+            add_layer_gap_pct_layer_9_10=0.006,
+            add_layer_gap_pct_layer_11_plus=0.008,
+        )
+        self.assertFalse(decision.ok)
+        self.assertAlmostEqual(decision.gap_pct, 0.003)
+        self.assertAlmostEqual(decision.required_price, 100.30)
+
+    def test_check_add_gap_missing_last_entry(self) -> None:
+        from src.strategies.add_layer_gates import check_add_gap
+
+        for bad_price in (None, 0.0, -1.0):
+            with self.subTest(last_entry_price=bad_price):
+                decision = check_add_gap(
+                    side="LONG",
+                    price=99.0,
+                    last_entry_price=bad_price,
+                    target_layer=2,
+                    add_layer_gap_pct=0.003,
+                    add_layer_gap_pct_layer_7_8=0.004,
+                    add_layer_gap_pct_layer_9_10=0.006,
+                    add_layer_gap_pct_layer_11_plus=0.008,
+                )
+                self.assertFalse(decision.ok)
+                self.assertAlmostEqual(decision.gap_pct, 0.003)
+                self.assertAlmostEqual(decision.required_price, 0.0)
+
+    def test_check_base_add_timing_missing_last_entry(self) -> None:
+        from src.strategies.add_layer_gates import check_base_add_timing
+
+        decision = check_base_add_timing(
+            side="LONG",
+            price=99.0,
+            ts_ms=1_000_000,
+            target_layer=2,
+            layers=1,
+            last_entry_price=None,
+            last_order_ts_ms=0,
+            first_add_block_seconds=1800,
+            add_min_interval_seconds=600,
+            add_layer_gap_pct=0.003,
+            add_layer_gap_pct_layer_7_8=0.004,
+            add_layer_gap_pct_layer_9_10=0.006,
+            add_layer_gap_pct_layer_11_plus=0.008,
+        )
+        self.assertFalse(decision.ok)
+        self.assertEqual(decision.reason, "missing_last_entry")
+
+    def test_check_base_add_timing_first_add_blocked(self) -> None:
+        from src.strategies.add_layer_gates import check_base_add_timing
+
+        decision = check_base_add_timing(
+            side="LONG",
+            price=99.0,
+            ts_ms=1_000_000,
+            target_layer=2,
+            layers=1,
+            last_entry_price=100.0,
+            last_order_ts_ms=900_000,  # 100s ago, < 1800s
+            first_add_block_seconds=1800,
+            add_min_interval_seconds=600,
+            add_layer_gap_pct=0.003,
+            add_layer_gap_pct_layer_7_8=0.004,
+            add_layer_gap_pct_layer_9_10=0.006,
+            add_layer_gap_pct_layer_11_plus=0.008,
+        )
+        self.assertFalse(decision.ok)
+        self.assertEqual(decision.reason, "first_add_block")
+
+    def test_check_base_add_timing_first_add_allowed(self) -> None:
+        from src.strategies.add_layer_gates import check_base_add_timing
+
+        decision = check_base_add_timing(
+            side="LONG",
+            price=99.0,
+            ts_ms=3_000_000,
+            target_layer=2,
+            layers=1,
+            last_entry_price=100.0,
+            last_order_ts_ms=1_000_000,  # 2000s ago, > 1800s
+            first_add_block_seconds=1800,
+            add_min_interval_seconds=600,
+            add_layer_gap_pct=0.003,
+            add_layer_gap_pct_layer_7_8=0.004,
+            add_layer_gap_pct_layer_9_10=0.006,
+            add_layer_gap_pct_layer_11_plus=0.008,
+        )
+        self.assertTrue(decision.ok)
+        self.assertEqual(decision.reason, "ok")
+
+    def test_check_base_add_timing_add_interval_blocked(self) -> None:
+        from src.strategies.add_layer_gates import check_base_add_timing
+
+        decision = check_base_add_timing(
+            side="LONG",
+            price=99.70,  # 0.3% adverse gap
+            ts_ms=1_500_000,
+            target_layer=2,
+            layers=2,
+            last_entry_price=100.0,
+            last_order_ts_ms=1_000_000,  # 500s ago < 600s
+            first_add_block_seconds=1800,
+            add_min_interval_seconds=600,
+            add_layer_gap_pct=0.003,
+            add_layer_gap_pct_layer_7_8=0.004,
+            add_layer_gap_pct_layer_9_10=0.006,
+            add_layer_gap_pct_layer_11_plus=0.008,
+        )
+        self.assertFalse(decision.ok)
+        self.assertEqual(decision.reason, "add_interval")
+
+    def test_check_base_add_timing_add_interval_bypassed(self) -> None:
+        from src.strategies.add_layer_gates import check_base_add_timing
+
+        # adverse_gap = (100 - 99.39) / 100 = 0.0061 >= bypass_gap = 0.006
+        decision = check_base_add_timing(
+            side="LONG",
+            price=99.39,
+            ts_ms=1_500_000,
+            target_layer=2,
+            layers=2,
+            last_entry_price=100.0,
+            last_order_ts_ms=1_000_000,  # 500s ago < 600s
+            first_add_block_seconds=1800,
+            add_min_interval_seconds=600,
+            add_layer_gap_pct=0.003,
+            add_layer_gap_pct_layer_7_8=0.004,
+            add_layer_gap_pct_layer_9_10=0.006,
+            add_layer_gap_pct_layer_11_plus=0.008,
+        )
+        self.assertTrue(decision.ok)
+        self.assertEqual(decision.reason, "ok")
+
+    def test_check_base_add_timing_elapsed_passes_interval(self) -> None:
+        from src.strategies.add_layer_gates import check_base_add_timing
+
+        decision = check_base_add_timing(
+            side="LONG",
+            price=99.70,
+            ts_ms=2_000_000,
+            target_layer=2,
+            layers=2,
+            last_entry_price=100.0,
+            last_order_ts_ms=1_000_000,  # 1000s ago > 600s
+            first_add_block_seconds=1800,
+            add_min_interval_seconds=600,
+            add_layer_gap_pct=0.003,
+            add_layer_gap_pct_layer_7_8=0.004,
+            add_layer_gap_pct_layer_9_10=0.006,
+            add_layer_gap_pct_layer_11_plus=0.008,
+        )
+        self.assertTrue(decision.ok)
+        self.assertEqual(decision.reason, "ok")
+
+    def test_check_add_avg_improvement_long_passed(self) -> None:
+        from src.strategies.add_layer_gates import check_add_avg_improvement
+
+        decision = check_add_avg_improvement(
+            side="LONG",
+            price=99.0,  # cheaper buy lowers avg
+            required_improvement_pct=0.0012,
+            old_qty=1.0,
+            old_notional=100.0,
+            old_avg=100.0,
+            add_qty=1.0,
+        )
+        self.assertTrue(decision.ok)
+        self.assertGreaterEqual(decision.improvement_pct, 0.0012)
+        self.assertLess(decision.projected_avg, 100.0)
+
+    def test_check_add_avg_improvement_long_blocked(self) -> None:
+        from src.strategies.add_layer_gates import check_add_avg_improvement
+
+        decision = check_add_avg_improvement(
+            side="LONG",
+            price=99.70,  # small improvement
+            required_improvement_pct=0.0012,
+            old_qty=100.0,
+            old_notional=10_000.0,
+            old_avg=100.0,
+            add_qty=0.1,
+        )
+        self.assertFalse(decision.ok)
+        self.assertLess(decision.improvement_pct, 0.0012)
+
+    def test_check_add_avg_improvement_short_passed(self) -> None:
+        from src.strategies.add_layer_gates import check_add_avg_improvement
+
+        decision = check_add_avg_improvement(
+            side="SHORT",
+            price=101.0,  # higher short entry raises avg
+            required_improvement_pct=0.0012,
+            old_qty=1.0,
+            old_notional=100.0,
+            old_avg=100.0,
+            add_qty=1.0,
+        )
+        self.assertTrue(decision.ok)
+        self.assertGreaterEqual(decision.improvement_pct, 0.0012)
+        self.assertGreater(decision.projected_avg, 100.0)
+
+    def test_check_add_avg_improvement_short_blocked(self) -> None:
+        from src.strategies.add_layer_gates import check_add_avg_improvement
+
+        decision = check_add_avg_improvement(
+            side="SHORT",
+            price=100.30,  # small improvement
+            required_improvement_pct=0.0012,
+            old_qty=100.0,
+            old_notional=10_000.0,
+            old_avg=100.0,
+            add_qty=0.1,
+        )
+        self.assertFalse(decision.ok)
+        self.assertLess(decision.improvement_pct, 0.0012)
+
+    def test_check_add_avg_improvement_zero_required(self) -> None:
+        from src.strategies.add_layer_gates import check_add_avg_improvement
+
+        decision = check_add_avg_improvement(
+            side="LONG",
+            price=100.0,
+            required_improvement_pct=0.0,
+            old_qty=1.0,
+            old_notional=100.0,
+            old_avg=100.0,
+            add_qty=0.0,
+        )
+        self.assertTrue(decision.ok)
+        self.assertAlmostEqual(decision.improvement_pct, 0.0)
+        self.assertAlmostEqual(decision.projected_avg, 100.0)
+
+    def test_check_add_avg_improvement_zero_old_qty(self) -> None:
+        from src.strategies.add_layer_gates import check_add_avg_improvement
+
+        decision = check_add_avg_improvement(
+            side="LONG",
+            price=99.0,
+            required_improvement_pct=0.0012,
+            old_qty=0.0,
+            old_notional=10_000.0,
+            old_avg=100.0,
+            add_qty=0.1,
+        )
+        self.assertFalse(decision.ok)
+        self.assertAlmostEqual(decision.improvement_pct, 0.0)
+        self.assertAlmostEqual(decision.projected_avg, 100.0)
+
+    def test_check_add_avg_improvement_zero_old_notional(self) -> None:
+        from src.strategies.add_layer_gates import check_add_avg_improvement
+
+        decision = check_add_avg_improvement(
+            side="LONG",
+            price=99.0,
+            required_improvement_pct=0.0012,
+            old_qty=100.0,
+            old_notional=0.0,
+            old_avg=100.0,
+            add_qty=0.1,
+        )
+        self.assertFalse(decision.ok)
+        self.assertAlmostEqual(decision.improvement_pct, 0.0)
+        self.assertAlmostEqual(decision.projected_avg, 100.0)
+
+    def test_check_add_avg_improvement_zero_old_avg(self) -> None:
+        from src.strategies.add_layer_gates import check_add_avg_improvement
+
+        decision = check_add_avg_improvement(
+            side="LONG",
+            price=99.0,
+            required_improvement_pct=0.0012,
+            old_qty=100.0,
+            old_notional=10_000.0,
+            old_avg=0.0,
+            add_qty=0.1,
+        )
+        self.assertFalse(decision.ok)
+        self.assertAlmostEqual(decision.improvement_pct, 0.0)
+        self.assertAlmostEqual(decision.projected_avg, 0.0)
+
+    def test_check_add_avg_improvement_zero_add_qty(self) -> None:
+        from src.strategies.add_layer_gates import check_add_avg_improvement
+
+        decision = check_add_avg_improvement(
+            side="LONG",
+            price=99.0,
+            required_improvement_pct=0.0012,
+            old_qty=100.0,
+            old_notional=10_000.0,
+            old_avg=100.0,
+            add_qty=0.0,
+        )
+        self.assertFalse(decision.ok)
+        self.assertAlmostEqual(decision.improvement_pct, 0.0)
+        self.assertAlmostEqual(decision.projected_avg, 100.0)
+
+    def test_add_elapsed_seconds(self) -> None:
+        from src.strategies.add_layer_gates import add_elapsed_seconds
+
+        self.assertAlmostEqual(add_elapsed_seconds(ts_ms=1_500_000, last_order_ts_ms=1_000_000), 500.0)
+        self.assertAlmostEqual(add_elapsed_seconds(ts_ms=500_000, last_order_ts_ms=1_000_000), 0.0)
+
+    def test_adverse_gap_pct_long(self) -> None:
+        from src.strategies.add_layer_gates import adverse_gap_pct
+
+        self.assertAlmostEqual(adverse_gap_pct(side="LONG", price=99.0, last_entry_price=100.0), 0.01)
+        self.assertAlmostEqual(adverse_gap_pct(side="LONG", price=101.0, last_entry_price=100.0), -0.01)
+
+    def test_adverse_gap_pct_short(self) -> None:
+        from src.strategies.add_layer_gates import adverse_gap_pct
+
+        self.assertAlmostEqual(adverse_gap_pct(side="SHORT", price=101.0, last_entry_price=100.0), 0.01)
+        self.assertAlmostEqual(adverse_gap_pct(side="SHORT", price=99.0, last_entry_price=100.0), -0.01)
+
+    def test_adverse_gap_pct_missing_last_entry(self) -> None:
+        from src.strategies.add_layer_gates import adverse_gap_pct
+
+        self.assertAlmostEqual(adverse_gap_pct(side="LONG", price=99.0, last_entry_price=None), 0.0)
+        self.assertAlmostEqual(adverse_gap_pct(side="LONG", price=99.0, last_entry_price=0.0), 0.0)
+
+
 if __name__ == "__main__":
     unittest.main()

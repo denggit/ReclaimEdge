@@ -9,6 +9,7 @@ from src.monitors.boll_band_breakout_monitor import BollSnapshot
 from src.position_management.cost_basis import calculate_remaining_breakeven_price
 from src.position_management.sidecar.model import trim_sidecar_legs_for_state
 from src.risk.simple_position_sizer import PositionSize, SimplePositionSizer
+from src.strategies import add_layer_gates
 from src.utils.log import get_logger
 
 logger = get_logger(__name__)
@@ -815,85 +816,74 @@ class BollCvdReclaimStrategy:
         )
 
     def _add_layer_gap_pct_for_target_layer(self, target_layer: int) -> float:
-        if target_layer >= 11:
-            return self.config.add_layer_gap_pct_layer_11_plus
-        if target_layer >= 9:
-            return self.config.add_layer_gap_pct_layer_9_10
-        if target_layer >= 7:
-            return self.config.add_layer_gap_pct_layer_7_8
-        return self.config.add_layer_gap_pct
+        return add_layer_gates.add_layer_gap_pct_for_target_layer(
+            target_layer=target_layer,
+            add_layer_gap_pct=self.config.add_layer_gap_pct,
+            add_layer_gap_pct_layer_7_8=self.config.add_layer_gap_pct_layer_7_8,
+            add_layer_gap_pct_layer_9_10=self.config.add_layer_gap_pct_layer_9_10,
+            add_layer_gap_pct_layer_11_plus=self.config.add_layer_gap_pct_layer_11_plus,
+        )
 
     def _add_min_interval_bypass_gap_pct_for_target_layer(self, target_layer: int) -> float:
-        return self._add_layer_gap_pct_for_target_layer(target_layer) * 2
+        return add_layer_gates.add_min_interval_bypass_gap_pct_for_target_layer(
+            target_layer=target_layer,
+            add_layer_gap_pct=self.config.add_layer_gap_pct,
+            add_layer_gap_pct_layer_7_8=self.config.add_layer_gap_pct_layer_7_8,
+            add_layer_gap_pct_layer_9_10=self.config.add_layer_gap_pct_layer_9_10,
+            add_layer_gap_pct_layer_11_plus=self.config.add_layer_gap_pct_layer_11_plus,
+        )
 
     def _add_gap_passed(self, side: PositionSide, price: float, target_layer: int) -> tuple[bool, float, float]:
-        gap_pct = self._add_layer_gap_pct_for_target_layer(target_layer)
-        last = self.state.last_entry_price
-        if last is None or last <= 0:
-            return False, gap_pct, 0.0
-
-        if side == "LONG":
-            required_price = last * (1 - gap_pct)
-            return price <= required_price, gap_pct, required_price
-
-        required_price = last * (1 + gap_pct)
-        return price >= required_price, gap_pct, required_price
+        decision = add_layer_gates.check_add_gap(
+            side=side,
+            price=price,
+            last_entry_price=self.state.last_entry_price,
+            target_layer=target_layer,
+            add_layer_gap_pct=self.config.add_layer_gap_pct,
+            add_layer_gap_pct_layer_7_8=self.config.add_layer_gap_pct_layer_7_8,
+            add_layer_gap_pct_layer_9_10=self.config.add_layer_gap_pct_layer_9_10,
+            add_layer_gap_pct_layer_11_plus=self.config.add_layer_gap_pct_layer_11_plus,
+        )
+        return decision.ok, decision.gap_pct, decision.required_price
 
     def _add_avg_improvement_passed(self, side: PositionSide, price: float, target_layer: int) -> tuple[
         bool, float, float]:
-        required = self.config.add_min_avg_improvement_pct
-        if required <= 0:
-            return True, 0.0, self.state.avg_entry_price
-
-        old_qty = self.state.total_entry_qty
-        old_notional = self.state.total_entry_notional
-        old_avg = self.state.avg_entry_price
         size = self.sizer.calculate(price, layer_index=target_layer)
         add_qty = size.eth_qty
-        if old_qty <= 0 or old_notional <= 0 or old_avg <= 0 or add_qty <= 0:
-            return False, 0.0, old_avg
-
-        projected_qty = old_qty + add_qty
-        projected_notional = old_notional + price * add_qty
-        projected_avg = projected_notional / projected_qty
-        if side == "LONG":
-            improvement_pct = (old_avg - projected_avg) / old_avg
-        else:
-            improvement_pct = (projected_avg - old_avg) / old_avg
-        return improvement_pct >= required, improvement_pct, projected_avg
+        decision = add_layer_gates.check_add_avg_improvement(
+            side=side,
+            price=price,
+            required_improvement_pct=self.config.add_min_avg_improvement_pct,
+            old_qty=self.state.total_entry_qty,
+            old_notional=self.state.total_entry_notional,
+            old_avg=self.state.avg_entry_price,
+            add_qty=add_qty,
+        )
+        return decision.ok, decision.improvement_pct, decision.projected_avg
 
     def _add_timing_passed(self, side: PositionSide, price: float, ts_ms: int, target_layer: int) -> tuple[bool, str]:
-        last = self.state.last_entry_price
-        if last is None or last <= 0:
-            return False, "missing_last_entry"
-
-        elapsed_seconds = self._add_elapsed_seconds(ts_ms)
-        if self.state.layers == 1:
-            if elapsed_seconds < self.config.first_add_block_seconds:
-                return False, "first_add_block"
-            return True, "ok"
-
-        if self.state.layers >= 2:
-            adverse_gap_pct = self._adverse_gap_pct(side, price)
-            bypass_gap_pct = self._add_min_interval_bypass_gap_pct_for_target_layer(target_layer)
-            if (
-                    elapsed_seconds < self.config.add_min_interval_seconds
-                    and adverse_gap_pct < bypass_gap_pct
-            ):
-                return False, "add_interval"
-
-        return True, "ok"
+        decision = add_layer_gates.check_base_add_timing(
+            side=side,
+            price=price,
+            ts_ms=ts_ms,
+            target_layer=target_layer,
+            layers=self.state.layers,
+            last_entry_price=self.state.last_entry_price,
+            last_order_ts_ms=self.state.last_order_ts_ms,
+            first_add_block_seconds=self.config.first_add_block_seconds,
+            add_min_interval_seconds=self.config.add_min_interval_seconds,
+            add_layer_gap_pct=self.config.add_layer_gap_pct,
+            add_layer_gap_pct_layer_7_8=self.config.add_layer_gap_pct_layer_7_8,
+            add_layer_gap_pct_layer_9_10=self.config.add_layer_gap_pct_layer_9_10,
+            add_layer_gap_pct_layer_11_plus=self.config.add_layer_gap_pct_layer_11_plus,
+        )
+        return decision.ok, decision.reason
 
     def _add_elapsed_seconds(self, ts_ms: int) -> float:
-        return max((ts_ms - self.state.last_order_ts_ms) / 1000, 0.0)
+        return add_layer_gates.add_elapsed_seconds(ts_ms=ts_ms, last_order_ts_ms=self.state.last_order_ts_ms)
 
     def _adverse_gap_pct(self, side: PositionSide, price: float) -> float:
-        last = self.state.last_entry_price
-        if last is None or last <= 0:
-            return 0.0
-        if side == "LONG":
-            return (last - price) / last
-        return (price - last) / last
+        return add_layer_gates.adverse_gap_pct(side=side, price=price, last_entry_price=self.state.last_entry_price)
 
     def _log_add_skip_once_per_window(
             self,
