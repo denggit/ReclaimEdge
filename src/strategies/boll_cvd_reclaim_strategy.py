@@ -11,6 +11,7 @@ from src.position_management.sidecar.model import trim_sidecar_legs_for_state
 from src.risk.simple_position_sizer import PositionSize, SimplePositionSizer
 from src.strategies import add_layer_gates
 from src.strategies import middle_runner as middle_runner_helpers
+from src.strategies import near_tp_reduce as near_tp_helpers
 from src.strategies import three_stage_runner as three_stage_helpers
 from src.strategies import tp_plan_selector
 from src.utils.log import get_logger
@@ -1784,35 +1785,45 @@ class BollCvdReclaimStrategy:
             return None
         if self.state.near_tp_protected:
             return None
-        if self.state.tp_plan == "MIDDLE_RUNNER" or self.state.middle_runner_pending or self.state.middle_runner_active:
-            return None
-        if self.state.tp_plan == "THREE_STAGE_RUNNER" or self.state.three_stage_runner_enabled_for_position or self.state.trend_runner_active:
-            return None
-        if self.state.tp_plan == "SPLIT_PARTIAL_FINAL" and not self.state.partial_tp_consumed:
+
+        plan_gate = near_tp_helpers.near_tp_plan_allowed(
+            tp_plan=self.state.tp_plan,
+            middle_runner_pending=self.state.middle_runner_pending,
+            middle_runner_active=self.state.middle_runner_active,
+            three_stage_runner_enabled_for_position=self.state.three_stage_runner_enabled_for_position,
+            trend_runner_active=self.state.trend_runner_active,
+            partial_tp_consumed=self.state.partial_tp_consumed,
+        )
+        if not plan_gate.allowed:
             return None
 
         side = self.state.side
         avg = self.state.avg_entry_price
         final_tp = self.state.tp_price
-        if side == "LONG":
-            if final_tp <= avg:
-                return None
-            progress = (price - avg) / (final_tp - avg)
-            profit_pct = (price - avg) / avg
-            near_by_distance = final_tp - price <= self.config.near_tp_max_distance_usd
-        else:
-            if final_tp >= avg:
-                return None
-            progress = (avg - price) / (avg - final_tp)
-            profit_pct = (avg - price) / avg
-            near_by_distance = price - final_tp <= self.config.near_tp_max_distance_usd
 
-        reduce_profit_ok = profit_pct >= self.config.near_tp_min_reduce_profit_pct
-        min_profit_seen_ok = profit_pct >= self.config.near_tp_min_profit_pct
-        near_by_progress = progress >= self.config.near_tp_min_progress_ratio
+        progress_result = near_tp_helpers.calculate_near_tp_progress(
+            side=side,
+            price=price,
+            avg_entry_price=avg,
+            final_tp_price=final_tp,
+            near_tp_max_distance_usd=self.config.near_tp_max_distance_usd,
+            near_tp_min_reduce_profit_pct=self.config.near_tp_min_reduce_profit_pct,
+            near_tp_min_profit_pct=self.config.near_tp_min_profit_pct,
+            near_tp_min_progress_ratio=self.config.near_tp_min_progress_ratio,
+        )
+        if progress_result is None:
+            return None
+
+        progress = progress_result.progress
+        profit_pct = progress_result.profit_pct
+        near_by_distance = progress_result.near_by_distance
+        near_by_progress = progress_result.near_by_progress
+        reduce_profit_ok = progress_result.reduce_profit_ok
+        min_profit_seen_ok = progress_result.min_profit_seen_ok
 
         if not self.state.near_tp_armed:
-            if (near_by_progress or near_by_distance) and min_profit_seen_ok:
+            arming = near_tp_helpers.should_arm_near_tp(progress=progress_result)
+            if arming:
                 self.state.near_tp_armed = True
                 self.state.near_tp_best_price = price
                 self.state.near_tp_armed_ts_ms = ts_ms
@@ -1830,34 +1841,35 @@ class BollCvdReclaimStrategy:
             else:
                 return None
 
-        old_best = self.state.near_tp_best_price if self.state.near_tp_best_price is not None else price
-        if side == "LONG":
-            best = max(old_best, price)
-        else:
-            best = min(old_best, price)
-        if best != old_best:
+        best_decision = near_tp_helpers.update_near_tp_best_price(
+            side=side,
+            old_best_price=self.state.near_tp_best_price,
+            price=price,
+        )
+        best = best_decision.best_price
+        if best_decision.changed:
             self.state.near_tp_best_price = best
             logger.info("NEAR_TP_BEST_UPDATED | side=%s best_price=%.4f price=%.4f", side, best, price)
         else:
             self.state.near_tp_best_price = best
 
         if self.state.near_tp_reduce_pending:
-            if reduce_profit_ok:
+            if near_tp_helpers.near_tp_pending_can_reduce(reduce_profit_ok=reduce_profit_ok):
                 return self._near_tp_reduce_intent(price, ts_ms, boll, cvd, progress, best, 0.0, 0.0)
             return None
 
-        if side == "LONG":
-            giveback = best - price
-            floating_profit_path = best - avg
-        else:
-            giveback = price - best
-            floating_profit_path = avg - best
-        giveback_threshold = max(
-            self.config.near_tp_giveback_usd,
-            price * self.config.near_tp_giveback_pct,
-            floating_profit_path * self.config.near_tp_giveback_profit_ratio,
+        giveback_result = near_tp_helpers.calculate_near_tp_giveback(
+            side=side,
+            price=price,
+            avg_entry_price=avg,
+            best_price=best,
+            near_tp_giveback_usd=self.config.near_tp_giveback_usd,
+            near_tp_giveback_pct=self.config.near_tp_giveback_pct,
+            near_tp_giveback_profit_ratio=self.config.near_tp_giveback_profit_ratio,
         )
-        if giveback < giveback_threshold:
+        giveback = giveback_result.giveback
+        giveback_threshold = giveback_result.threshold
+        if not giveback_result.triggered:
             return None
 
         logger.warning(
@@ -1899,9 +1911,11 @@ class BollCvdReclaimStrategy:
         side = self.state.side
         if side is None or self.state.tp_price is None:
             return None
-        pct = self.config.near_tp_protective_sl_profit_pct
-        protective_sl = self.state.avg_entry_price * (1 + pct) if side == "LONG" else self.state.avg_entry_price * (
-                    1 - pct)
+        protective_sl = near_tp_helpers.calculate_near_tp_protective_sl(
+            side=side,
+            avg_entry_price=self.state.avg_entry_price,
+            near_tp_protective_sl_profit_pct=self.config.near_tp_protective_sl_profit_pct,
+        )
         size = self.sizer.calculate(price, layer_index=max(self.state.layers, 1))
         if self.config.near_tp_shadow_enabled and not self.config.near_tp_reduce_enabled:
             logger.warning(
@@ -1989,18 +2003,22 @@ class BollCvdReclaimStrategy:
         )
         self.state.net_remaining_breakeven_price = float(basis.buffered_breakeven_price or 0.0)
 
+    def _apply_near_tp_state_values(self, values: near_tp_helpers.NearTpStateValues) -> None:
+        self.state.near_tp_armed = values.near_tp_armed
+        self.state.near_tp_reduce_pending = values.near_tp_reduce_pending
+        self.state.near_tp_protected = values.near_tp_protected
+        self.state.near_tp_best_price = values.near_tp_best_price
+        self.state.near_tp_armed_ts_ms = values.near_tp_armed_ts_ms
+        self.state.near_tp_pending_ts_ms = values.near_tp_pending_ts_ms
+        self.state.near_tp_trigger_ts_ms = values.near_tp_trigger_ts_ms
+        self.state.near_tp_protective_sl_price = values.near_tp_protective_sl_price
+        self.state.near_tp_protective_sl_order_id = values.near_tp_protective_sl_order_id
+        self.state.near_tp_add_disabled = values.near_tp_add_disabled
+        self.state.near_tp_sidecar_skip_logged = values.near_tp_sidecar_skip_logged
+
     def _reset_near_tp_state(self) -> None:
-        self.state.near_tp_armed = False
-        self.state.near_tp_reduce_pending = False
-        self.state.near_tp_protected = False
-        self.state.near_tp_best_price = None
-        self.state.near_tp_armed_ts_ms = 0
-        self.state.near_tp_pending_ts_ms = 0
-        self.state.near_tp_trigger_ts_ms = 0
-        self.state.near_tp_protective_sl_price = None
-        self.state.near_tp_protective_sl_order_id = None
-        self.state.near_tp_add_disabled = False
-        self.state.near_tp_sidecar_skip_logged = False
+        values = near_tp_helpers.reset_near_tp_state_values()
+        self._apply_near_tp_state_values(values)
 
     def _apply_middle_runner_state_values(self, values: middle_runner_helpers.MiddleRunnerStateValues) -> None:
         self.state.middle_runner_enabled_for_position = values.middle_runner_enabled_for_position
