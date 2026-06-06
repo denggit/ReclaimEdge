@@ -8,12 +8,13 @@ from typing import Any, TYPE_CHECKING
 from dataclasses import replace
 
 from src.execution import order_specs
+from src.execution.trader import LiveTradeResult, PositionSnapshot
 from src.position_management.sidecar.model import sanitize_okx_client_order_id
 from src.strategies.boll_cvd_reclaim_strategy import PositionSide, TradeIntent
 from src.utils.log import get_logger
 
 if TYPE_CHECKING:
-    from src.execution.trader import LiveTradeResult, PositionSnapshot, Trader
+    from src.execution.trader import Trader
 
 logger = get_logger(__name__)
 
@@ -1152,9 +1153,3 @@ class TpSlExecutionManager:
         if ok:
             logger.warning("THREE_STAGE_TP1_PROTECTIVE_SL_CANCELLED | algoId=%s", order_id)
         return ok
-
-
-# Delayed import — safe because trader.py fully defines LiveTradeResult and
-# PositionSnapshot before this module is imported (import happens inside
-# Trader.__init__).
-from src.execution.trader import LiveTradeResult, PositionSnapshot  # noqa: E402

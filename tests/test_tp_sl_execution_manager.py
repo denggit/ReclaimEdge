@@ -532,5 +532,44 @@ class TpSlExecutionManagerTest(unittest.IsolatedAsyncioTestCase):
         self.assertLessEqual(len(requests[0][2]["clOrdId"]), 32)
 
 
+    # ------------------------------------------------------------------
+    # Regression: LiveTradeResult / PositionSnapshot runtime import
+    # ------------------------------------------------------------------
+
+    async def test_execute_near_tp_reduce_no_position_returns_LiveTradeResult(self) -> None:
+        """execute_near_tp_reduce with no position returns LiveTradeResult (runtime import check)."""
+        trader = make_trader()
+
+        async def fake_fetch_snapshot():  # type: ignore[no-untyped-def]
+            return trader_module.PositionSnapshot(None, Decimal("0"), 0.0, 0.0, Decimal("0"))
+
+        trader.fetch_position_snapshot = fake_fetch_snapshot
+
+        manager = TpSlExecutionManager(trader)
+        intent = make_intent(intent_type="NEAR_TP_REDUCE")
+        result = await manager.execute_near_tp_reduce(intent)
+
+        self.assertIsInstance(result, trader_module.LiveTradeResult)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.message, "no position")
+
+    async def test_replace_take_profit_no_position_returns_LiveTradeResult(self) -> None:
+        """replace_take_profit with no net position returns LiveTradeResult (runtime import check)."""
+        trader = make_trader()
+
+        async def fake_fetch_snapshot():  # type: ignore[no-untyped-def]
+            return trader_module.PositionSnapshot(None, Decimal("0"), 0.0, 0.0, Decimal("0"))
+
+        trader.fetch_position_snapshot = fake_fetch_snapshot
+
+        manager = TpSlExecutionManager(trader)
+        intent = make_intent()
+        result = await manager.replace_take_profit(intent)
+
+        self.assertIsInstance(result, trader_module.LiveTradeResult)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.message, "no position to protect")
+
+
 if __name__ == "__main__":
     unittest.main()
