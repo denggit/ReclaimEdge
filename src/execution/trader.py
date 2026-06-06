@@ -14,6 +14,7 @@ from typing import Any, Optional
 import aiohttp
 
 from config.env_loader import OKX_CONFIG
+from src.execution import order_specs
 from src.position_management.sidecar.model import sanitize_okx_client_order_id
 from src.strategies.boll_cvd_reclaim_strategy import PositionSide, TradeIntent
 from src.utils.log import get_logger
@@ -148,17 +149,13 @@ class Trader:
             return await self.replace_take_profit(intent)
 
         contracts = self.eth_qty_to_contracts(Decimal(str(intent.size.eth_qty)))
-        side = "buy" if intent.side == "LONG" else "sell"
-        body: dict[str, Any] = {
-            "instId": self.symbol,
-            "tdMode": self.td_mode,
-            "side": side,
-            "ordType": "market",
-            "sz": self.decimal_to_str(contracts),
-        }
-        pos_side = self.pos_side(intent.side)
-        if pos_side:
-            body["posSide"] = pos_side
+        body = order_specs.build_market_entry_order_body(
+            inst_id=self.symbol,
+            td_mode=self.td_mode,
+            side=intent.side,
+            contracts_text=self.decimal_to_str(contracts),
+            pos_side_mode=self.pos_side_mode,
+        )
 
         res = await self.request("POST", "/api/v5/trade/order", body)
         order_id = self.extract_order_id(res)
@@ -777,103 +774,81 @@ class Trader:
         return contracts
 
     def _build_take_profit_order_specs(self, intent: TradeIntent) -> list[tuple[str, Decimal, float]]:
-        partial_tp_price = getattr(intent, "partial_tp_price", None)
-        partial_tp_ratio = Decimal(str(getattr(intent, "partial_tp_ratio", 0.0)))
-        tp_plan = getattr(intent, "tp_plan", "SINGLE")
-        if tp_plan == "THREE_STAGE_RUNNER":
-            return self._build_three_stage_order_specs(intent)
-        if getattr(intent, "partial_tp_consumed", False) or (
-                tp_plan == "MIDDLE_RUNNER" and getattr(intent, "middle_runner_active", False)):
-            return [("final", self.position_contracts, intent.tp_price)]
-        if tp_plan not in {"SPLIT_PARTIAL_FINAL", "SPLIT_50_50",
-                           "MIDDLE_RUNNER"} or partial_tp_price is None or partial_tp_ratio <= 0 or partial_tp_ratio >= 1:
-            return [("final", self.position_contracts, intent.tp_price)]
-
-        partial_contracts = self.round_contracts_down(self.position_contracts * partial_tp_ratio)
-        final_contracts = self.position_contracts - partial_contracts
-        if partial_contracts < self.min_contracts or final_contracts < self.min_contracts:
-            logger.warning(
-                "SPLIT_TP_FALLBACK_SINGLE | reason=size_too_small total_contracts=%s partial_contracts=%s final_contracts=%s min_contracts=%s",
-                self.position_contracts,
-                partial_contracts,
-                final_contracts,
-                self.min_contracts,
-            )
-            return [("final", self.position_contracts, intent.tp_price)]
-        if tp_plan == "MIDDLE_RUNNER":
-            return [("middle", partial_contracts, float(partial_tp_price)),
-                    ("runner", final_contracts, intent.tp_price)]
-        return [("partial", partial_contracts, float(partial_tp_price)), ("final", final_contracts, intent.tp_price)]
-
-    def _build_three_stage_order_specs(self, intent: TradeIntent) -> list[tuple[str, Decimal, float]]:
-        tp1_price = getattr(intent, "three_stage_tp1_price", None)
-        tp2_price = getattr(intent, "three_stage_tp2_price", None)
-        tp1_ratio = Decimal(str(getattr(intent, "three_stage_tp1_ratio", 0.0)))
-        tp2_ratio = Decimal(str(getattr(intent, "three_stage_tp2_ratio", 0.0)))
-        if getattr(intent, "three_stage_tp1_consumed", False) and not getattr(intent, "three_stage_tp2_consumed",
-                                                                              False):
-            runner_ratio = Decimal(str(getattr(intent, "three_stage_runner_ratio", 0.0)))
-            remaining_ratio = tp2_ratio + runner_ratio
-            if tp2_price is None or tp2_ratio <= 0 or remaining_ratio <= 0:
+        decision = order_specs.build_take_profit_order_specs(
+            position_contracts=self.position_contracts,
+            min_contracts=self.min_contracts,
+            contract_precision=self.contract_precision,
+            tp_plan=getattr(intent, "tp_plan", "SINGLE"),
+            final_tp_price=intent.tp_price,
+            partial_tp_price=getattr(intent, "partial_tp_price", None),
+            partial_tp_ratio=Decimal(str(getattr(intent, "partial_tp_ratio", 0.0))),
+            partial_tp_consumed=bool(getattr(intent, "partial_tp_consumed", False)),
+            middle_runner_active=bool(getattr(intent, "middle_runner_active", False)),
+            three_stage_tp1_price=getattr(intent, "three_stage_tp1_price", None),
+            three_stage_tp2_price=getattr(intent, "three_stage_tp2_price", None),
+            three_stage_tp1_ratio=Decimal(str(getattr(intent, "three_stage_tp1_ratio", 0.0))),
+            three_stage_tp2_ratio=Decimal(str(getattr(intent, "three_stage_tp2_ratio", 0.0))),
+            three_stage_tp1_consumed=bool(getattr(intent, "three_stage_tp1_consumed", False)),
+            three_stage_tp2_consumed=bool(getattr(intent, "three_stage_tp2_consumed", False)),
+            three_stage_runner_ratio=Decimal(str(getattr(intent, "three_stage_runner_ratio", 0.0))),
+        )
+        reason = decision.fallback_reason
+        ctx = decision.fallback_context
+        if reason is not None and ctx is not None:
+            if reason == "SPLIT_TP_FALLBACK_SINGLE_SIZE_TOO_SMALL":
+                logger.warning(
+                    "SPLIT_TP_FALLBACK_SINGLE | reason=size_too_small total_contracts=%s partial_contracts=%s final_contracts=%s min_contracts=%s",
+                    ctx["total_contracts"],
+                    ctx["partial_contracts"],
+                    ctx["final_contracts"],
+                    ctx["min_contracts"],
+                )
+            elif reason == "THREE_STAGE_TP2_AFTER_TP1_INVALID_RATIOS":
                 logger.warning(
                     "THREE_STAGE_TP2_AFTER_TP1_FALLBACK | reason=invalid_ratios total_contracts=%s tp2_ratio=%s runner_ratio=%s tp2_price=%s",
-                    self.position_contracts,
-                    tp2_ratio,
-                    runner_ratio,
-                    tp2_price,
+                    ctx["total_contracts"],
+                    ctx["tp2_ratio"],
+                    ctx["runner_ratio"],
+                    ctx["tp2_price"],
                 )
-                return [("final", self.position_contracts, intent.tp_price)]
-            tp2_contracts = self.round_contracts_down(self.position_contracts * tp2_ratio / remaining_ratio)
-            runner_contracts = self.position_contracts - tp2_contracts
-            if tp2_contracts < self.min_contracts:
+            elif reason == "THREE_STAGE_TP2_AFTER_TP1_TP2_TOO_SMALL":
                 logger.warning(
                     "THREE_STAGE_TP2_AFTER_TP1_FALLBACK | reason=tp2_too_small total_contracts=%s tp2_contracts=%s runner_contracts=%s min_contracts=%s",
-                    self.position_contracts,
-                    tp2_contracts,
-                    runner_contracts,
-                    self.min_contracts,
+                    ctx["total_contracts"],
+                    ctx["tp2_contracts"],
+                    ctx["runner_contracts"],
+                    ctx["min_contracts"],
                 )
-                return [("final", self.position_contracts, intent.tp_price)]
-            if runner_contracts < self.min_contracts:
+            elif reason == "THREE_STAGE_TP2_AFTER_TP1_RUNNER_TOO_SMALL":
                 logger.warning(
                     "THREE_STAGE_TP2_AFTER_TP1_FALLBACK | reason=runner_too_small total_contracts=%s tp2_contracts=%s runner_contracts=%s min_contracts=%s",
-                    self.position_contracts,
-                    tp2_contracts,
-                    runner_contracts,
-                    self.min_contracts,
+                    ctx["total_contracts"],
+                    ctx["tp2_contracts"],
+                    ctx["runner_contracts"],
+                    ctx["min_contracts"],
                 )
-                return [("tp2_outer", self.position_contracts, float(tp2_price))]
-            return [("tp2_outer", tp2_contracts, float(tp2_price))]
-        if tp1_price is None or tp2_price is None or tp1_ratio <= 0 or tp2_ratio <= 0:
-            return [("final", self.position_contracts, intent.tp_price)]
-        tp1_contracts = self.round_contracts_down(self.position_contracts * tp1_ratio)
-        tp2_contracts = self.round_contracts_down(self.position_contracts * tp2_ratio)
-        runner_contracts = self.position_contracts - tp1_contracts - tp2_contracts
-        if tp1_contracts < self.min_contracts or tp2_contracts < self.min_contracts or runner_contracts < self.min_contracts:
-            logger.warning(
-                "THREE_STAGE_TP_FALLBACK_SINGLE | reason=size_too_small total_contracts=%s tp1_contracts=%s tp2_contracts=%s runner_contracts=%s min_contracts=%s",
-                self.position_contracts,
-                tp1_contracts,
-                tp2_contracts,
-                runner_contracts,
-                self.min_contracts,
-            )
-            return [("final", self.position_contracts, intent.tp_price)]
-        return [
-            ("tp1_middle", tp1_contracts, float(tp1_price)),
-            ("tp2_outer", tp2_contracts, float(tp2_price)),
-        ]
+            elif reason == "THREE_STAGE_TP_FALLBACK_SINGLE_SIZE_TOO_SMALL":
+                logger.warning(
+                    "THREE_STAGE_TP_FALLBACK_SINGLE | reason=size_too_small total_contracts=%s tp1_contracts=%s tp2_contracts=%s runner_contracts=%s min_contracts=%s",
+                    ctx["total_contracts"],
+                    ctx["tp1_contracts"],
+                    ctx["tp2_contracts"],
+                    ctx["runner_contracts"],
+                    ctx["min_contracts"],
+                )
+        return [(spec.label, spec.contracts, spec.price) for spec in decision.specs]
+
+    def _build_three_stage_order_specs(self, intent: TradeIntent) -> list[tuple[str, Decimal, float]]:
+        return self._build_take_profit_order_specs(intent)
 
     def _trend_runner_sl_contracts(self, intent: TradeIntent, net_contracts_for_sl: Decimal) -> Decimal:
-        if getattr(intent, "trend_runner_active", False):
-            return net_contracts_for_sl
-        runner_ratio = Decimal(str(getattr(intent, "three_stage_runner_ratio", 0.0)))
-        if runner_ratio <= 0 or runner_ratio >= 1:
-            return net_contracts_for_sl
-        contracts = self.round_contracts_down(net_contracts_for_sl * runner_ratio)
-        if contracts < self.min_contracts:
-            return net_contracts_for_sl
-        return contracts
+        return order_specs.trend_runner_sl_contracts(
+            net_contracts_for_sl=net_contracts_for_sl,
+            runner_ratio=Decimal(str(getattr(intent, "three_stage_runner_ratio", 0.0))),
+            min_contracts=self.min_contracts,
+            contract_precision=self.contract_precision,
+            trend_runner_active=bool(getattr(intent, "trend_runner_active", False)),
+        )
 
     async def _place_reduce_only_take_profit_orders(self, intent: TradeIntent,
                                                     specs: list[tuple[str, Decimal, float]]) -> list[str]:
@@ -895,35 +870,23 @@ class Trader:
         return placed_order_ids
 
     def _reduce_only_tp_order_body(self, side: PositionSide, contracts: Decimal, price: float) -> dict[str, Any]:
-        close_side = "sell" if side == "LONG" else "buy"
-        body: dict[str, Any] = {
-            "instId": self.symbol,
-            "tdMode": self.td_mode,
-            "side": close_side,
-            "ordType": "limit",
-            "px": self.price_to_str(price),
-            "sz": self.decimal_to_str(contracts),
-            "reduceOnly": "true",
-        }
-        pos_side = self.pos_side(side)
-        if pos_side:
-            body["posSide"] = pos_side
-        return body
+        return order_specs.build_reduce_only_tp_order_body(
+            inst_id=self.symbol,
+            td_mode=self.td_mode,
+            side=side,
+            contracts_text=self.decimal_to_str(contracts),
+            price_text=self.price_to_str(price),
+            pos_side_mode=self.pos_side_mode,
+        )
 
     def _reduce_only_market_order_body(self, side: PositionSide, contracts: Decimal) -> dict[str, Any]:
-        close_side = "sell" if side == "LONG" else "buy"
-        body: dict[str, Any] = {
-            "instId": self.symbol,
-            "tdMode": self.td_mode,
-            "side": close_side,
-            "ordType": "market",
-            "sz": self.decimal_to_str(contracts),
-            "reduceOnly": "true",
-        }
-        pos_side = self.pos_side(side)
-        if pos_side:
-            body["posSide"] = pos_side
-        return body
+        return order_specs.build_reduce_only_market_order_body(
+            inst_id=self.symbol,
+            td_mode=self.td_mode,
+            side=side,
+            contracts_text=self.decimal_to_str(contracts),
+            pos_side_mode=self.pos_side_mode,
+        )
 
     async def place_near_tp_protective_stop_with_retries(
             self,
@@ -1108,41 +1071,25 @@ class Trader:
 
     def _near_tp_protective_sl_algo_body(self, side: PositionSide, contracts: Decimal, stop_price: float) -> dict[
         str, Any]:
-        close_side = "sell" if side == "LONG" else "buy"
-        body: dict[str, Any] = {
-            "instId": self.symbol,
-            "tdMode": self.td_mode,
-            "side": close_side,
-            "ordType": "conditional",
-            "sz": self.decimal_to_str(contracts),
-            "slTriggerPx": self.price_to_str(stop_price),
-            "slOrdPx": "-1",
-            "slTriggerPxType": "last",
-            "reduceOnly": "true",
-        }
-        pos_side = self.pos_side(side)
-        if pos_side:
-            body["posSide"] = pos_side
-        return body
+        return order_specs.build_conditional_protective_sl_algo_body(
+            inst_id=self.symbol,
+            td_mode=self.td_mode,
+            side=side,
+            contracts_text=self.decimal_to_str(contracts),
+            stop_price_text=self.price_to_str(stop_price),
+            pos_side_mode=self.pos_side_mode,
+        )
 
     def _near_tp_fallback_conditional_close_body(self, side: PositionSide, contracts: Decimal, stop_price: float) -> \
     dict[str, Any]:
-        close_side = "sell" if side == "LONG" else "buy"
-        body: dict[str, Any] = {
-            "instId": self.symbol,
-            "tdMode": self.td_mode,
-            "side": close_side,
-            "ordType": "conditional",
-            "sz": self.decimal_to_str(contracts),
-            "slTriggerPx": self.price_to_str(stop_price),
-            "slOrdPx": "-1",
-            "slTriggerPxType": "last",
-            "reduceOnly": "true",
-        }
-        pos_side = self.pos_side(side)
-        if pos_side:
-            body["posSide"] = pos_side
-        return body
+        return order_specs.build_conditional_protective_sl_algo_body(
+            inst_id=self.symbol,
+            td_mode=self.td_mode,
+            side=side,
+            contracts_text=self.decimal_to_str(contracts),
+            stop_price_text=self.price_to_str(stop_price),
+            pos_side_mode=self.pos_side_mode,
+        )
 
     async def market_exit_remaining_position_with_retries(self, side: PositionSide, retry_count: int) -> tuple[
         bool, str]:
@@ -1274,24 +1221,23 @@ class Trader:
             if not managed_order_ids and not allow_unmanaged:
                 raise RuntimeError("reduce_only_order_identity_unknown")
             try:
-                await self.request("POST", "/api/v5/trade/cancel-order", {"instId": self.symbol, "ordId": ord_id})
+                await self.request("POST", "/api/v5/trade/cancel-order", order_specs.build_cancel_order_body(
+                    inst_id=self.symbol,
+                    order_id=ord_id,
+                ))
                 logger.info("Canceled existing reduce-only order | ordId=%s", ord_id)
             except Exception:
                 logger.exception("Failed to cancel existing reduce-only order | ordId=%s", ord_id)
 
     async def place_sidecar_market_order(self, *, side: PositionSide, eth_qty: float) -> dict[str, Any]:
         contracts = self.eth_qty_to_contracts(Decimal(str(eth_qty)))
-        order_side = "buy" if side == "LONG" else "sell"
-        body: dict[str, Any] = {
-            "instId": self.symbol,
-            "tdMode": self.td_mode,
-            "side": order_side,
-            "ordType": "market",
-            "sz": self.decimal_to_str(contracts),
-        }
-        pos_side = self.pos_side(side)
-        if pos_side:
-            body["posSide"] = pos_side
+        body = order_specs.build_market_entry_order_body(
+            inst_id=self.symbol,
+            td_mode=self.td_mode,
+            side=side,
+            contracts_text=self.decimal_to_str(contracts),
+            pos_side_mode=self.pos_side_mode,
+        )
         res = await self.request("POST", "/api/v5/trade/order", body)
         return {
             "order_id": self.extract_order_id(res),
@@ -1307,12 +1253,18 @@ class Trader:
             tp_price: float,
             client_order_id: str | None = None,
     ) -> str:
-        body = self._reduce_only_tp_order_body(side, Decimal(str(contracts)), float(tp_price))
         sent_client_order_id = ""
         if client_order_id:
             sent_client_order_id = sanitize_okx_client_order_id(client_order_id)
-            if sent_client_order_id:
-                body["clOrdId"] = sent_client_order_id
+        body = order_specs.build_reduce_only_tp_order_body(
+            inst_id=self.symbol,
+            td_mode=self.td_mode,
+            side=side,
+            contracts_text=self.decimal_to_str(Decimal(str(contracts))),
+            price_text=self.price_to_str(float(tp_price)),
+            pos_side_mode=self.pos_side_mode,
+            client_order_id=sent_client_order_id or None,
+        )
         res = await self.request("POST", "/api/v5/trade/order", body)
         order_id = self.extract_order_id(res)
         logger.warning(
@@ -1329,7 +1281,10 @@ class Trader:
         if not order_id:
             return True
         try:
-            await self.request("POST", "/api/v5/trade/cancel-order", {"instId": self.symbol, "ordId": order_id})
+            await self.request("POST", "/api/v5/trade/cancel-order", order_specs.build_cancel_order_body(
+                inst_id=self.symbol,
+                order_id=order_id,
+            ))
             logger.warning("SIDECAR_TP_CANCELLED | ordId=%s", order_id)
             return True
         except Exception as exc:
@@ -1377,7 +1332,10 @@ class Trader:
         if not order_id:
             return True
         try:
-            await self.request("POST", "/api/v5/trade/cancel-algos", [{"instId": self.symbol, "algoId": order_id}])
+            await self.request("POST", "/api/v5/trade/cancel-algos", order_specs.build_cancel_algo_body(
+                inst_id=self.symbol,
+                algo_id=order_id,
+            ))
             if self.near_tp_protective_sl_order_id == order_id:
                 self.near_tp_protective_sl_order_id = None
             logger.warning("NEAR_TP_PROTECTIVE_SL_CANCEL_ON_FLAT | algoId=%s", order_id)
@@ -1471,13 +1429,13 @@ class Trader:
         self.trend_runner_sl_order_id = None
 
     async def set_leverage(self) -> None:
-        body = {"instId": self.symbol, "lever": str(self.leverage), "mgnMode": self.td_mode}
-        if self.pos_side_mode == "long_short":
-            for pos_side in ("long", "short"):
-                side_body = dict(body)
-                side_body["posSide"] = pos_side
-                await self.request("POST", "/api/v5/account/set-leverage", side_body)
-        else:
+        bodies = order_specs.build_set_leverage_bodies(
+            inst_id=self.symbol,
+            td_mode=self.td_mode,
+            leverage=self.leverage,
+            pos_side_mode=self.pos_side_mode,
+        )
+        for body in bodies:
             await self.request("POST", "/api/v5/account/set-leverage", body)
 
     async def request(self, method: str, endpoint: str, payload: Any | None = None) -> dict[str, Any]:
@@ -1524,13 +1482,10 @@ class Trader:
         return contracts
 
     def round_contracts_down(self, contracts: Decimal) -> Decimal:
-        lots = (contracts / self.contract_precision).to_integral_value(rounding=ROUND_DOWN)
-        return lots * self.contract_precision
+        return order_specs.round_contracts_down(contracts=contracts, contract_precision=self.contract_precision)
 
     def pos_side(self, side: str) -> str | None:
-        if self.pos_side_mode != "long_short":
-            return None
-        return "long" if side == "LONG" else "short"
+        return order_specs.pos_side_for_mode(side=side, pos_side_mode=self.pos_side_mode)
 
     @staticmethod
     def extract_order_id(res: dict[str, Any]) -> str:
