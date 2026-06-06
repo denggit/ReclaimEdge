@@ -21,18 +21,18 @@ logger = get_logger(__name__)
 
 
 async def monitor_sidecar_orders_once(
-    *,
-    trader: Trader,
-    strategy_state: StrategyPositionState,
-    execution_state: live_runtime_types.ExecutionState,
-    journal: LiveTradeJournal,
-    state_store: LiveStateStore,
-    trader_symbol: str,
-    core_position: PositionSnapshot,
-    position_id: str | None,
-    cash_before_position: float | None,
-    ts_ms: int,
-    fee_buffer_pct: float = position_cost_runtime.DEFAULT_NET_REMAINING_FEE_BUFFER_PCT,
+        *,
+        trader: Trader,
+        strategy_state: StrategyPositionState,
+        execution_state: live_runtime_types.ExecutionState,
+        journal: LiveTradeJournal,
+        state_store: LiveStateStore,
+        trader_symbol: str,
+        core_position: PositionSnapshot,
+        position_id: str | None,
+        cash_before_position: float | None,
+        ts_ms: int,
+        fee_buffer_pct: float = position_cost_runtime.DEFAULT_NET_REMAINING_FEE_BUFFER_PCT,
 ) -> None:
     if not getattr(strategy_state, "sidecar_enabled_for_position", False):
         return
@@ -69,10 +69,10 @@ async def monitor_sidecar_orders_once(
             # may now exceed current net position. Must halt for manual reconciliation.
             active_global_sl_orders: list[str] = []
             for sl_field in (
-                "near_tp_protective_sl_order_id",
-                "middle_runner_protective_sl_order_id",
-                "three_stage_post_tp1_protective_sl_order_id",
-                "trend_runner_sl_order_id",
+                    "near_tp_protective_sl_order_id",
+                    "middle_runner_protective_sl_order_id",
+                    "three_stage_post_tp1_protective_sl_order_id",
+                    "trend_runner_sl_order_id",
             ):
                 sl_order_id = getattr(strategy_state, sl_field, None) or getattr(trader, sl_field, None)
                 if sl_order_id:
@@ -105,10 +105,15 @@ async def monitor_sidecar_orders_once(
             strategy_state.sidecar_dirty = True
             strategy_state.sidecar_halt_reason = "sidecar_tp_order_missing_or_unknown"
             if not leg.get("warning_recorded"):
-                journal.append("SIDECAR_TP_ORDER_MISSING_OR_UNKNOWN", {**dict(leg), **status, "manual_intervention_required": True}, position_id=position_id)
+                journal.append("SIDECAR_TP_ORDER_MISSING_OR_UNKNOWN",
+                               {**dict(leg), **status, "manual_intervention_required": True}, position_id=position_id)
             strategy_state.sidecar_legs[index] = mark_sidecar_leg_unknown_halted(leg, ts_ms)
-            logger.error("SIDECAR_TP_ORDER_MISSING_OR_UNKNOWN | position_id=%s leg_id=%s status=%s manual_intervention_required=true", position_id, leg.get("leg_id"), order_status)
+            logger.error(
+                "SIDECAR_TP_ORDER_MISSING_OR_UNKNOWN | position_id=%s leg_id=%s status=%s manual_intervention_required=true",
+                position_id, leg.get("leg_id"), order_status)
             changed = True
     if changed:
         sidecar_runtime_state.refresh_sidecar_state_totals(strategy_state, int(os.getenv("SIDECAR_MAX_LEGS", "10")))
-        state_store.save(LiveStateStore.from_strategy_state(position_id=position_id, symbol=trader_symbol, strategy_state=strategy_state, cash_before_position=cash_before_position))
+        state_store.save(LiveStateStore.from_strategy_state(position_id=position_id, symbol=trader_symbol,
+                                                            strategy_state=strategy_state,
+                                                            cash_before_position=cash_before_position))

@@ -118,6 +118,7 @@ class OKXDataLoader:
             # 保存合并后的数据
             self.save_local_data(combined_df)
             logger.debug(f"💾 追加数据: 合并现有 {len(existing_df)} 根和新 {len(df)} 根，去重后 {len(combined_df)} 根K线")
+
     def _save_candles_batch(self, candles_batch: list):
         """
         保存一批原始蜡烛数据到本地数据库
@@ -329,7 +330,7 @@ class OKXDataLoader:
             logger.debug(f"🔍 检测到 {len(missing_intervals)} 个缺失区间，开始补全...")
             filled_dfs = []
             for i, (start_time, end_time) in enumerate(missing_intervals):
-                logger.debug(f"  补全区间 {i+1}: {start_time} -> {end_time}")
+                logger.debug(f"  补全区间 {i + 1}: {start_time} -> {end_time}")
                 filled_df = self._fill_missing_interval(start_time, end_time)
                 if not filled_df.empty:
                     filled_dfs.append(filled_df)

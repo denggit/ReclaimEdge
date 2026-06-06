@@ -365,12 +365,12 @@ class CvdTracker:
         return self._baseline_volume_sum / elapsed_seconds if elapsed_seconds > 0 else 0.0
 
     def _snapshot_without_mutating_windows(
-        self,
-        ts_ms: int,
-        price: float,
-        side: TradeSide,
-        size: float,
-        signed_delta: float,
+            self,
+            ts_ms: int,
+            price: float,
+            side: TradeSide,
+            size: float,
+            signed_delta: float,
     ) -> CvdSnapshot:
         if self._last_snapshot is None:
             return CvdSnapshot(
@@ -516,7 +516,8 @@ class CvdTracker:
     def _load_out_of_order_policy() -> OutOfOrderPolicy:
         raw = os.getenv("CVD_OUT_OF_ORDER_POLICY", "drop_for_realtime").strip().lower()
         if raw == "accept_slow_debug":
-            logger.warning("CVD_OUT_OF_ORDER_POLICY=accept_slow_debug is not supported in live O(1) update; using drop_for_realtime")
+            logger.warning(
+                "CVD_OUT_OF_ORDER_POLICY=accept_slow_debug is not supported in live O(1) update; using drop_for_realtime")
         return "drop_for_realtime"
 
     @staticmethod

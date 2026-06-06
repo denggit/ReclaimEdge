@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
-import os
 from decimal import Decimal
 from pathlib import Path
 from types import MethodType
@@ -12,12 +12,12 @@ from src.execution.trader import PositionSnapshot, Trader
 from src.indicators.cvd_tracker import CvdSnapshot
 from src.monitors.boll_band_breakout_monitor import BollSnapshot
 from src.position_management.runner_live_helpers import middle_runner_size_mismatch_needs_degraded_protection
-from src.reporting.trade_journal import LiveTradeJournal
-from src.risk.simple_position_sizer import PositionSize, SimplePositionSizer, SimplePositionSizerConfig
 from src.position_management.tp_progress import (
     mark_middle_runner_active_if_position_reduced,
     mark_partial_tp_consumed_if_position_reduced,
 )
+from src.reporting.trade_journal import LiveTradeJournal
+from src.risk.simple_position_sizer import PositionSize, SimplePositionSizer, SimplePositionSizerConfig
 from src.strategies.boll_cvd_reclaim_strategy import (
     BollCvdReclaimStrategy,
     BollCvdReclaimStrategyConfig,
@@ -116,15 +116,15 @@ class SplitTakeProfitStrategyTest(unittest.TestCase):
         self.assertTrue(config.split_tp_enabled)
 
         with patch.dict(
-            os.environ,
-            {
-                "MIDDLE_RUNNER_ENABLED": "true",
-                "MIDDLE_RUNNER_FIRST_CLOSE_RATIO": "0.99",
-                "MIDDLE_RUNNER_EXTENSION_TRIGGER_RATIO": "0.6",
-                "NEAR_TP_ENABLED": "false",
-                "SPLIT_TP_ENABLED": "false",
-            },
-            clear=True,
+                os.environ,
+                {
+                    "MIDDLE_RUNNER_ENABLED": "true",
+                    "MIDDLE_RUNNER_FIRST_CLOSE_RATIO": "0.99",
+                    "MIDDLE_RUNNER_EXTENSION_TRIGGER_RATIO": "0.6",
+                    "NEAR_TP_ENABLED": "false",
+                    "SPLIT_TP_ENABLED": "false",
+                },
+                clear=True,
         ):
             config = BollCvdReclaimStrategyConfig.from_env()
         self.assertTrue(config.middle_runner_enabled)
@@ -215,7 +215,8 @@ class SplitTakeProfitStrategyTest(unittest.TestCase):
         strat = strategy()
         strat.state.avg_entry_price = 100.0
 
-        partial_tp, partial_ratio, plan = strat._select_tp_plan("LONG", 110.0, 4, tp_mode="MIDDLE", boll=boll(middle=101.0, upper=110.0))
+        partial_tp, partial_ratio, plan = strat._select_tp_plan("LONG", 110.0, 4, tp_mode="MIDDLE",
+                                                                boll=boll(middle=101.0, upper=110.0))
 
         self.assertEqual(plan, "SPLIT_PARTIAL_FINAL")
         self.assertEqual(partial_ratio, 0.5)
@@ -235,7 +236,8 @@ class SplitTakeProfitStrategyTest(unittest.TestCase):
         strat = strategy()
         strat.state.avg_entry_price = 100.0
 
-        partial_tp, partial_ratio, plan = strat._select_tp_plan("SHORT", 90.0, 4, tp_mode="MIDDLE", boll=boll(middle=99.0, upper=110.0, lower=90.0))
+        partial_tp, partial_ratio, plan = strat._select_tp_plan("SHORT", 90.0, 4, tp_mode="MIDDLE",
+                                                                boll=boll(middle=99.0, upper=110.0, lower=90.0))
 
         self.assertEqual(plan, "SPLIT_PARTIAL_FINAL")
         self.assertEqual(partial_ratio, 0.5)
@@ -315,7 +317,8 @@ class SplitTakeProfitStrategyTest(unittest.TestCase):
     def test_open_position_initializes_net_remaining_breakeven_short(self) -> None:
         strat = strategy(breakeven_fee_buffer_pct=0.001)
 
-        strat._open_position("SHORT", "OPEN_SHORT", 100.0, 2_000, boll(middle=99.0, upper=110.0, lower=90.0), cvd(), "test")
+        strat._open_position("SHORT", "OPEN_SHORT", 100.0, 2_000, boll(middle=99.0, upper=110.0, lower=90.0), cvd(),
+                             "test")
 
         self.assertGreater(strat.state.position_cost_entry_notional, 0)
         self.assertGreater(strat.state.position_cost_remaining_qty, 0)
@@ -354,7 +357,8 @@ class SplitTakeProfitStrategyTest(unittest.TestCase):
         enabled = strategy(middle_runner_enabled=True, breakeven_fee_buffer_pct=0.001, tp_min_net_profit_pct=0.002)
         enabled.state.avg_entry_price = 100.0
         tp_price, mode = enabled._select_tp_price("LONG", boll(middle=100.1, upper=110.0))
-        partial_tp, partial_ratio, plan = enabled._select_tp_plan("LONG", tp_price, 1, tp_mode=mode, boll=boll(middle=100.1, upper=110.0))
+        partial_tp, partial_ratio, plan = enabled._select_tp_plan("LONG", tp_price, 1, tp_mode=mode,
+                                                                  boll=boll(middle=100.1, upper=110.0))
         self.assertEqual(mode, "UPPER")
         self.assertEqual(plan, "SINGLE")
         self.assertIsNone(partial_tp)
@@ -362,7 +366,8 @@ class SplitTakeProfitStrategyTest(unittest.TestCase):
 
         disabled = strategy(middle_runner_enabled=False)
         disabled.state.avg_entry_price = 100.0
-        partial_tp, partial_ratio, plan = disabled._select_tp_plan("LONG", 101.0, 1, tp_mode="MIDDLE", boll=boll(middle=101.0, upper=110.0))
+        partial_tp, partial_ratio, plan = disabled._select_tp_plan("LONG", 101.0, 1, tp_mode="MIDDLE",
+                                                                   boll=boll(middle=101.0, upper=110.0))
         self.assertEqual(plan, "SINGLE")
         self.assertIsNone(partial_tp)
         self.assertEqual(partial_ratio, 0.0)
@@ -396,8 +401,8 @@ class SplitTakeProfitStrategyTest(unittest.TestCase):
 
         # Scenario B: breakeven candidate wins (lower is far away → structure candidate too loose)
         long_sl_b = long_strat._calculate_middle_runner_protective_sl("LONG", 103.0, boll(middle=102.0, lower=90.0))
-        candidate_breakeven_b = (95.0 + 102.0) / 2   # 98.5
-        candidate_structure_b = (90.0 + 102.0) / 2   # 96.0
+        candidate_breakeven_b = (95.0 + 102.0) / 2  # 98.5
+        candidate_structure_b = (90.0 + 102.0) / 2  # 96.0
         self.assertEqual(long_sl_b, max(candidate_breakeven_b, candidate_structure_b))
         # breakeven candidate wins when structure is looser
         self.assertEqual(long_sl_b, candidate_breakeven_b)
@@ -407,7 +412,8 @@ class SplitTakeProfitStrategyTest(unittest.TestCase):
         #     (upper + middle) / 2,                     ← candidate_2 (structure)
         # )
         short_strat = strategy(middle_runner_enabled=True, breakeven_fee_buffer_pct=0.001)
-        short_strat.state = StrategyPositionState(side="SHORT", avg_entry_price=100.0, net_remaining_breakeven_price=105.0)
+        short_strat.state = StrategyPositionState(side="SHORT", avg_entry_price=100.0,
+                                                  net_remaining_breakeven_price=105.0)
 
         # Scenario C: structure candidate wins (upper is tight enough)
         short_sl = short_strat._calculate_middle_runner_protective_sl("SHORT", 97.0, boll(middle=98.0, upper=104.0))
@@ -432,7 +438,8 @@ class SplitTakeProfitStrategyTest(unittest.TestCase):
             middle_runner_active=True,
             middle_runner_sl_time_tighten_candle_count=1,
         )
-        long_sl = long_strat._calculate_middle_runner_protective_sl("LONG", 250.0, boll(middle=200.0, upper=220.0, lower=100.0))
+        long_sl = long_strat._calculate_middle_runner_protective_sl("LONG", 250.0,
+                                                                    boll(middle=200.0, upper=220.0, lower=100.0))
 
         short_strat = strategy(middle_runner_enabled=True)
         short_strat.state = StrategyPositionState(
@@ -442,7 +449,8 @@ class SplitTakeProfitStrategyTest(unittest.TestCase):
             middle_runner_active=True,
             middle_runner_sl_time_tighten_candle_count=1,
         )
-        short_sl = short_strat._calculate_middle_runner_protective_sl("SHORT", 50.0, boll(middle=100.0, upper=200.0, lower=80.0))
+        short_sl = short_strat._calculate_middle_runner_protective_sl("SHORT", 50.0,
+                                                                      boll(middle=100.0, upper=200.0, lower=80.0))
 
         self.assertEqual(long_strat._runner_sl_time_tighten_ratio(1), 0.55)
         self.assertEqual(long_sl, 155.0)
@@ -507,8 +515,10 @@ class SplitTakeProfitStrategyTest(unittest.TestCase):
         strat.state = StrategyPositionState(side="LONG", avg_entry_price=100.0, net_remaining_breakeven_price=95.0)
 
         with self.assertLogs("src.strategies.boll_cvd_reclaim_strategy", level="WARNING") as logs:
-            strat._calculate_middle_runner_protective_sl("LONG", 103.0, boll(middle=102.0, lower=90.0, upper=110.0, candle_ts_ms=1_000))
-            strat._calculate_middle_runner_protective_sl("LONG", 103.0, boll(middle=102.0, lower=90.0, upper=110.0, candle_ts_ms=2_000))
+            strat._calculate_middle_runner_protective_sl("LONG", 103.0, boll(middle=102.0, lower=90.0, upper=110.0,
+                                                                             candle_ts_ms=1_000))
+            strat._calculate_middle_runner_protective_sl("LONG", 103.0, boll(middle=102.0, lower=90.0, upper=110.0,
+                                                                             candle_ts_ms=2_000))
 
         self.assertEqual("\n".join(logs.output).count("MIDDLE_RUNNER_PROTECTIVE_SL_DIAG"), 2)
 
@@ -517,7 +527,8 @@ class SplitTakeProfitStrategyTest(unittest.TestCase):
         strat.state = StrategyPositionState(side="LONG", avg_entry_price=100.0, net_remaining_breakeven_price=0.0)
 
         with self.assertLogs("src.strategies.boll_cvd_reclaim_strategy", level="WARNING") as logs:
-            strat._calculate_middle_runner_protective_sl("LONG", 103.0, boll(middle=102.0, lower=90.0, upper=110.0, candle_ts_ms=1_000))
+            strat._calculate_middle_runner_protective_sl("LONG", 103.0, boll(middle=102.0, lower=90.0, upper=110.0,
+                                                                             candle_ts_ms=1_000))
 
         joined = "\n".join(logs.output)
         self.assertIn("MIDDLE_RUNNER_PROTECTIVE_SL_DIAG", joined)
@@ -532,7 +543,8 @@ class SplitTakeProfitStrategyTest(unittest.TestCase):
 
         short_strat = strategy(middle_runner_enabled=True, middle_runner_extension_trigger_ratio=0.6)
         short_strat.state.middle_runner_active = True
-        new_sl = short_strat._apply_middle_runner_extension_trigger("SHORT", 94.0, boll(middle=100.0, lower=90.0), 101.0)
+        new_sl = short_strat._apply_middle_runner_extension_trigger("SHORT", 94.0, boll(middle=100.0, lower=90.0),
+                                                                    101.0)
         self.assertEqual(new_sl, 100.0)
         self.assertTrue(short_strat.state.middle_runner_extension_triggered)
 
@@ -556,7 +568,8 @@ class SplitTakeProfitStrategyTest(unittest.TestCase):
             last_tp_update_candle_ts_ms=1_000,
         )
 
-        pending_intent = strat._maybe_update_tp(100.0, 2_000, boll(middle=102.0, upper=112.0, lower=92.0, candle_ts_ms=2_000), cvd())
+        pending_intent = strat._maybe_update_tp(100.0, 2_000,
+                                                boll(middle=102.0, upper=112.0, lower=92.0, candle_ts_ms=2_000), cvd())
         self.assertIsNotNone(pending_intent)
         self.assertEqual(pending_intent.tp_plan, "MIDDLE_RUNNER")
         self.assertEqual(pending_intent.partial_tp_price, 102.0)
@@ -568,13 +581,15 @@ class SplitTakeProfitStrategyTest(unittest.TestCase):
         strat.state.middle_runner_pending = False
         strat.state.middle_runner_active = True
         strat.state.middle_runner_protective_sl_price = 101.5
-        active_intent = strat._maybe_update_tp(106.0, 3_000, boll(middle=103.0, upper=113.0, lower=93.0, candle_ts_ms=3_000), cvd())
+        active_intent = strat._maybe_update_tp(106.0, 3_000,
+                                               boll(middle=103.0, upper=113.0, lower=93.0, candle_ts_ms=3_000), cvd())
         self.assertIsNotNone(active_intent)
         self.assertEqual(active_intent.tp_price, 113.0)
         self.assertGreaterEqual(active_intent.middle_runner_protective_sl_price or 0, 101.5)
 
     def test_middle_runner_pending_does_not_migrate_to_three_stage_after_env_change(self) -> None:
-        strat = strategy(middle_runner_enabled=False, three_stage_runner_enabled=True, breakeven_fee_buffer_pct=0.001, tp_min_net_profit_pct=0.002)
+        strat = strategy(middle_runner_enabled=False, three_stage_runner_enabled=True, breakeven_fee_buffer_pct=0.001,
+                         tp_min_net_profit_pct=0.002)
         strat.state = StrategyPositionState(
             side="LONG",
             layers=1,
@@ -597,7 +612,8 @@ class SplitTakeProfitStrategyTest(unittest.TestCase):
         )
 
         # middle=100.5 is sufficient: effective_be=100.1, required=100.3002 < 100.5 → MIDDLE
-        update_intent = strat._maybe_update_tp(100.0, 2_000, boll(middle=100.5, upper=111.0, lower=90.0, candle_ts_ms=2_000), cvd())
+        update_intent = strat._maybe_update_tp(100.0, 2_000,
+                                               boll(middle=100.5, upper=111.0, lower=90.0, candle_ts_ms=2_000), cvd())
 
         self.assertIsNotNone(update_intent)
         self.assertEqual(update_intent.tp_plan, "MIDDLE_RUNNER")
@@ -631,7 +647,8 @@ class SplitTakeProfitStrategyTest(unittest.TestCase):
             last_tp_update_candle_ts_ms=1_000,
         )
 
-        update_intent = strat._maybe_update_tp(100.5, 2_000, boll(middle=103.0, upper=113.0, lower=97.0, candle_ts_ms=2_000), cvd())
+        update_intent = strat._maybe_update_tp(100.5, 2_000,
+                                               boll(middle=103.0, upper=113.0, lower=97.0, candle_ts_ms=2_000), cvd())
 
         self.assertIsNotNone(update_intent)
         self.assertEqual(strat.state.middle_runner_protective_sl_price, 101.5)
@@ -694,7 +711,8 @@ class SplitTakeProfitStrategyTest(unittest.TestCase):
         )
 
         # middle=100.1: required_middle = 100.0 * 1.002 = 100.2 > 100.1 → insufficient
-        got = strat._maybe_update_tp(99.0, 2_000, boll(middle=100.1, upper=103.0, lower=97.0, candle_ts_ms=2_000), cvd())
+        got = strat._maybe_update_tp(99.0, 2_000, boll(middle=100.1, upper=103.0, lower=97.0, candle_ts_ms=2_000),
+                                     cvd())
 
         self.assertIsNotNone(got, "Must return UPDATE_TP when middle profit insufficient")
         self.assertEqual(got.intent_type, "UPDATE_TP")
@@ -730,7 +748,8 @@ class SplitTakeProfitStrategyTest(unittest.TestCase):
         )
 
         # middle insufficient but middle_runner_active → must NOT reset
-        got = strat._maybe_update_tp(100.5, 2_000, boll(middle=100.1, upper=103.0, lower=97.0, candle_ts_ms=2_000), cvd())
+        got = strat._maybe_update_tp(100.5, 2_000, boll(middle=100.1, upper=103.0, lower=97.0, candle_ts_ms=2_000),
+                                     cvd())
 
         self.assertIsNotNone(got, "Must return UPDATE_TP for active middle runner")
         self.assertTrue(strat.state.middle_runner_active, "middle_runner_active must be preserved")
@@ -738,7 +757,8 @@ class SplitTakeProfitStrategyTest(unittest.TestCase):
 
     def test_split_partial_disabled_when_middle_profit_insufficient(self) -> None:
         """SPLIT with partial not consumed must fall back to SINGLE outer when middle profit insufficient."""
-        strat = strategy(breakeven_fee_buffer_pct=0.001, tp_min_net_profit_pct=0.002, split_tp_enabled=True, split_tp_min_layers=2)
+        strat = strategy(breakeven_fee_buffer_pct=0.001, tp_min_net_profit_pct=0.002, split_tp_enabled=True,
+                         split_tp_min_layers=2)
         strat.state = StrategyPositionState(
             side="LONG",
             layers=2,
@@ -756,7 +776,8 @@ class SplitTakeProfitStrategyTest(unittest.TestCase):
         )
 
         # middle=100.1: required_middle = 100.0 * 1.002 = 100.2 > 100.1 → insufficient
-        got = strat._maybe_update_tp(99.0, 2_000, boll(middle=100.1, upper=103.0, lower=97.0, candle_ts_ms=2_000), cvd())
+        got = strat._maybe_update_tp(99.0, 2_000, boll(middle=100.1, upper=103.0, lower=97.0, candle_ts_ms=2_000),
+                                     cvd())
 
         self.assertIsNotNone(got, "Must return UPDATE_TP when middle profit insufficient")
         self.assertEqual(got.intent_type, "UPDATE_TP")
@@ -767,7 +788,8 @@ class SplitTakeProfitStrategyTest(unittest.TestCase):
 
     def test_split_partial_disabled_when_middle_profit_insufficient_is_not_reenabled(self) -> None:
         """SPLIT fallback to SINGLE must not be re-enabled by subsequent TP-plan selection."""
-        strat = strategy(breakeven_fee_buffer_pct=0.001, tp_min_net_profit_pct=0.002, split_tp_enabled=True, split_tp_min_layers=2, three_stage_runner_enabled=False)
+        strat = strategy(breakeven_fee_buffer_pct=0.001, tp_min_net_profit_pct=0.002, split_tp_enabled=True,
+                         split_tp_min_layers=2, three_stage_runner_enabled=False)
         strat.state = StrategyPositionState(
             side="LONG",
             layers=2,
@@ -785,7 +807,8 @@ class SplitTakeProfitStrategyTest(unittest.TestCase):
         )
 
         # middle=100.1: required_middle = 100.0 * 1.002 = 100.2 > 100.1 → insufficient
-        got = strat._maybe_update_tp(99.0, 2_000, boll(middle=100.1, upper=103.0, lower=97.0, candle_ts_ms=2_000), cvd())
+        got = strat._maybe_update_tp(99.0, 2_000, boll(middle=100.1, upper=103.0, lower=97.0, candle_ts_ms=2_000),
+                                     cvd())
 
         self.assertIsNotNone(got, "Must return UPDATE_TP when middle profit insufficient")
         self.assertEqual(got.intent_type, "UPDATE_TP")
@@ -963,7 +986,8 @@ class SplitTakeProfitLifecycleTest(unittest.TestCase):
         self.assertEqual(strat.state.tp_plan, "SINGLE")
         self.assertEqual(strat.state.middle_runner_sl_time_tighten_candle_count, 0)
         self.assertEqual(strat.state.middle_runner_sl_time_tighten_last_candle_ts_ms, 1_000)
-        self.assertEqual(strat._advance_runner_sl_time_tighten_candle_count(target="middle_runner", candle_ts_ms=2_000), 1)
+        self.assertEqual(strat._advance_runner_sl_time_tighten_candle_count(target="middle_runner", candle_ts_ms=2_000),
+                         1)
 
     def test_middle_runner_partial_size_mismatch_disables_add_without_activation(self) -> None:
         strat = strategy(middle_runner_enabled=True)

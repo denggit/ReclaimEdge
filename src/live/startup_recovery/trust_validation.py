@@ -49,8 +49,8 @@ def expected_saved_state_remaining_qty(saved_state: Any) -> tuple[float, str]:  
     # ── 4. Three-Stage deduction ────────────────────────────────────────
     total_entry = float(getattr(saved_state, "total_entry_qty", 0.0) or 0.0)
     if (
-        total_entry > 0
-        and bool(getattr(saved_state, "three_stage_runner_enabled_for_position", False))
+            total_entry > 0
+            and bool(getattr(saved_state, "three_stage_runner_enabled_for_position", False))
     ):
         tp2_consumed = bool(getattr(saved_state, "three_stage_tp2_consumed", False))
         tp1_consumed = bool(getattr(saved_state, "three_stage_tp1_consumed", False))
@@ -75,10 +75,10 @@ def expected_saved_state_remaining_qty(saved_state: Any) -> tuple[float, str]:  
 
 
 def trusted_startup_saved_state(  # type: ignore[no-untyped-def]
-    saved_state: Any,
-    startup_position: PositionSnapshot,
-    max_avg_diff_pct: float | None = None,
-    max_qty_diff_pct: float | None = None,
+        saved_state: Any,
+        startup_position: PositionSnapshot,
+        max_avg_diff_pct: float | None = None,
+        max_qty_diff_pct: float | None = None,
 ) -> Any:
     """Return saved_state only when it matches the current OKX position.
 

@@ -21,12 +21,12 @@ async def fetch_usdt_cash_balance(trader: Trader) -> float:
 
 
 async def fetch_settled_flat_balance(
-    trader: Trader,
-    *,
-    attempts: int,
-    interval_seconds: float,
-    stable_delta_usdt: float,
-    cash_equity_max_diff_usdt: float,
+        trader: Trader,
+        *,
+        attempts: int,
+        interval_seconds: float,
+        stable_delta_usdt: float,
+        cash_equity_max_diff_usdt: float,
 ) -> SettledFlatBalance:
     attempts = max(int(attempts), 1)
     previous_flat_cash: float | None = None

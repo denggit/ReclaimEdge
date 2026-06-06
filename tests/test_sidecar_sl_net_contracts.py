@@ -7,12 +7,11 @@ if only core contracts are covered, the sidecar portion is left unprotected.
 
 from __future__ import annotations
 
-from decimal import Decimal
-
-import contextlib
 import asyncio
+import contextlib
 import datetime as dt
 import unittest
+from decimal import Decimal
 
 from scripts.run_boll_cvd_live import (
     StrategyPositionState,
@@ -109,7 +108,7 @@ class FullProtectiveTrader:
         self.position_contracts = Decimal("0")
 
     async def place_three_stage_post_tp1_protective_stop_with_retries(
-        self, side, contracts, stop_price, retry_count, retry_interval_seconds
+            self, side, contracts, stop_price, retry_count, retry_interval_seconds
     ):
         order_id = f"post-tp1-{len(self.post_tp1_stop_orders) + 1}"
         self.post_tp1_stop_orders.append({
@@ -124,7 +123,7 @@ class FullProtectiveTrader:
         return self.cancel_post_tp1_ok
 
     async def place_middle_runner_protective_stop_with_retries(
-        self, side, contracts, stop_price, retry_count, retry_interval_seconds
+            self, side, contracts, stop_price, retry_count, retry_interval_seconds
     ):
         order_id = f"mr-sl-{len(self.middle_runner_stop_orders) + 1}"
         self.middle_runner_stop_orders.append({
@@ -164,8 +163,8 @@ class FullProtectiveTrader:
 class SidecarSLNetContractsTest(unittest.IsolatedAsyncioTestCase):
 
     async def run_account_sync_until(
-        self, predicate, *, account_snapshot, execution_state, trader,
-        strategy, journal, state_store, timeout: float = 1.0
+            self, predicate, *, account_snapshot, execution_state, trader,
+            strategy, journal, state_store, timeout: float = 1.0
     ):
         task = asyncio.create_task(
             account_position_sync_worker(
@@ -449,7 +448,7 @@ class SidecarSLNetContractsTest(unittest.IsolatedAsyncioTestCase):
                 return PositionSnapshot("LONG", net_contracts, 100.0, 0.6, net_contracts)
 
             async def place_three_stage_post_tp1_protective_stop_with_retries(
-                inner_self, side, contracts, stop_price, retry_count, retry_interval_seconds
+                    inner_self, side, contracts, stop_price, retry_count, retry_interval_seconds
             ):
                 inner_self.post_tp1_stop_orders.append({
                     "side": side, "contracts": contracts, "stop_price": stop_price,
@@ -513,7 +512,6 @@ class SidecarSLNetContractsTest(unittest.IsolatedAsyncioTestCase):
         cannot happen (the payload side always comes from core_position.side
         which is validated), but the guard exists for robustness.
         """
-        import unittest.mock as mock
 
         net_contracts = Decimal("12")
 
@@ -522,7 +520,7 @@ class SidecarSLNetContractsTest(unittest.IsolatedAsyncioTestCase):
                 return PositionSnapshot("LONG", net_contracts, 100.0, 0.6, net_contracts)
 
             async def place_three_stage_post_tp1_protective_stop_with_retries(
-                inner_self, side, contracts, stop_price, retry_count, retry_interval_seconds
+                    inner_self, side, contracts, stop_price, retry_count, retry_interval_seconds
             ):
                 return False, None, "simulated_sl_place_failure"
 
@@ -786,7 +784,6 @@ class SidecarSLNetContractsTest(unittest.IsolatedAsyncioTestCase):
         # Verify the pending order context is included
         self.assertIn("pending_order_count=1", log_line)
         self.assertIn("event=TP1", log_line)
-
 
     # ── Regression tests ──────────────────────────────────────────
 

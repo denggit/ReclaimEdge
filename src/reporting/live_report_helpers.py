@@ -9,11 +9,11 @@ from src.strategies.boll_cvd_reclaim_strategy import TradeIntent
 
 
 def build_report_context(
-    *,
-    account_snapshot: AccountSnapshot,
-    execution_state: ExecutionState,
-    period_start_cash: float | None = None,
-    period_start_equity: float | None = None,
+        *,
+        account_snapshot: AccountSnapshot,
+        execution_state: ExecutionState,
+        period_start_cash: float | None = None,
+        period_start_equity: float | None = None,
 ) -> ReportRuntimeContext:
     position = account_snapshot.position
     return ReportRuntimeContext(

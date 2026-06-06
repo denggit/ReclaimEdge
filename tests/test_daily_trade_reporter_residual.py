@@ -7,7 +7,8 @@ from src.reporting.daily_trade_reporter import DailyReportWindow, DailyTradeRepo
 from src.reporting.trade_journal import JournalEvent
 
 
-def event(event_type: str, payload: dict, position_id: str | None = None, ts: str = "2026-01-01T00:00:00+00:00") -> JournalEvent:
+def event(event_type: str, payload: dict, position_id: str | None = None,
+          ts: str = "2026-01-01T00:00:00+00:00") -> JournalEvent:
     return JournalEvent(
         event_id=f"{event_type}-{position_id or 'none'}-{len(payload)}",
         event_type=event_type,

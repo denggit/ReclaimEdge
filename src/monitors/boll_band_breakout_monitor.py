@@ -178,17 +178,19 @@ class OkxPublicMarketClient:
             confirmed = row[8] == "1" if len(row) >= 9 else True
             if not include_live and not confirmed:
                 continue
-            candles.append(Candle(int(row[0]), float(row[1]), float(row[2]), float(row[3]), float(row[4]), float(row[5]), confirmed))
+            candles.append(
+                Candle(int(row[0]), float(row[1]), float(row[2]), float(row[3]), float(row[4]), float(row[5]),
+                       confirmed))
         candles.sort(key=lambda item: item.ts_ms)
         return candles
 
 
 class BollBandBreakoutMonitor:
     def __init__(
-        self,
-        config: BollBandBreakoutMonitorConfig,
-        handlers: Optional[list[SignalHandler]] = None,
-        tick_handlers: Optional[list[TickHandler]] = None,
+            self,
+            config: BollBandBreakoutMonitorConfig,
+            handlers: Optional[list[SignalHandler]] = None,
+            tick_handlers: Optional[list[TickHandler]] = None,
     ):
         self.config = config
         self.client = OkxPublicMarketClient(config)
@@ -289,7 +291,8 @@ class BollBandBreakoutMonitor:
                 exc_info=failures == 1 or logger.isEnabledFor(logging.DEBUG),
             )
             self._last_candle_sync_error_log_ts_ms = now_ms
-        if last_success_age_seconds >= self._candle_sync_stale_warn_seconds and self._should_log_candle_sync_stale(now_ms):
+        if last_success_age_seconds >= self._candle_sync_stale_warn_seconds and self._should_log_candle_sync_stale(
+                now_ms):
             logger.error(
                 "CANDLE_SYNC_STALE | failures=%s last_success_age_seconds=%.1f risk=live_boll_may_be_stale",
                 failures,
@@ -334,7 +337,8 @@ class BollBandBreakoutMonitor:
             return
         latest = candles[-1]
         closes = [item.close for item in candles]
-        middle, upper, lower = BollCalculator.calculate(closes, self.config.boll_window, self.config.boll_std_multiplier)
+        middle, upper, lower = BollCalculator.calculate(closes, self.config.boll_window,
+                                                        self.config.boll_std_multiplier)
         upper_distance_pct = abs(upper - middle) / middle
         lower_distance_pct = abs(middle - lower) / middle
         alert_switch_on = upper_distance_pct >= self.config.band_distance_threshold_pct or lower_distance_pct >= self.config.band_distance_threshold_pct
@@ -366,14 +370,15 @@ class BollBandBreakoutMonitor:
         if self._previous_price is not None:
             self._previous_zone = self._classify_price_zone(self._previous_price)
         if is_new_candle or switch_changed:
-            logger.info("BOLL updated | inst=%s candle_ts=%s close=%.4f middle=%.4f upper=%.4f lower=%.4f upper_dist=%.4f%% lower_dist=%.4f%% switch=%s live_mode=%s tp_boll=%s tp_middle=%s tp_upper=%s tp_lower=%s",
+            logger.info(
+                "BOLL updated | inst=%s candle_ts=%s close=%.4f middle=%.4f upper=%.4f lower=%.4f upper_dist=%.4f%% lower_dist=%.4f%% switch=%s live_mode=%s tp_boll=%s tp_middle=%s tp_upper=%s tp_lower=%s",
                 self.config.inst_id, latest.ts_ms, latest.close, middle, upper, lower,
                 upper_distance_pct * 100, lower_distance_pct * 100, alert_switch_on, self.config.use_live_candle,
                 f"win{tp_window}" if tp_window is not None else "off",
                 f"{tp_middle:.4f}" if tp_middle is not None else "-",
                 f"{tp_upper:.4f}" if tp_upper is not None else "-",
                 f"{tp_lower:.4f}" if tp_lower is not None else "-",
-            )
+                )
 
     async def _tick_loop(self) -> None:
         while self._running:
@@ -442,7 +447,10 @@ class BollBandBreakoutMonitor:
         if signal is None:
             return
         self._freeze_until_ts = now + self.config.alert_freeze_seconds
-        logger.warning("BOLL breakout signal | inst=%s direction=%s prev=%.4f price=%.4f upper=%.4f middle=%.4f lower=%.4f freeze=%ss", signal.inst_id, signal.direction, signal.previous_price, signal.price, signal.upper, signal.middle, signal.lower, signal.freeze_seconds)
+        logger.warning(
+            "BOLL breakout signal | inst=%s direction=%s prev=%.4f price=%.4f upper=%.4f middle=%.4f lower=%.4f freeze=%ss",
+            signal.inst_id, signal.direction, signal.previous_price, signal.price, signal.upper, signal.middle,
+            signal.lower, signal.freeze_seconds)
         self._emit(signal)
 
     async def _queue_tick_event(self, event: MarketTickEvent) -> None:
@@ -496,7 +504,8 @@ class BollBandBreakoutMonitor:
                 return
             if bucket_ts < latest.ts_ms:
                 return
-            self._candles[-1] = Candle(latest.ts_ms, latest.open, max(latest.high, price), min(latest.low, price), price, latest.volume, False)
+            self._candles[-1] = Candle(latest.ts_ms, latest.open, max(latest.high, price), min(latest.low, price),
+                                       price, latest.volume, False)
 
     def _log_stale_rest_candles_if_needed(self, last_price: float) -> None:
         now_ms = self._now_ms()
@@ -518,8 +527,11 @@ class BollBandBreakoutMonitor:
         )
         self._last_boll_stale_log_ts_ms = now_ms
 
-    def _build_signal(self, direction: BreakoutDirection, price: float, previous_price: float, tick_ts_ms: int, snapshot: BollSnapshot) -> BreakoutSignal:
-        return BreakoutSignal(self.config.inst_id, direction, price, previous_price, tick_ts_ms, snapshot.candle_ts_ms, snapshot.middle, snapshot.upper, snapshot.lower, snapshot.upper_distance_pct, snapshot.lower_distance_pct, self.config.alert_freeze_seconds)
+    def _build_signal(self, direction: BreakoutDirection, price: float, previous_price: float, tick_ts_ms: int,
+                      snapshot: BollSnapshot) -> BreakoutSignal:
+        return BreakoutSignal(self.config.inst_id, direction, price, previous_price, tick_ts_ms, snapshot.candle_ts_ms,
+                              snapshot.middle, snapshot.upper, snapshot.lower, snapshot.upper_distance_pct,
+                              snapshot.lower_distance_pct, self.config.alert_freeze_seconds)
 
     def _classify_price_zone(self, price: float) -> PriceZone:
         snapshot = self._snapshot

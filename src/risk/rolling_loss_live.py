@@ -118,16 +118,16 @@ def rolling_loss_guard_state_payload(action: str, guard: RollingLossGuard, reaso
 
 
 async def record_and_notify_rolling_loss_guard(
-    *,
-    journal: LiveTradeJournal,
-    email_sender: EmailSender | None,
-    payload: dict[str, Any],
-    email_enabled: bool,
+        *,
+        journal: LiveTradeJournal,
+        email_sender: EmailSender | None,
+        payload: dict[str, Any],
+        email_enabled: bool,
 ) -> None:
     if (
-        payload.get("critical_halt_preserved") is not None
-        or payload.get("existing_halt_reason") is not None
-        or payload.get("rolling_loss_halt_not_applied") is not None
+            payload.get("critical_halt_preserved") is not None
+            or payload.get("existing_halt_reason") is not None
+            or payload.get("rolling_loss_halt_not_applied") is not None
     ) and hasattr(journal, "append"):
         journal.append("ROLLING_LOSS_GUARD", payload)
     else:
@@ -145,21 +145,21 @@ async def record_and_notify_rolling_loss_guard(
 
 
 async def apply_rolling_loss_guard_startup_state(
-    *,
-    rolling_loss_guard: RollingLossGuard,
-    execution_state: ExecutionState,
-    has_position: bool,
-    equity: float,
-    now_ms: int,
-    journal: LiveTradeJournal,
-    email_sender: EmailSender | None,
+        *,
+        rolling_loss_guard: RollingLossGuard,
+        execution_state: ExecutionState,
+        has_position: bool,
+        equity: float,
+        now_ms: int,
+        journal: LiveTradeJournal,
+        email_sender: EmailSender | None,
 ) -> None:
     if rolling_loss_guard.state is None or not rolling_loss_guard.state.enabled:
         return
     if (
-        rolling_loss_guard.state.halt_active
-        and rolling_loss_guard.state.halt_until_ts_ms is not None
-        and now_ms < rolling_loss_guard.state.halt_until_ts_ms
+            rolling_loss_guard.state.halt_active
+            and rolling_loss_guard.state.halt_until_ts_ms is not None
+            and now_ms < rolling_loss_guard.state.halt_until_ts_ms
     ):
         execution_state.trading_halted = True
         execution_state.halt_reason = (

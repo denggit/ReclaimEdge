@@ -8,7 +8,6 @@ from src.position_management.sidecar.model import sidecar_open_contracts, sideca
 from src.position_management.sidecar.reconciler import build_core_position_view
 from src.strategies.boll_cvd_reclaim_strategy import StrategyPositionState, TradeIntent
 
-
 POSITION_MANAGEMENT_INTENTS = {"UPDATE_TP", "NEAR_TP_REDUCE", "MARKET_EXIT_RUNNER"}
 ENTRY_ADD_INTENTS = {"OPEN_LONG", "OPEN_SHORT", "ADD_LONG", "ADD_SHORT"}
 
@@ -29,7 +28,8 @@ def apply_core_position_view_to_state(state: StrategyPositionState, core_positio
 
 
 def with_runtime_managed_core(intent: TradeIntent, account_position: PositionSnapshot | None) -> TradeIntent:
-    if not getattr(intent, "managed_core_contracts", None) and account_position is not None and account_position.has_position:
+    if not getattr(intent, "managed_core_contracts",
+                   None) and account_position is not None and account_position.has_position:
         if intent.intent_type in POSITION_MANAGEMENT_INTENTS:
             return replace(
                 intent,
@@ -40,11 +40,11 @@ def with_runtime_managed_core(intent: TradeIntent, account_position: PositionSna
 
 
 def with_entry_add_managed_core_contracts(
-    *,
-    intent: TradeIntent,
-    strategy_state: StrategyPositionState,
-    account_core_position: PositionSnapshot | None,
-    trader: Trader,
+        *,
+        intent: TradeIntent,
+        strategy_state: StrategyPositionState,
+        account_core_position: PositionSnapshot | None,
+        trader: Trader,
 ) -> TradeIntent:
     if not strategy_state.sidecar_enabled_for_position:
         return intent
@@ -71,9 +71,9 @@ def with_entry_add_managed_core_contracts(
 
 
 def sidecar_position_mismatch(
-    okx_position: PositionSnapshot,
-    state: StrategyPositionState,
-    tolerance_qty: float = 0.000001,
+        okx_position: PositionSnapshot,
+        state: StrategyPositionState,
+        tolerance_qty: float = 0.000001,
 ) -> bool:
     if not getattr(state, "sidecar_enabled_for_position", False):
         return False

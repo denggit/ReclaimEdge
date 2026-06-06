@@ -30,10 +30,10 @@ def queue_oldest_command_age_seconds(queue: asyncio.Queue[TradeCommand]) -> floa
 
 
 async def enqueue_strategy_tick(
-    event: MarketTickEvent,
-    strategy_tick_queue: asyncio.Queue[MarketTickEvent],
-    state_lock: asyncio.Lock,
-    execution_state: ExecutionState,
+        event: MarketTickEvent,
+        strategy_tick_queue: asyncio.Queue[MarketTickEvent],
+        state_lock: asyncio.Lock,
+        execution_state: ExecutionState,
 ) -> None:
     if event.boll is None:
         return
@@ -51,10 +51,10 @@ async def enqueue_strategy_tick(
 
 
 async def enqueue_execution_command(
-    command: TradeCommand,
-    execution_queue: asyncio.Queue[TradeCommand],
-    state_lock: asyncio.Lock,
-    execution_state: ExecutionState,
+        command: TradeCommand,
+        execution_queue: asyncio.Queue[TradeCommand],
+        state_lock: asyncio.Lock,
+        execution_state: ExecutionState,
 ) -> bool:
     async with state_lock:
         if execution_queue.full():

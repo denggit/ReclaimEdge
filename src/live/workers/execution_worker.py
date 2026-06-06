@@ -35,18 +35,18 @@ logger = get_logger(__name__)
 
 
 async def execution_worker(
-    *,
-    execution_queue: asyncio.Queue[live_runtime_types.TradeCommand],
-    state_lock: asyncio.Lock,
-    execution_state: live_runtime_types.ExecutionState,
-    account_snapshot: live_runtime_types.AccountSnapshot,
-    trader: Trader,
-    strategy: BollCvdShockReclaimStrategy,
-    journal: LiveTradeJournal,
-    state_store: LiveStateStore,
-    email_sender: EmailSender,
-    backlog_log_seconds: float,
-    sidecar_skip_first_layer: bool = True,
+        *,
+        execution_queue: asyncio.Queue[live_runtime_types.TradeCommand],
+        state_lock: asyncio.Lock,
+        execution_state: live_runtime_types.ExecutionState,
+        account_snapshot: live_runtime_types.AccountSnapshot,
+        trader: Trader,
+        strategy: BollCvdShockReclaimStrategy,
+        journal: LiveTradeJournal,
+        state_store: LiveStateStore,
+        email_sender: EmailSender,
+        backlog_log_seconds: float,
+        sidecar_skip_first_layer: bool = True,
 ) -> None:
     last_backlog_log = 0.0
     while True:
@@ -72,8 +72,8 @@ async def execution_worker(
                 if runner_live_helpers.three_stage_dirty_post_tp1_sl_after_tp2(strategy.state):
                     dirty_post_tp1_sl_blocked = True
                     dirty_post_tp1_sl_should_record = not (
-                        execution_state.trading_halted
-                        and execution_state.halt_reason == runner_live_helpers.THREE_STAGE_RUNTIME_DIRTY_HALT_REASON
+                            execution_state.trading_halted
+                            and execution_state.halt_reason == runner_live_helpers.THREE_STAGE_RUNTIME_DIRTY_HALT_REASON
                     )
                     execution_state.trading_halted = True
                     execution_state.halt_reason = runner_live_helpers.THREE_STAGE_RUNTIME_DIRTY_HALT_REASON
@@ -99,9 +99,9 @@ async def execution_worker(
 
             async with state_lock:
                 rolling_management_allowed = (
-                    execution_state.trading_halted
-                    and execution_state.halt_reason in ROLLING_LOSS_HALT_REASONS
-                    and command.intent.intent_type in strategy_tick_worker_module.POSITION_MANAGEMENT_INTENTS
+                        execution_state.trading_halted
+                        and execution_state.halt_reason in ROLLING_LOSS_HALT_REASONS
+                        and command.intent.intent_type in strategy_tick_worker_module.POSITION_MANAGEMENT_INTENTS
                 )
                 if execution_state.trading_halted and not rolling_management_allowed:
                     logger.warning(
@@ -118,7 +118,9 @@ async def execution_worker(
             if command.intent.intent_type != "UPDATE_TP" and current_position_id is None:
                 entry_cash_before = await live_flat_balance.fetch_usdt_cash_balance(trader)
 
-            if command.intent.intent_type in {"ADD_LONG", "ADD_SHORT"} and getattr(command.strategy_state_snapshot, "tp_plan", "SINGLE") in tp_progress_helpers.SPLIT_TP_PLANS:
+            if command.intent.intent_type in {"ADD_LONG", "ADD_SHORT"} and getattr(command.strategy_state_snapshot,
+                                                                                   "tp_plan",
+                                                                                   "SINGLE") in tp_progress_helpers.SPLIT_TP_PLANS:
                 position = await trader.fetch_position_snapshot()
                 if position.has_position and position.side == command.intent.side:
                     consumed = False
@@ -169,7 +171,8 @@ async def execution_worker(
                 command = replace(command, intent=entry_intent)
 
             # Guard: Sidecar enabled position must never execute NEAR_TP_REDUCE
-            if command.intent.intent_type == "NEAR_TP_REDUCE" and getattr(strategy.state, "sidecar_enabled_for_position", False):
+            if command.intent.intent_type == "NEAR_TP_REDUCE" and getattr(strategy.state,
+                                                                          "sidecar_enabled_for_position", False):
                 logger.error(
                     "SIDECAR_BLOCKS_NEAR_TP_REDUCE | sidecar_enabled_for_position=True; NEAR_TP_REDUCE would reduce sidecar portion of OKX net position trading_halted=true halt_reason=sidecar_blocks_near_tp_reduce",
                 )
@@ -218,7 +221,8 @@ async def execution_worker(
                     intent=command.intent,
                     sidecar_enabled=bool(getattr(strategy.state, "sidecar_enabled_for_position", False)),
                     account_equity_usdt=float(trader.account_equity_usdt),
-                    leverage=float(getattr(trader, "leverage", getattr(getattr(trader, "config", None), "leverage", 50)) or 50),
+                    leverage=float(
+                        getattr(trader, "leverage", getattr(getattr(trader, "config", None), "leverage", 50)) or 50),
                     sidecar_margin_pct=float(getattr(strategy.state, "sidecar_margin_pct", 0.0) or 0.0),
                     sidecar_tp_pct=float(getattr(strategy.state, "sidecar_tp_pct", 0.0) or 0.0),
                     position_id=current_position_id,
@@ -241,28 +245,38 @@ async def execution_worker(
                     if getattr(command.intent, "middle_runner_active", False):
                         if getattr(result, "protective_sl_order_id", None):
                             strategy.state.middle_runner_protective_sl_order_id = result.protective_sl_order_id
-                        if live_config_helpers._parse_optional_float(getattr(result, "protective_sl_price", "")) is not None:
-                            strategy.state.middle_runner_protective_sl_price = live_config_helpers._parse_optional_float(result.protective_sl_price)
+                        if live_config_helpers._parse_optional_float(
+                                getattr(result, "protective_sl_price", "")) is not None:
+                            strategy.state.middle_runner_protective_sl_price = live_config_helpers._parse_optional_float(
+                                result.protective_sl_price)
                     if getattr(command.intent, "trend_runner_active", False):
                         if getattr(result, "protective_sl_order_id", None):
                             strategy.state.trend_runner_sl_order_id = result.protective_sl_order_id
-                        if live_config_helpers._parse_optional_float(getattr(result, "protective_sl_price", "")) is not None:
-                            strategy.state.trend_runner_sl_price = live_config_helpers._parse_optional_float(result.protective_sl_price)
+                        if live_config_helpers._parse_optional_float(
+                                getattr(result, "protective_sl_price", "")) is not None:
+                            strategy.state.trend_runner_sl_price = live_config_helpers._parse_optional_float(
+                                result.protective_sl_price)
                         strategy.state.trend_runner_tp_order_id = result.tp_order_id
                     strategy.state.tp_order_id = result.tp_order_id
                     strategy.state.tp_order_ids = list(getattr(result, "tp_order_ids", ()) or [])
-                    if getattr(command.intent, "three_stage_post_tp1_protective_sl_price", None) is not None and getattr(command.intent, "three_stage_tp1_consumed", False):
+                    if getattr(command.intent, "three_stage_post_tp1_protective_sl_price",
+                               None) is not None and getattr(command.intent, "three_stage_tp1_consumed", False):
                         if getattr(result, "protective_sl_order_id", None):
                             strategy.state.three_stage_post_tp1_protective_sl_order_id = result.protective_sl_order_id
-                        if live_config_helpers._parse_optional_float(getattr(result, "protective_sl_price", "")) is not None:
-                            strategy.state.three_stage_post_tp1_protective_sl_price = live_config_helpers._parse_optional_float(result.protective_sl_price)
+                        if live_config_helpers._parse_optional_float(
+                                getattr(result, "protective_sl_price", "")) is not None:
+                            strategy.state.three_stage_post_tp1_protective_sl_price = live_config_helpers._parse_optional_float(
+                                result.protective_sl_price)
                         strategy.state.three_stage_post_tp1_protected = bool(getattr(result, "protective_sl_ok", False))
                     strategy_state_for_save = copy.deepcopy(strategy.state)
                     equity = account_snapshot.equity
-                journal.record_tp_update(position_id=current_position_id, intent=command.intent, result=result, equity=equity)
+                journal.record_tp_update(position_id=current_position_id, intent=command.intent, result=result,
+                                         equity=equity)
                 if (
-                    (getattr(command.intent, "middle_runner_active", False) or getattr(command.intent, "middle_runner_pending", False))
-                    and hasattr(journal, "append")
+                        (getattr(command.intent, "middle_runner_active", False) or getattr(command.intent,
+                                                                                           "middle_runner_pending",
+                                                                                           False))
+                        and hasattr(journal, "append")
                 ):
                     journal.append(
                         "MIDDLE_RUNNER_TP_UPDATED",
@@ -270,7 +284,9 @@ async def execution_worker(
                             "side": command.intent.side,
                             "first_tp_price": getattr(command.intent, "partial_tp_price", None),
                             "final_tp_price": command.intent.tp_price,
-                            "protective_sl_price": getattr(result, "protective_sl_price", "") or getattr(command.intent, "middle_runner_protective_sl_price", None),
+                            "protective_sl_price": getattr(result, "protective_sl_price", "") or getattr(command.intent,
+                                                                                                         "middle_runner_protective_sl_price",
+                                                                                                         None),
                             "protective_sl_order_id": getattr(result, "protective_sl_order_id", None),
                             "boll_lower": command.intent.boll_lower,
                             "boll_middle": command.intent.boll_middle,
@@ -285,8 +301,11 @@ async def execution_worker(
                         {
                             "side": command.intent.side,
                             "tp_plan": "THREE_STAGE_RUNNER",
-                            "runner_tp_price": getattr(command.intent, "trend_runner_tp_price", None) or command.intent.tp_price,
-                            "runner_sl_price": getattr(result, "protective_sl_price", "") or getattr(command.intent, "trend_runner_sl_price", None),
+                            "runner_tp_price": getattr(command.intent, "trend_runner_tp_price",
+                                                       None) or command.intent.tp_price,
+                            "runner_sl_price": getattr(result, "protective_sl_price", "") or getattr(command.intent,
+                                                                                                     "trend_runner_sl_price",
+                                                                                                     None),
                             "runner_sl_order_id": getattr(result, "protective_sl_order_id", None),
                             "trend_runner_active": True,
                             "trend_runner_adjust_count": getattr(command.intent, "trend_runner_adjust_count", 0),
@@ -298,19 +317,22 @@ async def execution_worker(
                         position_id=current_position_id,
                     )
                 if (
-                    getattr(command.intent, "three_stage_post_tp1_protective_sl_price", None) is not None
-                    and getattr(command.intent, "three_stage_tp1_consumed", False)
-                    and not getattr(command.intent, "trend_runner_active", False)
-                    and hasattr(journal, "append")
+                        getattr(command.intent, "three_stage_post_tp1_protective_sl_price", None) is not None
+                        and getattr(command.intent, "three_stage_tp1_consumed", False)
+                        and not getattr(command.intent, "trend_runner_active", False)
+                        and hasattr(journal, "append")
                 ):
                     journal.append(
                         "THREE_STAGE_TP1_PROTECTIVE_SL_UPDATED",
                         {
                             "side": command.intent.side,
                             "contracts": result.contracts,
-                            "protective_sl_price": getattr(result, "protective_sl_price", "") or getattr(command.intent, "three_stage_post_tp1_protective_sl_price", None),
+                            "protective_sl_price": getattr(result, "protective_sl_price", "") or getattr(command.intent,
+                                                                                                         "three_stage_post_tp1_protective_sl_price",
+                                                                                                         None),
                             "protective_sl_order_id": getattr(result, "protective_sl_order_id", None),
-                            "old_protective_sl_order_id": getattr(command.intent, "three_stage_post_tp1_protective_sl_order_id", None),
+                            "old_protective_sl_order_id": getattr(command.intent,
+                                                                  "three_stage_post_tp1_protective_sl_order_id", None),
                             "avg_entry_price": command.intent.avg_entry_price,
                             "tp1_price": getattr(command.intent, "three_stage_tp1_price", None),
                             "tp1_ratio": getattr(command.intent, "three_stage_tp1_ratio", 0.0),
@@ -322,7 +344,10 @@ async def execution_worker(
                         },
                         position_id=current_position_id,
                     )
-                state_store.save(LiveStateStore.from_strategy_state(position_id=current_position_id, symbol=trader.symbol, strategy_state=strategy_state_for_save, cash_before_position=cash_before_position))
+                state_store.save(
+                    LiveStateStore.from_strategy_state(position_id=current_position_id, symbol=trader.symbol,
+                                                       strategy_state=strategy_state_for_save,
+                                                       cash_before_position=cash_before_position))
                 logger.warning(
                     "LIVE TP update success | side=%s layer=%s price=%.4f contracts=%s tp_price=%s tp_mode=%s tp_plan=%s partial_tp=%s avg_entry=%.4f breakeven=%.4f tp_order_id=%s",
                     command.intent.side,
@@ -384,8 +409,12 @@ async def execution_worker(
                         strategy.state.near_tp_protected = True
                         strategy.state.near_tp_reduce_pending = False
                         strategy_config = getattr(strategy, "config", None)
-                        strategy.state.near_tp_add_disabled = bool(getattr(strategy_config, "near_tp_disable_add_after_reduce", True))
-                        strategy.state.near_tp_protective_sl_price = getattr(command.intent, "near_tp_protective_sl_price", None) or live_config_helpers._parse_optional_float(getattr(result, "protective_sl_price", ""))
+                        strategy.state.near_tp_add_disabled = bool(
+                            getattr(strategy_config, "near_tp_disable_add_after_reduce", True))
+                        strategy.state.near_tp_protective_sl_price = getattr(command.intent,
+                                                                             "near_tp_protective_sl_price",
+                                                                             None) or live_config_helpers._parse_optional_float(
+                            getattr(result, "protective_sl_price", ""))
                         strategy.state.near_tp_protective_sl_order_id = getattr(result, "protective_sl_order_id", None)
                         strategy.state.tp_plan = "SINGLE"
                         strategy.state.partial_tp_price = None
@@ -463,7 +492,8 @@ async def execution_worker(
                     execution_state.last_order_ts_ms = command.intent.ts_ms
                     execution_state.trading_halted = True
                     execution_state.halt_reason = "trend_runner_market_exit_waiting_flat"
-                    strategy.state.trend_runner_exit_reason = getattr(command.intent, "trend_runner_exit_reason", None) or command.intent.reason
+                    strategy.state.trend_runner_exit_reason = getattr(command.intent, "trend_runner_exit_reason",
+                                                                      None) or command.intent.reason
                     strategy_state_for_save = copy.deepcopy(strategy.state)
                     cash_before_position = execution_state.cash_before_position
                 journal.record_trend_runner_market_exit(
@@ -492,7 +522,8 @@ async def execution_worker(
                 new_position_id = None
                 async with state_lock:
                     if execution_state.current_position_id is None:
-                        new_position_id = journal.new_position_id(trader.symbol, command.intent.side, command.intent.ts_ms)
+                        new_position_id = journal.new_position_id(trader.symbol, command.intent.side,
+                                                                  command.intent.ts_ms)
                         execution_state.current_position_id = new_position_id
                         execution_state.cash_before_position = entry_cash_before
                     current_position_id = execution_state.current_position_id
@@ -573,7 +604,10 @@ async def execution_worker(
                         },
                         position_id=current_position_id or new_position_id or "",
                     )
-                state_store.save(LiveStateStore.from_strategy_state(position_id=current_position_id, symbol=trader.symbol, strategy_state=strategy_state_for_save, cash_before_position=cash_before_position))
+                state_store.save(
+                    LiveStateStore.from_strategy_state(position_id=current_position_id, symbol=trader.symbol,
+                                                       strategy_state=strategy_state_for_save,
+                                                       cash_before_position=cash_before_position))
                 logger.warning(
                     "LIVE entry success | intent_type=%s side=%s layer=%s price=%.4f contracts=%s tp_price=%s tp_mode=%s tp_plan=%s partial_tp=%s avg_entry=%.4f breakeven=%.4f order_id=%s tp_order_id=%s",
                     command.intent.intent_type,

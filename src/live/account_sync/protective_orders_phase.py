@@ -24,18 +24,18 @@ class AccountSyncProtectiveOrdersResult:
 
 
 async def run_account_sync_protective_orders_phase(
-    *,
-    state_lock: asyncio.Lock,
-    execution_state: live_runtime_types.ExecutionState,
-    trader: Trader,
-    strategy: BollCvdShockReclaimStrategy,
-    journal: LiveTradeJournal,
-    state_store: LiveStateStore,
-    save_state_payload: tuple[str | None, StrategyPositionState, float | None] | None,
-    three_stage_post_tp1_cancel_payload: dict[str, Any] | None,
-    three_stage_post_tp1_sl_payload: dict[str, Any] | None,
-    middle_runner_sl_payload: dict[str, Any] | None,
-    middle_runner_activation_payload: dict[str, Any] | None,
+        *,
+        state_lock: asyncio.Lock,
+        execution_state: live_runtime_types.ExecutionState,
+        trader: Trader,
+        strategy: BollCvdShockReclaimStrategy,
+        journal: LiveTradeJournal,
+        state_store: LiveStateStore,
+        save_state_payload: tuple[str | None, StrategyPositionState, float | None] | None,
+        three_stage_post_tp1_cancel_payload: dict[str, Any] | None,
+        three_stage_post_tp1_sl_payload: dict[str, Any] | None,
+        middle_runner_sl_payload: dict[str, Any] | None,
+        middle_runner_activation_payload: dict[str, Any] | None,
 ) -> AccountSyncProtectiveOrdersResult:
     if three_stage_post_tp1_cancel_payload is not None:
         old_order_id = three_stage_post_tp1_cancel_payload.get("protective_sl_order_id")
@@ -56,13 +56,14 @@ async def run_account_sync_protective_orders_phase(
                 strategy.state.three_stage_post_tp1_protective_sl_price = None
                 strategy.state.three_stage_post_tp1_protected = False
                 if (
-                    three_stage_post_tp1_cancel_payload.get("pending_halt_applied")
-                    and execution_state.trading_halted
-                    and execution_state.halt_reason == runner_live_helpers.THREE_STAGE_CANCEL_PENDING_HALT_REASON
+                        three_stage_post_tp1_cancel_payload.get("pending_halt_applied")
+                        and execution_state.trading_halted
+                        and execution_state.halt_reason == runner_live_helpers.THREE_STAGE_CANCEL_PENDING_HALT_REASON
                 ):
                     execution_state.trading_halted = False
                     execution_state.halt_reason = None
-                save_state_payload = (execution_state.current_position_id, copy.deepcopy(strategy.state), execution_state.cash_before_position)
+                save_state_payload = (execution_state.current_position_id, copy.deepcopy(strategy.state),
+                                      execution_state.cash_before_position)
             if hasattr(journal, "append"):
                 journal.append(
                     "THREE_STAGE_TP1_PROTECTIVE_SL_CANCELLED_ON_TP2",
@@ -81,11 +82,13 @@ async def run_account_sync_protective_orders_phase(
         else:
             async with state_lock:
                 strategy.state.three_stage_post_tp1_protective_sl_order_id = old_order_id
-                strategy.state.three_stage_post_tp1_protective_sl_price = three_stage_post_tp1_cancel_payload.get("protective_sl_price")
+                strategy.state.three_stage_post_tp1_protective_sl_price = three_stage_post_tp1_cancel_payload.get(
+                    "protective_sl_price")
                 strategy.state.three_stage_post_tp1_protected = True
                 execution_state.trading_halted = True
                 execution_state.halt_reason = "three_stage_post_tp1_sl_cancel_failed_on_tp2"
-                save_state_payload = (execution_state.current_position_id, copy.deepcopy(strategy.state), execution_state.cash_before_position)
+                save_state_payload = (execution_state.current_position_id, copy.deepcopy(strategy.state),
+                                      execution_state.cash_before_position)
             if hasattr(journal, "append"):
                 journal.append(
                     "THREE_STAGE_TP1_PROTECTIVE_SL_CANCEL_FAILED_ON_TP2",
@@ -131,7 +134,8 @@ async def run_account_sync_protective_orders_phase(
                 strategy.state.three_stage_post_tp1_protective_sl_order_id = sl_order_id
                 strategy.state.three_stage_post_tp1_protective_sl_price = float(sl_price)
                 strategy.state.three_stage_post_tp1_protected = True
-                save_state_payload = (execution_state.current_position_id, copy.deepcopy(strategy.state), execution_state.cash_before_position)
+                save_state_payload = (execution_state.current_position_id, copy.deepcopy(strategy.state),
+                                      execution_state.cash_before_position)
             if hasattr(journal, "append"):
                 journal.append(
                     "THREE_STAGE_TP1_PROTECTIVE_SL_PLACED",
@@ -257,7 +261,8 @@ async def run_account_sync_protective_orders_phase(
                 strategy.state.middle_runner_protective_sl_price = float(sl_price)
                 if middle_runner_sl_payload.get("reason") == "partial_size_mismatch_degraded":
                     strategy.state.middle_runner_size_mismatch_protected = True
-                save_state_payload = (execution_state.current_position_id, copy.deepcopy(strategy.state), execution_state.cash_before_position)
+                save_state_payload = (execution_state.current_position_id, copy.deepcopy(strategy.state),
+                                      execution_state.cash_before_position)
             if hasattr(journal, "append"):
                 event_name = (
                     "MIDDLE_RUNNER_SIZE_MISMATCH_PROTECTED"
@@ -283,7 +288,8 @@ async def run_account_sync_protective_orders_phase(
                     middle_runner_activation_recorded = True
             logger.warning(
                 "%s | position_id=%s side=%s core_contracts=%s net_contracts=%s sl_contracts=%s protective_sl_price=%s protective_sl_order_id=%s",
-                "MIDDLE_RUNNER_SIZE_MISMATCH_PROTECTED" if middle_runner_sl_payload.get("reason") == "partial_size_mismatch_degraded" else "MIDDLE_RUNNER_ACTIVATED",
+                "MIDDLE_RUNNER_SIZE_MISMATCH_PROTECTED" if middle_runner_sl_payload.get(
+                    "reason") == "partial_size_mismatch_degraded" else "MIDDLE_RUNNER_ACTIVATED",
                 middle_runner_sl_payload.get("position_id"),
                 middle_runner_sl_payload.get("side"),
                 middle_runner_sl_payload.get("core_contracts"),
@@ -322,10 +328,10 @@ async def run_account_sync_protective_orders_phase(
                 exit_message,
             )
     if (
-        middle_runner_activation_payload is not None
-        and not middle_runner_activation_recorded
-        and middle_runner_sl_payload is None
-        and hasattr(journal, "append")
+            middle_runner_activation_payload is not None
+            and not middle_runner_activation_recorded
+            and middle_runner_sl_payload is None
+            and hasattr(journal, "append")
     ):
         journal.append(
             "MIDDLE_RUNNER_ACTIVATED",

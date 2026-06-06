@@ -20,7 +20,8 @@ from src.risk.simple_position_sizer import SimplePositionSizer, SimplePositionSi
 
 
 def test_sidecar_disabled_keeps_core_margin_pct_and_sizing() -> None:
-    config = SimplePositionSizerConfig(dry_run_equity_usdt=1000, layer_margin_pct=0.04, leverage=50, sidecar_enabled=False)
+    config = SimplePositionSizerConfig(dry_run_equity_usdt=1000, layer_margin_pct=0.04, leverage=50,
+                                       sidecar_enabled=False)
     sizer = SimplePositionSizer(config)
 
     size = sizer.calculate(100.0, layer_index=1)
@@ -95,8 +96,10 @@ def test_trim_and_open_qty_keep_small_state() -> None:
 
 def test_open_unprotected_counts_as_sidecar_exposure() -> None:
     legs = [
-        {"leg_id": "1", "qty": 0.69, "contracts": "0.69", "status": SidecarLegStatus.OPEN_UNPROTECTED.value, "created_ts_ms": 1, "updated_ts_ms": 1},
-        {"leg_id": "2", "qty": 2, "contracts": "2", "status": SidecarLegStatus.OPEN.value, "created_ts_ms": 2, "updated_ts_ms": 2},
+        {"leg_id": "1", "qty": 0.69, "contracts": "0.69", "status": SidecarLegStatus.OPEN_UNPROTECTED.value,
+         "created_ts_ms": 1, "updated_ts_ms": 1},
+        {"leg_id": "2", "qty": 2, "contracts": "2", "status": SidecarLegStatus.OPEN.value, "created_ts_ms": 2,
+         "updated_ts_ms": 2},
     ]
 
     assert sidecar_open_qty(legs) == pytest.approx(2.69)

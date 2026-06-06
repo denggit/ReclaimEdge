@@ -46,10 +46,10 @@ def three_stage_post_tp1_boll(strategy: BollCvdReclaimStrategy):
 
 
 def three_stage_post_tp1_current_price(
-    account_snapshot: AccountSnapshot,
-    position: PositionSnapshot,
-    post_tp1_boll: Any,
-    now_ms: int,
+        account_snapshot: AccountSnapshot,
+        position: PositionSnapshot,
+        post_tp1_boll: Any,
+        now_ms: int,
 ) -> tuple[float, str]:
     latest_price = getattr(account_snapshot, "latest_market_price", None)
     latest_ts_ms = int(getattr(account_snapshot, "latest_market_price_ts_ms", 0) or 0)
@@ -82,8 +82,8 @@ def three_stage_post_tp1_current_price(
 
 
 def middle_runner_size_mismatch_needs_degraded_protection(
-    strategy: BollCvdReclaimStrategy,
-    position: PositionSnapshot,
+        strategy: BollCvdReclaimStrategy,
+        position: PositionSnapshot,
 ) -> bool:
     state = strategy.state
     if not getattr(state, "middle_runner_pending", False):
@@ -112,10 +112,10 @@ def three_stage_dirty_post_tp1_sl_after_tp2(state: StrategyPositionState) -> boo
 
 
 def three_stage_dirty_post_tp1_payload(
-    *,
-    strategy: BollCvdReclaimStrategy,
-    execution_state: ExecutionState,
-    reason: str,
+        *,
+        strategy: BollCvdReclaimStrategy,
+        execution_state: ExecutionState,
+        reason: str,
 ) -> dict[str, Any]:
     state = strategy.state
     return {
@@ -132,14 +132,14 @@ def three_stage_dirty_post_tp1_payload(
 
 
 def append_three_stage_dirty_post_tp1_event(
-    *,
-    event_name: str,
-    strategy: BollCvdReclaimStrategy,
-    execution_state: ExecutionState,
-    journal: LiveTradeJournal,
-    state_store: LiveStateStore,
-    trader_symbol: str,
-    reason: str,
+        *,
+        event_name: str,
+        strategy: BollCvdReclaimStrategy,
+        execution_state: ExecutionState,
+        journal: LiveTradeJournal,
+        state_store: LiveStateStore,
+        trader_symbol: str,
+        reason: str,
 ) -> None:
     payload = three_stage_dirty_post_tp1_payload(strategy=strategy, execution_state=execution_state, reason=reason)
     if hasattr(journal, "append"):
@@ -166,14 +166,14 @@ def append_three_stage_dirty_post_tp1_event(
 
 
 def apply_three_stage_startup_safety_gate(
-    *,
-    strategy: BollCvdReclaimStrategy,
-    execution_state: ExecutionState,
-    saved_state: Any,
-    startup_position: PositionSnapshot,
-    journal: LiveTradeJournal,
-    state_store: LiveStateStore,
-    trader_symbol: str,
+        *,
+        strategy: BollCvdReclaimStrategy,
+        execution_state: ExecutionState,
+        saved_state: Any,
+        startup_position: PositionSnapshot,
+        journal: LiveTradeJournal,
+        state_store: LiveStateStore,
+        trader_symbol: str,
 ) -> bool:
     if not startup_position.has_position:
         return False

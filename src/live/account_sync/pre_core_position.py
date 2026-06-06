@@ -19,8 +19,8 @@ from src.position_management.sidecar.model import (
     sidecar_open_qty,
 )
 from src.position_management.sidecar.reconciler import build_core_position_view
-from src.reporting.trade_journal import LiveTradeJournal
 from src.reporting.live_state_store import LiveStateStore
+from src.reporting.trade_journal import LiveTradeJournal
 from src.risk.simple_position_sizer import SimplePositionSizer
 from src.strategies.boll_cvd_shock_reclaim_strategy import BollCvdShockReclaimStrategy
 from src.utils.log import get_logger
@@ -50,29 +50,29 @@ class AccountSyncPreCorePositionResult:
 
 
 async def run_account_sync_pre_core_position_phase(
-    *,
-    state_lock: asyncio.Lock,
-    account_snapshot: live_runtime_types.AccountSnapshot,
-    execution_state: live_runtime_types.ExecutionState,
-    trader: Trader,
-    sizer: SimplePositionSizer,
-    strategy: BollCvdShockReclaimStrategy,
-    journal: LiveTradeJournal,
-    state_store: LiveStateStore,
-    now: float,
-    last_account_sync: float,
-    account_sync_seconds: float,
-    cash_transfer_detect_enabled: bool,
-    cash_transfer_min_delta_usdt: float,
-    cash_transfer_settle_seconds: float,
-    cash_transfer_after_flat_cooldown_seconds: float,
-    cash_drift_min_delta_usdt: float,
-    cash_event_log_interval_seconds: float,
-    cash_log_min_delta_usdt: float,
-    last_logged_cash: float,
-    last_logged_equity: float,
-    last_cash_event_log: float,
-    last_flat_detected_monotonic: float,
+        *,
+        state_lock: asyncio.Lock,
+        account_snapshot: live_runtime_types.AccountSnapshot,
+        execution_state: live_runtime_types.ExecutionState,
+        trader: Trader,
+        sizer: SimplePositionSizer,
+        strategy: BollCvdShockReclaimStrategy,
+        journal: LiveTradeJournal,
+        state_store: LiveStateStore,
+        now: float,
+        last_account_sync: float,
+        account_sync_seconds: float,
+        cash_transfer_detect_enabled: bool,
+        cash_transfer_min_delta_usdt: float,
+        cash_transfer_settle_seconds: float,
+        cash_transfer_after_flat_cooldown_seconds: float,
+        cash_drift_min_delta_usdt: float,
+        cash_event_log_interval_seconds: float,
+        cash_log_min_delta_usdt: float,
+        last_logged_cash: float,
+        last_logged_equity: float,
+        last_cash_event_log: float,
+        last_flat_detected_monotonic: float,
 ) -> AccountSyncPreCorePositionResult:
     cash = account_snapshot.cash
     equity = account_snapshot.equity
@@ -114,7 +114,8 @@ async def run_account_sync_pre_core_position_phase(
     async with state_lock:
         pending_order_count = execution_state.pending_order_count
         sidecar_runtime_state.refresh_sidecar_state_totals(strategy.state, int(os.getenv("SIDECAR_MAX_LEGS", "10")))
-        if sidecar_runtime_state.open_sidecar_legs_exceed_limit(strategy.state, int(os.getenv("SIDECAR_MAX_LEGS", "10"))):
+        if sidecar_runtime_state.open_sidecar_legs_exceed_limit(strategy.state,
+                                                                int(os.getenv("SIDECAR_MAX_LEGS", "10"))):
             execution_state.trading_halted = True
             execution_state.halt_reason = "sidecar_open_legs_exceed_max"
             strategy.state.sidecar_dirty = True
@@ -126,7 +127,8 @@ async def run_account_sync_pre_core_position_phase(
                         "open_leg_count": sum(
                             1
                             for leg in strategy.state.sidecar_legs
-                            if leg.get("status") in {SidecarLegStatus.OPEN.value, SidecarLegStatus.OPEN_UNPROTECTED.value}
+                            if
+                            leg.get("status") in {SidecarLegStatus.OPEN.value, SidecarLegStatus.OPEN_UNPROTECTED.value}
                         ),
                         "sidecar_max_legs": int(os.getenv("SIDECAR_MAX_LEGS", "10")),
                         "manual_intervention_required": True,
@@ -134,7 +136,8 @@ async def run_account_sync_pre_core_position_phase(
                     position_id=execution_state.current_position_id,
                 )
         open_sidecar_qty = sidecar_open_qty(strategy.state.sidecar_legs)
-        core_position = build_core_position_view(position, open_sidecar_qty, sidecar_open_contracts(strategy.state.sidecar_legs))
+        core_position = build_core_position_view(position, open_sidecar_qty,
+                                                 sidecar_open_contracts(strategy.state.sidecar_legs))
         core_position_view_helpers.apply_core_position_view_to_state(strategy.state, core_position)
         current_position_key = core_position_view_helpers.position_log_key(core_position)
         if core_position_view_helpers.sidecar_position_mismatch(position, strategy.state):
@@ -168,10 +171,10 @@ async def run_account_sync_pre_core_position_phase(
             and getattr(sizer.config, "sidecar_close_when_core_flat", True)
         )
         flat_transition_detected = (
-            pending_order_count == 0
-            and not core_position.has_position
-            and not force_close_sidecar
-            and strategy.state.layers > 0
+                pending_order_count == 0
+                and not core_position.has_position
+                and not force_close_sidecar
+                and strategy.state.layers > 0
         )
         if flat_transition_detected:
             pending_flat_payload = {
@@ -187,8 +190,11 @@ async def run_account_sync_pre_core_position_phase(
                 "last_tp_plan": getattr(strategy.state, "tp_plan", "SINGLE"),
                 "partial_tp_consumed": getattr(strategy.state, "partial_tp_consumed", False),
                 "near_tp_protective_sl_order_id": getattr(strategy.state, "near_tp_protective_sl_order_id", None),
-                "middle_runner_protective_sl_order_id": getattr(strategy.state, "middle_runner_protective_sl_order_id", None),
-                "three_stage_post_tp1_protective_sl_order_id": getattr(strategy.state, "three_stage_post_tp1_protective_sl_order_id", None),
+                "middle_runner_protective_sl_order_id": getattr(strategy.state, "middle_runner_protective_sl_order_id",
+                                                                None),
+                "three_stage_post_tp1_protective_sl_order_id": getattr(strategy.state,
+                                                                       "three_stage_post_tp1_protective_sl_order_id",
+                                                                       None),
                 "trend_runner_sl_order_id": getattr(strategy.state, "trend_runner_sl_order_id", None),
                 "trend_runner_exit_reason": getattr(strategy.state, "trend_runner_exit_reason", None),
             }
@@ -223,20 +229,20 @@ async def run_account_sync_pre_core_position_phase(
             if seconds_since_last_order < cash_transfer_settle_seconds:
                 unsafe_reasons.append("order_settle")
             in_flat_settle_cooldown = (
-                last_flat_detected_monotonic > 0
-                and now - last_flat_detected_monotonic < cash_transfer_after_flat_cooldown_seconds
+                    last_flat_detected_monotonic > 0
+                    and now - last_flat_detected_monotonic < cash_transfer_after_flat_cooldown_seconds
             )
             if in_flat_settle_cooldown:
                 unsafe_reasons.append("flat_settle_cooldown")
             safe_for_cash_transfer = (
-                cash_transfer_detect_enabled
-                and pending_order_count == 0
-                and not core_position.has_position
-                and strategy.state.layers == 0
-                and execution_state.current_position_id is None
-                and seconds_since_last_order >= cash_transfer_settle_seconds
-                and not in_flat_settle_cooldown
-                and abs(cash_delta) >= cash_transfer_min_delta_usdt
+                    cash_transfer_detect_enabled
+                    and pending_order_count == 0
+                    and not core_position.has_position
+                    and strategy.state.layers == 0
+                    and execution_state.current_position_id is None
+                    and seconds_since_last_order >= cash_transfer_settle_seconds
+                    and not in_flat_settle_cooldown
+                    and abs(cash_delta) >= cash_transfer_min_delta_usdt
             )
             if safe_for_cash_transfer:
                 direction = "DEPOSIT" if cash_delta > 0 else "WITHDRAWAL"

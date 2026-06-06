@@ -12,7 +12,8 @@ from src.reporting.journal_compactor import compact_after_weekly_summary
 from src.reporting.trade_journal import JournalEvent, LiveTradeJournal
 
 
-def event(event_id: str, event_type: str, position_id: str | None, ts: str, payload: dict | None = None) -> JournalEvent:
+def event(event_id: str, event_type: str, position_id: str | None, ts: str,
+          payload: dict | None = None) -> JournalEvent:
     return JournalEvent(
         event_id=event_id,
         event_type=event_type,

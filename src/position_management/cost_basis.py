@@ -19,12 +19,12 @@ class RemainingCostBasis:
 
 
 def calculate_remaining_breakeven_price(
-    *,
-    side: PositionSide,
-    entry_notional: float,
-    exit_notional: float,
-    remaining_qty: float,
-    fee_buffer_pct: float,
+        *,
+        side: PositionSide,
+        entry_notional: float,
+        exit_notional: float,
+        remaining_qty: float,
+        fee_buffer_pct: float,
 ) -> RemainingCostBasis:
     safe_remaining_qty = float(remaining_qty or 0.0)
     safe_entry_notional = float(entry_notional or 0.0)

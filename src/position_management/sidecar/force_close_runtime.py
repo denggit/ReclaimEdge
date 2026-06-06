@@ -21,16 +21,16 @@ logger = get_logger(__name__)
 
 
 async def force_close_sidecar_after_core_flat(
-    *,
-    trader: Trader,
-    strategy_state: StrategyPositionState,
-    execution_state: live_runtime_types.ExecutionState,
-    journal: LiveTradeJournal,
-    state_store: LiveStateStore,
-    trader_symbol: str,
-    position_id: str | None,
-    cash_before_position: float | None,
-    ts_ms: int,
+        *,
+        trader: Trader,
+        strategy_state: StrategyPositionState,
+        execution_state: live_runtime_types.ExecutionState,
+        journal: LiveTradeJournal,
+        state_store: LiveStateStore,
+        trader_symbol: str,
+        position_id: str | None,
+        cash_before_position: float | None,
+        ts_ms: int,
 ) -> bool:
     if sidecar_open_qty(strategy_state.sidecar_legs) <= 0:
         return True
@@ -38,9 +38,9 @@ async def force_close_sidecar_after_core_flat(
     okx_position = await trader.fetch_position_snapshot()
     tolerance = Decimal(str(os.getenv("SIDECAR_FORCE_CLOSE_CONTRACT_TOLERANCE", "0.01")))
     if (
-        not okx_position.has_position
-        or okx_position.side != strategy_state.side
-        or abs(okx_position.contracts - expected_sidecar_contracts) > tolerance
+            not okx_position.has_position
+            or okx_position.side != strategy_state.side
+            or abs(okx_position.contracts - expected_sidecar_contracts) > tolerance
     ):
         execution_state.trading_halted = True
         execution_state.halt_reason = "sidecar_force_close_position_mismatch"
@@ -62,7 +62,9 @@ async def force_close_sidecar_after_core_flat(
             expected_sidecar_contracts,
             tolerance,
         )
-        state_store.save(LiveStateStore.from_strategy_state(position_id=position_id, symbol=trader_symbol, strategy_state=strategy_state, cash_before_position=cash_before_position))
+        state_store.save(LiveStateStore.from_strategy_state(position_id=position_id, symbol=trader_symbol,
+                                                            strategy_state=strategy_state,
+                                                            cash_before_position=cash_before_position))
         return False
     try:
         for leg in strategy_state.sidecar_legs:
@@ -84,9 +86,13 @@ async def force_close_sidecar_after_core_flat(
         execution_state.halt_reason = "sidecar_force_close_failed"
         strategy_state.sidecar_dirty = True
         strategy_state.sidecar_halt_reason = "sidecar_force_close_failed"
-        journal.append("SIDECAR_FORCE_CLOSE_FAILED", {"error": str(exc), "manual_intervention_required": True}, position_id=position_id)
-        logger.error("SIDECAR_FORCE_CLOSE_FAILED | position_id=%s error=%s manual_intervention_required=true", position_id, exc)
-        state_store.save(LiveStateStore.from_strategy_state(position_id=position_id, symbol=trader_symbol, strategy_state=strategy_state, cash_before_position=cash_before_position))
+        journal.append("SIDECAR_FORCE_CLOSE_FAILED", {"error": str(exc), "manual_intervention_required": True},
+                       position_id=position_id)
+        logger.error("SIDECAR_FORCE_CLOSE_FAILED | position_id=%s error=%s manual_intervention_required=true",
+                     position_id, exc)
+        state_store.save(LiveStateStore.from_strategy_state(position_id=position_id, symbol=trader_symbol,
+                                                            strategy_state=strategy_state,
+                                                            cash_before_position=cash_before_position))
         return False
     strategy_state.sidecar_legs = [
         mark_sidecar_leg_force_closed(leg, ts_ms)
@@ -95,6 +101,9 @@ async def force_close_sidecar_after_core_flat(
         for leg in strategy_state.sidecar_legs
     ]
     sidecar_runtime_state.refresh_sidecar_state_totals(strategy_state, int(os.getenv("SIDECAR_MAX_LEGS", "10")))
-    journal.append("SIDECAR_FORCE_CLOSED_AFTER_CORE_FLAT", {"side": strategy_state.side, "reason": "core_flat"}, position_id=position_id)
-    state_store.save(LiveStateStore.from_strategy_state(position_id=position_id, symbol=trader_symbol, strategy_state=strategy_state, cash_before_position=cash_before_position))
+    journal.append("SIDECAR_FORCE_CLOSED_AFTER_CORE_FLAT", {"side": strategy_state.side, "reason": "core_flat"},
+                   position_id=position_id)
+    state_store.save(
+        LiveStateStore.from_strategy_state(position_id=position_id, symbol=trader_symbol, strategy_state=strategy_state,
+                                           cash_before_position=cash_before_position))
     return True

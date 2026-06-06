@@ -86,7 +86,8 @@ class BollBandBreakoutMonitorTickQueueTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_candle_sync_timeout_does_not_crash_and_logs_low_frequency(self) -> None:
         monitor = BollBandBreakoutMonitor(BollBandBreakoutMonitorConfig(candle_poll_seconds=1))
-        monitor.client = FakeCandleClient([TimeoutError("timeout"), TimeoutError("timeout"), TimeoutError("timeout")])  # type: ignore[assignment]
+        monitor.client = FakeCandleClient(
+            [TimeoutError("timeout"), TimeoutError("timeout"), TimeoutError("timeout")])  # type: ignore[assignment]
         now_ms = 1_000_000
         monitor._now_ms = lambda: now_ms  # type: ignore[method-assign]
         monitor._candle_sync_started_ts_ms = now_ms

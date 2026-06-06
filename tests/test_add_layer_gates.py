@@ -11,7 +11,6 @@ from src.strategies.boll_cvd_reclaim_strategy import (
     StrategyPositionState,
 )
 
-
 NOW_MS = 2_000_000
 
 

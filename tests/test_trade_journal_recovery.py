@@ -66,8 +66,10 @@ class LiveTradeJournalRecoveryTest(unittest.TestCase):
     def test_closed_position_is_not_reused(self) -> None:
         journal = self.make_journal()
         position_id = "ETH-USDT-SWAP:LONG:closed"
-        self.append_event(journal, "ENTRY", position_id, {"symbol": "ETH-USDT-SWAP", "side": "LONG", "cash_before_position": 100.0})
-        self.append_event(journal, "FLAT", position_id, {"symbol": "ETH-USDT-SWAP", "side": "LONG", "cash_after": 101.0})
+        self.append_event(journal, "ENTRY", position_id,
+                          {"symbol": "ETH-USDT-SWAP", "side": "LONG", "cash_before_position": 100.0})
+        self.append_event(journal, "FLAT", position_id,
+                          {"symbol": "ETH-USDT-SWAP", "side": "LONG", "cash_after": 101.0})
 
         match = journal.find_latest_unclosed_position("ETH-USDT-SWAP", "LONG")
 

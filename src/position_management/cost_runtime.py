@@ -14,10 +14,10 @@ DEFAULT_NET_REMAINING_FEE_BUFFER_PCT = 0.001
 
 
 def sync_strategy_cost_from_position(
-    strategy: BollCvdReclaimStrategy,
-    position: PositionSnapshot,
-    *,
-    restore_from_position: Callable[[BollCvdReclaimStrategy, PositionSnapshot], None] | None = None,
+        strategy: BollCvdReclaimStrategy,
+        position: PositionSnapshot,
+        *,
+        restore_from_position: Callable[[BollCvdReclaimStrategy, PositionSnapshot], None] | None = None,
 ) -> None:
     if not position.has_position or position.side is None or position.avg_entry_price <= 0:
         return
@@ -35,7 +35,8 @@ def sync_strategy_cost_from_position(
     strategy.state.last_entry_price = strategy.state.last_entry_price or position.avg_entry_price
 
 
-def refresh_net_remaining_breakeven(strategy_state: StrategyPositionState, fee_buffer_pct: float = DEFAULT_NET_REMAINING_FEE_BUFFER_PCT) -> None:
+def refresh_net_remaining_breakeven(strategy_state: StrategyPositionState,
+                                    fee_buffer_pct: float = DEFAULT_NET_REMAINING_FEE_BUFFER_PCT) -> None:
     if strategy_state.side not in {"LONG", "SHORT"}:
         strategy_state.net_remaining_breakeven_price = 0.0
         return
@@ -50,11 +51,11 @@ def refresh_net_remaining_breakeven(strategy_state: StrategyPositionState, fee_b
 
 
 def record_remaining_entry_notional(
-    strategy_state: StrategyPositionState,
-    *,
-    qty: float,
-    price: float,
-    fee_buffer_pct: float = DEFAULT_NET_REMAINING_FEE_BUFFER_PCT,
+        strategy_state: StrategyPositionState,
+        *,
+        qty: float,
+        price: float,
+        fee_buffer_pct: float = DEFAULT_NET_REMAINING_FEE_BUFFER_PCT,
 ) -> None:
     if qty <= 0 or price <= 0:
         return
@@ -64,34 +65,37 @@ def record_remaining_entry_notional(
 
 
 def record_remaining_exit_notional(
-    strategy_state: StrategyPositionState,
-    *,
-    qty: float,
-    price: float,
-    remaining_qty: float | None = None,
-    fee_buffer_pct: float = DEFAULT_NET_REMAINING_FEE_BUFFER_PCT,
+        strategy_state: StrategyPositionState,
+        *,
+        qty: float,
+        price: float,
+        remaining_qty: float | None = None,
+        fee_buffer_pct: float = DEFAULT_NET_REMAINING_FEE_BUFFER_PCT,
 ) -> None:
     if qty <= 0 or price <= 0:
         return
     strategy_state.position_cost_exit_notional += float(qty) * float(price)
     if remaining_qty is None:
-        strategy_state.position_cost_remaining_qty = max(float(strategy_state.position_cost_remaining_qty or 0.0) - float(qty), 0.0)
+        strategy_state.position_cost_remaining_qty = max(
+            float(strategy_state.position_cost_remaining_qty or 0.0) - float(qty), 0.0)
     else:
         strategy_state.position_cost_remaining_qty = max(float(remaining_qty or 0.0), 0.0)
     refresh_net_remaining_breakeven(strategy_state, fee_buffer_pct)
 
 
-def remaining_total_qty_from_core_position(strategy_state: StrategyPositionState, core_position: PositionSnapshot) -> float:
-    return max(float(core_position.eth_qty or 0.0), 0.0) + sidecar_open_qty(list(getattr(strategy_state, "sidecar_legs", []) or []))
+def remaining_total_qty_from_core_position(strategy_state: StrategyPositionState,
+                                           core_position: PositionSnapshot) -> float:
+    return max(float(core_position.eth_qty or 0.0), 0.0) + sidecar_open_qty(
+        list(getattr(strategy_state, "sidecar_legs", []) or []))
 
 
 def record_core_position_reduction_exit(
-    strategy_state: StrategyPositionState,
-    core_position: PositionSnapshot,
-    *,
-    exit_price: float | None,
-    fee_buffer_pct: float = DEFAULT_NET_REMAINING_FEE_BUFFER_PCT,
-    expected_remaining_qty: float | None = None,
+        strategy_state: StrategyPositionState,
+        core_position: PositionSnapshot,
+        *,
+        exit_price: float | None,
+        fee_buffer_pct: float = DEFAULT_NET_REMAINING_FEE_BUFFER_PCT,
+        expected_remaining_qty: float | None = None,
 ) -> None:
     price = float(exit_price or 0.0)
     if price <= 0:
@@ -137,11 +141,11 @@ def record_core_position_reduction_exit(
 
 
 def record_sidecar_tp_fill_exit(
-    strategy_state: StrategyPositionState,
-    leg: dict[str, Any],
-    status: dict[str, Any],
-    *,
-    fee_buffer_pct: float = DEFAULT_NET_REMAINING_FEE_BUFFER_PCT,
+        strategy_state: StrategyPositionState,
+        leg: dict[str, Any],
+        status: dict[str, Any],
+        *,
+        fee_buffer_pct: float = DEFAULT_NET_REMAINING_FEE_BUFFER_PCT,
 ) -> None:
     filled_qty = _coerce_positive_float(status.get("filled_qty")) or _coerce_positive_float(leg.get("qty"))
     fill_price = _coerce_positive_float(status.get("avg_fill_price")) or _coerce_positive_float(leg.get("tp_price"))

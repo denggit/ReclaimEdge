@@ -37,7 +37,6 @@ from src.risk.rolling_loss_live import (  # noqa: E402
 from src.risk.simple_position_sizer import SimplePositionSizer, SimplePositionSizerConfig  # noqa: E402
 from src.strategies.boll_cvd_reclaim_strategy import StrategyPositionState  # noqa: E402
 
-
 NOW_MS = 1_800_000_000_000
 
 
@@ -65,7 +64,8 @@ class FakeStrategy:
 
 
 class FakeTrader:
-    def __init__(self, position: PositionSnapshot | None = None, equity: float = 100.0, cash: float | None = None) -> None:
+    def __init__(self, position: PositionSnapshot | None = None, equity: float = 100.0,
+                 cash: float | None = None) -> None:
         self.symbol = "ETH-USDT-SWAP"
         self.account_equity_usdt = equity
         self.account_cash_usdt = equity if cash is None else cash
@@ -301,18 +301,19 @@ class RollingLossGuardTest(unittest.IsolatedAsyncioTestCase):
             journal = RecordingJournal()
 
             with patch.dict(
-                os.environ,
-                {
-                    "CASH_TRANSFER_MIN_DELTA_USDT": "0.5",
-                    "CASH_TRANSFER_SETTLE_SECONDS": "0",
-                    "CASH_TRANSFER_AFTER_FLAT_COOLDOWN_SECONDS": "0",
-                    "CASH_DRIFT_MIN_DELTA_USDT": "0.5",
-                },
+                    os.environ,
+                    {
+                        "CASH_TRANSFER_MIN_DELTA_USDT": "0.5",
+                        "CASH_TRANSFER_SETTLE_SECONDS": "0",
+                        "CASH_TRANSFER_AFTER_FLAT_COOLDOWN_SECONDS": "0",
+                        "CASH_DRIFT_MIN_DELTA_USDT": "0.5",
+                    },
             ):
                 task = asyncio.create_task(
                     account_position_sync_worker(
                         state_lock=asyncio.Lock(),
-                        account_snapshot=AccountSnapshot(flat_position(), 90.0, 90.0, asyncio.get_running_loop().time(), 0, 1),
+                        account_snapshot=AccountSnapshot(flat_position(), 90.0, 90.0, asyncio.get_running_loop().time(),
+                                                         0, 1),
                         execution_state=ExecutionState(None, None),
                         trader=trader,  # type: ignore[arg-type]
                         sizer=SimplePositionSizer(SimplePositionSizerConfig()),
@@ -413,18 +414,19 @@ class RollingLossGuardTest(unittest.IsolatedAsyncioTestCase):
             journal = FakeJournal()
 
             with patch.dict(
-                os.environ,
-                {
-                    "CASH_TRANSFER_MIN_DELTA_USDT": "0.5",
-                    "CASH_TRANSFER_SETTLE_SECONDS": "0",
-                    "CASH_TRANSFER_AFTER_FLAT_COOLDOWN_SECONDS": "0",
-                    "CASH_DRIFT_MIN_DELTA_USDT": "0.5",
-                },
+                    os.environ,
+                    {
+                        "CASH_TRANSFER_MIN_DELTA_USDT": "0.5",
+                        "CASH_TRANSFER_SETTLE_SECONDS": "0",
+                        "CASH_TRANSFER_AFTER_FLAT_COOLDOWN_SECONDS": "0",
+                        "CASH_DRIFT_MIN_DELTA_USDT": "0.5",
+                    },
             ):
                 task = asyncio.create_task(
                     account_position_sync_worker(
                         state_lock=asyncio.Lock(),
-                        account_snapshot=AccountSnapshot(live_position(), 100.0, 100.0, asyncio.get_running_loop().time(), 0, 1),
+                        account_snapshot=AccountSnapshot(live_position(), 100.0, 100.0,
+                                                         asyncio.get_running_loop().time(), 0, 1),
                         execution_state=execution_state,
                         trader=trader,  # type: ignore[arg-type]
                         sizer=SimplePositionSizer(SimplePositionSizerConfig()),
@@ -522,12 +524,14 @@ class RollingLossGuardTest(unittest.IsolatedAsyncioTestCase):
             guard.save()
             journal = FakeJournal()
             email_sender = FakeEmailSender()
-            execution_state = ExecutionState(None, None, trading_halted=True, halt_reason="rolling_loss_hard_halt", halt_until_ts_ms=1)
+            execution_state = ExecutionState(None, None, trading_halted=True, halt_reason="rolling_loss_hard_halt",
+                                             halt_until_ts_ms=1)
             trader = FakeTrader(equity=125.0)
             task = asyncio.create_task(
                 account_position_sync_worker(
                     state_lock=asyncio.Lock(),
-                    account_snapshot=AccountSnapshot(flat_position(), 125.0, 125.0, asyncio.get_running_loop().time(), 0, 1),
+                    account_snapshot=AccountSnapshot(flat_position(), 125.0, 125.0, asyncio.get_running_loop().time(),
+                                                     0, 1),
                     execution_state=execution_state,
                     trader=trader,  # type: ignore[arg-type]
                     sizer=SimplePositionSizer(SimplePositionSizerConfig()),
@@ -562,12 +566,14 @@ class RollingLossGuardTest(unittest.IsolatedAsyncioTestCase):
             guard.state.halt_level = "SOFT"
             guard.state.halt_until_ts_ms = 1
             guard.save()
-            execution_state = ExecutionState(None, None, trading_halted=True, halt_reason="near_tp_reduce_failure", halt_until_ts_ms=1)
+            execution_state = ExecutionState(None, None, trading_halted=True, halt_reason="near_tp_reduce_failure",
+                                             halt_until_ts_ms=1)
             trader = FakeTrader(equity=125.0)
             task = asyncio.create_task(
                 account_position_sync_worker(
                     state_lock=asyncio.Lock(),
-                    account_snapshot=AccountSnapshot(flat_position(), 125.0, 125.0, asyncio.get_running_loop().time(), 0, 1),
+                    account_snapshot=AccountSnapshot(flat_position(), 125.0, 125.0, asyncio.get_running_loop().time(),
+                                                     0, 1),
                     execution_state=execution_state,
                     trader=trader,  # type: ignore[arg-type]
                     sizer=SimplePositionSizer(SimplePositionSizerConfig()),
@@ -615,20 +621,21 @@ class RollingLossGuardTest(unittest.IsolatedAsyncioTestCase):
             )
 
             with patch.dict(
-                os.environ,
-                {
-                    "FLAT_BALANCE_CONFIRM_ATTEMPTS": "2",
-                    "FLAT_BALANCE_CONFIRM_INTERVAL_SECONDS": "0",
-                    "CASH_TRANSFER_MIN_DELTA_USDT": "0.5",
-                    "CASH_TRANSFER_SETTLE_SECONDS": "0",
-                    "CASH_TRANSFER_AFTER_FLAT_COOLDOWN_SECONDS": "180",
-                    "CASH_DRIFT_MIN_DELTA_USDT": "0.5",
-                },
+                    os.environ,
+                    {
+                        "FLAT_BALANCE_CONFIRM_ATTEMPTS": "2",
+                        "FLAT_BALANCE_CONFIRM_INTERVAL_SECONDS": "0",
+                        "CASH_TRANSFER_MIN_DELTA_USDT": "0.5",
+                        "CASH_TRANSFER_SETTLE_SECONDS": "0",
+                        "CASH_TRANSFER_AFTER_FLAT_COOLDOWN_SECONDS": "180",
+                        "CASH_DRIFT_MIN_DELTA_USDT": "0.5",
+                    },
             ):
                 task = asyncio.create_task(
                     account_position_sync_worker(
                         state_lock=asyncio.Lock(),
-                        account_snapshot=AccountSnapshot(live_position(), 100.0, 100.0, asyncio.get_running_loop().time(), 0, 1),
+                        account_snapshot=AccountSnapshot(live_position(), 100.0, 100.0,
+                                                         asyncio.get_running_loop().time(), 0, 1),
                         execution_state=execution_state,
                         trader=FakeTrader(equity=80.0),  # type: ignore[arg-type]
                         sizer=SimplePositionSizer(SimplePositionSizerConfig()),
@@ -676,20 +683,21 @@ class RollingLossGuardTest(unittest.IsolatedAsyncioTestCase):
             execution_state = ExecutionState("pos-1", 100.0)
 
             with patch.dict(
-                os.environ,
-                {
-                    "FLAT_BALANCE_CONFIRM_ATTEMPTS": "2",
-                    "FLAT_BALANCE_CONFIRM_INTERVAL_SECONDS": "0",
-                    "CASH_TRANSFER_MIN_DELTA_USDT": "0.5",
-                    "CASH_TRANSFER_SETTLE_SECONDS": "0",
-                    "CASH_TRANSFER_AFTER_FLAT_COOLDOWN_SECONDS": "180",
-                    "CASH_DRIFT_MIN_DELTA_USDT": "0.5",
-                },
+                    os.environ,
+                    {
+                        "FLAT_BALANCE_CONFIRM_ATTEMPTS": "2",
+                        "FLAT_BALANCE_CONFIRM_INTERVAL_SECONDS": "0",
+                        "CASH_TRANSFER_MIN_DELTA_USDT": "0.5",
+                        "CASH_TRANSFER_SETTLE_SECONDS": "0",
+                        "CASH_TRANSFER_AFTER_FLAT_COOLDOWN_SECONDS": "180",
+                        "CASH_DRIFT_MIN_DELTA_USDT": "0.5",
+                    },
             ):
                 task = asyncio.create_task(
                     account_position_sync_worker(
                         state_lock=asyncio.Lock(),
-                        account_snapshot=AccountSnapshot(live_position(), 100.0, 100.0, asyncio.get_running_loop().time(), 0, 1),
+                        account_snapshot=AccountSnapshot(live_position(), 100.0, 100.0,
+                                                         asyncio.get_running_loop().time(), 0, 1),
                         execution_state=execution_state,
                         trader=FakeTrader(equity=80.0),  # type: ignore[arg-type]
                         sizer=SimplePositionSizer(SimplePositionSizerConfig()),

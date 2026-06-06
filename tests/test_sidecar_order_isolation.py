@@ -96,7 +96,8 @@ class IsolationTrader(Trader):
 async def test_main_tp_update_does_not_cancel_sidecar_tp() -> None:
     trader = IsolationTrader()
 
-    result = await trader.replace_take_profit(intent(protected_order_ids=("sidecar-tp", "near-sl"), managed_core_contracts="10"))
+    result = await trader.replace_take_profit(
+        intent(protected_order_ids=("sidecar-tp", "near-sl"), managed_core_contracts="10"))
 
     assert result.ok
     assert trader.cancelled == ["core-old"]

@@ -21,9 +21,9 @@ class JournalCompactionResult:
 
 
 def compact_after_weekly_summary(
-    journal: LiveTradeJournal,
-    snapshot_until: datetime,
-    current_position_id: str | None,
+        journal: LiveTradeJournal,
+        snapshot_until: datetime,
+        current_position_id: str | None,
 ) -> JournalCompactionResult:
     """Archive closed-position events after a successful weekly summary.
 
@@ -108,9 +108,9 @@ def _write_events_atomic(path: Path, events: list[JournalEvent], *, tmp_path: Pa
 
 
 def _closed_position_event_ids_to_archive(
-    events: list[JournalEvent],
-    snapshot_until: datetime,
-    current_position_id: str | None,
+        events: list[JournalEvent],
+        snapshot_until: datetime,
+        current_position_id: str | None,
 ) -> set[str]:
     grouped = group_position_events(event for event in events if event.position_id is not None)
     archive_ids: set[str] = set()

@@ -8,7 +8,6 @@ import sys
 import types
 import unittest
 from decimal import Decimal
-from types import MethodType
 from unittest.mock import patch
 
 if importlib.util.find_spec("dotenv") is None:
@@ -398,11 +397,11 @@ class RecordingTrader(Trader):
                 self.market_order_count += 1
                 self.market_orders.append(dict(payload))
             if (
-                payload
-                and payload.get("ordType") == "market"
-                and payload.get("reduceOnly") == "true"
-                and self.market_order_count > 1
-                and self.fail_market_exit_attempts > 0
+                    payload
+                    and payload.get("ordType") == "market"
+                    and payload.get("reduceOnly") == "true"
+                    and self.market_order_count > 1
+                    and self.fail_market_exit_attempts > 0
             ):
                 self.fail_market_exit_attempts -= 1
                 raise RuntimeError("market exit failed")
@@ -417,7 +416,8 @@ class NearTpTraderTest(unittest.IsolatedAsyncioTestCase):
         result = await trader.execute_near_tp_reduce(intent())
 
         self.assertTrue(result.ok)
-        market_orders = [payload for _m, endpoint, payload in trader.requests if endpoint == "/api/v5/trade/order" and payload.get("ordType") == "market"]
+        market_orders = [payload for _m, endpoint, payload in trader.requests if
+                         endpoint == "/api/v5/trade/order" and payload.get("ordType") == "market"]
         self.assertEqual(market_orders[0]["side"], "sell")
         self.assertEqual(market_orders[0]["reduceOnly"], "true")
         self.assertEqual(market_orders[0]["sz"], "0.5")
@@ -426,9 +426,11 @@ class NearTpTraderTest(unittest.IsolatedAsyncioTestCase):
     async def test_execute_near_tp_reduce_replaces_final_tp_for_remaining_position(self) -> None:
         trader = RecordingTrader()
 
-        await trader.execute_near_tp_reduce(intent(partial_tp_price=108.0, partial_tp_ratio=0.5, tp_plan="SPLIT_PARTIAL_FINAL"))
+        await trader.execute_near_tp_reduce(
+            intent(partial_tp_price=108.0, partial_tp_ratio=0.5, tp_plan="SPLIT_PARTIAL_FINAL"))
 
-        tp_orders = [payload for _m, endpoint, payload in trader.requests if endpoint == "/api/v5/trade/order" and payload.get("ordType") == "limit"]
+        tp_orders = [payload for _m, endpoint, payload in trader.requests if
+                     endpoint == "/api/v5/trade/order" and payload.get("ordType") == "limit"]
         self.assertEqual(len(tp_orders), 1)
         self.assertEqual(tp_orders[0]["px"], "110.00")
         self.assertEqual(tp_orders[0]["sz"], "0.5")
@@ -448,7 +450,8 @@ class NearTpTraderTest(unittest.IsolatedAsyncioTestCase):
         trader = RecordingTrader()
         trader.fail_algo_attempts = 2
 
-        ok, order_id, _message = await trader.place_near_tp_protective_stop_with_retries("LONG", Decimal("0.5"), 100.1, 3, 0)
+        ok, order_id, _message = await trader.place_near_tp_protective_stop_with_retries("LONG", Decimal("0.5"), 100.1,
+                                                                                         3, 0)
 
         self.assertTrue(ok)
         self.assertTrue(order_id)
@@ -458,12 +461,14 @@ class NearTpTraderTest(unittest.IsolatedAsyncioTestCase):
         trader = RecordingTrader()
         trader.fail_algo_attempts = 3
 
-        ok, order_id, message = await trader.place_near_tp_protective_stop_with_retries("LONG", Decimal("0.5"), 100.1, 3, 0)
+        ok, order_id, message = await trader.place_near_tp_protective_stop_with_retries("LONG", Decimal("0.5"), 100.1,
+                                                                                        3, 0)
 
         self.assertTrue(ok)
         self.assertTrue(order_id)
         self.assertEqual(message, "fallback_conditional_close_placed")
-        fallback_orders = [payload for index, (_m, endpoint, payload) in enumerate(trader.requests, start=1) if endpoint == "/api/v5/trade/order-algo" and index > 3]
+        fallback_orders = [payload for index, (_m, endpoint, payload) in enumerate(trader.requests, start=1) if
+                           endpoint == "/api/v5/trade/order-algo" and index > 3]
         self.assertEqual(len(fallback_orders), 1)
         self.assertIn("slTriggerPx", fallback_orders[0])
         self.assertNotIn("triggerPx", fallback_orders[0])
@@ -504,13 +509,14 @@ class NearTpTraderTest(unittest.IsolatedAsyncioTestCase):
         trader.verify_missing_attempts = 1
 
         with patch.dict(
-            os.environ,
-            {
-                "NEAR_TP_PROTECTIVE_SL_VERIFY_ATTEMPTS": "1",
-                "NEAR_TP_PROTECTIVE_SL_VERIFY_INTERVAL_SECONDS": "0",
-            },
+                os.environ,
+                {
+                    "NEAR_TP_PROTECTIVE_SL_VERIFY_ATTEMPTS": "1",
+                    "NEAR_TP_PROTECTIVE_SL_VERIFY_INTERVAL_SECONDS": "0",
+                },
         ):
-            ok, order_id, message = await trader.place_near_tp_protective_stop_with_retries("LONG", Decimal("0.5"), 100.1, 2, 0)
+            ok, order_id, message = await trader.place_near_tp_protective_stop_with_retries("LONG", Decimal("0.5"),
+                                                                                            100.1, 2, 0)
 
         self.assertTrue(ok)
         self.assertTrue(order_id)
@@ -523,13 +529,14 @@ class NearTpTraderTest(unittest.IsolatedAsyncioTestCase):
         trader.verify_missing_attempts = 1
 
         with patch.dict(
-            os.environ,
-            {
-                "NEAR_TP_PROTECTIVE_SL_VERIFY_ATTEMPTS": "1",
-                "NEAR_TP_PROTECTIVE_SL_VERIFY_INTERVAL_SECONDS": "0",
-            },
+                os.environ,
+                {
+                    "NEAR_TP_PROTECTIVE_SL_VERIFY_ATTEMPTS": "1",
+                    "NEAR_TP_PROTECTIVE_SL_VERIFY_INTERVAL_SECONDS": "0",
+                },
         ):
-            ok, order_id, _message = await trader.place_near_tp_protective_stop_with_retries("LONG", Decimal("0.5"), 100.1, 2, 0)
+            ok, order_id, _message = await trader.place_near_tp_protective_stop_with_retries("LONG", Decimal("0.5"),
+                                                                                             100.1, 2, 0)
 
         self.assertTrue(ok)
         self.assertEqual(order_id, "algo-2")
@@ -543,13 +550,14 @@ class NearTpTraderTest(unittest.IsolatedAsyncioTestCase):
         trader.verify_missing_attempts = 1
 
         with patch.dict(
-            os.environ,
-            {
-                "NEAR_TP_PROTECTIVE_SL_VERIFY_ATTEMPTS": "1",
-                "NEAR_TP_PROTECTIVE_SL_VERIFY_INTERVAL_SECONDS": "0",
-            },
+                os.environ,
+                {
+                    "NEAR_TP_PROTECTIVE_SL_VERIFY_ATTEMPTS": "1",
+                    "NEAR_TP_PROTECTIVE_SL_VERIFY_INTERVAL_SECONDS": "0",
+                },
         ):
-            ok, order_id, _message = await trader.place_near_tp_protective_stop_with_retries("LONG", Decimal("0.5"), 100.1, 3, 0)
+            ok, order_id, _message = await trader.place_near_tp_protective_stop_with_retries("LONG", Decimal("0.5"),
+                                                                                             100.1, 3, 0)
 
         self.assertTrue(ok)
         self.assertEqual(order_id, "algo-sec-2")
@@ -650,11 +658,11 @@ class NearTpTraderTest(unittest.IsolatedAsyncioTestCase):
         trader.positions.append(PositionSnapshot("LONG", Decimal("0.5"), 100.0, 0.05, Decimal("0.5")))
 
         with patch.dict(
-            os.environ,
-            {
-                "NEAR_TP_PROTECTIVE_SL_RETRY_INTERVAL_SECONDS": "0",
-                "NEAR_TP_SL_FAIL_MARKET_EXIT_RETRY_COUNT": "3",
-            },
+                os.environ,
+                {
+                    "NEAR_TP_PROTECTIVE_SL_RETRY_INTERVAL_SECONDS": "0",
+                    "NEAR_TP_SL_FAIL_MARKET_EXIT_RETRY_COUNT": "3",
+                },
         ):
             result = await trader.execute_near_tp_reduce(intent())
 
@@ -718,7 +726,8 @@ class RecordingEmailSender:
 
 
 class RunnerTrader:
-    def __init__(self, result: LiveTradeResult, positions: list[PositionSnapshot] | None = None, raise_on_fetch_position: bool = False) -> None:
+    def __init__(self, result: LiveTradeResult, positions: list[PositionSnapshot] | None = None,
+                 raise_on_fetch_position: bool = False) -> None:
         self.symbol = "ETH-USDT-SWAP"
         self.position_contracts = Decimal("0.5")
         self.account_equity_usdt = 100.0
@@ -758,19 +767,20 @@ class FakeStrategy:
 
 
 async def run_execution_worker_once(
-    *,
-    result: LiveTradeResult,
-    strat_state: StrategyPositionState,
-    execution_state: ExecutionState,
-    journal: FakeJournal,
-    state_store: RecordingStateStore,
-    email_sender: RecordingEmailSender,
-    trader_positions: list[PositionSnapshot] | None = None,
-    raise_on_fetch_position: bool = False,
+        *,
+        result: LiveTradeResult,
+        strat_state: StrategyPositionState,
+        execution_state: ExecutionState,
+        journal: FakeJournal,
+        state_store: RecordingStateStore,
+        email_sender: RecordingEmailSender,
+        trader_positions: list[PositionSnapshot] | None = None,
+        raise_on_fetch_position: bool = False,
 ) -> RunnerTrader:
     queue: asyncio.Queue[TradeCommand] = asyncio.Queue(maxsize=1000)
     near_intent = intent()
-    await queue.put(TradeCommand(near_intent, strat_state, near_intent.ts_ms, asyncio.get_running_loop().time(), 0, near_intent.reason))
+    await queue.put(TradeCommand(near_intent, strat_state, near_intent.ts_ms, asyncio.get_running_loop().time(), 0,
+                                 near_intent.reason))
     trader = RunnerTrader(result, trader_positions, raise_on_fetch_position=raise_on_fetch_position)
     strategy_obj = FakeStrategy()
     strategy_obj.state = strat_state
@@ -779,7 +789,8 @@ async def run_execution_worker_once(
             execution_queue=queue,
             state_lock=asyncio.Lock(),
             execution_state=execution_state,
-            account_snapshot=AccountSnapshot(PositionSnapshot("LONG", Decimal("0.5"), 100.0, 0.05, Decimal("0.5")), 100.0, 100.0, asyncio.get_running_loop().time(), 0, 1),
+            account_snapshot=AccountSnapshot(PositionSnapshot("LONG", Decimal("0.5"), 100.0, 0.05, Decimal("0.5")),
+                                             100.0, 100.0, asyncio.get_running_loop().time(), 0, 1),
             trader=trader,  # type: ignore[arg-type]
             strategy=strategy_obj,  # type: ignore[arg-type]
             journal=journal,  # type: ignore[arg-type]
@@ -885,22 +896,25 @@ class NearTpRunnerTest(unittest.IsolatedAsyncioTestCase):
         strategy_obj.state = strat_state
         clearing_store = ClearingStateStore()
         with patch.dict(
-            os.environ,
-            {
-                "FLAT_BALANCE_CONFIRM_ATTEMPTS": "2",
-                "FLAT_BALANCE_CONFIRM_INTERVAL_SECONDS": "0",
-                "CASH_TRANSFER_MIN_DELTA_USDT": "0.5",
-                "CASH_TRANSFER_SETTLE_SECONDS": "0",
-                "CASH_TRANSFER_AFTER_FLAT_COOLDOWN_SECONDS": "180",
-                "CASH_DRIFT_MIN_DELTA_USDT": "0.5",
-            },
+                os.environ,
+                {
+                    "FLAT_BALANCE_CONFIRM_ATTEMPTS": "2",
+                    "FLAT_BALANCE_CONFIRM_INTERVAL_SECONDS": "0",
+                    "CASH_TRANSFER_MIN_DELTA_USDT": "0.5",
+                    "CASH_TRANSFER_SETTLE_SECONDS": "0",
+                    "CASH_TRANSFER_AFTER_FLAT_COOLDOWN_SECONDS": "180",
+                    "CASH_DRIFT_MIN_DELTA_USDT": "0.5",
+                },
         ):
             task = asyncio.create_task(
                 account_position_sync_worker(
                     state_lock=asyncio.Lock(),
-                    account_snapshot=AccountSnapshot(PositionSnapshot("LONG", Decimal("0.5"), 100.0, 0.05, Decimal("0.5")), 100.0, 100.0, asyncio.get_running_loop().time(), 0, 1),
+                    account_snapshot=AccountSnapshot(
+                        PositionSnapshot("LONG", Decimal("0.5"), 100.0, 0.05, Decimal("0.5")), 100.0, 100.0,
+                        asyncio.get_running_loop().time(), 0, 1),
                     execution_state=execution_state,
-                    trader=RunnerTrader(LiveTradeResult(True, "noop", None, None, "0", "", "ok")),  # type: ignore[arg-type]
+                    trader=RunnerTrader(LiveTradeResult(True, "noop", None, None, "0", "", "ok")),
+                    # type: ignore[arg-type]
                     sizer=SimplePositionSizer(SimplePositionSizerConfig()),
                     strategy=strategy_obj,  # type: ignore[arg-type]
                     journal=journal,  # type: ignore[arg-type]
@@ -959,7 +973,8 @@ class NearTpRunnerTest(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(saved.total_entry_qty, 0.05)
         self.assertAlmostEqual(saved.avg_entry_price, 101.0)
 
-    async def test_near_tp_protective_sl_success_but_position_sync_fails_halts_and_saves_minimal_protected_state(self) -> None:
+    async def test_near_tp_protective_sl_success_but_position_sync_fails_halts_and_saves_minimal_protected_state(
+            self) -> None:
         strat_state = seeded_long_state(total_entry_qty=1.0, total_entry_notional=100.0, avg_entry_price=100.0)
         journal = FakeJournal()
         state_store = RecordingStateStore()
@@ -1017,12 +1032,14 @@ class NearTpRunnerTest(unittest.IsolatedAsyncioTestCase):
 
         strategy_obj = FakeStrategy()
         strategy_obj.state = seeded_long_state(near_tp_protected=True, near_tp_add_disabled=True)
-        execution_state = ExecutionState("pos-1", 100.0, trading_halted=True, halt_reason="near_tp_protected_sync_failed")
+        execution_state = ExecutionState("pos-1", 100.0, trading_halted=True,
+                                         halt_reason="near_tp_protected_sync_failed")
         state_store = SavingStateStore()
         task = asyncio.create_task(
             account_position_sync_worker(
                 state_lock=asyncio.Lock(),
-                account_snapshot=AccountSnapshot(flat_position(), 100.0, 100.0, asyncio.get_running_loop().time(), 0, 1),
+                account_snapshot=AccountSnapshot(flat_position(), 100.0, 100.0, asyncio.get_running_loop().time(), 0,
+                                                 1),
                 execution_state=execution_state,
                 trader=RunnerTrader(
                     LiveTradeResult(True, "noop", None, None, "0", "", "ok"),
@@ -1062,7 +1079,8 @@ class NearTpRunnerTest(unittest.IsolatedAsyncioTestCase):
         task = asyncio.create_task(
             account_position_sync_worker(
                 state_lock=asyncio.Lock(),
-                account_snapshot=AccountSnapshot(flat_position(), 100.0, 100.0, asyncio.get_running_loop().time(), 0, 1),
+                account_snapshot=AccountSnapshot(flat_position(), 100.0, 100.0, asyncio.get_running_loop().time(), 0,
+                                                 1),
                 execution_state=execution_state,
                 trader=RunnerTrader(
                     LiveTradeResult(True, "noop", None, None, "0", "", "ok"),
@@ -1140,21 +1158,23 @@ class NearTpRunnerTest(unittest.IsolatedAsyncioTestCase):
 
         trader = RunnerTrader(LiveTradeResult(True, "noop", None, None, "0", "", "ok"))
         with patch.dict(
-            os.environ,
-            {
-                "FLAT_BALANCE_CONFIRM_ATTEMPTS": "2",
-                "FLAT_BALANCE_CONFIRM_INTERVAL_SECONDS": "0",
-                "CASH_TRANSFER_MIN_DELTA_USDT": "0.5",
-                "CASH_TRANSFER_SETTLE_SECONDS": "0",
-                "CASH_TRANSFER_AFTER_FLAT_COOLDOWN_SECONDS": "180",
-                "CASH_DRIFT_MIN_DELTA_USDT": "0.5",
-            },
+                os.environ,
+                {
+                    "FLAT_BALANCE_CONFIRM_ATTEMPTS": "2",
+                    "FLAT_BALANCE_CONFIRM_INTERVAL_SECONDS": "0",
+                    "CASH_TRANSFER_MIN_DELTA_USDT": "0.5",
+                    "CASH_TRANSFER_SETTLE_SECONDS": "0",
+                    "CASH_TRANSFER_AFTER_FLAT_COOLDOWN_SECONDS": "180",
+                    "CASH_DRIFT_MIN_DELTA_USDT": "0.5",
+                },
         ):
             store = ClearingStateStore()
             task = asyncio.create_task(
                 account_position_sync_worker(
                     state_lock=asyncio.Lock(),
-                    account_snapshot=AccountSnapshot(PositionSnapshot("LONG", Decimal("0.5"), 100.0, 0.05, Decimal("0.5")), 100.0, 100.0, asyncio.get_running_loop().time(), 0, 1),
+                    account_snapshot=AccountSnapshot(
+                        PositionSnapshot("LONG", Decimal("0.5"), 100.0, 0.05, Decimal("0.5")), 100.0, 100.0,
+                        asyncio.get_running_loop().time(), 0, 1),
                     execution_state=ExecutionState("pos-1", 100.0),
                     trader=trader,  # type: ignore[arg-type]
                     sizer=SimplePositionSizer(SimplePositionSizerConfig()),
@@ -1217,7 +1237,8 @@ class NearTpRunnerTest(unittest.IsolatedAsyncioTestCase):
             strategy_state=state,
             cash_before_position=None,
         )
-        strat = BollCvdShockReclaimStrategy(BollCvdReclaimStrategyConfig(), SimplePositionSizer(SimplePositionSizerConfig()))
+        strat = BollCvdShockReclaimStrategy(BollCvdReclaimStrategyConfig(),
+                                            SimplePositionSizer(SimplePositionSizerConfig()))
 
         restore_strategy_from_saved_state(strat, saved)
 

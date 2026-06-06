@@ -33,18 +33,18 @@ class AccountSyncTpProgressResult:
 
 
 def run_account_sync_tp_progress_phase(
-    *,
-    account_snapshot: live_runtime_types.AccountSnapshot,
-    execution_state: live_runtime_types.ExecutionState,
-    trader: Trader,
-    strategy: BollCvdShockReclaimStrategy,
-    journal: LiveTradeJournal,
-    state_store: LiveStateStore,
-    position: PositionSnapshot,
-    core_position: PositionSnapshot,
-    current_position_key: Any,
-    pending_order_count: int,
-    last_logged_position_key: Any,
+        *,
+        account_snapshot: live_runtime_types.AccountSnapshot,
+        execution_state: live_runtime_types.ExecutionState,
+        trader: Trader,
+        strategy: BollCvdShockReclaimStrategy,
+        journal: LiveTradeJournal,
+        state_store: LiveStateStore,
+        position: PositionSnapshot,
+        core_position: PositionSnapshot,
+        current_position_key: Any,
+        pending_order_count: int,
+        last_logged_position_key: Any,
 ) -> AccountSyncTpProgressResult:
     # Position reduction detection must run every account sync,
     # even when pending orders exist (e.g. TP2 / Sidecar TP still
@@ -58,7 +58,8 @@ def run_account_sync_tp_progress_phase(
     middle_runner_activation_payload: dict[str, Any] | None = None
 
     middle_runner_activated = tp_progress_helpers.mark_middle_runner_active_if_position_reduced(strategy, core_position)
-    three_stage_event = tp_progress_helpers.mark_three_stage_progress_if_position_reduced(strategy, core_position, live_time_utils.utc_ms())
+    three_stage_event = tp_progress_helpers.mark_three_stage_progress_if_position_reduced(strategy, core_position,
+                                                                                          live_time_utils.utc_ms())
     tp_progress_helpers.mark_partial_tp_consumed_if_position_reduced(strategy, core_position)
     position_cost_runtime.sync_strategy_cost_from_position(
         strategy,
@@ -87,10 +88,15 @@ def run_account_sync_tp_progress_phase(
                 current_price = None
                 price_source = "missing"
                 if post_tp1_boll is not None and core_position.side is not None:
-                    current_price, price_source = runner_live_helpers.three_stage_post_tp1_current_price(account_snapshot, core_position, post_tp1_boll, live_time_utils.utc_ms())
-                    base_sl = strategy._calculate_three_stage_post_tp1_protective_sl(core_position.side, current_price, post_tp1_boll)
-                    extension_sl = strategy._apply_three_stage_post_tp1_extension_trigger(core_position.side, current_price, post_tp1_boll, base_sl)
-                    protective_sl = strategy._tighten_optional_three_stage_post_tp1_sl(core_position.side, base_sl, extension_sl)
+                    current_price, price_source = runner_live_helpers.three_stage_post_tp1_current_price(
+                        account_snapshot, core_position, post_tp1_boll, live_time_utils.utc_ms())
+                    base_sl = strategy._calculate_three_stage_post_tp1_protective_sl(core_position.side, current_price,
+                                                                                     post_tp1_boll)
+                    extension_sl = strategy._apply_three_stage_post_tp1_extension_trigger(core_position.side,
+                                                                                          current_price, post_tp1_boll,
+                                                                                          base_sl)
+                    protective_sl = strategy._tighten_optional_three_stage_post_tp1_sl(core_position.side, base_sl,
+                                                                                       extension_sl)
                 strategy.state.three_stage_post_tp1_protective_sl_price = protective_sl
                 # Global protective SL must cover OKX net position (core + sidecar)
                 if not position.has_position or position.side != core_position.side or position.contracts <= 0:
@@ -311,9 +317,9 @@ def run_account_sync_tp_progress_phase(
             "reason": "partial_size_mismatch_degraded",
         }
     if (
-        execution_state.trading_halted
-        and execution_state.halt_reason == "near_tp_protected_sync_failed"
-        and getattr(strategy.state, "near_tp_protected", False)
+            execution_state.trading_halted
+            and execution_state.halt_reason == "near_tp_protected_sync_failed"
+            and getattr(strategy.state, "near_tp_protected", False)
     ):
         execution_state.trading_halted = False
         execution_state.halt_reason = None
@@ -323,7 +329,8 @@ def run_account_sync_tp_progress_phase(
             core_position.contracts,
             core_position.avg_entry_price,
         )
-    save_state_payload = (execution_state.current_position_id, copy.deepcopy(strategy.state), execution_state.cash_before_position)
+    save_state_payload = (
+    execution_state.current_position_id, copy.deepcopy(strategy.state), execution_state.cash_before_position)
     if current_position_key != last_logged_position_key:
         logger.info(
             "POSITION_SYNC_CHANGED | side=%s contracts=%s avg_entry=%.4f eth_qty=%.6f strategy_layers=%s",

@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import unittest
 import importlib.util
 import sys
 import types
+import unittest
 from unittest.mock import patch
 
 from src.indicators.cvd_tracker import CvdSnapshot
@@ -108,7 +108,8 @@ class BollCvdShockReclaimStrategyTest(unittest.TestCase):
         strat.outside_no_burst_log_interval_seconds = 2
 
         with self.assertLogs("src.strategies.boll_cvd_shock_reclaim_strategy", level="INFO") as logs:
-            with patch("src.strategies.boll_cvd_shock_reclaim_strategy.time.monotonic", side_effect=[100.0, 101.0, 102.1]):
+            with patch("src.strategies.boll_cvd_shock_reclaim_strategy.time.monotonic",
+                       side_effect=[100.0, 101.0, 102.1]):
                 first = strat.on_tick(99.9, 10_000, boll_snapshot(), cvd_snapshot(down_burst=False))
                 second = strat.on_tick(99.8, 9_000, boll_snapshot(), cvd_snapshot(down_burst=False))
                 third = strat.on_tick(99.7, 8_000, boll_snapshot(), cvd_snapshot(down_burst=False))

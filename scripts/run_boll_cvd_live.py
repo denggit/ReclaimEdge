@@ -1,13 +1,10 @@
 from __future__ import annotations
 
 import asyncio
-import copy
 import datetime as dt
-import logging
 import os
 import sys
 import time
-from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -18,7 +15,7 @@ SRC = ROOT / "src"
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(SRC))
 
-from src.execution.trader import PositionSnapshot, Trader  # noqa: E402
+from src.execution.trader import Trader  # noqa: E402
 from src.indicators.cvd_tracker import CvdTracker, CvdTrackerConfig  # noqa: E402
 from src.live import config_helpers as live_config_helpers  # noqa: E402
 from src.live import queue_helpers as live_queue_helpers  # noqa: E402
@@ -44,7 +41,6 @@ from src.monitors.boll_band_breakout_monitor import (  # noqa: E402
 from src.position_management import tp_progress as tp_progress_helpers  # noqa: E402
 from src.position_management.sidecar import runtime_state as sidecar_runtime_state  # noqa: E402
 from src.position_management.sidecar.model import (  # noqa: E402
-    SidecarLegStatus,
     sidecar_open_contracts,
     sidecar_open_qty,
 )
@@ -67,10 +63,8 @@ from src.risk.rolling_loss_guard import (  # noqa: E402
 )
 from src.risk import rolling_loss_live as rolling_loss_live_helpers  # noqa: E402
 from src.strategies.boll_cvd_reclaim_strategy import (  # noqa: E402
-    BollCvdReclaimStrategy,
     BollCvdReclaimStrategyConfig,
     StrategyPositionState,
-    TradeIntent,
 )
 from src.strategies.boll_cvd_shock_reclaim_strategy import BollCvdShockReclaimStrategy  # noqa: E402
 from src.utils.email_sender import EmailSender  # noqa: E402
@@ -80,20 +74,20 @@ logger = get_logger(__name__)
 
 
 async def account_position_sync_worker(
-    *,
-    state_lock: asyncio.Lock,
-    account_snapshot: live_runtime_types.AccountSnapshot,
-    execution_state: live_runtime_types.ExecutionState,
-    trader: Trader,
-    sizer: SimplePositionSizer,
-    strategy: BollCvdShockReclaimStrategy,
-    journal: LiveTradeJournal,
-    state_store: LiveStateStore,
-    position_sync_seconds: float,
-    account_sync_seconds: float,
-    cash_log_min_delta_usdt: float,
-    rolling_loss_guard: RollingLossGuard | None = None,
-    email_sender: EmailSender | None = None,
+        *,
+        state_lock: asyncio.Lock,
+        account_snapshot: live_runtime_types.AccountSnapshot,
+        execution_state: live_runtime_types.ExecutionState,
+        trader: Trader,
+        sizer: SimplePositionSizer,
+        strategy: BollCvdShockReclaimStrategy,
+        journal: LiveTradeJournal,
+        state_store: LiveStateStore,
+        position_sync_seconds: float,
+        account_sync_seconds: float,
+        cash_log_min_delta_usdt: float,
+        rolling_loss_guard: RollingLossGuard | None = None,
+        email_sender: EmailSender | None = None,
 ) -> None:
     last_account_sync = 0.0
     last_logged_cash = account_snapshot.cash
@@ -112,7 +106,9 @@ async def account_position_sync_worker(
     last_sidecar_status_check = 0.0
     sync_failure_log_interval_seconds = float(os.getenv("ACCOUNT_SYNC_FAILURE_LOG_INTERVAL_SECONDS", "60"))
     sync_stale_warn_seconds = float(os.getenv("ACCOUNT_SYNC_STALE_WARN_SECONDS", "180"))
-    cash_transfer_detect_enabled = os.getenv("CASH_TRANSFER_DETECT_ENABLED", "true").strip().lower() in {"1", "true", "yes", "y", "on"}
+    cash_transfer_detect_enabled = os.getenv("CASH_TRANSFER_DETECT_ENABLED", "true").strip().lower() in {"1", "true",
+                                                                                                         "yes", "y",
+                                                                                                         "on"}
     cash_transfer_min_delta_usdt = float(os.getenv("CASH_TRANSFER_MIN_DELTA_USDT", "0.5"))
     cash_transfer_settle_seconds = float(os.getenv("CASH_TRANSFER_SETTLE_SECONDS", "120"))
     cash_transfer_after_flat_cooldown_seconds = float(os.getenv("CASH_TRANSFER_AFTER_FLAT_COOLDOWN_SECONDS", "180"))
@@ -212,13 +208,14 @@ async def account_position_sync_worker(
                 )
                 continue
 
-            sidecar_check_seconds = max(float(getattr(sizer.config, "sidecar_order_status_check_seconds", 5.0) or 5.0), 0.0)
+            sidecar_check_seconds = max(float(getattr(sizer.config, "sidecar_order_status_check_seconds", 5.0) or 5.0),
+                                        0.0)
             if (
-                sidecar_check_seconds >= 0
-                and now - last_sidecar_status_check >= sidecar_check_seconds
-                and getattr(strategy.state, "sidecar_enabled_for_position", False)
-                and not sidecar_reconciled_this_sync
-                and pending_order_count == 0
+                    sidecar_check_seconds >= 0
+                    and now - last_sidecar_status_check >= sidecar_check_seconds
+                    and getattr(strategy.state, "sidecar_enabled_for_position", False)
+                    and not sidecar_reconciled_this_sync
+                    and pending_order_count == 0
             ):
                 last_sidecar_status_check = now
                 await sidecar_monitor_runtime.monitor_sidecar_orders_once(
@@ -245,7 +242,8 @@ async def account_position_sync_worker(
                         cash_equity_max_diff_usdt=flat_balance_cash_equity_max_diff_usdt,
                     )
                 except Exception as exc:
-                    logger.exception("FLAT_BALANCE_SETTLE_FAILED | falling back to latest account equity before FLAT journal")
+                    logger.exception(
+                        "FLAT_BALANCE_SETTLE_FAILED | falling back to latest account equity before FLAT journal")
                     settled = live_runtime_types.SettledFlatBalance(
                         cash=equity,
                         equity=equity,
@@ -273,25 +271,31 @@ async def account_position_sync_worker(
                     try:
                         await trader.cancel_near_tp_protective_stop(protective_sl_order_id)
                     except Exception:
-                        logger.warning("NEAR_TP_PROTECTIVE_SL_CANCEL_ON_FLAT | algoId=%s failed_unhandled", protective_sl_order_id)
+                        logger.warning("NEAR_TP_PROTECTIVE_SL_CANCEL_ON_FLAT | algoId=%s failed_unhandled",
+                                       protective_sl_order_id)
                 middle_runner_sl_order_id = pending_flat_payload.get("middle_runner_protective_sl_order_id")
                 if middle_runner_sl_order_id:
                     try:
                         await trader.cancel_middle_runner_protective_stop(middle_runner_sl_order_id)
                     except Exception:
-                        logger.warning("MIDDLE_RUNNER_CANCELLED | reason=flat_sl_cancel_failed algoId=%s", middle_runner_sl_order_id)
-                three_stage_post_tp1_sl_order_id = pending_flat_payload.get("three_stage_post_tp1_protective_sl_order_id")
+                        logger.warning("MIDDLE_RUNNER_CANCELLED | reason=flat_sl_cancel_failed algoId=%s",
+                                       middle_runner_sl_order_id)
+                three_stage_post_tp1_sl_order_id = pending_flat_payload.get(
+                    "three_stage_post_tp1_protective_sl_order_id")
                 if three_stage_post_tp1_sl_order_id:
                     try:
                         await trader.cancel_three_stage_post_tp1_protective_stop(three_stage_post_tp1_sl_order_id)
                     except Exception:
-                        logger.warning("THREE_STAGE_TP1_PROTECTIVE_SL_CANCELLED | reason=flat_sl_cancel_failed algoId=%s", three_stage_post_tp1_sl_order_id)
+                        logger.warning(
+                            "THREE_STAGE_TP1_PROTECTIVE_SL_CANCELLED | reason=flat_sl_cancel_failed algoId=%s",
+                            three_stage_post_tp1_sl_order_id)
                 trend_runner_sl_order_id = pending_flat_payload.get("trend_runner_sl_order_id")
                 if trend_runner_sl_order_id:
                     try:
                         await trader.cancel_trend_runner_protective_stop(trend_runner_sl_order_id)
                     except Exception:
-                        logger.warning("TREND_RUNNER_CANCELLED | reason=flat_sl_cancel_failed algoId=%s", trend_runner_sl_order_id)
+                        logger.warning("TREND_RUNNER_CANCELLED | reason=flat_sl_cancel_failed algoId=%s",
+                                       trend_runner_sl_order_id)
                 async with state_lock:
                     flat_previous_halt_reason = execution_state.halt_reason if execution_state.trading_halted else None
                     account_snapshot.position = position
@@ -315,8 +319,8 @@ async def account_position_sync_worker(
                         "rolling_loss_hard_halt",
                     }
                     preserve_critical_halt = (
-                        rolling_loss_guard is not None
-                        and flat_previous_halt_reason not in flat_clearable_halt_reasons
+                            rolling_loss_guard is not None
+                            and flat_previous_halt_reason not in flat_clearable_halt_reasons
                     )
                     execution_state.trading_halted = preserve_critical_halt
                     execution_state.halt_reason = flat_previous_halt_reason if preserve_critical_halt else None
@@ -369,9 +373,9 @@ async def account_position_sync_worker(
                     guard_now_ms = live_time_utils.utc_ms()
                     flat_equity = record_flat_payload.get("equity_after") or record_flat_payload.get("cash_after")
                     flat_event_id = (
-                        record_flat_payload.get("position_id")
-                        or (pending_flat_payload or {}).get("position_id")
-                        or execution_state.current_position_id
+                            record_flat_payload.get("position_id")
+                            or (pending_flat_payload or {}).get("position_id")
+                            or execution_state.current_position_id
                     )
                     decision = rolling_loss_guard.evaluate_after_flat(
                         now_ms=guard_now_ms,
@@ -403,9 +407,9 @@ async def account_position_sync_worker(
                             else:
                                 async with state_lock:
                                     if (
-                                        not execution_state.trading_halted
-                                        or execution_state.halt_reason in ROLLING_LOSS_HALT_REASONS
-                                        or execution_state.halt_reason is None
+                                            not execution_state.trading_halted
+                                            or execution_state.halt_reason in ROLLING_LOSS_HALT_REASONS
+                                            or execution_state.halt_reason is None
                                     ):
                                         execution_state.trading_halted = True
                                         execution_state.halt_reason = halt_reason
@@ -429,7 +433,9 @@ async def account_position_sync_worker(
                 state_store.clear()
             if save_state_payload is not None:
                 position_id, strategy_state, cash_before_position = save_state_payload
-                state_store.save(LiveStateStore.from_strategy_state(position_id=position_id, symbol=trader.symbol, strategy_state=strategy_state, cash_before_position=cash_before_position))
+                state_store.save(LiveStateStore.from_strategy_state(position_id=position_id, symbol=trader.symbol,
+                                                                    strategy_state=strategy_state,
+                                                                    cash_before_position=cash_before_position))
             if rolling_loss_guard is not None and rolling_loss_guard.state is not None and rolling_loss_guard.state.enabled:
                 guard_now_ms = live_time_utils.utc_ms()
                 has_position_now = bool(position.has_position)
@@ -437,9 +443,9 @@ async def account_position_sync_worker(
                     halted = execution_state.trading_halted
                     halt_reason = execution_state.halt_reason
                 if (
-                    halted
-                    and halt_reason in ROLLING_LOSS_HALT_REASONS
-                    and rolling_loss_guard.should_resume(guard_now_ms, has_position_now)
+                        halted
+                        and halt_reason in ROLLING_LOSS_HALT_REASONS
+                        and rolling_loss_guard.should_resume(guard_now_ms, has_position_now)
                 ):
                     rolling_loss_guard.mark_resumed(guard_now_ms, equity)
                     rolling_loss_guard.save()
@@ -465,13 +471,14 @@ async def account_position_sync_worker(
                         rolling_loss_guard.state.drawdown_pct,
                     )
                 elif (
-                    halted
-                    and halt_reason in ROLLING_LOSS_HALT_REASONS
-                    and rolling_loss_guard.state.halt_until_ts_ms is not None
-                    and guard_now_ms >= rolling_loss_guard.state.halt_until_ts_ms
-                    and has_position_now
+                        halted
+                        and halt_reason in ROLLING_LOSS_HALT_REASONS
+                        and rolling_loss_guard.state.halt_until_ts_ms is not None
+                        and guard_now_ms >= rolling_loss_guard.state.halt_until_ts_ms
+                        and has_position_now
                 ):
-                    logger.warning("ROLLING_LOSS_GUARD_RESUME_DELAYED | reason=position_open halt_until_ts_ms=%s", rolling_loss_guard.state.halt_until_ts_ms)
+                    logger.warning("ROLLING_LOSS_GUARD_RESUME_DELAYED | reason=position_open halt_until_ts_ms=%s",
+                                   rolling_loss_guard.state.halt_until_ts_ms)
             if consecutive_failures > 0:
                 logger.warning("ACCOUNT_SYNC_RECOVERED | failures=%s", consecutive_failures)
             consecutive_failures = 0
@@ -568,7 +575,9 @@ async def main() -> None:
             getattr(strategy.state, "last_tp_update_candle_ts_ms", 0),
             trusted_saved_state is not None,
         )
-        state_store.save(LiveStateStore.from_strategy_state(position_id=current_position_id, symbol=trader.symbol, strategy_state=strategy.state, cash_before_position=cash_before_position))
+        state_store.save(LiveStateStore.from_strategy_state(position_id=current_position_id, symbol=trader.symbol,
+                                                            strategy_state=strategy.state,
+                                                            cash_before_position=cash_before_position))
     else:
         state_store.clear()
 
@@ -612,7 +621,9 @@ async def main() -> None:
     core_position_view_helpers.apply_core_position_view_to_state(strategy.state, startup_core_position)
     account_snapshot.position = startup_core_position
     if startup_position.has_position:
-        state_store.save(LiveStateStore.from_strategy_state(position_id=current_position_id, symbol=trader.symbol, strategy_state=strategy.state, cash_before_position=cash_before_position))
+        state_store.save(LiveStateStore.from_strategy_state(position_id=current_position_id, symbol=trader.symbol,
+                                                            strategy_state=strategy.state,
+                                                            cash_before_position=cash_before_position))
     await rolling_loss_live_helpers.apply_rolling_loss_guard_startup_state(
         rolling_loss_guard=rolling_loss_guard,
         execution_state=execution_state,
@@ -631,8 +642,10 @@ async def main() -> None:
         state_store=state_store,
         trader_symbol=trader.symbol,
     )
-    strategy_tick_queue: asyncio.Queue[MarketTickEvent] = asyncio.Queue(maxsize=int(os.getenv("STRATEGY_TICK_QUEUE_MAXSIZE", "20000")))
-    execution_queue: asyncio.Queue[live_runtime_types.TradeCommand] = asyncio.Queue(maxsize=int(os.getenv("EXECUTION_QUEUE_MAXSIZE", "1000")))
+    strategy_tick_queue: asyncio.Queue[MarketTickEvent] = asyncio.Queue(
+        maxsize=int(os.getenv("STRATEGY_TICK_QUEUE_MAXSIZE", "20000")))
+    execution_queue: asyncio.Queue[live_runtime_types.TradeCommand] = asyncio.Queue(
+        maxsize=int(os.getenv("EXECUTION_QUEUE_MAXSIZE", "1000")))
     position_sync_seconds = float(os.getenv("POSITION_SYNC_SECONDS", "5"))
     account_sync_seconds = float(os.getenv("ACCOUNT_SYNC_SECONDS", "60"))
     cash_log_min_delta_usdt = float(os.getenv("ACCOUNT_LOG_MIN_DELTA_USDT", "0.01"))
@@ -670,7 +683,8 @@ async def main() -> None:
 
         raw_time = os.getenv("WEEKLY_SUMMARY_TIME", "10:00")
         raw_weekday = os.getenv("WEEKLY_SUMMARY_WEEKDAY", "0")
-        compact_after_success = os.getenv("WEEKLY_COMPACT_AFTER_SUCCESS", "false").strip().lower() in {"1", "true", "yes", "y", "on"}
+        compact_after_success = os.getenv("WEEKLY_COMPACT_AFTER_SUCCESS", "false").strip().lower() in {"1", "true",
+                                                                                                       "yes", "y", "on"}
         hour, minute = live_time_utils.parse_weekly_report_time(raw_time)
         weekday = int(raw_weekday)
         if weekday < 0 or weekday > 6:

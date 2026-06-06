@@ -139,7 +139,8 @@ class RollingLossGuard:
             return
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = self.state_path.with_suffix(self.state_path.suffix + ".tmp")
-        tmp_path.write_text(json.dumps(asdict(self.state), ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+        tmp_path.write_text(json.dumps(asdict(self.state), ensure_ascii=False, indent=2, sort_keys=True),
+                            encoding="utf-8")
         tmp_path.replace(self.state_path)
 
     def reset_window(self, now_ms: int, equity: float) -> None:
@@ -177,13 +178,13 @@ class RollingLossGuard:
         return False
 
     def evaluate_after_flat(
-        self,
-        *,
-        now_ms: int,
-        flat_equity: float | None = None,
-        flat_event_id: str | None = None,
-        journal_events: Iterable[JournalEvent] | None = None,
-        has_position: bool = False,
+            self,
+            *,
+            now_ms: int,
+            flat_equity: float | None = None,
+            flat_event_id: str | None = None,
+            journal_events: Iterable[JournalEvent] | None = None,
+            has_position: bool = False,
     ) -> RollingLossGuardDecision:
         del journal_events
         state = self._require_state()
@@ -263,7 +264,8 @@ class RollingLossGuard:
         reason = "threshold_not_reached"
         drawdown_worsened = drawdown_pct > old_drawdown_pct + 1e-12
 
-        if drawdown_worsened and self._threshold_reached(drawdown_pct, self.config.hard_halt_pct) and not state.hard_halt_triggered:
+        if drawdown_worsened and self._threshold_reached(drawdown_pct,
+                                                         self.config.hard_halt_pct) and not state.hard_halt_triggered:
             action = "HARD_HALT"
             threshold_pct = self.config.hard_halt_pct
             halt_hours = self.config.hard_halt_hours
@@ -275,7 +277,8 @@ class RollingLossGuard:
             state.halt_level = "HARD"
             state.halt_until_ts_ms = halt_until
             reason = "flat_to_flat_drawdown_reached_hard_threshold"
-        elif drawdown_worsened and self._threshold_reached(drawdown_pct, self.config.soft_halt_pct) and not state.soft_halt_triggered:
+        elif drawdown_worsened and self._threshold_reached(drawdown_pct,
+                                                           self.config.soft_halt_pct) and not state.soft_halt_triggered:
             action = "SOFT_HALT"
             threshold_pct = self.config.soft_halt_pct
             halt_hours = self.config.soft_halt_hours
@@ -286,7 +289,8 @@ class RollingLossGuard:
             state.halt_level = "SOFT"
             state.halt_until_ts_ms = halt_until
             reason = "flat_to_flat_drawdown_reached_soft_threshold"
-        elif drawdown_worsened and self._threshold_reached(drawdown_pct, self.config.warn_pct) and not state.warn_triggered:
+        elif drawdown_worsened and self._threshold_reached(drawdown_pct,
+                                                           self.config.warn_pct) and not state.warn_triggered:
             action = "WARN"
             threshold_pct = self.config.warn_pct
             state.warn_triggered = True
@@ -326,11 +330,11 @@ class RollingLossGuard:
         )
 
     def adjust_flat_reference_for_cash_transfer(
-        self,
-        *,
-        now_ms: int,
-        new_flat_equity: float,
-        reason: str,
+            self,
+            *,
+            now_ms: int,
+            new_flat_equity: float,
+            reason: str,
     ) -> None:
         state = self._require_state()
         equity = _safe_float(new_flat_equity, 0.0)
@@ -370,16 +374,18 @@ class RollingLossGuard:
                 return None
             data = json.loads(raw)
             if not isinstance(data, dict):
-                logger.warning("ROLLING_DRAWDOWN_GUARD_STATE_INVALID_JSON | path=%s reinitializing=true", self.state_path)
+                logger.warning("ROLLING_DRAWDOWN_GUARD_STATE_INVALID_JSON | path=%s reinitializing=true",
+                               self.state_path)
                 return None
             return self._state_from_dict(data, current_equity=current_equity)
         except Exception as exc:
-            logger.warning("ROLLING_DRAWDOWN_GUARD_STATE_LOAD_FAILED | path=%s error=%s reinitializing=true", self.state_path, exc)
+            logger.warning("ROLLING_DRAWDOWN_GUARD_STATE_LOAD_FAILED | path=%s error=%s reinitializing=true",
+                           self.state_path, exc)
             return None
 
     def _state_from_dict(self, data: dict[str, object], *, current_equity: float) -> RollingLossGuardState:
         migrated_from_window = "reference_flat_equity" not in data and (
-            "baseline_equity" in data or "last_loss_pct" in data or "window_start_ts_ms" in data
+                "baseline_equity" in data or "last_loss_pct" in data or "window_start_ts_ms" in data
         )
         old_loss_pct = max(_safe_float(data.get("last_loss_pct"), 0.0), 0.0)
         reference = _safe_float(data.get("reference_flat_equity"), 0.0)
@@ -435,23 +441,23 @@ class RollingLossGuard:
         return self.state
 
     def _decision(
-        self,
-        action: str | None,
-        rolling_realized_pnl: float,
-        loss_usdt: float,
-        loss_pct: float,
-        *,
-        threshold_pct: float | None = None,
-        halt_hours: float | None = None,
-        halt_until_ts_ms: int | None = None,
-        reason: str | None = None,
-        segment_retention: float | None = None,
-        segment_return_pct: float | None = None,
-        cumulative_retention: float | None = None,
-        drawdown_pct: float | None = None,
-        reference_flat_equity: float | None = None,
-        flat_equity: float | None = None,
-        max_drawdown_pct: float | None = None,
+            self,
+            action: str | None,
+            rolling_realized_pnl: float,
+            loss_usdt: float,
+            loss_pct: float,
+            *,
+            threshold_pct: float | None = None,
+            halt_hours: float | None = None,
+            halt_until_ts_ms: int | None = None,
+            reason: str | None = None,
+            segment_retention: float | None = None,
+            segment_return_pct: float | None = None,
+            cumulative_retention: float | None = None,
+            drawdown_pct: float | None = None,
+            reference_flat_equity: float | None = None,
+            flat_equity: float | None = None,
+            max_drawdown_pct: float | None = None,
     ) -> RollingLossGuardDecision:
         state = self._require_state()
         return RollingLossGuardDecision(

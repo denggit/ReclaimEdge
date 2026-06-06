@@ -71,11 +71,11 @@ class CvdTrackerPerformanceTest(unittest.TestCase):
 
     def test_update_stats_logs_periodic_summary(self) -> None:
         with patch.dict(
-            os.environ,
-            {
-                "CVD_UPDATE_STATS_INTERVAL_SECONDS": "0.001",
-                "CVD_UPDATE_SLOW_LOG_MS": "0.0001",
-            },
+                os.environ,
+                {
+                    "CVD_UPDATE_STATS_INTERVAL_SECONDS": "0.001",
+                    "CVD_UPDATE_SLOW_LOG_MS": "0.0001",
+                },
         ):
             tracker = CvdTracker(perf_config())
 
@@ -124,12 +124,12 @@ class CvdTrackerPerformanceTest(unittest.TestCase):
 
         snapshot = None
         for offset_ms, price in (
-            (60_000, 100.00),
-            (60_200, 99.86),
-            (60_400, 99.70),
-            (60_600, 99.52),
-            (60_800, 99.38),
-            (61_000, 99.29),
+                (60_000, 100.00),
+                (60_200, 99.86),
+                (60_400, 99.70),
+                (60_600, 99.52),
+                (60_800, 99.38),
+                (61_000, 99.29),
         ):
             snapshot = tracker.update("sell", 80.0, price, ts + offset_ms)
 

@@ -11,8 +11,8 @@ import sys
 import time
 import types
 import unittest
-from unittest.mock import patch
 from decimal import Decimal
+from unittest.mock import patch
 
 if importlib.util.find_spec("dotenv") is None:
     dotenv = types.ModuleType("dotenv")
@@ -41,7 +41,6 @@ from src.indicators.cvd_tracker import CvdSnapshot  # noqa: E402
 from src.monitors.boll_band_breakout_monitor import BollSnapshot, MarketTickEvent, TradeTick  # noqa: E402
 from src.live.startup_recovery.basic_restore import (  # noqa: E402
     restore_strategy_from_position,
-    restore_strategy_from_saved_state,
 )
 from src.position_management.runner_live_helpers import (  # noqa: E402
     apply_three_stage_startup_safety_gate,
@@ -52,7 +51,8 @@ from src.position_management.tp_progress import (  # noqa: E402
     mark_three_stage_progress_if_position_reduced,
 )
 from src.risk.simple_position_sizer import PositionSize, SimplePositionSizer, SimplePositionSizerConfig  # noqa: E402
-from src.strategies.boll_cvd_reclaim_strategy import BollCvdReclaimStrategyConfig, StrategyPositionState, TradeIntent  # noqa: E402
+from src.strategies.boll_cvd_reclaim_strategy import BollCvdReclaimStrategyConfig, StrategyPositionState, \
+    TradeIntent  # noqa: E402
 from src.strategies.boll_cvd_shock_reclaim_strategy import BollCvdShockReclaimStrategy  # noqa: E402
 
 
@@ -172,7 +172,8 @@ class FakeJournal:
         if kwargs.get("cash_before_position") is not None and kwargs.get("cash_after") is not None:
             pnl = kwargs["cash_after"] - kwargs["cash_before_position"]
             kwargs["realized_pnl_usdt_est"] = pnl
-            kwargs["realized_pnl_pct_est"] = pnl / kwargs["cash_before_position"] * 100 if kwargs["cash_before_position"] else None
+            kwargs["realized_pnl_pct_est"] = pnl / kwargs["cash_before_position"] * 100 if kwargs[
+                "cash_before_position"] else None
         self.flats.append(kwargs)
 
     def record_cash_transfer(self, **kwargs) -> None:  # type: ignore[no-untyped-def]
@@ -237,7 +238,8 @@ class FakeTrader:
         if self.execute_delay:
             await asyncio.sleep(self.execute_delay)
         self.executed.append(trade_intent.ts_ms)
-        return LiveTradeResult(True, trade_intent.intent_type, f"ord-{trade_intent.ts_ms}", "tp", "1", "101", "ok", True, True)
+        return LiveTradeResult(True, trade_intent.intent_type, f"ord-{trade_intent.ts_ms}", "tp", "1", "101", "ok",
+                               True, True)
 
     async def fetch_position_snapshot(self) -> PositionSnapshot:
         if self.position_delay:
@@ -253,7 +255,8 @@ class FakeTrader:
     def mark_flat(self) -> None:
         self.position_contracts = Decimal("0")
 
-    async def place_three_stage_post_tp1_protective_stop_with_retries(self, side, contracts, stop_price, retry_count, retry_interval_seconds):  # type: ignore[no-untyped-def]
+    async def place_three_stage_post_tp1_protective_stop_with_retries(self, side, contracts, stop_price, retry_count,
+                                                                      retry_interval_seconds):  # type: ignore[no-untyped-def]
         order_id = f"post-tp1-{len(self.post_tp1_stop_orders) + 1}"
         self.post_tp1_stop_orders.append(
             {
@@ -271,7 +274,8 @@ class FakeTrader:
         self.cancelled_post_tp1_stop_ids.append(order_id)
         return self.cancel_post_tp1_ok
 
-    async def place_middle_runner_protective_stop_with_retries(self, side, contracts, stop_price, retry_count, retry_interval_seconds):  # type: ignore[no-untyped-def]
+    async def place_middle_runner_protective_stop_with_retries(self, side, contracts, stop_price, retry_count,
+                                                               retry_interval_seconds):  # type: ignore[no-untyped-def]
         order_id = f"mid-runner-{len(self.middle_runner_stop_orders) + 1}"
         self.middle_runner_stop_orders.append(
             {
@@ -314,9 +318,11 @@ class SidecarWorkerTrader(FakeTrader):
         self.executed_intents.append(trade_intent)
         self.executed.append(trade_intent.ts_ms)
         contracts = str(self.eth_qty_to_contracts(Decimal(str(trade_intent.size.eth_qty))))
-        return LiveTradeResult(True, trade_intent.intent_type, f"ord-{trade_intent.ts_ms}", "tp", contracts, "101", "ok", True, True)
+        return LiveTradeResult(True, trade_intent.intent_type, f"ord-{trade_intent.ts_ms}", "tp", contracts, "101",
+                               "ok", True, True)
 
-    async def place_sidecar_fixed_take_profit(self, *, side, contracts, tp_price, client_order_id=None):  # type: ignore[no-untyped-def]
+    async def place_sidecar_fixed_take_profit(self, *, side, contracts, tp_price,
+                                              client_order_id=None):  # type: ignore[no-untyped-def]
         self.sidecar_tps.append((side, contracts, tp_price, client_order_id))
         return "sidecar-tp"
 
@@ -503,7 +509,8 @@ class LiveRuntimeWorkerTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("net_remaining_breakeven_price", joined)
         self.assertIn("position_cost_exit_notional=60.6000", joined)
 
-    async def run_account_sync_until(self, predicate, *, account_snapshot, execution_state, trader, strategy, journal, state_store, timeout: float = 0.5):  # type: ignore[no-untyped-def]
+    async def run_account_sync_until(self, predicate, *, account_snapshot, execution_state, trader, strategy, journal,
+                                     state_store, timeout: float = 0.5):  # type: ignore[no-untyped-def]
         task = asyncio.create_task(
             account_position_sync_worker(
                 state_lock=asyncio.Lock(),
@@ -569,7 +576,8 @@ class LiveRuntimeWorkerTest(unittest.IsolatedAsyncioTestCase):
         journal = FakeJournal()
         state_store = RecordingStateStore()
         latest_ts_ms = int(dt.datetime.now().timestamp() * 1000)
-        account_snapshot = AccountSnapshot(None, 100.0, 100.0, asyncio.get_running_loop().time(), 0, 1, latest_market_price=106.4, latest_market_price_ts_ms=latest_ts_ms)
+        account_snapshot = AccountSnapshot(None, 100.0, 100.0, asyncio.get_running_loop().time(), 0, 1,
+                                           latest_market_price=106.4, latest_market_price_ts_ms=latest_ts_ms)
         execution_state = ExecutionState("pos-1", 100.0)
 
         await self.run_account_sync_until(
@@ -597,7 +605,8 @@ class LiveRuntimeWorkerTest(unittest.IsolatedAsyncioTestCase):
         journal = FakeJournal()
         state_store = RecordingStateStore()
         latest_ts_ms = int(dt.datetime.now().timestamp() * 1000)
-        account_snapshot = AccountSnapshot(None, 100.0, 100.0, asyncio.get_running_loop().time(), 0, 1, latest_market_price=93.6, latest_market_price_ts_ms=latest_ts_ms)
+        account_snapshot = AccountSnapshot(None, 100.0, 100.0, asyncio.get_running_loop().time(), 0, 1,
+                                           latest_market_price=93.6, latest_market_price_ts_ms=latest_ts_ms)
         execution_state = ExecutionState("pos-1", 100.0)
 
         await self.run_account_sync_until(
@@ -638,7 +647,8 @@ class LiveRuntimeWorkerTest(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertIn("THREE_STAGE_POST_TP1_SL_PRICE_FALLBACK", "\n".join(logs.output))
-        placed_payloads = [payload for event_name, payload, _position_id in journal.events if event_name == "THREE_STAGE_TP1_PROTECTIVE_SL_PLACED"]
+        placed_payloads = [payload for event_name, payload, _position_id in journal.events if
+                           event_name == "THREE_STAGE_TP1_PROTECTIVE_SL_PLACED"]
         self.assertEqual(placed_payloads[0]["reason"], "three_stage_tp1_filled")
 
     async def test_three_stage_tp2_cancel_post_tp1_sl_success_clears_state(self) -> None:
@@ -655,7 +665,8 @@ class LiveRuntimeWorkerTest(unittest.IsolatedAsyncioTestCase):
         trader = Tp2Trader()
         journal = FakeJournal()
         state_store = RecordingStateStore()
-        account_snapshot = AccountSnapshot(None, 100.0, 100.0, asyncio.get_running_loop().time(), 0, 1, latest_market_price=110.0)
+        account_snapshot = AccountSnapshot(None, 100.0, 100.0, asyncio.get_running_loop().time(), 0, 1,
+                                           latest_market_price=110.0)
         execution_state = ExecutionState("pos-1", 100.0)
 
         await self.run_account_sync_until(
@@ -689,7 +700,8 @@ class LiveRuntimeWorkerTest(unittest.IsolatedAsyncioTestCase):
         trader.cancel_post_tp1_ok = False
         journal = FakeJournal()
         state_store = RecordingStateStore()
-        account_snapshot = AccountSnapshot(None, 100.0, 100.0, asyncio.get_running_loop().time(), 0, 1, latest_market_price=110.0)
+        account_snapshot = AccountSnapshot(None, 100.0, 100.0, asyncio.get_running_loop().time(), 0, 1,
+                                           latest_market_price=110.0)
         execution_state = ExecutionState("pos-1", 100.0)
 
         await self.run_account_sync_until(
@@ -762,7 +774,8 @@ class LiveRuntimeWorkerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(strategy.state.three_stage_post_tp1_protective_sl_order_id, "old-post")
         self.assertEqual(strategy.state.three_stage_post_tp1_protective_sl_price, 101.0)
         self.assertTrue(strategy.state.three_stage_post_tp1_protected)
-        self.assertIn("THREE_STAGE_TP1_PROTECTIVE_SL_CANCEL_FAILED_ON_TP2_RESTORED", [event[0] for event in journal.events])
+        self.assertIn("THREE_STAGE_TP1_PROTECTIVE_SL_CANCEL_FAILED_ON_TP2_RESTORED",
+                      [event[0] for event in journal.events])
         self.assertEqual(state_store.saved_states[-1].three_stage_post_tp1_protective_sl_order_id, "old-post")
 
     async def test_dirty_post_tp1_sl_blocks_runner_update(self) -> None:
@@ -785,7 +798,8 @@ class LiveRuntimeWorkerTest(unittest.IsolatedAsyncioTestCase):
             }
         )
         queue: asyncio.Queue[TradeCommand] = asyncio.Queue(maxsize=1000)
-        await queue.put(TradeCommand(runner_update, copy.deepcopy(strategy.state), runner_update.ts_ms, asyncio.get_running_loop().time(), 0, runner_update.reason))
+        await queue.put(TradeCommand(runner_update, copy.deepcopy(strategy.state), runner_update.ts_ms,
+                                     asyncio.get_running_loop().time(), 0, runner_update.reason))
         execution_state = ExecutionState("pos-1", 100.0)
         trader = FakeTrader()
         journal = FakeJournal()
@@ -795,7 +809,8 @@ class LiveRuntimeWorkerTest(unittest.IsolatedAsyncioTestCase):
                 execution_queue=queue,
                 state_lock=asyncio.Lock(),
                 execution_state=execution_state,
-                account_snapshot=AccountSnapshot(PositionSnapshot("LONG", Decimal("2"), 100.0, 0.2, Decimal("2")), 100.0, 100.0, asyncio.get_running_loop().time(), 0, 1),
+                account_snapshot=AccountSnapshot(PositionSnapshot("LONG", Decimal("2"), 100.0, 0.2, Decimal("2")),
+                                                 100.0, 100.0, asyncio.get_running_loop().time(), 0, 1),
                 trader=trader,  # type: ignore[arg-type]
                 strategy=strategy,
                 journal=journal,  # type: ignore[arg-type]
@@ -829,7 +844,8 @@ class LiveRuntimeWorkerTest(unittest.IsolatedAsyncioTestCase):
         trader = Tp2Trader()
         journal = FakeJournal()
         state_store = RecordingStateStore()
-        account_snapshot = AccountSnapshot(None, 100.0, 100.0, asyncio.get_running_loop().time(), 0, 1, latest_market_price=110.0)
+        account_snapshot = AccountSnapshot(None, 100.0, 100.0, asyncio.get_running_loop().time(), 0, 1,
+                                           latest_market_price=110.0)
         execution_state = ExecutionState("pos-1", 100.0, trading_halted=True, halt_reason="some_existing_critical_halt")
 
         await self.run_account_sync_until(
@@ -864,14 +880,16 @@ class LiveRuntimeWorkerTest(unittest.IsolatedAsyncioTestCase):
 
         with patch.dict(os.environ, {"LATEST_MARKET_PRICE_MAX_AGE_SECONDS": "30"}):
             with self.assertLogs("src.position_management.runner_live_helpers", level="WARNING") as logs:
-                current_price, source = three_stage_post_tp1_current_price(account_snapshot, position, boll(), now_ms=100_000)
+                current_price, source = three_stage_post_tp1_current_price(account_snapshot, position, boll(),
+                                                                           now_ms=100_000)
 
         self.assertEqual(current_price, 100.0)
         self.assertEqual(source, "position_avg_entry")
         self.assertIn("latest_market_price_stale", "\n".join(logs.output))
 
     def test_restore_strategy_from_position_sets_conservative_first_entry_clock(self) -> None:
-        strategy = BollCvdShockReclaimStrategy(BollCvdReclaimStrategyConfig(), SimplePositionSizer(SimplePositionSizerConfig()))
+        strategy = BollCvdShockReclaimStrategy(BollCvdReclaimStrategyConfig(),
+                                               SimplePositionSizer(SimplePositionSizerConfig()))
         position = PositionSnapshot("LONG", Decimal("3"), 100.5, 0.3, Decimal("3"))
 
         restore_strategy_from_position(strategy, position, now_ms=123_456)
@@ -912,14 +930,16 @@ class LiveRuntimeWorkerTest(unittest.IsolatedAsyncioTestCase):
             with patch("src.live.time_utils.dt.datetime", fixed_datetime(now_value)):
                 self.assertEqual(next_weekly_summary_time(10, 0, weekday=0), expected)
 
-    async def run_strategy_worker_once(self, strategy: FakeStrategy, cvd: FakeCvd, queue: asyncio.Queue[MarketTickEvent]) -> asyncio.Queue[TradeCommand]:
+    async def run_strategy_worker_once(self, strategy: FakeStrategy, cvd: FakeCvd,
+                                       queue: asyncio.Queue[MarketTickEvent]) -> asyncio.Queue[TradeCommand]:
         execution_queue: asyncio.Queue[TradeCommand] = asyncio.Queue(maxsize=1000)
         worker = asyncio.create_task(
             strategy_tick_worker(
                 strategy_tick_queue=queue,
                 execution_queue=execution_queue,
                 state_lock=asyncio.Lock(),
-                account_snapshot=AccountSnapshot(flat_position(), 100.0, 100.0, asyncio.get_running_loop().time(), 0, 1),
+                account_snapshot=AccountSnapshot(flat_position(), 100.0, 100.0, asyncio.get_running_loop().time(), 0,
+                                                 1),
                 execution_state=ExecutionState(None, None),
                 cvd=cvd,  # type: ignore[arg-type]
                 strategy=strategy,  # type: ignore[arg-type]
@@ -1048,7 +1068,8 @@ class LiveRuntimeWorkerTest(unittest.IsolatedAsyncioTestCase):
                 strategy_tick_queue=strategy_queue,
                 execution_queue=execution_queue,
                 state_lock=asyncio.Lock(),
-                account_snapshot=AccountSnapshot(flat_position(), 100.0, 100.0, asyncio.get_running_loop().time(), 0, 1),
+                account_snapshot=AccountSnapshot(flat_position(), 100.0, 100.0, asyncio.get_running_loop().time(), 0,
+                                                 1),
                 execution_state=execution_state,
                 cvd=cvd,  # type: ignore[arg-type]
                 strategy=strategy,  # type: ignore[arg-type]
@@ -1090,7 +1111,8 @@ class LiveRuntimeWorkerTest(unittest.IsolatedAsyncioTestCase):
         task = asyncio.create_task(
             account_position_sync_worker(
                 state_lock=asyncio.Lock(),
-                account_snapshot=AccountSnapshot(flat_position(), 100.0, 100.0, asyncio.get_running_loop().time(), 0, 1),
+                account_snapshot=AccountSnapshot(flat_position(), 100.0, 100.0, asyncio.get_running_loop().time(), 0,
+                                                 1),
                 execution_state=execution_state,
                 trader=PendingFlatTrader(),  # type: ignore[arg-type]
                 sizer=SimplePositionSizer(SimplePositionSizerConfig()),
@@ -1152,17 +1174,17 @@ class LiveRuntimeWorkerTest(unittest.IsolatedAsyncioTestCase):
         state_store = ClearingStateStore()
 
         with patch.dict(
-            os.environ,
-            {
-                "FLAT_BALANCE_CONFIRM_ATTEMPTS": "3",
-                "FLAT_BALANCE_CONFIRM_INTERVAL_SECONDS": "0",
-                "FLAT_BALANCE_STABLE_DELTA_USDT": "0.05",
-                "FLAT_BALANCE_CASH_EQUITY_MAX_DIFF_USDT": "0.10",
-                "CASH_TRANSFER_MIN_DELTA_USDT": "0.5",
-                "CASH_TRANSFER_SETTLE_SECONDS": "0",
-                "CASH_TRANSFER_AFTER_FLAT_COOLDOWN_SECONDS": "180",
-                "CASH_DRIFT_MIN_DELTA_USDT": "0.5",
-            },
+                os.environ,
+                {
+                    "FLAT_BALANCE_CONFIRM_ATTEMPTS": "3",
+                    "FLAT_BALANCE_CONFIRM_INTERVAL_SECONDS": "0",
+                    "FLAT_BALANCE_STABLE_DELTA_USDT": "0.05",
+                    "FLAT_BALANCE_CASH_EQUITY_MAX_DIFF_USDT": "0.10",
+                    "CASH_TRANSFER_MIN_DELTA_USDT": "0.5",
+                    "CASH_TRANSFER_SETTLE_SECONDS": "0",
+                    "CASH_TRANSFER_AFTER_FLAT_COOLDOWN_SECONDS": "180",
+                    "CASH_DRIFT_MIN_DELTA_USDT": "0.5",
+                },
         ):
             task = asyncio.create_task(
                 account_position_sync_worker(
@@ -1226,17 +1248,17 @@ class LiveRuntimeWorkerTest(unittest.IsolatedAsyncioTestCase):
         journal = RecordingJournal()
 
         with patch.dict(
-            os.environ,
-            {
-                "FLAT_BALANCE_CONFIRM_ATTEMPTS": "2",
-                "FLAT_BALANCE_CONFIRM_INTERVAL_SECONDS": "0",
-                "FLAT_BALANCE_STABLE_DELTA_USDT": "0.05",
-                "FLAT_BALANCE_CASH_EQUITY_MAX_DIFF_USDT": "0.10",
-                "CASH_TRANSFER_MIN_DELTA_USDT": "0.5",
-                "CASH_TRANSFER_SETTLE_SECONDS": "0",
-                "CASH_TRANSFER_AFTER_FLAT_COOLDOWN_SECONDS": "180",
-                "CASH_DRIFT_MIN_DELTA_USDT": "0.5",
-            },
+                os.environ,
+                {
+                    "FLAT_BALANCE_CONFIRM_ATTEMPTS": "2",
+                    "FLAT_BALANCE_CONFIRM_INTERVAL_SECONDS": "0",
+                    "FLAT_BALANCE_STABLE_DELTA_USDT": "0.05",
+                    "FLAT_BALANCE_CASH_EQUITY_MAX_DIFF_USDT": "0.10",
+                    "CASH_TRANSFER_MIN_DELTA_USDT": "0.5",
+                    "CASH_TRANSFER_SETTLE_SECONDS": "0",
+                    "CASH_TRANSFER_AFTER_FLAT_COOLDOWN_SECONDS": "180",
+                    "CASH_DRIFT_MIN_DELTA_USDT": "0.5",
+                },
         ):
             with self.assertLogs("scripts.run_boll_cvd_live", level="WARNING") as logs:
                 task = asyncio.create_task(
@@ -1345,15 +1367,15 @@ class LiveRuntimeWorkerTest(unittest.IsolatedAsyncioTestCase):
         state_store = RecordingStateStore()
 
         with patch.dict(
-            os.environ,
-            {
-                "FLAT_BALANCE_CONFIRM_ATTEMPTS": "2",
-                "FLAT_BALANCE_CONFIRM_INTERVAL_SECONDS": "0",
-                "CASH_TRANSFER_MIN_DELTA_USDT": "0.5",
-                "CASH_TRANSFER_SETTLE_SECONDS": "0",
-                "CASH_TRANSFER_AFTER_FLAT_COOLDOWN_SECONDS": "180",
-                "CASH_DRIFT_MIN_DELTA_USDT": "0.5",
-            },
+                os.environ,
+                {
+                    "FLAT_BALANCE_CONFIRM_ATTEMPTS": "2",
+                    "FLAT_BALANCE_CONFIRM_INTERVAL_SECONDS": "0",
+                    "CASH_TRANSFER_MIN_DELTA_USDT": "0.5",
+                    "CASH_TRANSFER_SETTLE_SECONDS": "0",
+                    "CASH_TRANSFER_AFTER_FLAT_COOLDOWN_SECONDS": "180",
+                    "CASH_DRIFT_MIN_DELTA_USDT": "0.5",
+                },
         ):
             task = asyncio.create_task(
                 account_position_sync_worker(
@@ -1437,15 +1459,15 @@ class LiveRuntimeWorkerTest(unittest.IsolatedAsyncioTestCase):
         trader = FlatSettleTrader()
 
         with patch.dict(
-            os.environ,
-            {
-                "FLAT_BALANCE_CONFIRM_ATTEMPTS": "2",
-                "FLAT_BALANCE_CONFIRM_INTERVAL_SECONDS": "0",
-                "CASH_TRANSFER_MIN_DELTA_USDT": "0.5",
-                "CASH_TRANSFER_SETTLE_SECONDS": "0",
-                "CASH_TRANSFER_AFTER_FLAT_COOLDOWN_SECONDS": "180",
-                "CASH_DRIFT_MIN_DELTA_USDT": "0.5",
-            },
+                os.environ,
+                {
+                    "FLAT_BALANCE_CONFIRM_ATTEMPTS": "2",
+                    "FLAT_BALANCE_CONFIRM_INTERVAL_SECONDS": "0",
+                    "CASH_TRANSFER_MIN_DELTA_USDT": "0.5",
+                    "CASH_TRANSFER_SETTLE_SECONDS": "0",
+                    "CASH_TRANSFER_AFTER_FLAT_COOLDOWN_SECONDS": "180",
+                    "CASH_DRIFT_MIN_DELTA_USDT": "0.5",
+                },
         ):
             task = asyncio.create_task(
                 account_position_sync_worker(
@@ -1502,13 +1524,13 @@ class LiveRuntimeWorkerTest(unittest.IsolatedAsyncioTestCase):
         journal = RecordingJournal()
 
         with patch.dict(
-            os.environ,
-            {
-                "CASH_TRANSFER_MIN_DELTA_USDT": "0.5",
-                "CASH_TRANSFER_SETTLE_SECONDS": "0",
-                "CASH_TRANSFER_AFTER_FLAT_COOLDOWN_SECONDS": "180",
-                "CASH_DRIFT_MIN_DELTA_USDT": "0.5",
-            },
+                os.environ,
+                {
+                    "CASH_TRANSFER_MIN_DELTA_USDT": "0.5",
+                    "CASH_TRANSFER_SETTLE_SECONDS": "0",
+                    "CASH_TRANSFER_AFTER_FLAT_COOLDOWN_SECONDS": "180",
+                    "CASH_DRIFT_MIN_DELTA_USDT": "0.5",
+                },
         ):
             task = asyncio.create_task(
                 account_position_sync_worker(
@@ -1562,7 +1584,8 @@ class LiveRuntimeWorkerTest(unittest.IsolatedAsyncioTestCase):
         task = asyncio.create_task(
             account_position_sync_worker(
                 state_lock=asyncio.Lock(),
-                account_snapshot=AccountSnapshot(flat_position(), 100.0, 100.0, asyncio.get_running_loop().time(), 0, 1),
+                account_snapshot=AccountSnapshot(flat_position(), 100.0, 100.0, asyncio.get_running_loop().time(), 0,
+                                                 1),
                 execution_state=execution_state,
                 trader=trader,  # type: ignore[arg-type]
                 sizer=SimplePositionSizer(SimplePositionSizerConfig()),
@@ -1598,7 +1621,8 @@ class LiveRuntimeWorkerTest(unittest.IsolatedAsyncioTestCase):
                 strategy_tick_queue=strategy_queue,
                 execution_queue=execution_queue,
                 state_lock=asyncio.Lock(),
-                account_snapshot=AccountSnapshot(flat_position(), 100.0, 100.0, asyncio.get_running_loop().time(), 0, 1),
+                account_snapshot=AccountSnapshot(flat_position(), 100.0, 100.0, asyncio.get_running_loop().time(), 0,
+                                                 1),
                 execution_state=execution_state,
                 cvd=cvd,  # type: ignore[arg-type]
                 strategy=strategy,  # type: ignore[arg-type]
@@ -1635,14 +1659,17 @@ class LiveRuntimeWorkerTest(unittest.IsolatedAsyncioTestCase):
     async def test_execution_worker_processes_commands_in_order(self) -> None:
         execution_queue: asyncio.Queue[TradeCommand] = asyncio.Queue(maxsize=1000)
         for ts_ms in [1_000, 1_001, 1_002]:
-            await execution_queue.put(TradeCommand(intent(ts_ms), StrategyPositionState(), ts_ms, asyncio.get_running_loop().time(), 0, "test"))
+            await execution_queue.put(
+                TradeCommand(intent(ts_ms), StrategyPositionState(), ts_ms, asyncio.get_running_loop().time(), 0,
+                             "test"))
         trader = FakeTrader()
         task = asyncio.create_task(
             execution_worker(
                 execution_queue=execution_queue,
                 state_lock=asyncio.Lock(),
                 execution_state=ExecutionState(None, None),
-                account_snapshot=AccountSnapshot(flat_position(), 100.0, 100.0, asyncio.get_running_loop().time(), 0, 1),
+                account_snapshot=AccountSnapshot(flat_position(), 100.0, 100.0, asyncio.get_running_loop().time(), 0,
+                                                 1),
                 trader=trader,  # type: ignore[arg-type]
                 strategy=FakeStrategy(),  # type: ignore[arg-type]
                 journal=FakeJournal(),  # type: ignore[arg-type]
@@ -1668,7 +1695,8 @@ class LiveRuntimeWorkerTest(unittest.IsolatedAsyncioTestCase):
             sidecar_tp_pct=0.004,
         )
         await execution_queue.put(
-            TradeCommand(entry_intent, copy.deepcopy(state), entry_intent.ts_ms, asyncio.get_running_loop().time(), 0, "test")
+            TradeCommand(entry_intent, copy.deepcopy(state), entry_intent.ts_ms, asyncio.get_running_loop().time(), 0,
+                         "test")
         )
         trader = SidecarWorkerTrader()
         journal = FakeJournal()
@@ -1679,7 +1707,8 @@ class LiveRuntimeWorkerTest(unittest.IsolatedAsyncioTestCase):
                 execution_queue=execution_queue,
                 state_lock=asyncio.Lock(),
                 execution_state=ExecutionState(None, None),
-                account_snapshot=AccountSnapshot(flat_position(), 100.0, 100.0, asyncio.get_running_loop().time(), 0, 1),
+                account_snapshot=AccountSnapshot(flat_position(), 100.0, 100.0, asyncio.get_running_loop().time(), 0,
+                                                 1),
                 trader=trader,  # type: ignore[arg-type]
                 strategy=strategy,  # type: ignore[arg-type]
                 journal=journal,  # type: ignore[arg-type]
@@ -1717,7 +1746,8 @@ class LiveRuntimeWorkerTest(unittest.IsolatedAsyncioTestCase):
             sidecar_tp_pct=0.004,
         )
         await execution_queue.put(
-            TradeCommand(entry_intent, copy.deepcopy(state), entry_intent.ts_ms, asyncio.get_running_loop().time(), 0, "test")
+            TradeCommand(entry_intent, copy.deepcopy(state), entry_intent.ts_ms, asyncio.get_running_loop().time(), 0,
+                         "test")
         )
         trader = SidecarWorkerTrader()
         journal = FakeJournal()
@@ -1727,7 +1757,8 @@ class LiveRuntimeWorkerTest(unittest.IsolatedAsyncioTestCase):
                 execution_queue=execution_queue,
                 state_lock=asyncio.Lock(),
                 execution_state=ExecutionState(None, None),
-                account_snapshot=AccountSnapshot(flat_position(), 100.0, 100.0, asyncio.get_running_loop().time(), 0, 1),
+                account_snapshot=AccountSnapshot(flat_position(), 100.0, 100.0, asyncio.get_running_loop().time(), 0,
+                                                 1),
                 trader=trader,  # type: ignore[arg-type]
                 strategy=strategy,  # type: ignore[arg-type]
                 journal=journal,  # type: ignore[arg-type]
@@ -1942,7 +1973,8 @@ class LiveRuntimeWorkerTest(unittest.IsolatedAsyncioTestCase):
         task = asyncio.create_task(
             account_position_sync_worker(
                 state_lock=state_lock,  # type: ignore[arg-type]
-                account_snapshot=AccountSnapshot(flat_position(), 100.0, 100.0, asyncio.get_running_loop().time(), 0, 1),
+                account_snapshot=AccountSnapshot(flat_position(), 100.0, 100.0, asyncio.get_running_loop().time(), 0,
+                                                 1),
                 execution_state=ExecutionState(None, None),
                 trader=GuardedTrader(),  # type: ignore[arg-type]
                 sizer=SimplePositionSizer(SimplePositionSizerConfig()),
@@ -2030,11 +2062,13 @@ class LiveRuntimeWorkerTest(unittest.IsolatedAsyncioTestCase):
                     fetched.set()
                 raise TimeoutError("private REST timeout")
 
-        with patch.dict(os.environ, {"ACCOUNT_SYNC_FAILURE_LOG_INTERVAL_SECONDS": "60", "ACCOUNT_SYNC_STALE_WARN_SECONDS": "180"}):
+        with patch.dict(os.environ,
+                        {"ACCOUNT_SYNC_FAILURE_LOG_INTERVAL_SECONDS": "60", "ACCOUNT_SYNC_STALE_WARN_SECONDS": "180"}):
             task = asyncio.create_task(
                 account_position_sync_worker(
                     state_lock=asyncio.Lock(),
-                    account_snapshot=AccountSnapshot(flat_position(), 100.0, 100.0, asyncio.get_running_loop().time(), 0, 1),
+                    account_snapshot=AccountSnapshot(flat_position(), 100.0, 100.0, asyncio.get_running_loop().time(),
+                                                     0, 1),
                     execution_state=ExecutionState(None, None),
                     trader=FailingTrader(),  # type: ignore[arg-type]
                     sizer=SimplePositionSizer(SimplePositionSizerConfig()),
@@ -2074,11 +2108,13 @@ class LiveRuntimeWorkerTest(unittest.IsolatedAsyncioTestCase):
                     raise TimeoutError("private REST timeout")
                 return live_position
 
-        with patch.dict(os.environ, {"ACCOUNT_SYNC_FAILURE_LOG_INTERVAL_SECONDS": "0", "ACCOUNT_SYNC_STALE_WARN_SECONDS": "999"}):
+        with patch.dict(os.environ,
+                        {"ACCOUNT_SYNC_FAILURE_LOG_INTERVAL_SECONDS": "0", "ACCOUNT_SYNC_STALE_WARN_SECONDS": "999"}):
             task = asyncio.create_task(
                 account_position_sync_worker(
                     state_lock=asyncio.Lock(),
-                    account_snapshot=AccountSnapshot(flat_position(), 100.0, 100.0, asyncio.get_running_loop().time(), 0, 1),
+                    account_snapshot=AccountSnapshot(flat_position(), 100.0, 100.0, asyncio.get_running_loop().time(),
+                                                     0, 1),
                     execution_state=ExecutionState("pos-1", 100.0),
                     trader=RecoveringTrader(),  # type: ignore[arg-type]
                     sizer=SimplePositionSizer(SimplePositionSizerConfig()),
@@ -2858,7 +2894,7 @@ class LiveRuntimeWorkerTest(unittest.IsolatedAsyncioTestCase):
                 return PositionSnapshot("LONG", Decimal("4"), 100.0, 0.4, Decimal("4"))
 
             async def place_three_stage_post_tp1_protective_stop_with_retries(
-                inner_self, side, contracts, stop_price, retry_count, retry_interval_seconds,
+                    inner_self, side, contracts, stop_price, retry_count, retry_interval_seconds,
             ):
                 raise AttributeError("'float' object has no attribute 'normalize'")
 
@@ -2894,7 +2930,8 @@ class LiveRuntimeWorkerTest(unittest.IsolatedAsyncioTestCase):
             "market_exit_remaining_position_with_retries must be called on SL failure",
         )
         failed_events = [e for e in journal.events if e[0] == "THREE_STAGE_POST_TP1_PROTECTIVE_SL_FAILED"]
-        self.assertEqual(len(failed_events), 1, "THREE_STAGE_POST_TP1_PROTECTIVE_SL_FAILED journal event must be logged")
+        self.assertEqual(len(failed_events), 1,
+                         "THREE_STAGE_POST_TP1_PROTECTIVE_SL_FAILED journal event must be logged")
 
     # ── Test: middle_runner SL exception enters failure fallback ──
 
@@ -2904,7 +2941,7 @@ class LiveRuntimeWorkerTest(unittest.IsolatedAsyncioTestCase):
                 return PositionSnapshot("LONG", Decimal("2"), 100.0, 0.2, Decimal("2"))
 
             async def place_middle_runner_protective_stop_with_retries(
-                inner_self, side, contracts, stop_price, retry_count, retry_interval_seconds,
+                    inner_self, side, contracts, stop_price, retry_count, retry_interval_seconds,
             ):
                 raise AttributeError("'float' object has no attribute 'normalize'")
 

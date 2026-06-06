@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
-import os
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -12,7 +12,8 @@ from src.reporting.journal_compactor import compact_after_weekly_summary
 from src.reporting.trade_journal import JournalEvent, LiveTradeJournal
 
 
-def event(event_id: str, event_type: str, position_id: str | None, ts: str, payload: dict | None = None) -> JournalEvent:
+def event(event_id: str, event_type: str, position_id: str | None, ts: str,
+          payload: dict | None = None) -> JournalEvent:
     return JournalEvent(
         event_id=event_id,
         event_type=event_type,
@@ -100,9 +101,11 @@ class OverallArchivedSummaryTest(unittest.TestCase):
             reporter = DailyTradeReporter(journal=journal, email_sender=FakeEmailSender())  # type: ignore[arg-type]
             for item in [
                 event("pos1-entry", "ENTRY", "pos1", "2026-01-01T00:00:00+00:00", {"cash_before_position": 100.0}),
-                event("pos1-flat", "FLAT", "pos1", "2026-01-01T01:00:00+00:00", {"realized_pnl_usdt_est": 10.0, "cash_after": 110.0}),
+                event("pos1-flat", "FLAT", "pos1", "2026-01-01T01:00:00+00:00",
+                      {"realized_pnl_usdt_est": 10.0, "cash_after": 110.0}),
                 event("pos2-entry", "ENTRY", "pos2", "2026-01-01T02:00:00+00:00", {"cash_before_position": 110.0}),
-                event("pos2-flat", "FLAT", "pos2", "2026-01-01T03:00:00+00:00", {"realized_pnl_usdt_est": -3.0, "cash_after": 107.0}),
+                event("pos2-flat", "FLAT", "pos2", "2026-01-01T03:00:00+00:00",
+                      {"realized_pnl_usdt_est": -3.0, "cash_after": 107.0}),
             ]:
                 journal.append_event(item)
 
@@ -118,7 +121,8 @@ class OverallArchivedSummaryTest(unittest.TestCase):
             self.assertNotIn("pos2-entry", live_ids)
             self.assertNotIn("pos2-flat", live_ids)
 
-            journal.append_event(event("pos3-entry", "ENTRY", "pos3", "2026-01-02T02:00:00+00:00", {"cash_before_position": 107.0}))
+            journal.append_event(
+                event("pos3-entry", "ENTRY", "pos3", "2026-01-02T02:00:00+00:00", {"cash_before_position": 107.0}))
             journal.append_event(
                 event(
                     "pos3-flat",

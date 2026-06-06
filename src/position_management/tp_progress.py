@@ -146,7 +146,8 @@ def mark_middle_runner_active_if_position_reduced(strategy: BollCvdReclaimStrate
     return True
 
 
-def mark_three_stage_progress_if_position_reduced(strategy: BollCvdReclaimStrategy, position: PositionSnapshot, ts_ms: int) -> str | None:
+def mark_three_stage_progress_if_position_reduced(strategy: BollCvdReclaimStrategy, position: PositionSnapshot,
+                                                  ts_ms: int) -> str | None:
     state = strategy.state
     if not getattr(state, "three_stage_runner_enabled_for_position", False):
         return None
@@ -167,7 +168,8 @@ def mark_three_stage_progress_if_position_reduced(strategy: BollCvdReclaimStrate
     event: str | None = None
 
     if not getattr(state, "three_stage_tp1_consumed", False) and remaining_ratio <= after_tp1_ratio + tp1_tolerance:
-        expected_after_tp1_qty = total_entry_qty * after_tp1_ratio + sidecar_open_qty(list(getattr(state, "sidecar_legs", []) or []))
+        expected_after_tp1_qty = total_entry_qty * after_tp1_ratio + sidecar_open_qty(
+            list(getattr(state, "sidecar_legs", []) or []))
         will_mark_tp2_now = remaining_ratio <= after_tp2_ratio + tp2_tolerance
         position_cost_runtime.record_core_position_reduction_exit(
             state,
@@ -212,9 +214,9 @@ def mark_three_stage_progress_if_position_reduced(strategy: BollCvdReclaimStrate
         )
 
     if (
-        getattr(state, "three_stage_tp1_consumed", False)
-        and not getattr(state, "three_stage_tp2_consumed", False)
-        and remaining_ratio <= after_tp2_ratio + tp2_tolerance
+            getattr(state, "three_stage_tp1_consumed", False)
+            and not getattr(state, "three_stage_tp2_consumed", False)
+            and remaining_ratio <= after_tp2_ratio + tp2_tolerance
     ):
         position_cost_runtime.record_core_position_reduction_exit(
             state,

@@ -23,15 +23,15 @@ logger = get_logger(__name__)
 
 
 async def reconcile_sidecar_orders_before_core_view(
-    *,
-    trader: Trader,
-    strategy: BollCvdShockReclaimStrategy,
-    execution_state: live_runtime_types.ExecutionState,
-    journal: LiveTradeJournal,
-    state_store: LiveStateStore,
-    trader_symbol: str,
-    ts_ms: int,
-    state_lock: asyncio.Lock,
+        *,
+        trader: Trader,
+        strategy: BollCvdShockReclaimStrategy,
+        execution_state: live_runtime_types.ExecutionState,
+        journal: LiveTradeJournal,
+        state_store: LiveStateStore,
+        trader_symbol: str,
+        ts_ms: int,
+        state_lock: asyncio.Lock,
 ) -> live_runtime_types.SidecarPreCoreReconcileResult:
     """Reconcile sidecar TP order status BEFORE constructing core_position view.
 
@@ -68,7 +68,8 @@ async def reconcile_sidecar_orders_before_core_view(
                 strategy.state.sidecar_dirty = True
                 strategy.state.sidecar_halt_reason = "sidecar_tp_order_missing_or_unknown"
                 if not leg.get("warning_recorded") and hasattr(journal, "append"):
-                    journal.append("SIDECAR_TP_ORDER_MISSING_OR_UNKNOWN", dict(leg), position_id=execution_state.current_position_id)
+                    journal.append("SIDECAR_TP_ORDER_MISSING_OR_UNKNOWN", dict(leg),
+                                   position_id=execution_state.current_position_id)
                 strategy.state.sidecar_legs[index] = mark_sidecar_leg_unknown_halted(leg, ts_ms)
                 dirty_changed = True
         if dirty_changed:
@@ -140,17 +141,17 @@ async def reconcile_sidecar_orders_before_core_view(
                 # may now exceed current net position. Must halt for manual reconciliation.
                 active_global_sl_orders: list[str] = []
                 for sl_field in (
-                    "near_tp_protective_sl_order_id",
-                    "middle_runner_protective_sl_order_id",
-                    "three_stage_post_tp1_protective_sl_order_id",
-                    "trend_runner_sl_order_id",
+                        "near_tp_protective_sl_order_id",
+                        "middle_runner_protective_sl_order_id",
+                        "three_stage_post_tp1_protective_sl_order_id",
+                        "trend_runner_sl_order_id",
                 ):
                     # Use trader fallback (same as monitor_sidecar_orders_once)
                     # because SL orders may have been placed by startup recovery
                     # or by a previous session and only tracked on the trader.
                     sl_order_id = (
-                        getattr(strategy.state, sl_field, None)
-                        or getattr(trader, sl_field, None)
+                            getattr(strategy.state, sl_field, None)
+                            or getattr(trader, sl_field, None)
                     )
                     if sl_order_id:
                         active_global_sl_orders.append(f"{sl_field}={sl_order_id}")

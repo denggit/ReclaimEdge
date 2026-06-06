@@ -14,9 +14,9 @@ logger = get_logger(__name__)
 
 
 def restore_strategy_from_position(
-    strategy: BollCvdReclaimStrategy,
-    position: PositionSnapshot,
-    now_ms: int | None = None,
+        strategy: BollCvdReclaimStrategy,
+        position: PositionSnapshot,
+        now_ms: int | None = None,
 ) -> None:
     if not position.has_position or position.side is None or position.avg_entry_price <= 0:
         return
@@ -46,8 +46,8 @@ def restore_strategy_from_position(
 
 
 def restore_strategy_from_saved_state(
-    strategy: BollCvdReclaimStrategy,
-    saved_state: Any,
+        strategy: BollCvdReclaimStrategy,
+        saved_state: Any,
 ) -> None:
     tp_plan = getattr(saved_state, "tp_plan", "SINGLE")
     if tp_plan == "SPLIT_50_50":
@@ -102,9 +102,12 @@ def restore_strategy_from_saved_state(
         middle_runner_size_mismatch_protected=getattr(saved_state, "middle_runner_size_mismatch_protected", False),
         middle_runner_size_mismatch_warning_ts_ms=getattr(saved_state, "middle_runner_size_mismatch_warning_ts_ms", 0),
         middle_runner_sl_diag_last_signature=getattr(saved_state, "middle_runner_sl_diag_last_signature", None),
-        middle_runner_sl_time_tighten_candle_count=getattr(saved_state, "middle_runner_sl_time_tighten_candle_count", 0),
-        middle_runner_sl_time_tighten_last_candle_ts_ms=getattr(saved_state, "middle_runner_sl_time_tighten_last_candle_ts_ms", 0),
-        middle_runner_sl_time_tighten_log_candle_ts_ms=getattr(saved_state, "middle_runner_sl_time_tighten_log_candle_ts_ms", 0),
+        middle_runner_sl_time_tighten_candle_count=getattr(saved_state, "middle_runner_sl_time_tighten_candle_count",
+                                                           0),
+        middle_runner_sl_time_tighten_last_candle_ts_ms=getattr(saved_state,
+                                                                "middle_runner_sl_time_tighten_last_candle_ts_ms", 0),
+        middle_runner_sl_time_tighten_log_candle_ts_ms=getattr(saved_state,
+                                                               "middle_runner_sl_time_tighten_log_candle_ts_ms", 0),
         three_stage_runner_enabled_for_position=getattr(saved_state, "three_stage_runner_enabled_for_position", False),
         three_stage_tp1_price=getattr(saved_state, "three_stage_tp1_price", None),
         three_stage_tp2_price=getattr(saved_state, "three_stage_tp2_price", None),
@@ -115,13 +118,22 @@ def restore_strategy_from_saved_state(
         three_stage_tp1_consumed=getattr(saved_state, "three_stage_tp1_consumed", False),
         three_stage_tp2_consumed=getattr(saved_state, "three_stage_tp2_consumed", False),
         three_stage_post_tp1_protective_sl_price=getattr(saved_state, "three_stage_post_tp1_protective_sl_price", None),
-        three_stage_post_tp1_protective_sl_order_id=getattr(saved_state, "three_stage_post_tp1_protective_sl_order_id", None),
-        three_stage_post_tp1_sl_extension_triggered=getattr(saved_state, "three_stage_post_tp1_sl_extension_triggered", False),
+        three_stage_post_tp1_protective_sl_order_id=getattr(saved_state, "three_stage_post_tp1_protective_sl_order_id",
+                                                            None),
+        three_stage_post_tp1_sl_extension_triggered=getattr(saved_state, "three_stage_post_tp1_sl_extension_triggered",
+                                                            False),
         three_stage_post_tp1_protected=getattr(saved_state, "three_stage_post_tp1_protected", False),
-        three_stage_post_tp1_sl_diag_last_signature=getattr(saved_state, "three_stage_post_tp1_sl_diag_last_signature", None),
-        three_stage_post_tp1_sl_time_tighten_candle_count=getattr(saved_state, "three_stage_post_tp1_sl_time_tighten_candle_count", 0),
-        three_stage_post_tp1_sl_time_tighten_last_candle_ts_ms=getattr(saved_state, "three_stage_post_tp1_sl_time_tighten_last_candle_ts_ms", 0),
-        three_stage_post_tp1_sl_time_tighten_log_candle_ts_ms=getattr(saved_state, "three_stage_post_tp1_sl_time_tighten_log_candle_ts_ms", 0),
+        three_stage_post_tp1_sl_diag_last_signature=getattr(saved_state, "three_stage_post_tp1_sl_diag_last_signature",
+                                                            None),
+        three_stage_post_tp1_sl_time_tighten_candle_count=getattr(saved_state,
+                                                                  "three_stage_post_tp1_sl_time_tighten_candle_count",
+                                                                  0),
+        three_stage_post_tp1_sl_time_tighten_last_candle_ts_ms=getattr(saved_state,
+                                                                       "three_stage_post_tp1_sl_time_tighten_last_candle_ts_ms",
+                                                                       0),
+        three_stage_post_tp1_sl_time_tighten_log_candle_ts_ms=getattr(saved_state,
+                                                                      "three_stage_post_tp1_sl_time_tighten_log_candle_ts_ms",
+                                                                      0),
         three_stage_pre_tp1_degrade_stage=getattr(saved_state, "three_stage_pre_tp1_degrade_stage", None),
         three_stage_pre_tp1_degraded_ts_ms=getattr(saved_state, "three_stage_pre_tp1_degraded_ts_ms", 0),
         trend_runner_active=getattr(saved_state, "trend_runner_active", False),

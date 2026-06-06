@@ -18,16 +18,16 @@ logger = get_logger(__name__)
 
 
 async def handle_execution_failure(
-    *,
-    command: live_runtime_types.TradeCommand,
-    result: Any | None,
-    error: Exception,
-    state_lock: asyncio.Lock,
-    execution_state: live_runtime_types.ExecutionState,
-    trader: Trader,
-    strategy: BollCvdShockReclaimStrategy,
-    journal: LiveTradeJournal,
-    email_sender: EmailSender,
+        *,
+        command: live_runtime_types.TradeCommand,
+        result: Any | None,
+        error: Exception,
+        state_lock: asyncio.Lock,
+        execution_state: live_runtime_types.ExecutionState,
+        trader: Trader,
+        strategy: BollCvdShockReclaimStrategy,
+        journal: LiveTradeJournal,
+        email_sender: EmailSender,
 ) -> live_runtime_types.ExecutionReport:
     contracts = trader.position_contracts
     if result is None or getattr(result, "entry_filled", False) or getattr(result, "reduce_filled", False):
@@ -37,7 +37,8 @@ async def handle_execution_failure(
         except Exception:
             contracts = trader.position_contracts
 
-    entry_may_be_live = bool(getattr(result, "entry_filled", False)) or bool(getattr(result, "reduce_filled", False)) or contracts > 0
+    entry_may_be_live = bool(getattr(result, "entry_filled", False)) or bool(
+        getattr(result, "reduce_filled", False)) or contracts > 0
     rolled_back = False
     async with state_lock:
         current_position_id = execution_state.current_position_id
@@ -56,12 +57,14 @@ async def handle_execution_failure(
         halted = execution_state.trading_halted
 
     if entry_may_be_live:
-        logger.exception("LIVE execution failed after/possibly after entry. Trading halted; strategy state NOT rolled back.")
+        logger.exception(
+            "LIVE execution failed after/possibly after entry. Trading halted; strategy state NOT rolled back.")
     else:
         logger.exception("LIVE execution failed before entry; strategy state has been rolled back")
 
     try:
-        journal.record_error(position_id=current_position_id, intent=command.intent, error=error, rolled_back=rolled_back, halted=halted)
+        journal.record_error(position_id=current_position_id, intent=command.intent, error=error,
+                             rolled_back=rolled_back, halted=halted)
         if str(error) == "reduce_only_order_identity_unknown" and hasattr(journal, "append"):
             journal.append(
                 "REDUCE_ONLY_ORDER_IDENTITY_UNKNOWN",
@@ -90,7 +93,8 @@ async def handle_execution_failure(
 </div>
 """.strip()
     else:
-        subject, content = report_helpers.build_live_failure_email(command.intent, error, rolled_back=rolled_back, halted=halted)
+        subject, content = report_helpers.build_live_failure_email(command.intent, error, rolled_back=rolled_back,
+                                                                   halted=halted)
     ok = await email_sender.send_email_async(subject, content, content_type="html")
     if not ok:
         logger.error("Failed to send live execution failure email")

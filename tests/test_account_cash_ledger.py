@@ -32,7 +32,8 @@ class AccountCashLedgerTest(unittest.TestCase):
 
             events = journal.load_events()
 
-        self.assertEqual([event.event_type for event in events], ["CASH_BASELINE", "CASH_TRANSFER", "ACCOUNT_CASH_DRIFT"])
+        self.assertEqual([event.event_type for event in events],
+                         ["CASH_BASELINE", "CASH_TRANSFER", "ACCOUNT_CASH_DRIFT"])
         self.assertEqual(events[0].payload["cash"], 100.0)
         self.assertEqual(events[1].payload["direction"], "DEPOSIT")
         self.assertEqual(events[1].payload["amount"], 50.0)

@@ -20,17 +20,17 @@ POSITION_MANAGEMENT_INTENTS = {"UPDATE_TP", "NEAR_TP_REDUCE", "MARKET_EXIT_RUNNE
 
 
 async def strategy_tick_worker(
-    *,
-    strategy_tick_queue: asyncio.Queue[MarketTickEvent],
-    execution_queue: asyncio.Queue[live_runtime_types.TradeCommand],
-    state_lock: asyncio.Lock,
-    account_snapshot: live_runtime_types.AccountSnapshot,
-    execution_state: live_runtime_types.ExecutionState,
-    cvd: CvdTracker,
-    strategy: BollCvdShockReclaimStrategy,
-    heartbeat_seconds: float,
-    account_stale_warn_seconds: float,
-    strategy_lag_warn_seconds: float,
+        *,
+        strategy_tick_queue: asyncio.Queue[MarketTickEvent],
+        execution_queue: asyncio.Queue[live_runtime_types.TradeCommand],
+        state_lock: asyncio.Lock,
+        account_snapshot: live_runtime_types.AccountSnapshot,
+        execution_state: live_runtime_types.ExecutionState,
+        cvd: CvdTracker,
+        strategy: BollCvdShockReclaimStrategy,
+        heartbeat_seconds: float,
+        account_stale_warn_seconds: float,
+        strategy_lag_warn_seconds: float,
 ) -> None:
     last_heartbeat = 0.0
     last_lag_log = 0.0
@@ -60,7 +60,8 @@ async def strategy_tick_worker(
                 )
                 last_lag_log = now
 
-            account_age_seconds = max(now - account_snapshot.updated_monotonic, 0.0) if account_snapshot.updated_monotonic > 0 else float("inf")
+            account_age_seconds = max(now - account_snapshot.updated_monotonic,
+                                      0.0) if account_snapshot.updated_monotonic > 0 else float("inf")
             if account_age_seconds >= account_stale_warn_seconds and now - last_account_stale_log >= 60:
                 logger.warning(
                     "ACCOUNT_SNAPSHOT_STALE | age_seconds=%.1f threshold=%.1f",
@@ -108,9 +109,9 @@ async def strategy_tick_worker(
                 pending_order_count = execution_state.pending_order_count
                 has_position = bool(account_snapshot.position and account_snapshot.position.has_position)
             allow_position_management_only = (
-                trading_halted
-                and halt_reason in ROLLING_LOSS_HALT_REASONS
-                and has_position
+                    trading_halted
+                    and halt_reason in ROLLING_LOSS_HALT_REASONS
+                    and has_position
             )
             if pending_order_count > 0:
                 continue
@@ -137,7 +138,8 @@ async def strategy_tick_worker(
                     account_snapshot_updated_ts_ms=account_snapshot.updated_ts_ms,
                     reason=intent.reason,
                 )
-                ok = await live_queue_helpers.enqueue_execution_command(command, execution_queue, state_lock, execution_state)
+                ok = await live_queue_helpers.enqueue_execution_command(command, execution_queue, state_lock,
+                                                                        execution_state)
                 if not ok:
                     async with state_lock:
                         strategy.state = backup_state

@@ -1,26 +1,25 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 from decimal import Decimal, ROUND_DOWN
 
 import pytest
 
-import asyncio
-
+from src.execution.trader import PositionSnapshot
+from src.live.runtime_types import ExecutionState, SidecarPreCoreReconcileResult
 from src.live.startup_recovery.order_recovery import (
     apply_main_tp_startup_recovery,
     apply_sidecar_startup_recovery,
 )
-from src.position_management.sidecar.model import sidecar_open_contracts
-from src.position_management.sidecar.force_close_runtime import force_close_sidecar_after_core_flat
-from src.position_management.sidecar.monitor_runtime import monitor_sidecar_orders_once
-from src.position_management.sidecar.pre_core_reconcile import reconcile_sidecar_orders_before_core_view
-from src.execution.trader import PositionSnapshot
-from src.live.runtime_types import ExecutionState, SidecarPreCoreReconcileResult
 from src.position_management.core_position_view import sidecar_position_mismatch, with_entry_add_managed_core_contracts
-from src.position_management.sidecar.model import SidecarLegStatus, sidecar_open_qty
 from src.position_management.sidecar.entry_runtime import attach_sidecar_after_combined_entry
+from src.position_management.sidecar.force_close_runtime import force_close_sidecar_after_core_flat
+from src.position_management.sidecar.model import SidecarLegStatus, sidecar_open_qty
+from src.position_management.sidecar.model import sidecar_open_contracts
+from src.position_management.sidecar.monitor_runtime import monitor_sidecar_orders_once
 from src.position_management.sidecar.planner import build_combined_entry_intent
+from src.position_management.sidecar.pre_core_reconcile import reconcile_sidecar_orders_before_core_view
 from src.position_management.sidecar.reconciler import build_core_position_view
 from src.position_management.sidecar.runtime_state import (
     open_sidecar_legs_exceed_limit,
@@ -93,12 +92,14 @@ class Trader:
         self.sidecar_market_orders.append((side, eth_qty))
         return {"order_id": "sc-market", "contracts": "1.66", "qty": 0.166}
 
-    async def place_sidecar_fixed_take_profit(self, *, side, contracts, tp_price, client_order_id=None):  # type: ignore[no-untyped-def]
+    async def place_sidecar_fixed_take_profit(self, *, side, contracts, tp_price,
+                                              client_order_id=None):  # type: ignore[no-untyped-def]
         self.sidecar_tps.append((side, contracts, tp_price, client_order_id))
         return "sidecar-tp"
 
     async def fetch_sidecar_order_status(self, order_id: str):  # type: ignore[no-untyped-def]
-        return {"order_id": order_id, "status": self.status_by_order.get(order_id, "OPEN"), "filled_qty": None, "avg_fill_price": None}
+        return {"order_id": order_id, "status": self.status_by_order.get(order_id, "OPEN"), "filled_qty": None,
+                "avg_fill_price": None}
 
     async def fetch_position_snapshot(self) -> PositionSnapshot:
         return self.position_snapshot
@@ -116,12 +117,12 @@ class Trader:
 
 
 def sidecar_plan_for(
-    intent_: TradeIntent,
-    execution: ExecutionState,
-    trader: Trader,
-    state: StrategyPositionState,
-    *,
-    sidecar_skip_first_layer: bool = False,
+        intent_: TradeIntent,
+        execution: ExecutionState,
+        trader: Trader,
+        state: StrategyPositionState,
+        *,
+        sidecar_skip_first_layer: bool = False,
 ):
     return build_combined_entry_intent(
         intent=intent_,
@@ -279,7 +280,9 @@ async def test_second_layer_after_first_skip_places_sidecar_tp() -> None:
     )
 
     assert ok
-    assert trader.sidecar_tps == [("LONG", str(combined.sidecar_plan.sidecar_contracts), pytest.approx(combined.sidecar_plan.sidecar_tp_price), combined.sidecar_plan.client_order_id)]
+    assert trader.sidecar_tps == [("LONG", str(combined.sidecar_plan.sidecar_contracts),
+                                   pytest.approx(combined.sidecar_plan.sidecar_tp_price),
+                                   combined.sidecar_plan.client_order_id)]
     assert [event[0] for event in journal.events] == ["SIDECAR_LEG_OPENED", "SIDECAR_TP_PLACED"]
     assert state.sidecar_legs[0]["layer_index"] == 2
 
@@ -378,7 +381,8 @@ def test_combined_add_preserves_cumulative_managed_core_contracts() -> None:
     assert combined.sidecar_plan.core_contracts == Decimal("1.00")
     assert combined.execution_intent.managed_core_contracts == "3.08"
     assert combined.execution_intent.managed_core_eth_qty == pytest.approx(0.308)
-    assert combined.execution_intent.size.eth_qty == pytest.approx(combined.sidecar_plan.core_qty + combined.sidecar_plan.sidecar_qty)
+    assert combined.execution_intent.size.eth_qty == pytest.approx(
+        combined.sidecar_plan.core_qty + combined.sidecar_plan.sidecar_qty)
 
 
 @pytest.mark.asyncio
@@ -392,7 +396,8 @@ async def test_open_long_success_creates_sidecar_leg_and_tp() -> None:
     entry_intent = intent()
     combined = sidecar_plan_for(entry_intent, execution, trader, state)
     ok = await attach_sidecar_after_combined_entry(
-        trader=trader, strategy_state=state, execution_state=execution, intent=combined.execution_intent, sidecar_plan=combined.sidecar_plan, journal=journal, state_store=store, trader_symbol="ETH-USDT-SWAP"
+        trader=trader, strategy_state=state, execution_state=execution, intent=combined.execution_intent,
+        sidecar_plan=combined.sidecar_plan, journal=journal, state_store=store, trader_symbol="ETH-USDT-SWAP"
     )
 
     assert ok
@@ -413,7 +418,8 @@ async def test_add_long_creates_layer_sidecar_leg() -> None:
     entry_intent = intent("ADD_LONG", 2)
     combined = sidecar_plan_for(entry_intent, execution, trader, state)
     await attach_sidecar_after_combined_entry(
-        trader=trader, strategy_state=state, execution_state=execution, intent=combined.execution_intent, sidecar_plan=combined.sidecar_plan, journal=Journal(), state_store=Store(), trader_symbol="ETH-USDT-SWAP"
+        trader=trader, strategy_state=state, execution_state=execution, intent=combined.execution_intent,
+        sidecar_plan=combined.sidecar_plan, journal=Journal(), state_store=Store(), trader_symbol="ETH-USDT-SWAP"
     )
 
     assert state.sidecar_legs[0]["layer_index"] == 2
@@ -457,7 +463,9 @@ async def test_sidecar_combined_add_still_single_market_order_when_three_stage_b
     assert combined.execution_intent.managed_core_contracts == "3.08"
     assert combined.execution_intent.managed_core_eth_qty == pytest.approx(0.308)
     assert trader.sidecar_market_orders == []
-    assert trader.sidecar_tps == [("LONG", str(combined.sidecar_plan.sidecar_contracts), pytest.approx(combined.sidecar_plan.sidecar_tp_price), combined.sidecar_plan.client_order_id)]
+    assert trader.sidecar_tps == [("LONG", str(combined.sidecar_plan.sidecar_contracts),
+                                   pytest.approx(combined.sidecar_plan.sidecar_tp_price),
+                                   combined.sidecar_plan.client_order_id)]
     assert len(state.sidecar_legs) == 1
     assert state.sidecar_legs[0]["layer_index"] == 2
     assert state.sidecar_legs[0]["status"] == "OPEN"
@@ -476,7 +484,8 @@ async def test_position_level_disabled_does_not_create_sidecar_mid_position() ->
     ok = True
     if combined.sidecar_plan is not None:
         ok = await attach_sidecar_after_combined_entry(
-            trader=trader, strategy_state=state, execution_state=execution, intent=combined.execution_intent, sidecar_plan=combined.sidecar_plan, journal=Journal(), state_store=Store(), trader_symbol="ETH-USDT-SWAP"
+            trader=trader, strategy_state=state, execution_state=execution, intent=combined.execution_intent,
+            sidecar_plan=combined.sidecar_plan, journal=Journal(), state_store=Store(), trader_symbol="ETH-USDT-SWAP"
         )
 
     assert ok
@@ -490,7 +499,9 @@ async def test_sidecar_tp_filled_updates_state() -> None:
     state.position_cost_entry_notional = 3000.0
     state.position_cost_remaining_qty = 1.0
     state.net_remaining_breakeven_price = 3003.0
-    state.sidecar_legs = [{"leg_id": "leg-1", "status": "OPEN", "tp_order_id": "tp-1", "qty": 0.1, "contracts": "1", "tp_price": 3012.0, "created_ts_ms": 1, "updated_ts_ms": 1}]
+    state.sidecar_legs = [
+        {"leg_id": "leg-1", "status": "OPEN", "tp_order_id": "tp-1", "qty": 0.1, "contracts": "1", "tp_price": 3012.0,
+         "created_ts_ms": 1, "updated_ts_ms": 1}]
     refresh_sidecar_state_totals(state)
     trader = Trader()
     trader.status_by_order["tp-1"] = "FILLED"
@@ -520,7 +531,9 @@ async def test_sidecar_tp_filled_updates_state() -> None:
 @pytest.mark.asyncio
 async def test_sidecar_tp_missing_while_core_active_halts() -> None:
     state = sidecar_state()
-    state.sidecar_legs = [{"leg_id": "leg-1", "status": "OPEN", "tp_order_id": "tp-1", "qty": 0.1, "contracts": "1", "created_ts_ms": 1, "updated_ts_ms": 1}]
+    state.sidecar_legs = [
+        {"leg_id": "leg-1", "status": "OPEN", "tp_order_id": "tp-1", "qty": 0.1, "contracts": "1", "created_ts_ms": 1,
+         "updated_ts_ms": 1}]
     trader = Trader()
     trader.status_by_order["tp-1"] = "UNKNOWN"
     execution = ExecutionState("pos-1", 1000.0)
@@ -547,7 +560,9 @@ async def test_sidecar_tp_missing_while_core_active_halts() -> None:
 @pytest.mark.asyncio
 async def test_core_flat_force_closes_sidecar() -> None:
     state = sidecar_state()
-    state.sidecar_legs = [{"leg_id": "leg-1", "status": "OPEN", "tp_order_id": "tp-1", "qty": 0.1, "contracts": "1", "created_ts_ms": 1, "updated_ts_ms": 1}]
+    state.sidecar_legs = [
+        {"leg_id": "leg-1", "status": "OPEN", "tp_order_id": "tp-1", "qty": 0.1, "contracts": "1", "created_ts_ms": 1,
+         "updated_ts_ms": 1}]
     refresh_sidecar_state_totals(state)
     trader = Trader()
     journal = Journal()
@@ -574,7 +589,9 @@ async def test_core_flat_force_closes_sidecar() -> None:
 @pytest.mark.asyncio
 async def test_sidecar_force_close_mismatch_halts_without_market_exit() -> None:
     state = sidecar_state()
-    state.sidecar_legs = [{"leg_id": "leg-1", "status": "OPEN", "tp_order_id": "tp-1", "qty": 0.1, "contracts": "1", "created_ts_ms": 1, "updated_ts_ms": 1}]
+    state.sidecar_legs = [
+        {"leg_id": "leg-1", "status": "OPEN", "tp_order_id": "tp-1", "qty": 0.1, "contracts": "1", "created_ts_ms": 1,
+         "updated_ts_ms": 1}]
     refresh_sidecar_state_totals(state)
     trader = Trader()
     trader.position_snapshot = PositionSnapshot("LONG", Decimal("2"), 3000, 0.2, Decimal("2"))
@@ -611,7 +628,9 @@ def test_core_sidecar_position_mismatch_detected() -> None:
 @pytest.mark.asyncio
 async def test_startup_recovery_open_order_continues() -> None:
     state = sidecar_state()
-    state.sidecar_legs = [{"leg_id": "leg-1", "status": "OPEN", "tp_order_id": "tp-1", "qty": 0.1, "contracts": "1", "created_ts_ms": 1, "updated_ts_ms": 1}]
+    state.sidecar_legs = [
+        {"leg_id": "leg-1", "status": "OPEN", "tp_order_id": "tp-1", "qty": 0.1, "contracts": "1", "created_ts_ms": 1,
+         "updated_ts_ms": 1}]
     trader = Trader()
     execution = ExecutionState("pos-1", 1000.0)
 
@@ -632,7 +651,9 @@ async def test_startup_recovery_open_order_continues() -> None:
 @pytest.mark.asyncio
 async def test_startup_recovery_unknown_order_halts() -> None:
     state = sidecar_state()
-    state.sidecar_legs = [{"leg_id": "leg-1", "status": "OPEN", "tp_order_id": "tp-1", "qty": 0.1, "contracts": "1", "created_ts_ms": 1, "updated_ts_ms": 1}]
+    state.sidecar_legs = [
+        {"leg_id": "leg-1", "status": "OPEN", "tp_order_id": "tp-1", "qty": 0.1, "contracts": "1", "created_ts_ms": 1,
+         "updated_ts_ms": 1}]
     trader = Trader()
     trader.status_by_order["tp-1"] = "UNKNOWN"
     execution = ExecutionState("pos-1", 1000.0)
@@ -715,7 +736,8 @@ async def test_startup_recovery_allows_sidecar_enabled_position_with_empty_legs(
 
 
 @pytest.mark.asyncio
-async def test_startup_recovery_keeps_sidecar_disabled_when_saved_state_has_empty_legs_and_disabled_flag(monkeypatch) -> None:
+async def test_startup_recovery_keeps_sidecar_disabled_when_saved_state_has_empty_legs_and_disabled_flag(
+        monkeypatch) -> None:
     monkeypatch.setenv("SIDECAR_ENABLED", "true")
     state = sidecar_state()
     state.sidecar_enabled_for_position = False
@@ -750,7 +772,9 @@ async def test_startup_recovery_keeps_sidecar_disabled_when_saved_state_has_empt
 @pytest.mark.asyncio
 async def test_startup_recovery_tp_filled_sidecar_position_stays_enabled() -> None:
     state = sidecar_state()
-    state.sidecar_legs = [{"leg_id": "leg-1", "status": "TP_FILLED", "tp_order_id": "tp-1", "qty": 0.1, "contracts": "1", "created_ts_ms": 1, "updated_ts_ms": 2}]
+    state.sidecar_legs = [
+        {"leg_id": "leg-1", "status": "TP_FILLED", "tp_order_id": "tp-1", "qty": 0.1, "contracts": "1",
+         "created_ts_ms": 1, "updated_ts_ms": 2}]
     execution = ExecutionState("pos-1", 1000.0)
     saved_state = type(
         "Saved",
@@ -993,7 +1017,9 @@ _GLOBAL_SL_FIELDS = [
 async def test_sidecar_tp_filled_with_active_global_sl_halts(sl_field: str) -> None:
     """Sidecar TP_FILLED + any active global protective SL order -> halt for manual reconcile."""
     state = sidecar_state()
-    state.sidecar_legs = [{"leg_id": "leg-1", "status": "OPEN", "tp_order_id": "tp-1", "qty": 0.1, "contracts": "1", "created_ts_ms": 1, "updated_ts_ms": 1}]
+    state.sidecar_legs = [
+        {"leg_id": "leg-1", "status": "OPEN", "tp_order_id": "tp-1", "qty": 0.1, "contracts": "1", "created_ts_ms": 1,
+         "updated_ts_ms": 1}]
     refresh_sidecar_state_totals(state)
     setattr(state, sl_field, "old-sl-001")
 
@@ -1035,7 +1061,9 @@ async def test_sidecar_tp_filled_with_active_global_sl_halts(sl_field: str) -> N
 async def test_sidecar_tp_filled_without_global_sl_does_not_halt() -> None:
     """Sidecar TP_FILLED without any active global SL: no halt, just update leg status."""
     state = sidecar_state()
-    state.sidecar_legs = [{"leg_id": "leg-1", "status": "OPEN", "tp_order_id": "tp-1", "qty": 0.1, "contracts": "1", "created_ts_ms": 1, "updated_ts_ms": 1}]
+    state.sidecar_legs = [
+        {"leg_id": "leg-1", "status": "OPEN", "tp_order_id": "tp-1", "qty": 0.1, "contracts": "1", "created_ts_ms": 1,
+         "updated_ts_ms": 1}]
     refresh_sidecar_state_totals(state)
     # No global SL order_ids set
 
@@ -1068,7 +1096,9 @@ async def test_sidecar_tp_filled_without_global_sl_does_not_halt() -> None:
 async def test_sidecar_tp_filled_global_sl_on_trader_also_halts() -> None:
     """SL order_id on trader instance (not just strategy_state) also triggers halt."""
     state = sidecar_state()
-    state.sidecar_legs = [{"leg_id": "leg-1", "status": "OPEN", "tp_order_id": "tp-1", "qty": 0.1, "contracts": "1", "created_ts_ms": 1, "updated_ts_ms": 1}]
+    state.sidecar_legs = [
+        {"leg_id": "leg-1", "status": "OPEN", "tp_order_id": "tp-1", "qty": 0.1, "contracts": "1", "created_ts_ms": 1,
+         "updated_ts_ms": 1}]
     refresh_sidecar_state_totals(state)
 
     trader = Trader()
@@ -1314,7 +1344,8 @@ async def test_sidecar_leg_not_in_state_before_tp_placement() -> None:
 class FailingTpTrader(Trader):
     """Trader whose place_sidecar_fixed_take_profit always raises."""
 
-    async def place_sidecar_fixed_take_profit(self, *, side, contracts, tp_price, client_order_id=None):  # type: ignore[no-untyped-def]
+    async def place_sidecar_fixed_take_profit(self, *, side, contracts, tp_price,
+                                              client_order_id=None):  # type: ignore[no-untyped-def]
         raise RuntimeError("tp place simulated failure")
 
 
@@ -1497,10 +1528,10 @@ async def test_pre_core_reconcile_sl_on_trader_triggers_halt() -> None:
     refresh_sidecar_state_totals(state)
     # strategy.state has NO SL order ids
     for sl_field in (
-        "near_tp_protective_sl_order_id",
-        "middle_runner_protective_sl_order_id",
-        "three_stage_post_tp1_protective_sl_order_id",
-        "trend_runner_sl_order_id",
+            "near_tp_protective_sl_order_id",
+            "middle_runner_protective_sl_order_id",
+            "three_stage_post_tp1_protective_sl_order_id",
+            "trend_runner_sl_order_id",
     ):
         setattr(state, sl_field, None)
 

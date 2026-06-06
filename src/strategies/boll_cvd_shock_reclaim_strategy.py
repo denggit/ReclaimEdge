@@ -88,14 +88,14 @@ class BollCvdShockReclaimStrategy(BollCvdReclaimStrategy):
         return intents
 
     def _open_position(
-        self,
-        side: PositionSide,
-        intent_type: TradeIntentType,
-        price: float,
-        ts_ms: int,
-        boll: BollSnapshot,
-        cvd: CvdSnapshot,
-        reason: str,
+            self,
+            side: PositionSide,
+            intent_type: TradeIntentType,
+            price: float,
+            ts_ms: int,
+            boll: BollSnapshot,
+            cvd: CvdSnapshot,
+            reason: str,
     ) -> TradeIntent:
         previous_layers = self.state.layers
         was_active_freeze = self._add_freeze_active(ts_ms)
@@ -189,7 +189,8 @@ class BollCvdShockReclaimStrategy(BollCvdReclaimStrategy):
         if self.state.layers >= 2:
             elapsed_seconds = self._add_elapsed_seconds(ts_ms)
             adverse_gap_pct = self._adverse_gap_pct(side, price)
-            bypass_gap_pct = self._add_layer_gap_pct_for_target_layer(target_layer) * self.config.add_min_interval_bypass_multiplier
+            bypass_gap_pct = self._add_layer_gap_pct_for_target_layer(
+                target_layer) * self.config.add_min_interval_bypass_multiplier
             if elapsed_seconds < self.config.add_min_interval_seconds and adverse_gap_pct < bypass_gap_pct:
                 return False, "add_interval"
 
@@ -248,7 +249,8 @@ class BollCvdShockReclaimStrategy(BollCvdReclaimStrategy):
     def _first_add_block_required_gap_pct_for_target_layer(self, target_layer: int) -> float:
         return self._add_layer_gap_pct_for_target_layer(target_layer) * self.first_add_block_bypass_multiplier
 
-    def _log_add_timing_skipped(self, side: PositionSide, reason: str, price: float, ts_ms: int, target_layer: int) -> None:
+    def _log_add_timing_skipped(self, side: PositionSide, reason: str, price: float, ts_ms: int,
+                                target_layer: int) -> None:
         if reason == "add_freeze":
             multiplier = self._active_add_freeze_bypass_multiplier()
             log_key = (
@@ -261,8 +263,8 @@ class BollCvdShockReclaimStrategy(BollCvdReclaimStrategy):
             last_ts = int(getattr(self, "_last_add_freeze_skip_log_ts_ms", 0) or 0)
             last_key = getattr(self, "_last_add_freeze_skip_log_key", None)
             if (
-                last_key == log_key
-                and ts_ms - last_ts < self.ADD_FREEZE_SKIP_LOG_INTERVAL_MS
+                    last_key == log_key
+                    and ts_ms - last_ts < self.ADD_FREEZE_SKIP_LOG_INTERVAL_MS
             ):
                 return
             self._last_add_freeze_skip_log_ts_ms = ts_ms

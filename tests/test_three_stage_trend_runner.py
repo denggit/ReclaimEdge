@@ -9,9 +9,11 @@ from src.execution.trader import PositionSnapshot, Trader
 from src.indicators.cvd_tracker import CvdSnapshot
 from src.monitors.boll_band_breakout_monitor import BollSnapshot
 from src.position_management.runner_live_helpers import three_stage_post_tp1_boll
-from src.position_management.tp_progress import append_three_stage_progress_journal_events, mark_three_stage_progress_if_position_reduced
+from src.position_management.tp_progress import append_three_stage_progress_journal_events, \
+    mark_three_stage_progress_if_position_reduced
 from src.risk.simple_position_sizer import PositionSize, SimplePositionSizer, SimplePositionSizerConfig
-from src.strategies.boll_cvd_reclaim_strategy import BollCvdReclaimStrategy, BollCvdReclaimStrategyConfig, StrategyPositionState, TradeIntent
+from src.strategies.boll_cvd_reclaim_strategy import BollCvdReclaimStrategy, BollCvdReclaimStrategyConfig, \
+    StrategyPositionState, TradeIntent
 
 
 def strategy(**overrides) -> BollCvdReclaimStrategy:
@@ -23,7 +25,8 @@ def strategy(**overrides) -> BollCvdReclaimStrategy:
         tp_min_net_profit_pct=0.002,
     )
     values.update(overrides)
-    return BollCvdReclaimStrategy(BollCvdReclaimStrategyConfig(**values), SimplePositionSizer(SimplePositionSizerConfig()))
+    return BollCvdReclaimStrategy(BollCvdReclaimStrategyConfig(**values),
+                                  SimplePositionSizer(SimplePositionSizerConfig()))
 
 
 def boll(middle: float = 101.0, upper: float = 110.0, lower: float = 90.0, candle_ts_ms: int = 1_000) -> BollSnapshot:
@@ -194,7 +197,8 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
         strat = strategy()
         strat.state.avg_entry_price = 100.0
 
-        got = strat._open_position("SHORT", "OPEN_SHORT", 100.0, 2_000, boll(middle=99.0, upper=110.0, lower=90.0), cvd(), "test")
+        got = strat._open_position("SHORT", "OPEN_SHORT", 100.0, 2_000, boll(middle=99.0, upper=110.0, lower=90.0),
+                                   cvd(), "test")
 
         self.assertEqual(got.tp_mode, "MIDDLE")
         self.assertEqual(got.tp_plan, "THREE_STAGE_RUNNER")
@@ -213,7 +217,8 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
             1728.0,
             2_000_000,
             boll(middle=1750.0, upper=1810.0, lower=1700.0),
-            cvd(side="buy", buy_volume=1.0, sell_volume=0.0, buy_ratio=1.0, sell_ratio=0.0, cross_positive=True, cvd_increasing=True, no_new_low=True),
+            cvd(side="buy", buy_volume=1.0, sell_volume=0.0, buy_ratio=1.0, sell_ratio=0.0, cross_positive=True,
+                cvd_increasing=True, no_new_low=True),
         )
 
         self.assertIsNotNone(got)
@@ -234,7 +239,8 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
                 1728.0,
                 2_000_000,
                 boll(middle=1750.0, upper=1810.0, lower=1700.0),
-                cvd(side="buy", buy_volume=1.0, sell_volume=0.0, buy_ratio=1.0, sell_ratio=0.0, cross_positive=True, cvd_increasing=True, no_new_low=True),
+                cvd(side="buy", buy_volume=1.0, sell_volume=0.0, buy_ratio=1.0, sell_ratio=0.0, cross_positive=True,
+                    cvd_increasing=True, no_new_low=True),
             )
 
         self.assertIsNone(got)
@@ -250,7 +256,8 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
                 1728.0,
                 2_000_000,
                 boll(middle=1750.0, upper=1810.0, lower=1700.0),
-                cvd(side="buy", buy_volume=1.0, sell_volume=0.0, buy_ratio=1.0, sell_ratio=0.0, cross_positive=True, cvd_increasing=True, no_new_low=True),
+                cvd(side="buy", buy_volume=1.0, sell_volume=0.0, buy_ratio=1.0, sell_ratio=0.0, cross_positive=True,
+                    cvd_increasing=True, no_new_low=True),
             )
 
         self.assertIsNone(got)
@@ -264,7 +271,8 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
             1760.0,
             2_000_000,
             boll(middle=1730.0, upper=1780.0, lower=1680.0),
-            cvd(side="sell", buy_volume=0.0, sell_volume=1.0, buy_ratio=0.0, sell_ratio=1.0, cross_negative=True, cvd_decreasing=True, no_new_high=True),
+            cvd(side="sell", buy_volume=0.0, sell_volume=1.0, buy_ratio=0.0, sell_ratio=1.0, cross_negative=True,
+                cvd_decreasing=True, no_new_high=True),
         )
 
         self.assertIsNotNone(got)
@@ -286,11 +294,13 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
                     1728.0,
                     ts_ms,
                     boll(middle=1750.0, upper=1810.0, lower=1700.0),
-                    cvd(side="buy", buy_volume=1.0, sell_volume=0.0, buy_ratio=1.0, sell_ratio=0.0, cross_positive=True, cvd_increasing=True, no_new_low=True),
+                    cvd(side="buy", buy_volume=1.0, sell_volume=0.0, buy_ratio=1.0, sell_ratio=0.0, cross_positive=True,
+                        cvd_increasing=True, no_new_low=True),
                 )
                 self.assertIsNone(got)
 
-        add_skip_logs = [line for line in logs.output if "ADD_SKIPPED" in line and "reason=three_stage_after_tp1" in line]
+        add_skip_logs = [line for line in logs.output if
+                         "ADD_SKIPPED" in line and "reason=three_stage_after_tp1" in line]
         self.assertEqual(len(add_skip_logs), 1)
 
     def test_outer_tp_mode_does_not_enable_three_stage_or_split(self) -> None:
@@ -298,7 +308,8 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
         strat.state.avg_entry_price = 100.0
 
         tp_price, mode = strat._select_tp_price("LONG", boll(middle=100.1, upper=110.0))
-        partial_tp, partial_ratio, plan = strat._select_tp_plan("LONG", tp_price, 4, tp_mode=mode, boll=boll(middle=100.1, upper=110.0))
+        partial_tp, partial_ratio, plan = strat._select_tp_plan("LONG", tp_price, 4, tp_mode=mode,
+                                                                boll=boll(middle=100.1, upper=110.0))
 
         self.assertEqual(mode, "UPPER")
         self.assertEqual(plan, "SINGLE")
@@ -351,7 +362,8 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
             trend_runner_sl_price=100.0,
         )
 
-        got = strat._maybe_trend_runner_market_exit(110.0, 62_000, boll(middle=101.0, upper=110.0), cvd(down_burst=True, sell_ratio=0.7, fast_cvd=-1.0))
+        got = strat._maybe_trend_runner_market_exit(110.0, 62_000, boll(middle=101.0, upper=110.0),
+                                                    cvd(down_burst=True, sell_ratio=0.7, fast_cvd=-1.0))
 
         self.assertIsNone(got)
         self.assertTrue(strat.state.trend_runner_reverse_candidate)
@@ -369,9 +381,11 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
             trend_runner_tp_price=112.0,
             trend_runner_sl_price=100.0,
         )
-        strat._maybe_trend_runner_market_exit(110.0, 62_000, boll(middle=101.0), cvd(down_burst=True, sell_ratio=0.7, fast_cvd=-1.0))
+        strat._maybe_trend_runner_market_exit(110.0, 62_000, boll(middle=101.0),
+                                              cvd(down_burst=True, sell_ratio=0.7, fast_cvd=-1.0))
 
-        got = strat._maybe_trend_runner_market_exit(109.7, 67_000, boll(middle=101.0), cvd(sell_ratio=0.7, fast_cvd=-2.0))
+        got = strat._maybe_trend_runner_market_exit(109.7, 67_000, boll(middle=101.0),
+                                                    cvd(sell_ratio=0.7, fast_cvd=-2.0))
 
         self.assertIsNotNone(got)
         self.assertEqual(got.reason, "trend_runner_reverse_burst_confirmed")
@@ -389,19 +403,23 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
             trend_runner_tp_price=112.0,
             trend_runner_sl_price=100.0,
         )
-        strat._maybe_trend_runner_market_exit(110.0, 62_000, boll(middle=101.0), cvd(down_burst=True, sell_ratio=0.7, fast_cvd=-1.0))
+        strat._maybe_trend_runner_market_exit(110.0, 62_000, boll(middle=101.0),
+                                              cvd(down_burst=True, sell_ratio=0.7, fast_cvd=-1.0))
         strat._maybe_trend_runner_market_exit(109.7, 64_000, boll(middle=101.0), cvd(sell_ratio=0.7, fast_cvd=-1.5))
 
-        got = strat._maybe_trend_runner_market_exit(109.9, 67_000, boll(middle=101.0), cvd(sell_ratio=0.7, fast_cvd=-2.0))
+        got = strat._maybe_trend_runner_market_exit(109.9, 67_000, boll(middle=101.0),
+                                                    cvd(sell_ratio=0.7, fast_cvd=-2.0))
 
         self.assertIsNone(got)
         self.assertFalse(strat.state.trend_runner_reverse_candidate)
 
     def test_reverse_burst_arm_delay_blocks_candidate(self) -> None:
         strat = strategy()
-        strat.state = StrategyPositionState(side="LONG", layers=1, trend_runner_active=True, trend_runner_trend_start_ts_ms=10_000)
+        strat.state = StrategyPositionState(side="LONG", layers=1, trend_runner_active=True,
+                                            trend_runner_trend_start_ts_ms=10_000)
 
-        got = strat._maybe_trend_runner_market_exit(110.0, 20_000, boll(middle=101.0), cvd(down_burst=True, sell_ratio=0.7, fast_cvd=-1.0))
+        got = strat._maybe_trend_runner_market_exit(110.0, 20_000, boll(middle=101.0),
+                                                    cvd(down_burst=True, sell_ratio=0.7, fast_cvd=-1.0))
 
         self.assertIsNone(got)
         self.assertFalse(strat.state.trend_runner_reverse_candidate)
@@ -482,14 +500,16 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
             three_stage_runner_ratio=0.2,
         )
 
-        event = mark_three_stage_progress_if_position_reduced(strat, PositionSnapshot("LONG", Decimal("4"), 100.0, 0.4, Decimal("4")), 10_000)
+        event = mark_three_stage_progress_if_position_reduced(strat, PositionSnapshot("LONG", Decimal("4"), 100.0, 0.4,
+                                                                                      Decimal("4")), 10_000)
         self.assertEqual(event, "TP1")
         self.assertTrue(strat.state.three_stage_tp1_consumed)
         self.assertFalse(strat.state.trend_runner_active)
         self.assertIsNone(strat.state.trend_runner_tp_price)
         self.assertIsNone(strat.state.trend_runner_sl_price)
 
-        event = mark_three_stage_progress_if_position_reduced(strat, PositionSnapshot("LONG", Decimal("2"), 100.0, 0.2, Decimal("2")), 20_000)
+        event = mark_three_stage_progress_if_position_reduced(strat, PositionSnapshot("LONG", Decimal("2"), 100.0, 0.2,
+                                                                                      Decimal("2")), 20_000)
         self.assertEqual(event, "TP2")
         self.assertTrue(strat.state.three_stage_tp2_consumed)
         self.assertTrue(strat.state.trend_runner_active)
@@ -554,7 +574,8 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
             [event_name for event_name, _payload, _position_id in journal.events],
             ["THREE_STAGE_TP1_FILLED", "THREE_STAGE_TP2_FILLED", "TREND_RUNNER_ACTIVATED"],
         )
-        self.assertEqual([position_id for _event_name, _payload, position_id in journal.events], ["pos-1", "pos-1", "pos-1"])
+        self.assertEqual([position_id for _event_name, _payload, position_id in journal.events],
+                         ["pos-1", "pos-1", "pos-1"])
 
     def test_tp2_sync_does_not_activate_when_remaining_above_tight_tolerance(self) -> None:
         strat = strategy()
@@ -687,7 +708,8 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
 
         strat._set_three_stage_runner_planned = fail_if_reset_called  # type: ignore[method-assign]
 
-        got = strat._maybe_update_tp(105.0, 2_000, boll(middle=102.0, upper=112.0, lower=92.0, candle_ts_ms=2_000), cvd())
+        got = strat._maybe_update_tp(105.0, 2_000, boll(middle=102.0, upper=112.0, lower=92.0, candle_ts_ms=2_000),
+                                     cvd())
 
         self.assertIsNotNone(got)
         self.assertTrue(strat.state.three_stage_tp1_consumed)
@@ -707,10 +729,13 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
             three_stage_tp1_ratio=0.6,
             three_stage_tp1_consumed=True,
         )
-        long_sl = long_strat._calculate_three_stage_post_tp1_protective_sl("LONG", 105.0, boll(middle=102.0, upper=112.0, lower=92.0))
+        long_sl = long_strat._calculate_three_stage_post_tp1_protective_sl("LONG", 105.0,
+                                                                           boll(middle=102.0, upper=112.0, lower=92.0))
         self.assertIsNotNone(long_sl)
         self.assertGreater(long_strat._tighten_three_stage_post_tp1_sl("LONG", 100.5, 99.5), 100.0)
-        extension = long_strat._apply_three_stage_post_tp1_extension_trigger("LONG", 108.0, boll(middle=102.0, upper=112.0, lower=92.0), long_sl)
+        extension = long_strat._apply_three_stage_post_tp1_extension_trigger("LONG", 108.0,
+                                                                             boll(middle=102.0, upper=112.0,
+                                                                                  lower=92.0), long_sl)
         self.assertGreaterEqual(extension or 0, 102.0)
         self.assertTrue(long_strat.state.three_stage_post_tp1_sl_extension_triggered)
 
@@ -722,10 +747,13 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
             three_stage_tp1_ratio=0.6,
             three_stage_tp1_consumed=True,
         )
-        short_sl = short_strat._calculate_three_stage_post_tp1_protective_sl("SHORT", 95.0, boll(middle=98.0, upper=108.0, lower=88.0))
+        short_sl = short_strat._calculate_three_stage_post_tp1_protective_sl("SHORT", 95.0,
+                                                                             boll(middle=98.0, upper=108.0, lower=88.0))
         self.assertIsNotNone(short_sl)
         self.assertLess(short_strat._tighten_three_stage_post_tp1_sl("SHORT", 99.5, 100.5), 100.0)
-        extension = short_strat._apply_three_stage_post_tp1_extension_trigger("SHORT", 92.0, boll(middle=98.0, upper=108.0, lower=88.0), short_sl)
+        extension = short_strat._apply_three_stage_post_tp1_extension_trigger("SHORT", 92.0,
+                                                                              boll(middle=98.0, upper=108.0,
+                                                                                   lower=88.0), short_sl)
         self.assertLessEqual(extension or 999, 98.0)
         self.assertTrue(short_strat.state.three_stage_post_tp1_sl_extension_triggered)
 
@@ -740,7 +768,8 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
             three_stage_tp1_consumed=True,
         )
 
-        got = strat._calculate_three_stage_post_tp1_protective_sl("LONG", 105.0, boll(middle=102.0, upper=112.0, lower=92.0))
+        got = strat._calculate_three_stage_post_tp1_protective_sl("LONG", 105.0,
+                                                                  boll(middle=102.0, upper=112.0, lower=92.0))
 
         self.assertEqual(got, ((95.0 + 102.0) / 2))
 
@@ -753,7 +782,8 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
             three_stage_post_tp1_sl_time_tighten_candle_count=1,
         )
 
-        got = strat._calculate_three_stage_post_tp1_protective_sl("LONG", 250.0, boll(middle=200.0, upper=220.0, lower=100.0))
+        got = strat._calculate_three_stage_post_tp1_protective_sl("LONG", 250.0,
+                                                                  boll(middle=200.0, upper=220.0, lower=100.0))
 
         self.assertEqual(strat._runner_sl_time_tighten_ratio(1), 0.55)
         self.assertEqual(got, 155.0)
@@ -767,7 +797,8 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
             three_stage_post_tp1_sl_time_tighten_candle_count=1,
         )
 
-        got = strat._calculate_three_stage_post_tp1_protective_sl("LONG", 250.0, boll(middle=200.0, upper=220.0, lower=100.0))
+        got = strat._calculate_three_stage_post_tp1_protective_sl("LONG", 250.0,
+                                                                  boll(middle=200.0, upper=220.0, lower=100.0))
 
         self.assertEqual(got, 164.0)
 
@@ -780,7 +811,8 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
             three_stage_post_tp1_sl_time_tighten_candle_count=1,
         )
 
-        got = strat._calculate_three_stage_post_tp1_protective_sl("SHORT", 50.0, boll(middle=100.0, upper=200.0, lower=80.0))
+        got = strat._calculate_three_stage_post_tp1_protective_sl("SHORT", 50.0,
+                                                                  boll(middle=100.0, upper=200.0, lower=80.0))
 
         self.assertEqual(got, 145.0)
 
@@ -793,7 +825,8 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
             three_stage_post_tp1_sl_time_tighten_candle_count=1,
         )
 
-        got = strat._calculate_three_stage_post_tp1_protective_sl("SHORT", 50.0, boll(middle=100.0, upper=200.0, lower=80.0))
+        got = strat._calculate_three_stage_post_tp1_protective_sl("SHORT", 50.0,
+                                                                  boll(middle=100.0, upper=200.0, lower=80.0))
 
         self.assertEqual(got, 136.0)
 
@@ -805,7 +838,8 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
             three_stage_tp1_consumed=True,
             three_stage_post_tp1_sl_time_tighten_candle_count=10,
         )
-        long_sl = long_strat._calculate_three_stage_post_tp1_protective_sl("LONG", 250.0, boll(middle=200.0, upper=220.0, lower=100.0))
+        long_sl = long_strat._calculate_three_stage_post_tp1_protective_sl("LONG", 250.0,
+                                                                           boll(middle=200.0, upper=220.0, lower=100.0))
 
         short_strat = strategy()
         short_strat.state = StrategyPositionState(
@@ -814,7 +848,9 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
             three_stage_tp1_consumed=True,
             three_stage_post_tp1_sl_time_tighten_candle_count=10,
         )
-        short_sl = short_strat._calculate_three_stage_post_tp1_protective_sl("SHORT", 50.0, boll(middle=100.0, upper=200.0, lower=80.0))
+        short_sl = short_strat._calculate_three_stage_post_tp1_protective_sl("SHORT", 50.0,
+                                                                             boll(middle=100.0, upper=200.0,
+                                                                                  lower=80.0))
 
         self.assertEqual(long_strat._runner_sl_time_tighten_ratio(10), 1.0)
         self.assertEqual(long_sl, 200.0)
@@ -980,7 +1016,8 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
             three_stage_tp1_consumed=True,
         )
 
-        got = strat._calculate_three_stage_post_tp1_protective_sl("LONG", 105.0, boll(middle=102.0, upper=112.0, lower=92.0))
+        got = strat._calculate_three_stage_post_tp1_protective_sl("LONG", 105.0,
+                                                                  boll(middle=102.0, upper=112.0, lower=92.0))
 
         fallback_breakeven = (100.0 - 0.6 * (102.0 - 100.0) / 0.4) * 1.001
         self.assertEqual(got, max((fallback_breakeven + 102.0) / 2, (92.0 + 102.0) / 2))
@@ -989,7 +1026,8 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
         strat = strategy()
         strat.state = StrategyPositionState(side="LONG", net_remaining_breakeven_price=85.0)
 
-        got = strat._calculate_three_stage_post_tp1_protective_sl("LONG", 105.0, boll(middle=102.0, upper=112.0, lower=92.0))
+        got = strat._calculate_three_stage_post_tp1_protective_sl("LONG", 105.0,
+                                                                  boll(middle=102.0, upper=112.0, lower=92.0))
 
         self.assertEqual(got, (92.0 + 102.0) / 2)
 
@@ -997,7 +1035,8 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
         strat = strategy()
         strat.state = StrategyPositionState(side="SHORT", net_remaining_breakeven_price=110.0)
 
-        got = strat._calculate_three_stage_post_tp1_protective_sl("SHORT", 95.0, boll(middle=98.0, upper=108.0, lower=88.0))
+        got = strat._calculate_three_stage_post_tp1_protective_sl("SHORT", 95.0,
+                                                                  boll(middle=98.0, upper=108.0, lower=88.0))
 
         self.assertEqual(got, (108.0 + 98.0) / 2)
 
@@ -1019,7 +1058,8 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
             last_tp_update_candle_ts_ms=1_000,
         )
 
-        got = strat._maybe_update_tp(100.0, 2_000, boll(middle=102.0, upper=112.0, lower=92.0, candle_ts_ms=2_000), cvd())
+        got = strat._maybe_update_tp(100.0, 2_000, boll(middle=102.0, upper=112.0, lower=92.0, candle_ts_ms=2_000),
+                                     cvd())
 
         self.assertIsNotNone(got)
         self.assertEqual(got.tp_plan, "THREE_STAGE_RUNNER")
@@ -1237,7 +1277,8 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
 
         # middle=100.1 is too low for net_remaining_be=100.0 with min_profit=0.002
         # required_middle = 100.0 * 1.002 = 100.2 > 100.1 → middle insufficient
-        got = strat._maybe_update_tp(99.0, 2_000, boll(middle=100.1, upper=103.0, lower=97.0, candle_ts_ms=2_000), cvd())
+        got = strat._maybe_update_tp(99.0, 2_000, boll(middle=100.1, upper=103.0, lower=97.0, candle_ts_ms=2_000),
+                                     cvd())
 
         self.assertIsNotNone(got, "Must return UPDATE_TP when middle profit insufficient")
         self.assertEqual(got.intent_type, "UPDATE_TP")
@@ -1277,7 +1318,8 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
         )
 
         # middle=100.3 is high enough: required_middle = 100.0 * 1.002 = 100.2 < 100.3 → middle sufficient
-        got = strat._maybe_update_tp(100.0, 2_000, boll(middle=100.3, upper=103.0, lower=97.0, candle_ts_ms=2_000), cvd())
+        got = strat._maybe_update_tp(100.0, 2_000, boll(middle=100.3, upper=103.0, lower=97.0, candle_ts_ms=2_000),
+                                     cvd())
 
         self.assertIsNotNone(got, "Must return UPDATE_TP when middle profit sufficient")
         self.assertEqual(got.intent_type, "UPDATE_TP")
@@ -1313,7 +1355,8 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
         )
 
         # middle insufficient but TP1 already consumed → must NOT reset
-        got = strat._maybe_update_tp(105.0, 2_000, boll(middle=100.1, upper=103.0, lower=97.0, candle_ts_ms=2_000), cvd())
+        got = strat._maybe_update_tp(105.0, 2_000, boll(middle=100.1, upper=103.0, lower=97.0, candle_ts_ms=2_000),
+                                     cvd())
 
         self.assertIsNotNone(got, "Must return UPDATE_TP for waiting_tp2 even when middle insufficient")
         self.assertEqual(got.intent_type, "UPDATE_TP")
@@ -1351,7 +1394,8 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
         )
 
         # middle=100.1 is too low: required_middle = 100.0*1.002 = 100.2 > 100.1 → insufficient
-        got = strat._maybe_update_tp(99.0, 2_000, boll(middle=100.1, upper=103.0, lower=97.0, candle_ts_ms=2_000), cvd())
+        got = strat._maybe_update_tp(99.0, 2_000, boll(middle=100.1, upper=103.0, lower=97.0, candle_ts_ms=2_000),
+                                     cvd())
 
         self.assertIsNotNone(got, "Must return UPDATE_TP when middle profit insufficient")
         self.assertEqual(got.intent_type, "UPDATE_TP")
@@ -1374,7 +1418,8 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
         first_ts = 100_000
         strat.state = three_stage_pre_tp1_state(first_entry_ts_ms=first_ts)
 
-        got = strat._maybe_update_tp(99.0, first_ts + 60_000, boll(middle=100.1, upper=110.0, candle_ts_ms=2_000), cvd())
+        got = strat._maybe_update_tp(99.0, first_ts + 60_000, boll(middle=100.1, upper=110.0, candle_ts_ms=2_000),
+                                     cvd())
 
         self.assertIsNotNone(got)
         self.assertEqual(got.tp_plan, "SINGLE")
@@ -1391,14 +1436,16 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
         first_ts = 100_000
         strat.state = three_stage_pre_tp1_state(first_entry_ts_ms=first_ts)
 
-        first = strat._maybe_update_tp(99.0, first_ts + 60_000, boll(middle=100.1, upper=110.0, candle_ts_ms=2_000), cvd())
+        first = strat._maybe_update_tp(99.0, first_ts + 60_000, boll(middle=100.1, upper=110.0, candle_ts_ms=2_000),
+                                       cvd())
 
         self.assertIsNotNone(first)
         self.assertEqual(first.tp_plan, "SINGLE")
         self.assertIsNone(strat.state.three_stage_pre_tp1_degrade_stage)
 
         strat.state.net_remaining_breakeven_price = 95.0
-        got = strat._maybe_update_tp(99.0, first_ts + 2 * 60 * 60 * 1000, boll(middle=101.0, upper=110.0, candle_ts_ms=3_000), cvd())
+        got = strat._maybe_update_tp(99.0, first_ts + 2 * 60 * 60 * 1000,
+                                     boll(middle=101.0, upper=110.0, candle_ts_ms=3_000), cvd())
 
         self.assertIsNotNone(got)
         self.assertEqual(got.tp_plan, "THREE_STAGE_RUNNER")
@@ -1410,7 +1457,8 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
         first_ts = 100_000
         strat.state = three_stage_pre_tp1_state(first_entry_ts_ms=first_ts)
 
-        first = strat._maybe_update_tp(99.0, first_ts + 10_801_000, boll(middle=100.1, upper=110.0, candle_ts_ms=2_000), cvd())
+        first = strat._maybe_update_tp(99.0, first_ts + 10_801_000, boll(middle=100.1, upper=110.0, candle_ts_ms=2_000),
+                                       cvd())
 
         self.assertIsNotNone(first)
         self.assertEqual(first.tp_plan, "SINGLE")
@@ -1418,7 +1466,8 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
         self.assertIsNone(strat.state.three_stage_pre_tp1_degrade_stage)
 
         strat.state.net_remaining_breakeven_price = 95.0
-        got = strat._maybe_update_tp(99.0, first_ts + 10_901_000, boll(middle=101.0, upper=110.0, candle_ts_ms=3_000), cvd())
+        got = strat._maybe_update_tp(99.0, first_ts + 10_901_000, boll(middle=101.0, upper=110.0, candle_ts_ms=3_000),
+                                     cvd())
 
         self.assertIsNotNone(got)
         self.assertEqual(got.tp_plan, "MIDDLE_RUNNER")
@@ -1453,7 +1502,8 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
             last_tp_update_candle_ts_ms=1_000,
         )
 
-        first = strat._maybe_update_tp(99.0, first_ts + 14_400_000, boll(middle=100.1, upper=110.0, candle_ts_ms=2_000), cvd())
+        first = strat._maybe_update_tp(99.0, first_ts + 14_400_000, boll(middle=100.1, upper=110.0, candle_ts_ms=2_000),
+                                       cvd())
 
         self.assertIsNotNone(first)
         self.assertEqual(first.tp_plan, "SINGLE")
@@ -1461,7 +1511,8 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
         self.assertEqual(strat.state.three_stage_pre_tp1_degrade_stage, "MIDDLE_RUNNER")
 
         strat.state.net_remaining_breakeven_price = 95.0
-        got = strat._maybe_update_tp(99.0, first_ts + 14_500_000, boll(middle=101.0, upper=110.0, candle_ts_ms=3_000), cvd())
+        got = strat._maybe_update_tp(99.0, first_ts + 14_500_000, boll(middle=101.0, upper=110.0, candle_ts_ms=3_000),
+                                     cvd())
 
         self.assertIsNotNone(got)
         self.assertEqual(got.tp_plan, "MIDDLE_RUNNER")
@@ -1473,7 +1524,8 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
         first_ts = 100_000
         strat.state = three_stage_pre_tp1_state(first_entry_ts_ms=first_ts)
 
-        got = strat._maybe_update_tp(99.0, first_ts + 10_801_000, boll(middle=101.0, upper=110.0, candle_ts_ms=2_000), cvd())
+        got = strat._maybe_update_tp(99.0, first_ts + 10_801_000, boll(middle=101.0, upper=110.0, candle_ts_ms=2_000),
+                                     cvd())
 
         self.assertIsNotNone(got)
         self.assertEqual(got.reason, "three_stage_pre_tp1_degraded_to_middle_runner")
@@ -1488,7 +1540,8 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
         first_ts = 100_000
         strat.state = three_stage_pre_tp1_state(first_entry_ts_ms=first_ts)
 
-        got = strat._maybe_update_tp(99.0, first_ts + 21_601_000, boll(middle=101.0, upper=110.0, candle_ts_ms=2_000), cvd())
+        got = strat._maybe_update_tp(99.0, first_ts + 21_601_000, boll(middle=101.0, upper=110.0, candle_ts_ms=2_000),
+                                     cvd())
 
         self.assertIsNotNone(got)
         self.assertEqual(got.reason, "three_stage_pre_tp1_degraded_to_single")
@@ -1504,7 +1557,8 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
         first_ts = 100_000
         strat.state = three_stage_pre_tp1_state(first_entry_ts_ms=first_ts)
 
-        got = strat._maybe_update_tp(99.0, first_ts + 21_601_000, boll(middle=101.0, upper=110.0, candle_ts_ms=2_000), cvd())
+        got = strat._maybe_update_tp(99.0, first_ts + 21_601_000, boll(middle=101.0, upper=110.0, candle_ts_ms=2_000),
+                                     cvd())
 
         self.assertIsNotNone(got)
         self.assertEqual(got.reason, "three_stage_pre_tp1_degraded_to_single")
@@ -1537,7 +1591,8 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
             last_tp_update_candle_ts_ms=1_000,
         )
 
-        got = strat._maybe_update_tp(99.0, first_ts + 21_601_000, boll(middle=101.0, upper=110.0, candle_ts_ms=2_000), cvd())
+        got = strat._maybe_update_tp(99.0, first_ts + 21_601_000, boll(middle=101.0, upper=110.0, candle_ts_ms=2_000),
+                                     cvd())
 
         self.assertIsNotNone(got)
         self.assertEqual(got.reason, "three_stage_pre_tp1_degraded_to_single")
@@ -1547,9 +1602,11 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
     def test_three_stage_pre_tp1_timeout_does_not_reset_after_add(self) -> None:
         strat = strategy(breakeven_fee_buffer_pct=0.0, tp_min_net_profit_pct=0.002)
         first_ts = 100_000
-        strat.state = three_stage_pre_tp1_state(first_entry_ts_ms=first_ts, layers=2, last_order_ts_ms=first_ts + 7_200_000)
+        strat.state = three_stage_pre_tp1_state(first_entry_ts_ms=first_ts, layers=2,
+                                                last_order_ts_ms=first_ts + 7_200_000)
 
-        got = strat._maybe_update_tp(99.0, first_ts + 10_801_000, boll(middle=101.0, upper=110.0, candle_ts_ms=2_000), cvd())
+        got = strat._maybe_update_tp(99.0, first_ts + 10_801_000, boll(middle=101.0, upper=110.0, candle_ts_ms=2_000),
+                                     cvd())
 
         self.assertIsNotNone(got)
         self.assertEqual(got.reason, "three_stage_pre_tp1_degraded_to_middle_runner")
@@ -1574,14 +1631,20 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
 
     def test_single_degrade_uses_outer_when_middle_profit_insufficient(self) -> None:
         long_strat = strategy(breakeven_fee_buffer_pct=0.0, tp_min_net_profit_pct=0.002)
-        long_strat.state = StrategyPositionState(side="LONG", avg_entry_price=100.0, net_remaining_breakeven_price=100.0)
-        long_tp, long_mode = long_strat._degrade_three_stage_pre_tp1_to_single(21_601_000, boll(middle=100.1, upper=110.0, lower=90.0))
+        long_strat.state = StrategyPositionState(side="LONG", avg_entry_price=100.0,
+                                                 net_remaining_breakeven_price=100.0)
+        long_tp, long_mode = long_strat._degrade_three_stage_pre_tp1_to_single(21_601_000,
+                                                                               boll(middle=100.1, upper=110.0,
+                                                                                    lower=90.0))
         self.assertAlmostEqual(long_tp, 110.0)
         self.assertEqual(long_mode, "UPPER")
 
         short_strat = strategy(breakeven_fee_buffer_pct=0.0, tp_min_net_profit_pct=0.002)
-        short_strat.state = StrategyPositionState(side="SHORT", avg_entry_price=100.0, net_remaining_breakeven_price=100.0)
-        short_tp, short_mode = short_strat._degrade_three_stage_pre_tp1_to_single(21_601_000, boll(middle=99.9, upper=110.0, lower=90.0))
+        short_strat.state = StrategyPositionState(side="SHORT", avg_entry_price=100.0,
+                                                  net_remaining_breakeven_price=100.0)
+        short_tp, short_mode = short_strat._degrade_three_stage_pre_tp1_to_single(21_601_000,
+                                                                                  boll(middle=99.9, upper=110.0,
+                                                                                       lower=90.0))
         self.assertAlmostEqual(short_tp, 90.0)
         self.assertEqual(short_mode, "LOWER")
 
@@ -1621,7 +1684,8 @@ class RecordingTrader(Trader):
         self.cancelled_post_tp1_stop_ids = []
 
     async def fetch_position_snapshot(self) -> PositionSnapshot:
-        return PositionSnapshot(self.side, self.position_contracts, 100.0, float(self.position_contracts * Decimal("0.1")), self.position_contracts)
+        return PositionSnapshot(self.side, self.position_contracts, 100.0,
+                                float(self.position_contracts * Decimal("0.1")), self.position_contracts)
 
     async def cancel_existing_reduce_only_orders(self) -> None:
         self.cancel_reduce_only_calls += 1
@@ -1640,7 +1704,8 @@ class RecordingTrader(Trader):
         self.trend_stop_calls += 1
         return True, "algo-runner", "protective_sl_placed"
 
-    async def place_three_stage_post_tp1_protective_stop_with_retries(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+    async def place_three_stage_post_tp1_protective_stop_with_retries(self, *args,
+                                                                      **kwargs):  # type: ignore[no-untyped-def]
         self.post_tp1_stop_calls += 1
         self.three_stage_post_tp1_protective_sl_order_id = "algo-post"
         return True, "algo-post", "protective_sl_placed"

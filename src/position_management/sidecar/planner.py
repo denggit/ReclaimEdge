@@ -12,7 +12,6 @@ from src.position_management.sidecar.model import (
     calculate_sidecar_tp_price,
     sanitize_okx_client_order_id,
 )
-from src.risk.simple_position_sizer import PositionSize
 from src.strategies.boll_cvd_reclaim_strategy import TradeIntent
 
 logger = logging.getLogger(__name__)
@@ -42,21 +41,21 @@ class CombinedEntryIntentPlan:
 
 
 def build_sidecar_execution_plan(
-    *,
-    enabled: bool,
-    side: PositionSide,
-    layer_index: int,
-    core_qty: float,
-    entry_price: float,
-    account_equity_usdt: float,
-    leverage: float,
-    sidecar_margin_pct: float,
-    sidecar_tp_pct: float,
-    layer_multiplier: float,
-    position_id: str | None,
-    ts_ms: int,
-    contract_multiplier: Decimal | str | float = Decimal("0.1"),
-    contract_precision: Decimal | str | float = Decimal("0.01"),
+        *,
+        enabled: bool,
+        side: PositionSide,
+        layer_index: int,
+        core_qty: float,
+        entry_price: float,
+        account_equity_usdt: float,
+        leverage: float,
+        sidecar_margin_pct: float,
+        sidecar_tp_pct: float,
+        layer_multiplier: float,
+        position_id: str | None,
+        ts_ms: int,
+        contract_multiplier: Decimal | str | float = Decimal("0.1"),
+        contract_precision: Decimal | str | float = Decimal("0.01"),
 ) -> SidecarExecutionPlan | None:
     if not enabled or sidecar_margin_pct <= 0 or entry_price <= 0:
         return None
@@ -93,25 +92,25 @@ def build_sidecar_execution_plan(
 
 
 def build_combined_entry_intent(
-    *,
-    intent: TradeIntent,
-    sidecar_enabled: bool,
-    account_equity_usdt: float,
-    leverage: float,
-    sidecar_margin_pct: float,
-    sidecar_tp_pct: float,
-    position_id: str | None,
-    sidecar_skip_first_layer: bool = True,
-    contract_multiplier: Decimal | str | float = Decimal("0.1"),
-    contract_precision: Decimal | str | float = Decimal("0.01"),
+        *,
+        intent: TradeIntent,
+        sidecar_enabled: bool,
+        account_equity_usdt: float,
+        leverage: float,
+        sidecar_margin_pct: float,
+        sidecar_tp_pct: float,
+        position_id: str | None,
+        sidecar_skip_first_layer: bool = True,
+        contract_multiplier: Decimal | str | float = Decimal("0.1"),
+        contract_precision: Decimal | str | float = Decimal("0.01"),
 ) -> CombinedEntryIntentPlan:
     if intent.intent_type not in {"OPEN_LONG", "OPEN_SHORT", "ADD_LONG", "ADD_SHORT"}:
         return CombinedEntryIntentPlan(execution_intent=intent, sidecar_plan=None)
     if (
-        sidecar_enabled
-        and sidecar_skip_first_layer
-        and int(intent.layer_index) <= 1
-        and intent.intent_type in {"OPEN_LONG", "OPEN_SHORT"}
+            sidecar_enabled
+            and sidecar_skip_first_layer
+            and int(intent.layer_index) <= 1
+            and intent.intent_type in {"OPEN_LONG", "OPEN_SHORT"}
     ):
         layer_multiplier = float(intent.size.layer_multiplier or 1.0)
         core_margin_pct = (

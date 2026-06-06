@@ -56,12 +56,12 @@ def calculate_sidecar_margin(sidecar_margin_pct: float, layer_multiplier: float)
 
 
 def calculate_sidecar_qty(
-    *,
-    account_equity_usdt: float,
-    price: float,
-    leverage: float,
-    sidecar_margin_pct: float,
-    layer_multiplier: float,
+        *,
+        account_equity_usdt: float,
+        price: float,
+        leverage: float,
+        sidecar_margin_pct: float,
+        layer_multiplier: float,
 ) -> float:
     if price <= 0:
         return 0.0

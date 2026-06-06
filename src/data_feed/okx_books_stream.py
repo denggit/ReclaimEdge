@@ -1,18 +1,20 @@
 import asyncio
 import json
 import time
+
 import websockets
 
 from src.utils.log import get_logger
 
 logger = get_logger(__name__)
 
+
 class OKXBooksStreamer:
     def __init__(self, symbol="ETH-USDT-SWAP", multiplier=0.1, on_book_callback=None):
         self.symbol = symbol
         self.multiplier = multiplier
         # 核心：通过回调把订单簿增量数据抛给 MarketContext
-        self.on_book_callback = on_book_callback 
+        self.on_book_callback = on_book_callback
         # 保持和你 okx_stream 一致的域名
         self.ws_url = "wss://ws.okx.com:8443/ws/v5/public"
 

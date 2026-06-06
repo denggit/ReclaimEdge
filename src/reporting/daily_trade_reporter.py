@@ -128,7 +128,8 @@ class DailyTradeReporter:
         subject, content = await asyncio.to_thread(self._build_overall_summary_report_sync, context)
         return await self.email_sender.send_email_async(subject, content, content_type="html")
 
-    def _build_last_24h_report_sync(self, start: datetime, end: datetime, context: ReportRuntimeContext | None) -> tuple[str, str]:
+    def _build_last_24h_report_sync(self, start: datetime, end: datetime, context: ReportRuntimeContext | None) -> \
+    tuple[str, str]:
         # Load all events once in a worker thread. The report window only displays
         # recent records, but all history can provide a best-effort starting cash
         # when context.period_start_cash was not supplied by the live runner.
@@ -188,10 +189,10 @@ class DailyTradeReporter:
         )
 
     def build_report(
-        self,
-        events: list[JournalEvent],
-        window: DailyReportWindow,
-        context: ReportRuntimeContext | None = None,
+            self,
+            events: list[JournalEvent],
+            window: DailyReportWindow,
+            context: ReportRuntimeContext | None = None,
     ) -> tuple[str, str]:
         grouped = group_position_events(events)
         finished_positions = []
@@ -244,10 +245,10 @@ class DailyTradeReporter:
         return subject, html_body
 
     def build_overall_summary_report(
-        self,
-        events: list[JournalEvent],
-        context: ReportRuntimeContext | None = None,
-        archived: ArchivedSummaryStats | None = None,
+            self,
+            events: list[JournalEvent],
+            context: ReportRuntimeContext | None = None,
+            archived: ArchivedSummaryStats | None = None,
     ) -> tuple[str, str]:
         archived = archived or ArchivedSummaryStats()
         events_sorted = sorted(events, key=lambda item: item.ts_iso)
@@ -351,7 +352,8 @@ class DailyTradeReporter:
         win_rate = win_count / closed_count * 100 if closed_count else None
         avg_pnl = known_closed_pnl / closed_count if closed_count else None
         profit_factor = gross_profit / gross_loss if gross_loss > 0 else None
-        total_return_pct = (latest_cash - first_cash) / first_cash * 100 if first_cash and latest_cash is not None else None
+        total_return_pct = (
+                                       latest_cash - first_cash) / first_cash * 100 if first_cash and latest_cash is not None else None
         max_drawdown_usdt, max_drawdown_pct = self._max_drawdown(equity_points)
         first_ts = short_ts(events_sorted[0].ts_iso) if events_sorted else "-"
         last_ts = short_ts(events_sorted[-1].ts_iso) if events_sorted else "-"
@@ -413,11 +415,11 @@ class DailyTradeReporter:
         return subject, content
 
     def _build_residual_bucket(
-        self,
-        events: list[JournalEvent],
-        incomplete_count: int,
-        known_closed_pnl: float,
-        context: ReportRuntimeContext | None,
+            self,
+            events: list[JournalEvent],
+            incomplete_count: int,
+            known_closed_pnl: float,
+            context: ReportRuntimeContext | None,
     ) -> ResidualPnlBucket:
         math = self.calculate_pnl_math(events, known_closed_pnl, context)
         formula = "current_cash - period_start_cash - net_transfer - known_closed_pnl"
@@ -453,9 +455,9 @@ class DailyTradeReporter:
 
     @staticmethod
     def calculate_pnl_math(
-        events: list[JournalEvent],
-        known_closed_pnl: float,
-        context: ReportRuntimeContext | None,
+            events: list[JournalEvent],
+            known_closed_pnl: float,
+            context: ReportRuntimeContext | None,
     ) -> ReportPnlMath:
         net_transfer = DailyTradeReporter._net_cash_transfer(events)
         period_start_cash = context.period_start_cash if context else None
@@ -520,9 +522,9 @@ class DailyTradeReporter:
 
     @staticmethod
     def _with_period_start_cash(
-        context: ReportRuntimeContext | None,
-        all_events: list[JournalEvent],
-        start: datetime,
+            context: ReportRuntimeContext | None,
+            all_events: list[JournalEvent],
+            start: datetime,
     ) -> ReportRuntimeContext | None:
         if context is not None and context.period_start_cash is not None:
             return context
@@ -539,7 +541,8 @@ class DailyTradeReporter:
         )
 
     @staticmethod
-    def _with_overall_start_cash(context: ReportRuntimeContext | None, events: list[JournalEvent]) -> ReportRuntimeContext | None:
+    def _with_overall_start_cash(context: ReportRuntimeContext | None,
+                                 events: list[JournalEvent]) -> ReportRuntimeContext | None:
         if context is not None and context.period_start_cash is not None:
             return context
         inferred = DailyTradeReporter._infer_first_cash(events)
@@ -679,30 +682,32 @@ class DailyTradeReporter:
         return max_dd, max_dd_pct
 
     def _render_html(
-        self,
-        *,
-        window: DailyReportWindow,
-        events: list[JournalEvent],
-        finished_positions: list[tuple[str, JournalEvent, list[JournalEvent], list[JournalEvent], JournalEvent]],
-        open_positions: list[tuple[str, JournalEvent, list[JournalEvent], list[JournalEvent], JournalEvent]],
-        total_pnl: float,
-        known_closed_pnl: float,
-        total_closed: int,
-        win_count: int,
-        residual_bucket: ResidualPnlBucket,
+            self,
+            *,
+            window: DailyReportWindow,
+            events: list[JournalEvent],
+            finished_positions: list[tuple[str, JournalEvent, list[JournalEvent], list[JournalEvent], JournalEvent]],
+            open_positions: list[tuple[str, JournalEvent, list[JournalEvent], list[JournalEvent], JournalEvent]],
+            total_pnl: float,
+            known_closed_pnl: float,
+            total_closed: int,
+            win_count: int,
+            residual_bucket: ResidualPnlBucket,
     ) -> str:
         win_rate = win_count / total_closed * 100 if total_closed else None
         rows = []
         for position_id, first_entry, entries, tp_events, flat in finished_positions:
             rows.append(self._closed_position_row(position_id, first_entry, entries, tp_events, flat))
         if not rows:
-            rows.append("<tr><td colspan='12' style='padding:10px;text-align:center;color:#777;'>最近24小时没有完整平仓交易</td></tr>")
+            rows.append(
+                "<tr><td colspan='12' style='padding:10px;text-align:center;color:#777;'>最近24小时没有完整平仓交易</td></tr>")
 
         open_rows = []
         for position_id, first_entry, entries, tp_events, last_event in open_positions:
             open_rows.append(self._open_position_row(position_id, first_entry, entries, tp_events, last_event))
         if not open_rows:
-            open_rows.append("<tr><td colspan='8' style='padding:10px;text-align:center;color:#777;'>当前无未平仓位</td></tr>")
+            open_rows.append(
+                "<tr><td colspan='8' style='padding:10px;text-align:center;color:#777;'>当前无未平仓位</td></tr>")
 
         return f"""
 <div style="font-family:Arial,Helvetica,sans-serif;line-height:1.5;color:#222;max-width:1180px;">
@@ -760,13 +765,15 @@ class DailyTradeReporter:
 </div>
 """.strip()
 
-    def _closed_position_row(self, position_id: str, first_entry: JournalEvent, entries: list[JournalEvent], tp_events: list[JournalEvent], flat: JournalEvent) -> str:
+    def _closed_position_row(self, position_id: str, first_entry: JournalEvent, entries: list[JournalEvent],
+                             tp_events: list[JournalEvent], flat: JournalEvent) -> str:
         side = first_entry.payload.get("side")
         prices = "<br>".join(
             f"L{e.payload.get('layer_index')}: {fmt(e.payload.get('price'), 2)} / {fmt(e.payload.get('size_margin_usdt'), 3)}U ×{fmt(e.payload.get('layer_multiplier'), 2)}"
             for e in entries
         ) or "接管已有仓位"
-        reasons = "<br>".join(html.escape(str(e.payload.get("reason", "-"))) for e in entries) or html.escape(str(first_entry.payload.get("note", "-")))
+        reasons = "<br>".join(html.escape(str(e.payload.get("reason", "-"))) for e in entries) or html.escape(
+            str(first_entry.payload.get("note", "-")))
         last_entry = entries[-1] if entries else first_entry
         last_tp = tp_events[-1].payload.get("tp_price") if tp_events else flat.payload.get("last_tp_price")
         boll = f"M:{fmt(last_entry.payload.get('boll_middle'), 2)}<br>U:{fmt(last_entry.payload.get('boll_upper'), 2)}<br>L:{fmt(last_entry.payload.get('boll_lower'), 2)}"
@@ -789,7 +796,8 @@ class DailyTradeReporter:
 </tr>
 """
 
-    def _open_position_row(self, position_id: str, first_entry: JournalEvent, entries: list[JournalEvent], tp_events: list[JournalEvent], last_event: JournalEvent) -> str:
+    def _open_position_row(self, position_id: str, first_entry: JournalEvent, entries: list[JournalEvent],
+                           tp_events: list[JournalEvent], last_event: JournalEvent) -> str:
         latest = entries[-1] if entries else last_event
         last_tp = tp_events[-1].payload.get("tp_price") if tp_events else latest.payload.get("tp_price")
         reason = latest.payload.get("reason") or latest.payload.get("note") or "-"

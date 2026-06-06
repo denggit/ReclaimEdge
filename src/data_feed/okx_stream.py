@@ -15,7 +15,7 @@ class OKXTickStreamer:
         self.on_tick_callback = on_tick_callback  # 核心：通过回调把数据抛给策略大脑
         # 使用 AWS 专线域名，在东京节点极其稳定
         self.ws_url = "wss://ws.okx.com:8443/ws/v5/public"
-        self.multiplier = multiplier    # OKX永续合约的sz指的是张数，1张ETH合约等于0.1个ETH
+        self.multiplier = multiplier  # OKX永续合约的sz指的是张数，1张ETH合约等于0.1个ETH
 
     async def connect(self):
         """建立 WebSocket 连接，保持心跳与断线重连"""

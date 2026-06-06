@@ -158,7 +158,8 @@ class LiveStateStore:
             self.path.unlink()
 
     @staticmethod
-    def from_strategy_state(*, position_id: str | None, symbol: str, strategy_state: Any, cash_before_position: float | None) -> LivePositionState:
+    def from_strategy_state(*, position_id: str | None, symbol: str, strategy_state: Any,
+                            cash_before_position: float | None) -> LivePositionState:
         return LivePositionState(
             position_id=position_id,
             symbol=symbol,
@@ -197,10 +198,12 @@ class LiveStateStore:
             near_tp_protective_sl_price=getattr(strategy_state, "near_tp_protective_sl_price", None),
             near_tp_protective_sl_order_id=getattr(strategy_state, "near_tp_protective_sl_order_id", None),
             near_tp_add_disabled=bool(getattr(strategy_state, "near_tp_add_disabled", False)),
-            middle_runner_enabled_for_position=bool(getattr(strategy_state, "middle_runner_enabled_for_position", False)),
+            middle_runner_enabled_for_position=bool(
+                getattr(strategy_state, "middle_runner_enabled_for_position", False)),
             middle_runner_pending=bool(getattr(strategy_state, "middle_runner_pending", False)),
             middle_runner_active=bool(getattr(strategy_state, "middle_runner_active", False)),
-            middle_runner_first_close_ratio=float(getattr(strategy_state, "middle_runner_first_close_ratio", 0.0) or 0.0),
+            middle_runner_first_close_ratio=float(
+                getattr(strategy_state, "middle_runner_first_close_ratio", 0.0) or 0.0),
             middle_runner_keep_ratio=float(getattr(strategy_state, "middle_runner_keep_ratio", 0.0) or 0.0),
             middle_runner_first_tp_price=getattr(strategy_state, "middle_runner_first_tp_price", None),
             middle_runner_final_tp_price=getattr(strategy_state, "middle_runner_final_tp_price", None),
@@ -208,13 +211,19 @@ class LiveStateStore:
             middle_runner_protective_sl_order_id=getattr(strategy_state, "middle_runner_protective_sl_order_id", None),
             middle_runner_extension_triggered=bool(getattr(strategy_state, "middle_runner_extension_triggered", False)),
             middle_runner_add_disabled=bool(getattr(strategy_state, "middle_runner_add_disabled", False)),
-            middle_runner_size_mismatch_protected=bool(getattr(strategy_state, "middle_runner_size_mismatch_protected", False)),
-            middle_runner_size_mismatch_warning_ts_ms=int(getattr(strategy_state, "middle_runner_size_mismatch_warning_ts_ms", 0) or 0),
+            middle_runner_size_mismatch_protected=bool(
+                getattr(strategy_state, "middle_runner_size_mismatch_protected", False)),
+            middle_runner_size_mismatch_warning_ts_ms=int(
+                getattr(strategy_state, "middle_runner_size_mismatch_warning_ts_ms", 0) or 0),
             middle_runner_sl_diag_last_signature=getattr(strategy_state, "middle_runner_sl_diag_last_signature", None),
-            middle_runner_sl_time_tighten_candle_count=int(getattr(strategy_state, "middle_runner_sl_time_tighten_candle_count", 0) or 0),
-            middle_runner_sl_time_tighten_last_candle_ts_ms=int(getattr(strategy_state, "middle_runner_sl_time_tighten_last_candle_ts_ms", 0) or 0),
-            middle_runner_sl_time_tighten_log_candle_ts_ms=int(getattr(strategy_state, "middle_runner_sl_time_tighten_log_candle_ts_ms", 0) or 0),
-            three_stage_runner_enabled_for_position=bool(getattr(strategy_state, "three_stage_runner_enabled_for_position", False)),
+            middle_runner_sl_time_tighten_candle_count=int(
+                getattr(strategy_state, "middle_runner_sl_time_tighten_candle_count", 0) or 0),
+            middle_runner_sl_time_tighten_last_candle_ts_ms=int(
+                getattr(strategy_state, "middle_runner_sl_time_tighten_last_candle_ts_ms", 0) or 0),
+            middle_runner_sl_time_tighten_log_candle_ts_ms=int(
+                getattr(strategy_state, "middle_runner_sl_time_tighten_log_candle_ts_ms", 0) or 0),
+            three_stage_runner_enabled_for_position=bool(
+                getattr(strategy_state, "three_stage_runner_enabled_for_position", False)),
             three_stage_tp1_price=getattr(strategy_state, "three_stage_tp1_price", None),
             three_stage_tp2_price=getattr(strategy_state, "three_stage_tp2_price", None),
             three_stage_runner_initial_tp_price=getattr(strategy_state, "three_stage_runner_initial_tp_price", None),
@@ -223,20 +232,29 @@ class LiveStateStore:
             three_stage_runner_ratio=float(getattr(strategy_state, "three_stage_runner_ratio", 0.0) or 0.0),
             three_stage_tp1_consumed=bool(getattr(strategy_state, "three_stage_tp1_consumed", False)),
             three_stage_tp2_consumed=bool(getattr(strategy_state, "three_stage_tp2_consumed", False)),
-            three_stage_post_tp1_protective_sl_price=getattr(strategy_state, "three_stage_post_tp1_protective_sl_price", None),
-            three_stage_post_tp1_protective_sl_order_id=getattr(strategy_state, "three_stage_post_tp1_protective_sl_order_id", None),
-            three_stage_post_tp1_sl_extension_triggered=bool(getattr(strategy_state, "three_stage_post_tp1_sl_extension_triggered", False)),
+            three_stage_post_tp1_protective_sl_price=getattr(strategy_state, "three_stage_post_tp1_protective_sl_price",
+                                                             None),
+            three_stage_post_tp1_protective_sl_order_id=getattr(strategy_state,
+                                                                "three_stage_post_tp1_protective_sl_order_id", None),
+            three_stage_post_tp1_sl_extension_triggered=bool(
+                getattr(strategy_state, "three_stage_post_tp1_sl_extension_triggered", False)),
             three_stage_post_tp1_protected=bool(getattr(strategy_state, "three_stage_post_tp1_protected", False)),
-            three_stage_post_tp1_sl_diag_last_signature=getattr(strategy_state, "three_stage_post_tp1_sl_diag_last_signature", None),
-            three_stage_post_tp1_sl_time_tighten_candle_count=int(getattr(strategy_state, "three_stage_post_tp1_sl_time_tighten_candle_count", 0) or 0),
-            three_stage_post_tp1_sl_time_tighten_last_candle_ts_ms=int(getattr(strategy_state, "three_stage_post_tp1_sl_time_tighten_last_candle_ts_ms", 0) or 0),
-            three_stage_post_tp1_sl_time_tighten_log_candle_ts_ms=int(getattr(strategy_state, "three_stage_post_tp1_sl_time_tighten_log_candle_ts_ms", 0) or 0),
+            three_stage_post_tp1_sl_diag_last_signature=getattr(strategy_state,
+                                                                "three_stage_post_tp1_sl_diag_last_signature", None),
+            three_stage_post_tp1_sl_time_tighten_candle_count=int(
+                getattr(strategy_state, "three_stage_post_tp1_sl_time_tighten_candle_count", 0) or 0),
+            three_stage_post_tp1_sl_time_tighten_last_candle_ts_ms=int(
+                getattr(strategy_state, "three_stage_post_tp1_sl_time_tighten_last_candle_ts_ms", 0) or 0),
+            three_stage_post_tp1_sl_time_tighten_log_candle_ts_ms=int(
+                getattr(strategy_state, "three_stage_post_tp1_sl_time_tighten_log_candle_ts_ms", 0) or 0),
             three_stage_pre_tp1_degrade_stage=getattr(strategy_state, "three_stage_pre_tp1_degrade_stage", None),
-            three_stage_pre_tp1_degraded_ts_ms=int(getattr(strategy_state, "three_stage_pre_tp1_degraded_ts_ms", 0) or 0),
+            three_stage_pre_tp1_degraded_ts_ms=int(
+                getattr(strategy_state, "three_stage_pre_tp1_degraded_ts_ms", 0) or 0),
             trend_runner_active=bool(getattr(strategy_state, "trend_runner_active", False)),
             trend_runner_trend_start_ts_ms=int(getattr(strategy_state, "trend_runner_trend_start_ts_ms", 0) or 0),
             trend_runner_adjust_count=int(getattr(strategy_state, "trend_runner_adjust_count", 0) or 0),
-            trend_runner_last_update_candle_ts_ms=int(getattr(strategy_state, "trend_runner_last_update_candle_ts_ms", 0) or 0),
+            trend_runner_last_update_candle_ts_ms=int(
+                getattr(strategy_state, "trend_runner_last_update_candle_ts_ms", 0) or 0),
             trend_runner_tp_price=getattr(strategy_state, "trend_runner_tp_price", None),
             trend_runner_sl_price=getattr(strategy_state, "trend_runner_sl_price", None),
             trend_runner_tp_order_id=getattr(strategy_state, "trend_runner_tp_order_id", None),
@@ -246,7 +264,8 @@ class LiveStateStore:
             trend_runner_reverse_start_ts_ms=int(getattr(strategy_state, "trend_runner_reverse_start_ts_ms", 0) or 0),
             trend_runner_reverse_start_price=getattr(strategy_state, "trend_runner_reverse_start_price", None),
             trend_runner_reverse_extreme_price=getattr(strategy_state, "trend_runner_reverse_extreme_price", None),
-            trend_runner_reverse_fast_cvd_start=float(getattr(strategy_state, "trend_runner_reverse_fast_cvd_start", 0.0) or 0.0),
+            trend_runner_reverse_fast_cvd_start=float(
+                getattr(strategy_state, "trend_runner_reverse_fast_cvd_start", 0.0) or 0.0),
             trend_runner_reverse_samples=list(getattr(strategy_state, "trend_runner_reverse_samples", []) or []),
             sidecar_enabled_for_position=bool(getattr(strategy_state, "sidecar_enabled_for_position", False)),
             sidecar_margin_pct=float(getattr(strategy_state, "sidecar_margin_pct", 0.0) or 0.0),

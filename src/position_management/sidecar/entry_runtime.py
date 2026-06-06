@@ -21,16 +21,16 @@ logger = get_logger(__name__)
 
 
 async def attach_sidecar_after_combined_entry(
-    *,
-    trader: Trader,
-    strategy_state: StrategyPositionState,
-    execution_state: live_runtime_types.ExecutionState,
-    intent: TradeIntent,
-    sidecar_plan: SidecarExecutionPlan,
-    journal: LiveTradeJournal,
-    state_store: LiveStateStore,
-    trader_symbol: str,
-    fee_buffer_pct: float = position_cost_runtime.DEFAULT_NET_REMAINING_FEE_BUFFER_PCT,
+        *,
+        trader: Trader,
+        strategy_state: StrategyPositionState,
+        execution_state: live_runtime_types.ExecutionState,
+        intent: TradeIntent,
+        sidecar_plan: SidecarExecutionPlan,
+        journal: LiveTradeJournal,
+        state_store: LiveStateStore,
+        trader_symbol: str,
+        fee_buffer_pct: float = position_cost_runtime.DEFAULT_NET_REMAINING_FEE_BUFFER_PCT,
 ) -> bool:
     if not getattr(strategy_state, "sidecar_enabled_for_position", False):
         return True
@@ -81,7 +81,8 @@ async def attach_sidecar_after_combined_entry(
         strategy_state.sidecar_dirty = True
         exit_ok, exit_message = await trader.market_exit_remaining_position_with_retries(
             intent.side,
-            retry_count=int(os.getenv("SIDECAR_TP_FAIL_MARKET_EXIT_RETRY_COUNT", os.getenv("NEAR_TP_SL_FAIL_MARKET_EXIT_RETRY_COUNT", "3"))),
+            retry_count=int(os.getenv("SIDECAR_TP_FAIL_MARKET_EXIT_RETRY_COUNT",
+                                      os.getenv("NEAR_TP_SL_FAIL_MARKET_EXIT_RETRY_COUNT", "3"))),
         )
         if exit_ok:
             execution_state.halt_reason = "sidecar_tp_place_failed_market_exit_waiting_flat"
@@ -90,7 +91,9 @@ async def attach_sidecar_after_combined_entry(
             execution_state.halt_reason = "sidecar_tp_place_failed"
             strategy_state.sidecar_halt_reason = "sidecar_tp_place_failed"
         sidecar_runtime_state.refresh_sidecar_state_totals(strategy_state, int(os.getenv("SIDECAR_MAX_LEGS", "10")))
-        state_store.save(LiveStateStore.from_strategy_state(position_id=position_id, symbol=trader_symbol, strategy_state=strategy_state, cash_before_position=execution_state.cash_before_position))
+        state_store.save(LiveStateStore.from_strategy_state(position_id=position_id, symbol=trader_symbol,
+                                                            strategy_state=strategy_state,
+                                                            cash_before_position=execution_state.cash_before_position))
         manual_intervention_required = not exit_ok
         journal.append(
             "SIDECAR_TP_PLACE_FAILED",
@@ -125,21 +128,23 @@ async def attach_sidecar_after_combined_entry(
     leg["updated_ts_ms"] = int(intent.ts_ms)
     strategy_state.sidecar_legs.append(leg)
     sidecar_runtime_state.refresh_sidecar_state_totals(strategy_state, int(os.getenv("SIDECAR_MAX_LEGS", "10")))
-    state_store.save(LiveStateStore.from_strategy_state(position_id=position_id, symbol=trader_symbol, strategy_state=strategy_state, cash_before_position=execution_state.cash_before_position))
+    state_store.save(
+        LiveStateStore.from_strategy_state(position_id=position_id, symbol=trader_symbol, strategy_state=strategy_state,
+                                           cash_before_position=execution_state.cash_before_position))
     journal.append("SIDECAR_LEG_OPENED", dict(leg), position_id=position_id)
     journal.append("SIDECAR_TP_PLACED", dict(leg), position_id=position_id)
     return True
 
 
 async def execute_sidecar_after_core_entry(
-    *,
-    trader: Trader,
-    strategy_state: StrategyPositionState,
-    execution_state: live_runtime_types.ExecutionState,
-    intent: TradeIntent,
-    journal: LiveTradeJournal,
-    state_store: LiveStateStore,
-    trader_symbol: str,
+        *,
+        trader: Trader,
+        strategy_state: StrategyPositionState,
+        execution_state: live_runtime_types.ExecutionState,
+        intent: TradeIntent,
+        journal: LiveTradeJournal,
+        state_store: LiveStateStore,
+        trader_symbol: str,
 ) -> bool:
     logger.error(
         "SIDECAR_LEGACY_AFTER_CORE_ENTRY_DISABLED | position_id=%s intent_type=%s side=%s layer=%s",

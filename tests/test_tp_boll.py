@@ -11,18 +11,14 @@ Verifies:
 from __future__ import annotations
 
 import os
-from dataclasses import replace
 from unittest import mock
-
-import pytest
 
 from src.monitors.boll_band_breakout_monitor import (
     BollBandBreakoutMonitorConfig,
     BollCalculator,
     BollSnapshot,
 )
-from src.position_management.cost_basis import calculate_remaining_breakeven_price
-from src.risk.simple_position_sizer import PositionSize, SimplePositionSizer, SimplePositionSizerConfig
+from src.risk.simple_position_sizer import SimplePositionSizer, SimplePositionSizerConfig
 from src.strategies.boll_cvd_reclaim_strategy import (
     BollCvdReclaimStrategy,
     BollCvdReclaimStrategyConfig,
@@ -32,9 +28,9 @@ from src.strategies.boll_cvd_reclaim_strategy import (
 # ── helpers ────────────────────────────────────────────────────────────
 
 def _boll_structure_20(
-    middle: float = 100.0,
-    upper: float = 110.0,
-    lower: float = 90.0,
+        middle: float = 100.0,
+        upper: float = 110.0,
+        lower: float = 90.0,
 ) -> BollSnapshot:
     return BollSnapshot(
         inst_id="ETH-USDT-SWAP",
@@ -51,13 +47,13 @@ def _boll_structure_20(
 
 
 def _boll_with_tp(
-    middle: float = 100.0,
-    upper: float = 110.0,
-    lower: float = 90.0,
-    tp_middle: float | None = 101.0,
-    tp_upper: float | None = 108.0,
-    tp_lower: float | None = 92.0,
-    tp_window: int | None = 15,
+        middle: float = 100.0,
+        upper: float = 110.0,
+        lower: float = 90.0,
+        tp_middle: float | None = 101.0,
+        tp_upper: float | None = 108.0,
+        tp_lower: float | None = 92.0,
+        tp_window: int | None = 15,
 ) -> BollSnapshot:
     return BollSnapshot(
         inst_id="ETH-USDT-SWAP",
@@ -513,7 +509,8 @@ class TestRunnerNotAffectedByTpBoll:
 
         tp, sl, extra, dist = s._calculate_trend_runner_dynamic_orders("LONG", b, 0, None)
         # TP should be based on boll.upper (110), not tp_upper (108)
-        expected_tp = 110.0 * (1 + max(s.config.runner_tp_min_outer_extra_pct, s.config.runner_tp_initial_outer_extra_pct))
+        expected_tp = 110.0 * (
+                    1 + max(s.config.runner_tp_min_outer_extra_pct, s.config.runner_tp_initial_outer_extra_pct))
         assert tp == expected_tp
 
 

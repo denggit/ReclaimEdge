@@ -4,9 +4,7 @@ import importlib.util
 import sys
 import types
 import unittest
-from dataclasses import replace
 from decimal import Decimal
-from unittest.mock import patch
 
 if importlib.util.find_spec("aiohttp") is None:
     aiohttp = types.ModuleType("aiohttp")

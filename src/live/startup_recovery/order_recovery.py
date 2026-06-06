@@ -22,14 +22,14 @@ logger = get_logger(__name__)
 
 
 async def apply_sidecar_startup_recovery(
-    *,
-    strategy: BollCvdReclaimStrategy,
-    execution_state: live_runtime_types.ExecutionState,
-    saved_state: Any,
-    startup_position: PositionSnapshot,
-    trader: Trader,
-    journal: LiveTradeJournal,
-    state_store: LiveStateStore,
+        *,
+        strategy: BollCvdReclaimStrategy,
+        execution_state: live_runtime_types.ExecutionState,
+        saved_state: Any,
+        startup_position: PositionSnapshot,
+        trader: Trader,
+        journal: LiveTradeJournal,
+        state_store: LiveStateStore,
 ) -> None:
     if not startup_position.has_position:
         strategy.state.sidecar_enabled_for_position = False
@@ -38,11 +38,14 @@ async def apply_sidecar_startup_recovery(
         state_store.clear()
         return
     saved_legs = list(getattr(saved_state, "sidecar_legs", []) or []) if saved_state is not None else []
-    saved_sidecar_enabled = bool(getattr(saved_state, "sidecar_enabled_for_position", False)) if saved_state is not None else False
+    saved_sidecar_enabled = bool(
+        getattr(saved_state, "sidecar_enabled_for_position", False)) if saved_state is not None else False
     if saved_sidecar_enabled:
         strategy.state.sidecar_enabled_for_position = True
-        strategy.state.sidecar_margin_pct = float(getattr(saved_state, "sidecar_margin_pct", strategy.state.sidecar_margin_pct) or 0.0)
-        strategy.state.sidecar_tp_pct = float(getattr(saved_state, "sidecar_tp_pct", strategy.state.sidecar_tp_pct) or 0.0)
+        strategy.state.sidecar_margin_pct = float(
+            getattr(saved_state, "sidecar_margin_pct", strategy.state.sidecar_margin_pct) or 0.0)
+        strategy.state.sidecar_tp_pct = float(
+            getattr(saved_state, "sidecar_tp_pct", strategy.state.sidecar_tp_pct) or 0.0)
     open_legs = [
         leg
         for leg in saved_legs
@@ -61,9 +64,9 @@ async def apply_sidecar_startup_recovery(
             )
             return
         if (
-            saved_state is None
-            and os.getenv("SIDECAR_ENABLED", "false").strip().lower() in {"1", "true", "yes", "y", "on"}
-            and hasattr(journal, "append")
+                saved_state is None
+                and os.getenv("SIDECAR_ENABLED", "false").strip().lower() in {"1", "true", "yes", "y", "on"}
+                and hasattr(journal, "append")
         ):
             strategy.state.sidecar_enabled_for_position = False
             strategy.state.sidecar_margin_pct = 0.0
@@ -83,7 +86,8 @@ async def apply_sidecar_startup_recovery(
     for index, leg in enumerate(list(strategy.state.sidecar_legs)):
         if leg.get("status") == SidecarLegStatus.OPEN_UNPROTECTED.value:
             execution_state.trading_halted = True
-            execution_state.halt_reason = str(getattr(strategy.state, "sidecar_halt_reason", None) or "sidecar_tp_place_failed")
+            execution_state.halt_reason = str(
+                getattr(strategy.state, "sidecar_halt_reason", None) or "sidecar_tp_place_failed")
             strategy.state.sidecar_dirty = True
             strategy.state.sidecar_halt_reason = execution_state.halt_reason
             continue
@@ -109,7 +113,8 @@ async def apply_sidecar_startup_recovery(
             )
             strategy.state.sidecar_legs[index] = mark_sidecar_leg_tp_filled(leg, live_time_utils.utc_ms())
             if hasattr(journal, "append"):
-                journal.append("SIDECAR_TP_FILLED", {**dict(leg), **status, "source": "startup_recovery"}, position_id=execution_state.current_position_id)
+                journal.append("SIDECAR_TP_FILLED", {**dict(leg), **status, "source": "startup_recovery"},
+                               position_id=execution_state.current_position_id)
             changed = True
             continue
         execution_state.trading_halted = True
@@ -144,12 +149,12 @@ async def apply_sidecar_startup_recovery(
 
 
 async def apply_main_tp_startup_recovery(
-    *,
-    execution_state: live_runtime_types.ExecutionState,
-    saved_state: Any,
-    startup_position: PositionSnapshot,
-    trader: Trader,
-    journal: LiveTradeJournal,
+        *,
+        execution_state: live_runtime_types.ExecutionState,
+        saved_state: Any,
+        startup_position: PositionSnapshot,
+        trader: Trader,
+        journal: LiveTradeJournal,
 ) -> None:
     if not startup_position.has_position:
         return
@@ -171,7 +176,9 @@ async def apply_main_tp_startup_recovery(
                 {"reason": "pending_order_check_failed", "error": str(exc), "manual_intervention_required": True},
                 position_id=execution_state.current_position_id,
             )
-        logger.error("MAIN_TP_ORDER_ID_MISSING_ON_STARTUP | reason=pending_order_check_failed error=%s trading_halted=true manual_intervention_required=true", exc)
+        logger.error(
+            "MAIN_TP_ORDER_ID_MISSING_ON_STARTUP | reason=pending_order_check_failed error=%s trading_halted=true manual_intervention_required=true",
+            exc)
         return
     protected_sidecar_tp_ids = {
         str(leg.get("tp_order_id"))
@@ -182,7 +189,7 @@ async def apply_main_tp_startup_recovery(
         item
         for item in pending_orders
         if item.get("instId") == trader.symbol and str(item.get("reduceOnly", "")).lower() == "true"
-        and str(item.get("ordId")) not in protected_sidecar_tp_ids
+           and str(item.get("ordId")) not in protected_sidecar_tp_ids
     ]
     if reduce_only_orders:
         execution_state.trading_halted = True

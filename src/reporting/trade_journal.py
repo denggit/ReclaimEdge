@@ -86,7 +86,8 @@ class LiveTradeJournal:
             last_ts = self._parse_event_ts(last_event.ts_iso)
             if best is not None and last_ts is not None and best_ts is not None and last_ts <= best_ts:
                 continue
-            if best is not None and (last_ts is None or best_ts is None) and last_event.ts_iso <= best.last_event_ts_iso:
+            if best is not None and (
+                    last_ts is None or best_ts is None) and last_event.ts_iso <= best.last_event_ts_iso:
                 continue
 
             best = UnclosedPositionMatch(
@@ -163,7 +164,8 @@ class LiveTradeJournal:
             return []
         return self._load_events_from_path(self.summary_path, start=start, end=end)
 
-    def _load_events_from_path(self, path: Path, start: datetime | None = None, end: datetime | None = None) -> list[JournalEvent]:
+    def _load_events_from_path(self, path: Path, start: datetime | None = None, end: datetime | None = None) -> list[
+        JournalEvent]:
         events: list[JournalEvent] = []
         with path.open("r", encoding="utf-8") as f:
             for line in f:
@@ -186,12 +188,12 @@ class LiveTradeJournal:
         return any(event.event_type == event_type for event in self.load_events())
 
     def record_cash_baseline(
-        self,
-        *,
-        source: str,
-        cash: float | None,
-        equity: float | None,
-        note: str | None = None,
+            self,
+            *,
+            source: str,
+            cash: float | None,
+            equity: float | None,
+            note: str | None = None,
     ) -> None:
         if source != "manual" and self.has_event_type("CASH_BASELINE"):
             return
@@ -206,15 +208,15 @@ class LiveTradeJournal:
         )
 
     def record_cash_transfer(
-        self,
-        *,
-        direction: str,
-        amount: float,
-        cash_before: float,
-        cash_after: float,
-        equity_before: float | None,
-        equity_after: float | None,
-        reason: str,
+            self,
+            *,
+            direction: str,
+            amount: float,
+            cash_before: float,
+            cash_after: float,
+            equity_before: float | None,
+            equity_after: float | None,
+            reason: str,
     ) -> None:
         if direction not in {"DEPOSIT", "WITHDRAWAL"}:
             raise ValueError(f"Invalid cash transfer direction={direction}")
@@ -236,14 +238,14 @@ class LiveTradeJournal:
         )
 
     def record_account_cash_drift(
-        self,
-        *,
-        amount: float,
-        cash_before: float,
-        cash_after: float,
-        equity_before: float | None,
-        equity_after: float | None,
-        reason: str,
+            self,
+            *,
+            amount: float,
+            cash_before: float,
+            cash_after: float,
+            equity_before: float | None,
+            equity_after: float | None,
+            reason: str,
     ) -> None:
         self.append(
             "ACCOUNT_CASH_DRIFT",
@@ -268,13 +270,13 @@ class LiveTradeJournal:
         self.append_event(event, self.summary_path)
 
     def record_journal_compacted(
-        self,
-        *,
-        archived_event_count: int,
-        retained_event_count: int,
-        archive_path: str | None,
-        summary_path: str | None,
-        snapshot_until: str,
+            self,
+            *,
+            archived_event_count: int,
+            retained_event_count: int,
+            archive_path: str | None,
+            summary_path: str | None,
+            snapshot_until: str,
     ) -> None:
         self.append(
             "JOURNAL_COMPACTED",
@@ -288,17 +290,17 @@ class LiveTradeJournal:
         )
 
     def record_startup_recovery(
-        self,
-        *,
-        position_id: str,
-        symbol: str,
-        side: str,
-        contracts: str,
-        eth_qty: float,
-        avg_entry: float,
-        cash: float | None,
-        equity: float | None,
-        extra: dict[str, Any] | None = None,
+            self,
+            *,
+            position_id: str,
+            symbol: str,
+            side: str,
+            contracts: str,
+            eth_qty: float,
+            avg_entry: float,
+            cash: float | None,
+            equity: float | None,
+            extra: dict[str, Any] | None = None,
     ) -> None:
         payload = {
             "symbol": symbol,
@@ -318,7 +320,8 @@ class LiveTradeJournal:
             position_id=position_id,
         )
 
-    def record_entry(self, *, position_id: str, intent: Any, result: Any, cash_before_position: float | None, equity: float | None, extra: dict[str, Any] | None = None) -> None:
+    def record_entry(self, *, position_id: str, intent: Any, result: Any, cash_before_position: float | None,
+                     equity: float | None, extra: dict[str, Any] | None = None) -> None:
         payload = {
             "intent_type": intent.intent_type,
             "side": intent.side,
@@ -403,13 +406,13 @@ class LiveTradeJournal:
         )
 
     def record_near_tp_reduce(
-        self,
-        *,
-        position_id: str | None,
-        symbol: str,
-        intent: Any,
-        result: Any,
-        protective_sl_fail_action: str | None = None,
+            self,
+            *,
+            position_id: str | None,
+            symbol: str,
+            intent: Any,
+            result: Any,
+            protective_sl_fail_action: str | None = None,
     ) -> None:
         self.append(
             "NEAR_TP_REDUCE",
@@ -426,7 +429,9 @@ class LiveTradeJournal:
                 "near_tp_progress_ratio": getattr(intent, "near_tp_progress_ratio", 0.0),
                 "near_tp_giveback": getattr(intent, "near_tp_giveback", 0.0),
                 "near_tp_giveback_threshold": getattr(intent, "near_tp_giveback_threshold", 0.0),
-                "protective_sl_price": getattr(result, "protective_sl_price", "") or getattr(intent, "near_tp_protective_sl_price", None),
+                "protective_sl_price": getattr(result, "protective_sl_price", "") or getattr(intent,
+                                                                                             "near_tp_protective_sl_price",
+                                                                                             None),
                 "protective_sl_order_id": getattr(result, "protective_sl_order_id", None),
                 "protective_sl_ok": bool(getattr(result, "protective_sl_ok", False)),
                 "protective_sl_fail_action": protective_sl_fail_action,
@@ -436,7 +441,8 @@ class LiveTradeJournal:
             position_id=position_id,
         )
 
-    def record_trend_runner_market_exit(self, *, position_id: str | None, symbol: str, intent: Any, result: Any) -> None:
+    def record_trend_runner_market_exit(self, *, position_id: str | None, symbol: str, intent: Any,
+                                        result: Any) -> None:
         self.append(
             "TREND_RUNNER_MARKET_EXIT_SIGNAL",
             {
@@ -451,7 +457,9 @@ class LiveTradeJournal:
                 "runner_ratio": getattr(intent, "three_stage_runner_ratio", 0.0),
                 "trend_runner_active": getattr(intent, "trend_runner_active", False),
                 "trend_runner_adjust_count": getattr(intent, "trend_runner_adjust_count", 0),
-                "trend_runner_exit_reason": getattr(intent, "trend_runner_exit_reason", None) or getattr(intent, "reason", None),
+                "trend_runner_exit_reason": getattr(intent, "trend_runner_exit_reason", None) or getattr(intent,
+                                                                                                         "reason",
+                                                                                                         None),
                 "reason": getattr(intent, "reason", None),
                 "price": getattr(intent, "price", None),
             },
@@ -459,22 +467,22 @@ class LiveTradeJournal:
         )
 
     def record_flat(
-        self,
-        *,
-        position_id: str | None,
-        symbol: str,
-        side: str | None,
-        cash_before_position: float | None,
-        cash_after: float | None,
-        equity_after: float | None,
-        reason: str,
-        layers: int,
-        avg_entry_price: float,
-        last_tp_price: float | None,
-        last_partial_tp_price: float | None = None,
-        last_tp_plan: str = "SINGLE",
-        partial_tp_consumed: bool = False,
-        trend_runner_exit_reason: str | None = None,
+            self,
+            *,
+            position_id: str | None,
+            symbol: str,
+            side: str | None,
+            cash_before_position: float | None,
+            cash_after: float | None,
+            equity_after: float | None,
+            reason: str,
+            layers: int,
+            avg_entry_price: float,
+            last_tp_price: float | None,
+            last_partial_tp_price: float | None = None,
+            last_tp_plan: str = "SINGLE",
+            partial_tp_consumed: bool = False,
+            trend_runner_exit_reason: str | None = None,
     ) -> None:
         pnl = None
         pnl_pct = None
@@ -504,27 +512,27 @@ class LiveTradeJournal:
         )
 
     def record_rolling_loss_guard(
-        self,
-        *,
-        action: str,
-        window_start_ts_ms: int | None = None,
-        window_end_ts_ms: int | None = None,
-        baseline_equity: float | None = None,
-        rolling_realized_pnl: float = 0.0,
-        loss_usdt: float = 0.0,
-        loss_pct: float = 0.0,
-        mode: str = "flat_to_flat_drawdown",
-        reference_flat_equity: float | None = None,
-        flat_equity: float | None = None,
-        segment_retention: float | None = None,
-        segment_return_pct: float | None = None,
-        cumulative_retention: float | None = None,
-        drawdown_pct: float | None = None,
-        max_drawdown_pct: float | None = None,
-        threshold_pct: float | None = None,
-        halt_hours: float | None = None,
-        halt_until_ts_ms: int | None = None,
-        reason: str | None = None,
+            self,
+            *,
+            action: str,
+            window_start_ts_ms: int | None = None,
+            window_end_ts_ms: int | None = None,
+            baseline_equity: float | None = None,
+            rolling_realized_pnl: float = 0.0,
+            loss_usdt: float = 0.0,
+            loss_pct: float = 0.0,
+            mode: str = "flat_to_flat_drawdown",
+            reference_flat_equity: float | None = None,
+            flat_equity: float | None = None,
+            segment_retention: float | None = None,
+            segment_return_pct: float | None = None,
+            cumulative_retention: float | None = None,
+            drawdown_pct: float | None = None,
+            max_drawdown_pct: float | None = None,
+            threshold_pct: float | None = None,
+            halt_hours: float | None = None,
+            halt_until_ts_ms: int | None = None,
+            reason: str | None = None,
     ) -> None:
         self.append(
             "ROLLING_LOSS_GUARD",
@@ -551,7 +559,8 @@ class LiveTradeJournal:
             },
         )
 
-    def record_error(self, *, position_id: str | None, intent: Any, error: Exception, rolled_back: bool, halted: bool) -> None:
+    def record_error(self, *, position_id: str | None, intent: Any, error: Exception, rolled_back: bool,
+                     halted: bool) -> None:
         self.append(
             "ERROR",
             {
