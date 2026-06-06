@@ -2301,7 +2301,7 @@ class LiveRuntimeWorkerTest(unittest.IsolatedAsyncioTestCase):
 
     def test_untrusted_saved_state_not_used_for_main_tp_startup_recovery(self) -> None:
         """When saved_state is untrusted, apply_main_tp_startup_recovery gets None."""
-        from scripts.run_boll_cvd_live import apply_main_tp_startup_recovery
+        from src.live.startup_recovery.order_recovery import apply_main_tp_startup_recovery
 
         saved_state = types.SimpleNamespace(
             position_id="pos-old",
@@ -2337,7 +2337,7 @@ class LiveRuntimeWorkerTest(unittest.IsolatedAsyncioTestCase):
 
     def test_trusted_saved_state_still_used_for_main_tp_startup_recovery(self) -> None:
         """When saved_state is trusted, tp_order_id is restored."""
-        from scripts.run_boll_cvd_live import apply_main_tp_startup_recovery
+        from src.live.startup_recovery.order_recovery import apply_main_tp_startup_recovery
 
         saved_state = types.SimpleNamespace(
             position_id="pos-1",
@@ -2407,7 +2407,7 @@ class LiveRuntimeWorkerTest(unittest.IsolatedAsyncioTestCase):
 
     def test_sidecar_not_recovered_from_untrusted_saved_state(self) -> None:
         """Sidecar enabled + legs in untrusted saved_state must not pollute current strategy."""
-        from scripts.run_boll_cvd_live import apply_sidecar_startup_recovery
+        from src.live.startup_recovery.order_recovery import apply_sidecar_startup_recovery
 
         sizer = SimplePositionSizer(SimplePositionSizerConfig())
         config = BollCvdReclaimStrategyConfig()
