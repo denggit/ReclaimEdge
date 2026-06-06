@@ -14,7 +14,6 @@ from scripts.run_boll_cvd_live import (
     force_close_sidecar_after_core_flat,
     monitor_sidecar_orders_once,
     reconcile_sidecar_orders_before_core_view,
-    refresh_sidecar_state_totals,
     sidecar_open_contracts,
 )
 from src.execution.trader import PositionSnapshot
@@ -23,6 +22,10 @@ from src.position_management.core_position_view import sidecar_position_mismatch
 from src.position_management.sidecar.model import SidecarLegStatus, sidecar_open_qty
 from src.position_management.sidecar.planner import build_combined_entry_intent
 from src.position_management.sidecar.reconciler import build_core_position_view
+from src.position_management.sidecar.runtime_state import (
+    open_sidecar_legs_exceed_limit,
+    refresh_sidecar_state_totals,
+)
 from src.risk.simple_position_sizer import PositionSize
 from src.strategies.boll_cvd_reclaim_strategy import StrategyPositionState, TradeIntent
 
@@ -144,6 +147,21 @@ def sidecar_state() -> StrategyPositionState:
         sidecar_margin_pct=0.01,
         sidecar_tp_pct=0.004,
     )
+
+
+def test_open_sidecar_legs_exceed_limit_counts_only_open_runtime_statuses() -> None:
+    state = sidecar_state()
+    state.sidecar_legs = [
+        {"leg_id": "open-1", "status": SidecarLegStatus.OPEN.value, "qty": 0.1},
+        {"leg_id": "open-unprotected", "status": SidecarLegStatus.OPEN_UNPROTECTED.value, "qty": 0.2},
+        {"leg_id": "tp", "status": SidecarLegStatus.TP_FILLED.value, "qty": 0.3},
+        {"leg_id": "force", "status": SidecarLegStatus.FORCE_CLOSED.value, "qty": 0.4},
+        {"leg_id": "cancelled", "status": SidecarLegStatus.CANCELLED.value, "qty": 0.5},
+    ]
+
+    assert open_sidecar_legs_exceed_limit(state, 1)
+    assert not open_sidecar_legs_exceed_limit(state, 2)
+    assert open_sidecar_legs_exceed_limit(state, 0)
 
 
 def test_sidecar_skip_first_layer_builds_core_only_open_intent() -> None:

@@ -36,16 +36,15 @@ from src.monitors.boll_band_breakout_monitor import (  # noqa: E402
 )
 from src.position_management import cost_runtime as position_cost_runtime  # noqa: E402
 from src.position_management import tp_progress as tp_progress_helpers  # noqa: E402
+from src.position_management.sidecar import runtime_state as sidecar_runtime_state  # noqa: E402
 from src.position_management.sidecar.model import (  # noqa: E402
     SidecarLegStatus,
     sidecar_open_contracts,
     sidecar_open_qty,
-    trim_sidecar_legs_for_state,
 )
 from src.position_management.sidecar.planner import (  # noqa: E402
     SidecarExecutionPlan,
     build_combined_entry_intent,
-    sidecar_client_order_id as build_sidecar_client_order_id,
 )
 from src.position_management.sidecar.reconciler import (  # noqa: E402
     build_core_position_view,
@@ -228,31 +227,6 @@ def restore_strategy_from_saved_state(strategy: BollCvdReclaimStrategy, saved_st
     )
 
 
-def open_sidecar_legs_exceed_limit(state: StrategyPositionState, max_legs: int) -> bool:
-    open_count = sum(
-        1
-        for leg in list(getattr(state, "sidecar_legs", []) or [])
-        if leg.get("status") in {SidecarLegStatus.OPEN.value, SidecarLegStatus.OPEN_UNPROTECTED.value}
-    )
-    return open_count > max(int(max_legs), 1)
-
-
-def refresh_sidecar_state_totals(state: StrategyPositionState, max_legs: int = 10) -> None:
-    state.sidecar_legs = trim_sidecar_legs_for_state(list(getattr(state, "sidecar_legs", []) or []), max_legs)
-    state.sidecar_open_qty = sidecar_open_qty(state.sidecar_legs)
-    state.sidecar_total_qty = sum(float(leg.get("qty") or 0.0) for leg in state.sidecar_legs)
-    state.sidecar_total_notional = sum(float(leg.get("qty") or 0.0) * float(leg.get("entry_price") or 0.0) for leg in state.sidecar_legs)
-    state.sidecar_realized_qty = sum(
-        float(leg.get("qty") or 0.0)
-        for leg in state.sidecar_legs
-        if leg.get("status") in {SidecarLegStatus.TP_FILLED.value, SidecarLegStatus.FORCE_CLOSED.value, SidecarLegStatus.CANCELLED.value}
-    )
-
-
-def sidecar_client_order_id(position_id: str | None, layer_index: int, ts_ms: int) -> str:
-    return build_sidecar_client_order_id(position_id, layer_index, ts_ms)
-
-
 async def attach_sidecar_after_combined_entry(
     *,
     trader: Trader,
@@ -322,7 +296,7 @@ async def attach_sidecar_after_combined_entry(
         else:
             execution_state.halt_reason = "sidecar_tp_place_failed"
             strategy_state.sidecar_halt_reason = "sidecar_tp_place_failed"
-        refresh_sidecar_state_totals(strategy_state, int(os.getenv("SIDECAR_MAX_LEGS", "10")))
+        sidecar_runtime_state.refresh_sidecar_state_totals(strategy_state, int(os.getenv("SIDECAR_MAX_LEGS", "10")))
         state_store.save(LiveStateStore.from_strategy_state(position_id=position_id, symbol=trader_symbol, strategy_state=strategy_state, cash_before_position=execution_state.cash_before_position))
         manual_intervention_required = not exit_ok
         journal.append(
@@ -357,7 +331,7 @@ async def attach_sidecar_after_combined_entry(
     leg["tp_order_id"] = tp_order_id
     leg["updated_ts_ms"] = int(intent.ts_ms)
     strategy_state.sidecar_legs.append(leg)
-    refresh_sidecar_state_totals(strategy_state, int(os.getenv("SIDECAR_MAX_LEGS", "10")))
+    sidecar_runtime_state.refresh_sidecar_state_totals(strategy_state, int(os.getenv("SIDECAR_MAX_LEGS", "10")))
     state_store.save(LiveStateStore.from_strategy_state(position_id=position_id, symbol=trader_symbol, strategy_state=strategy_state, cash_before_position=execution_state.cash_before_position))
     journal.append("SIDECAR_LEG_OPENED", dict(leg), position_id=position_id)
     journal.append("SIDECAR_TP_PLACED", dict(leg), position_id=position_id)
@@ -434,7 +408,7 @@ async def reconcile_sidecar_orders_before_core_view(
                 strategy.state.sidecar_legs[index] = mark_sidecar_leg_unknown_halted(leg, ts_ms)
                 dirty_changed = True
         if dirty_changed:
-            refresh_sidecar_state_totals(strategy.state, int(os.getenv("SIDECAR_MAX_LEGS", "10")))
+            sidecar_runtime_state.refresh_sidecar_state_totals(strategy.state, int(os.getenv("SIDECAR_MAX_LEGS", "10")))
             state_store.save(LiveStateStore.from_strategy_state(
                 position_id=execution_state.current_position_id,
                 symbol=trader_symbol,
@@ -563,7 +537,7 @@ async def reconcile_sidecar_orders_before_core_view(
                 )
 
         if changed:
-            refresh_sidecar_state_totals(strategy.state, int(os.getenv("SIDECAR_MAX_LEGS", "10")))
+            sidecar_runtime_state.refresh_sidecar_state_totals(strategy.state, int(os.getenv("SIDECAR_MAX_LEGS", "10")))
             state_store.save(LiveStateStore.from_strategy_state(
                 position_id=position_id,
                 symbol=trader_symbol,
@@ -664,7 +638,7 @@ async def monitor_sidecar_orders_once(
             logger.error("SIDECAR_TP_ORDER_MISSING_OR_UNKNOWN | position_id=%s leg_id=%s status=%s manual_intervention_required=true", position_id, leg.get("leg_id"), order_status)
             changed = True
     if changed:
-        refresh_sidecar_state_totals(strategy_state, int(os.getenv("SIDECAR_MAX_LEGS", "10")))
+        sidecar_runtime_state.refresh_sidecar_state_totals(strategy_state, int(os.getenv("SIDECAR_MAX_LEGS", "10")))
         state_store.save(LiveStateStore.from_strategy_state(position_id=position_id, symbol=trader_symbol, strategy_state=strategy_state, cash_before_position=cash_before_position))
 
 
@@ -742,7 +716,7 @@ async def force_close_sidecar_after_core_flat(
         else leg
         for leg in strategy_state.sidecar_legs
     ]
-    refresh_sidecar_state_totals(strategy_state, int(os.getenv("SIDECAR_MAX_LEGS", "10")))
+    sidecar_runtime_state.refresh_sidecar_state_totals(strategy_state, int(os.getenv("SIDECAR_MAX_LEGS", "10")))
     journal.append("SIDECAR_FORCE_CLOSED_AFTER_CORE_FLAT", {"side": strategy_state.side, "reason": "core_flat"}, position_id=position_id)
     state_store.save(LiveStateStore.from_strategy_state(position_id=position_id, symbol=trader_symbol, strategy_state=strategy_state, cash_before_position=cash_before_position))
     return True
@@ -761,7 +735,7 @@ async def apply_sidecar_startup_recovery(
     if not startup_position.has_position:
         strategy.state.sidecar_enabled_for_position = False
         strategy.state.sidecar_legs = []
-        refresh_sidecar_state_totals(strategy.state, int(os.getenv("SIDECAR_MAX_LEGS", "10")))
+        sidecar_runtime_state.refresh_sidecar_state_totals(strategy.state, int(os.getenv("SIDECAR_MAX_LEGS", "10")))
         state_store.clear()
         return
     saved_legs = list(getattr(saved_state, "sidecar_legs", []) or []) if saved_state is not None else []
@@ -776,7 +750,7 @@ async def apply_sidecar_startup_recovery(
         if leg.get("status") in {SidecarLegStatus.OPEN.value, SidecarLegStatus.OPEN_UNPROTECTED.value}
     ]
     if not open_legs:
-        refresh_sidecar_state_totals(strategy.state, int(os.getenv("SIDECAR_MAX_LEGS", "10")))
+        sidecar_runtime_state.refresh_sidecar_state_totals(strategy.state, int(os.getenv("SIDECAR_MAX_LEGS", "10")))
         if saved_sidecar_enabled:
             state_store.save(
                 LiveStateStore.from_strategy_state(
@@ -858,7 +832,7 @@ async def apply_sidecar_startup_recovery(
             status.get("status"),
         )
         changed = True
-    refresh_sidecar_state_totals(strategy.state, int(os.getenv("SIDECAR_MAX_LEGS", "10")))
+    sidecar_runtime_state.refresh_sidecar_state_totals(strategy.state, int(os.getenv("SIDECAR_MAX_LEGS", "10")))
     if changed or getattr(strategy.state, "sidecar_enabled_for_position", False):
         state_store.save(
             LiveStateStore.from_strategy_state(
@@ -1815,8 +1789,8 @@ async def account_position_sync_worker(
             # ── End pre-core reconciliation ──────────────────────────────
             async with state_lock:
                 pending_order_count = execution_state.pending_order_count
-                refresh_sidecar_state_totals(strategy.state, int(os.getenv("SIDECAR_MAX_LEGS", "10")))
-                if open_sidecar_legs_exceed_limit(strategy.state, int(os.getenv("SIDECAR_MAX_LEGS", "10"))):
+                sidecar_runtime_state.refresh_sidecar_state_totals(strategy.state, int(os.getenv("SIDECAR_MAX_LEGS", "10")))
+                if sidecar_runtime_state.open_sidecar_legs_exceed_limit(strategy.state, int(os.getenv("SIDECAR_MAX_LEGS", "10"))):
                     execution_state.trading_halted = True
                     execution_state.halt_reason = "sidecar_open_legs_exceed_max"
                     strategy.state.sidecar_dirty = True
@@ -3145,7 +3119,7 @@ async def main() -> None:
         journal=journal,
         state_store=state_store,
     )
-    refresh_sidecar_state_totals(strategy.state, int(os.getenv("SIDECAR_MAX_LEGS", "10")))
+    sidecar_runtime_state.refresh_sidecar_state_totals(strategy.state, int(os.getenv("SIDECAR_MAX_LEGS", "10")))
     startup_core_position = build_core_position_view(
         startup_position,
         sidecar_open_qty(strategy.state.sidecar_legs),
