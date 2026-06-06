@@ -252,5 +252,31 @@ class BollCvdShockReclaimStrategyTest(unittest.TestCase):
         self.assertAlmostEqual(strat._active_add_freeze_bypass_multiplier(), 2.0)
 
 
+    def test_add_freeze_expired_state_reset_when_chain_disabled(self) -> None:
+        """Regression: _reset_add_freeze_if_expired must still run when add_freeze_chain_enabled=False.
+
+        Original code called reset unconditionally after the first_add_block /
+        layers==1 early-return paths. The refactor must preserve that cleanup.
+        """
+        strat = strategy(
+            add_freeze_chain_enabled=False,
+            first_add_block_seconds=1800,
+            add_min_interval_seconds=600,
+        )
+        strat.state.layers = 2
+        strat.state.last_entry_price = 100.0
+        strat.state.last_order_ts_ms = 0
+        strat.state.first_entry_ts_ms = 1_000_000
+        strat.state.add_freeze_until_ts_ms = 1000
+        strat.state.add_freeze_penalty_count = 3
+
+        # ts_ms=2_000_000 is far after the stale freeze_until_ts_ms=1000.
+        # Even with add_freeze_chain_enabled=False, the wrapper must reset.
+        strat._add_timing_passed("LONG", price=99.0, ts_ms=2_000_000, target_layer=3)
+
+        self.assertEqual(strat.state.add_freeze_until_ts_ms, 0)
+        self.assertEqual(strat.state.add_freeze_penalty_count, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

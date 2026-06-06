@@ -128,8 +128,7 @@ class BollCvdShockReclaimStrategy(BollCvdReclaimStrategy):
         if last is None or last <= 0:
             return False, "missing_last_entry"
 
-        if self.config.add_freeze_chain_enabled:
-            self._reset_add_freeze_if_expired(ts_ms)
+        self._reset_add_freeze_if_expired(ts_ms)
 
         target_layer_gap_pct = self._add_layer_gap_pct_for_target_layer(target_layer)
         decision = add_freeze_chain.check_shock_add_timing(
