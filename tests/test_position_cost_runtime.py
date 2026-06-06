@@ -146,14 +146,18 @@ def test_sync_strategy_cost_from_position_calls_restore_callback_on_state_mismat
     assert restored == [(strat, position(side="LONG", qty=1.0, avg_entry=100.0))]
 
 
-# ── Real-data cost basis regression ─────────────────────────────────────
+# ── TP1 increment validation (ETH qty correctness) ─────────────────────
 
-def test_record_core_position_reduction_exit_correctly_with_real_data() -> None:
-    """Verify exit_notional matches expected value with real trading data.
 
-    Uses the user's observed values: total_entry_qty=0.59482721,
-    core eth_qty after TP1=0.178, tp1_price=1561.5685.
-    Expected exit_notional ≈ 0.41682721 * 1561.5685 ≈ 651.0.
+def test_record_core_position_reduction_exit_uses_eth_qty_for_tp1_increment() -> None:
+    """Verify the TP1 exit_notional increment uses ETH qty, not contracts.
+
+    This test only validates the TP1 exit notional increment — that
+    reduced_qty is computed correctly as 0.41682721 ETH and produces
+    exit_notional ≈ 651.0 USDT.
+
+    Full net_remaining_breakeven validation is covered by the dedicated
+    tests below (with and without sidecar).
     """
     state = StrategyPositionState(
         side="LONG",
@@ -276,6 +280,121 @@ def test_record_core_position_reduction_exit_clamp_fallback_when_qty_zero() -> N
     expected_exit_notional = 0.41682721 * 1561.5685
     assert state.position_cost_exit_notional == pytest.approx(expected_exit_notional, rel=1e-7)
     assert state.position_cost_remaining_qty == pytest.approx(0.17800000, rel=1e-7)
+
+
+# ── Full net_remaining_breakeven validation after TP1 ───────────────────
+
+
+def test_three_stage_tp1_without_sidecar_remaining_breakeven_reasonable() -> None:
+    """After TP1 at a price above avg_entry, net_remaining_breakeven
+    must be significantly below avg_entry_price (locked-in profit).
+
+    Construction:
+      - core_total_qty = 0.59482721 ETH
+      - avg_entry_price = 1529.0053
+      - tp1_price = 1561.5685 (higher → profit locked)
+      - after TP1: core.eth_qty = 0.17800000 ETH (30% remaining, tp1_ratio=0.7)
+    """
+    avg_entry = 1529.0053
+    core_qty = 0.59482721
+    tp1_price = 1561.5685
+    remaining_qty = 0.17800000
+
+    state = StrategyPositionState(
+        side="LONG",
+        total_entry_qty=core_qty,
+        position_cost_entry_notional=core_qty * avg_entry,
+        position_cost_exit_notional=0.0,
+        position_cost_remaining_qty=core_qty,
+        sidecar_legs=[],
+    )
+    record_core_position_reduction_exit(
+        state,
+        PositionSnapshot("LONG", Decimal("1.78"), avg_entry, remaining_qty, Decimal("1.78")),
+        exit_price=tp1_price,
+        fee_buffer_pct=0.001,
+    )
+    # TP1 increment: (0.59482721 - 0.178) * 1561.5685 ≈ 650.90
+    tp1_increment = (core_qty - remaining_qty) * tp1_price
+    raw_breakeven = (state.position_cost_entry_notional - tp1_increment) / remaining_qty
+    # raw_breakeven ≈ (909.474 - 650.904) / 0.178 ≈ 1452.64
+    # buffered = raw * (1 + fee_buffer_pct) = 1452.64 * 1.001 ≈ 1454.10
+    assert state.net_remaining_breakeven_price > 0
+    assert state.net_remaining_breakeven_price < avg_entry, (
+        f"net_remaining_breakeven_price={state.net_remaining_breakeven_price:.4f} "
+        f"should be < avg_entry={avg_entry:.4f} because TP1 locked in profit"
+    )
+    assert state.net_remaining_breakeven_price == pytest.approx(raw_breakeven * 1.001, rel=1e-6)
+
+
+def test_three_stage_tp1_after_sidecar_realized_keeps_remaining_breakeven_realistic() -> None:
+    """TP1 after sidecar already realized: remaining breakeven should fall further.
+
+    Construction:
+      - core_total_qty = 0.59482721 ETH
+      - sidecar_qty = 0.25 ETH (already filled at ~avg_entry*1.004)
+      - avg_entry_price = 1529.0053
+      - sidecar_tp_price = avg_entry * 1.004 ≈ 1535.12
+      - tp1_price = 1561.5685
+      - after TP1: core.eth_qty = 0.17800000 ETH
+
+    Pre-TP1 state:
+      - entry_notional = core_qty * avg_entry + sidecar_qty * avg_entry
+                        = 0.59482721*1529.0053 + 0.25*1529.0053 ≈ 1291.74
+      - exit_notional = sidecar_qty * sidecar_tp_price
+                        (sidecar already realized) ≈ 383.78
+      - remaining_qty = core_qty (sidecar already closed)
+
+    After TP1:
+      - exit_notional += (core_qty - 0.178) * tp1_price ≈ 650.90
+      - total_exit_notional ≈ 383.78 + 650.90 = 1034.68
+      - remaining_qty = 0.178
+      - raw ≈ (1291.74 - 1034.68) / 0.178 ≈ 1444.16
+      - buffered ≈ raw * 1.001 ≈ 1445.60
+    """
+    avg_entry = 1529.0053
+    core_qty = 0.59482721
+    sidecar_qty = 0.25
+    tp1_price = 1561.5685
+    remaining_qty = 0.17800000
+    sidecar_tp_price = avg_entry * 1.004
+    fee_buffer_pct = 0.001
+
+    # Pre-TP1: sidecar already realized
+    entry_notional = core_qty * avg_entry + sidecar_qty * avg_entry
+    pre_tp1_exit_notional = sidecar_qty * sidecar_tp_price
+
+    state = StrategyPositionState(
+        side="LONG",
+        total_entry_qty=core_qty,
+        position_cost_entry_notional=entry_notional,
+        position_cost_exit_notional=pre_tp1_exit_notional,
+        position_cost_remaining_qty=core_qty,
+        sidecar_legs=[],
+    )
+    record_core_position_reduction_exit(
+        state,
+        PositionSnapshot("LONG", Decimal("1.78"), avg_entry, remaining_qty, Decimal("1.78")),
+        exit_price=tp1_price,
+        fee_buffer_pct=fee_buffer_pct,
+    )
+    # Verify TP1 increment is correct
+    tp1_increment = (core_qty - remaining_qty) * tp1_price
+    total_exit_notional = pre_tp1_exit_notional + tp1_increment
+    assert state.position_cost_exit_notional == pytest.approx(total_exit_notional, rel=1e-7)
+    assert state.position_cost_remaining_qty == pytest.approx(remaining_qty, rel=1e-7)
+
+    # Net breakeven should reflect both sidecar profit and TP1 profit
+    raw = (entry_notional - total_exit_notional) / remaining_qty
+    expected_buffered = raw * (1.0 + fee_buffer_pct)
+    assert state.net_remaining_breakeven_price > 0
+    assert state.net_remaining_breakeven_price < avg_entry, (
+        f"net_remaining_breakeven_price={state.net_remaining_breakeven_price:.4f} "
+        f"should be < avg_entry={avg_entry:.4f} — sidecar + TP1 both locked profit"
+    )
+    # With sidecar realized, breakeven should be lower than without sidecar
+    # (more profit already locked)
+    assert state.net_remaining_breakeven_price == pytest.approx(expected_buffered, rel=1e-6)
 
 
 # ── JSON-safe tests ─────────────────────────────────────────────────────
