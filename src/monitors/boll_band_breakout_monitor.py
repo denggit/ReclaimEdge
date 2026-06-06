@@ -40,6 +40,10 @@ class BollBandBreakoutMonitorConfig:
     candle_limit: int = 100
     rest_base_url: str = "https://www.okx.com"
     ws_public_url: str = "wss://ws.okx.com:8443/ws/v5/public"
+    # TP-only BOLL window (15) used exclusively for take-profit prices.
+    # BOLL_WINDOW=20 remains the structure window for entry/add/risk/SL/runner.
+    tp_boll_enabled: bool = True
+    tp_boll_window: int = 15
 
     @classmethod
     def from_env(cls) -> "BollBandBreakoutMonitorConfig":
@@ -54,6 +58,8 @@ class BollBandBreakoutMonitorConfig:
             boll_recalc_seconds=float(os.getenv("BOLL_RECALC_SECONDS", "1")),
             candle_poll_seconds=int(os.getenv("CANDLE_POLL_SECONDS", "30")),
             candle_limit=int(os.getenv("CANDLE_LIMIT", "100")),
+            tp_boll_enabled=env_bool("TP_BOLL_ENABLED", True),
+            tp_boll_window=int(os.getenv("TP_BOLL_WINDOW", "15")),
         )
 
 
@@ -80,6 +86,13 @@ class BollSnapshot:
     lower_distance_pct: float
     alert_switch_on: bool
     live_mode: bool
+    # TP-only BOLL bands (TP_BOLL_WINDOW, e.g. 15) used exclusively for take-profit prices.
+    # lower/middle/upper always use structure BOLL (BOLL_WINDOW, e.g. 20).
+    # When tp_* fields are None, all TP prices fall back to structure BOLL.
+    tp_lower: float | None = None
+    tp_middle: float | None = None
+    tp_upper: float | None = None
+    tp_window: int | None = None
 
 
 @dataclass(frozen=True)
@@ -327,13 +340,40 @@ class BollBandBreakoutMonitor:
         alert_switch_on = upper_distance_pct >= self.config.band_distance_threshold_pct or lower_distance_pct >= self.config.band_distance_threshold_pct
         is_new_candle = latest.ts_ms != self._latest_candle_ts_ms
         switch_changed = alert_switch_on != self._latest_switch_state
-        self._snapshot = BollSnapshot(self.config.inst_id, latest.ts_ms, latest.close, middle, upper, lower, upper_distance_pct, lower_distance_pct, alert_switch_on, self.config.use_live_candle)
+
+        # Compute TP-only BOLL if enabled and we have enough candles.
+        tp_lower: float | None = None
+        tp_middle: float | None = None
+        tp_upper: float | None = None
+        tp_window: int | None = None
+        if self.config.tp_boll_enabled and self.config.tp_boll_window > 0:
+            tp_window = self.config.tp_boll_window
+            if tp_window != self.config.boll_window and len(closes) >= tp_window:
+                try:
+                    tp_middle, tp_upper, tp_lower = BollCalculator.calculate(
+                        closes, tp_window, self.config.boll_std_multiplier
+                    )
+                except ValueError:
+                    tp_lower = tp_middle = tp_upper = tp_window = None
+
+        self._snapshot = BollSnapshot(
+            self.config.inst_id, latest.ts_ms, latest.close, middle, upper, lower,
+            upper_distance_pct, lower_distance_pct, alert_switch_on, self.config.use_live_candle,
+            tp_lower=tp_lower, tp_middle=tp_middle, tp_upper=tp_upper, tp_window=tp_window,
+        )
         self._latest_candle_ts_ms = latest.ts_ms
         self._latest_switch_state = alert_switch_on
         if self._previous_price is not None:
             self._previous_zone = self._classify_price_zone(self._previous_price)
         if is_new_candle or switch_changed:
-            logger.info("BOLL updated | inst=%s candle_ts=%s close=%.4f middle=%.4f upper=%.4f lower=%.4f upper_dist=%.4f%% lower_dist=%.4f%% switch=%s live_mode=%s", self.config.inst_id, latest.ts_ms, latest.close, middle, upper, lower, upper_distance_pct * 100, lower_distance_pct * 100, alert_switch_on, self.config.use_live_candle)
+            logger.info("BOLL updated | inst=%s candle_ts=%s close=%.4f middle=%.4f upper=%.4f lower=%.4f upper_dist=%.4f%% lower_dist=%.4f%% switch=%s live_mode=%s tp_boll=%s tp_middle=%s tp_upper=%s tp_lower=%s",
+                self.config.inst_id, latest.ts_ms, latest.close, middle, upper, lower,
+                upper_distance_pct * 100, lower_distance_pct * 100, alert_switch_on, self.config.use_live_candle,
+                f"win{tp_window}" if tp_window is not None else "off",
+                f"{tp_middle:.4f}" if tp_middle is not None else "-",
+                f"{tp_upper:.4f}" if tp_upper is not None else "-",
+                f"{tp_lower:.4f}" if tp_lower is not None else "-",
+            )
 
     async def _tick_loop(self) -> None:
         while self._running:

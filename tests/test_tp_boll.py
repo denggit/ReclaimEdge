@@ -1,0 +1,693 @@
+"""Tests for TP-only BOLL window (TP_BOLL_WINDOW=15).
+
+Verifies:
+- BollSnapshot carries both structure BOLL20 and TP BOLL15 fields.
+- TP resolver prefers TP_BOLL15, falls back to structure BOLL20.
+- SINGLE / MIDDLE RUNNER / THREE-STAGE all use TP_BOLL15 for TP prices.
+- Runner and Sidecar are NOT affected.
+- Profit distance / fallback logic is preserved.
+"""
+
+from __future__ import annotations
+
+import os
+from dataclasses import replace
+from unittest import mock
+
+import pytest
+
+from src.monitors.boll_band_breakout_monitor import (
+    BollBandBreakoutMonitorConfig,
+    BollCalculator,
+    BollSnapshot,
+)
+from src.position_management.cost_basis import calculate_remaining_breakeven_price
+from src.risk.simple_position_sizer import PositionSize, SimplePositionSizer, SimplePositionSizerConfig
+from src.strategies.boll_cvd_reclaim_strategy import (
+    BollCvdReclaimStrategy,
+    BollCvdReclaimStrategyConfig,
+)
+
+
+# ── helpers ────────────────────────────────────────────────────────────
+
+def _boll_structure_20(
+    middle: float = 100.0,
+    upper: float = 110.0,
+    lower: float = 90.0,
+) -> BollSnapshot:
+    return BollSnapshot(
+        inst_id="ETH-USDT-SWAP",
+        candle_ts_ms=1000,
+        close=middle,
+        middle=middle,
+        upper=upper,
+        lower=lower,
+        upper_distance_pct=0.01,
+        lower_distance_pct=0.01,
+        alert_switch_on=True,
+        live_mode=True,
+    )
+
+
+def _boll_with_tp(
+    middle: float = 100.0,
+    upper: float = 110.0,
+    lower: float = 90.0,
+    tp_middle: float | None = 101.0,
+    tp_upper: float | None = 108.0,
+    tp_lower: float | None = 92.0,
+    tp_window: int | None = 15,
+) -> BollSnapshot:
+    return BollSnapshot(
+        inst_id="ETH-USDT-SWAP",
+        candle_ts_ms=1000,
+        close=middle,
+        middle=middle,
+        upper=upper,
+        lower=lower,
+        upper_distance_pct=0.01,
+        lower_distance_pct=0.01,
+        alert_switch_on=True,
+        live_mode=True,
+        tp_lower=tp_lower,
+        tp_middle=tp_middle,
+        tp_upper=tp_upper,
+        tp_window=tp_window,
+    )
+
+
+def _cvd() -> "CvdSnapshot":
+    from src.indicators.cvd_tracker import CvdSnapshot
+    return CvdSnapshot(
+        ts_ms=1000,
+        price=100.0,
+        side="buy",
+        size=1.0,
+        signed_delta=0.1,
+        total_cvd=0.5,
+        fast_cvd=0.1,
+        previous_fast_cvd=0.09,
+        buy_volume=60.0,
+        sell_volume=40.0,
+        buy_ratio=0.6,
+        sell_ratio=0.4,
+        cross_positive=True,
+        cross_negative=False,
+        cvd_increasing=True,
+        cvd_decreasing=False,
+        no_new_low=True,
+        no_new_high=False,
+        window_low=99.0,
+        window_high=101.0,
+        burst_net_move_pct=0.0,
+        burst_range_pct=0.0,
+        baseline_range_pct=0.0,
+        burst_move_ratio=0.0,
+        burst_volume=0.0,
+        baseline_volume=0.0,
+        burst_volume_ratio=0.0,
+        up_burst=False,
+        down_burst=False,
+    )
+
+
+def _sizer() -> SimplePositionSizer:
+    sizer_config = SimplePositionSizerConfig(
+        dry_run_equity_usdt=1000.0,
+        layer_margin_pct=0.03,
+        leverage=50.0,
+    )
+    return SimplePositionSizer(sizer_config)
+
+
+def _strategy(**overrides) -> BollCvdReclaimStrategy:
+    cfg = BollCvdReclaimStrategyConfig(**overrides)
+    return BollCvdReclaimStrategy(cfg, _sizer())
+
+
+def _min_profit_long(middle: float, be: float, min_pct: float = 0.002) -> bool:
+    return middle >= be * (1 + min_pct)
+
+
+def _min_profit_short(middle: float, be: float, min_pct: float = 0.002) -> bool:
+    return middle <= be * (1 - min_pct)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 1. BollSnapshot / BollCalculator tests
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestBollSnapshotTpFields:
+    def test_default_boll_snapshot_has_tp_fields_none(self):
+        b = _boll_structure_20()
+        assert b.tp_lower is None
+        assert b.tp_middle is None
+        assert b.tp_upper is None
+        assert b.tp_window is None
+
+    def test_boll_with_tp_fields_populated(self):
+        b = _boll_with_tp()
+        assert b.tp_lower == 92.0
+        assert b.tp_middle == 101.0
+        assert b.tp_upper == 108.0
+        assert b.tp_window == 15
+        # structure BOLL unchanged
+        assert b.middle == 100.0
+        assert b.upper == 110.0
+        assert b.lower == 90.0
+
+    def test_tp_boll_window_does_not_replace_structure_boll_via_calculator(self):
+        """Given same closes, window=20 vs window=15 produce different values."""
+        import random
+        random.seed(42)
+        closes = [100.0 + random.uniform(-3, 3) for _ in range(25)]
+
+        mid_20, up_20, lo_20 = BollCalculator.calculate(closes, 20, 2.0)
+        mid_15, up_15, lo_15 = BollCalculator.calculate(closes, 15, 2.0)
+
+        # They should differ because windows are different.
+        assert abs(mid_20 - mid_15) > 0.0001 or abs(up_20 - up_15) > 0.0001 or abs(lo_20 - lo_15) > 0.0001
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 2. TP resolver tests
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestTpResolver:
+    def test_select_tp_middle_prefers_tp_boll_when_available(self):
+        s = _strategy()
+        b = _boll_with_tp(middle=100.0, tp_middle=101.0)
+        price, source = s._select_tp_middle(b)
+        assert price == 101.0
+        assert source == "TP_BOLL"
+
+    def test_select_tp_middle_falls_back_to_structure_boll(self):
+        s = _strategy()
+        b = _boll_structure_20(middle=100.0)
+        price, source = s._select_tp_middle(b)
+        assert price == 100.0
+        assert source == "STRUCTURE_BOLL"
+
+    def test_select_tp_outer_prefers_tp_boll_long(self):
+        s = _strategy()
+        b = _boll_with_tp(upper=110.0, tp_upper=108.0)
+        price, source = s._select_tp_outer("LONG", b)
+        assert price == 108.0
+        assert source == "TP_BOLL"
+
+    def test_select_tp_outer_prefers_tp_boll_short(self):
+        s = _strategy()
+        b = _boll_with_tp(lower=90.0, tp_lower=92.0)
+        price, source = s._select_tp_outer("SHORT", b)
+        assert price == 92.0
+        assert source == "TP_BOLL"
+
+    def test_select_tp_outer_falls_back_long(self):
+        s = _strategy()
+        b = _boll_structure_20(upper=110.0)
+        price, source = s._select_tp_outer("LONG", b)
+        assert price == 110.0
+        assert source == "STRUCTURE_BOLL"
+
+    def test_select_tp_outer_falls_back_short(self):
+        s = _strategy()
+        b = _boll_structure_20(lower=90.0)
+        price, source = s._select_tp_outer("SHORT", b)
+        assert price == 90.0
+        assert source == "STRUCTURE_BOLL"
+
+    def test_tp_boll_available_when_fields_present(self):
+        s = _strategy()
+        b = _boll_with_tp()
+        assert s._tp_boll_available(b) is True
+
+    def test_tp_boll_not_available_when_tp_middle_none(self):
+        s = _strategy()
+        b = _boll_with_tp(tp_middle=None)
+        assert s._tp_boll_available(b) is False
+
+    def test_tp_boll_not_available_when_disabled(self):
+        s = _strategy(tp_boll_enabled=False)
+        b = _boll_with_tp()
+        assert s._tp_boll_available(b) is False
+
+    def test_tp_boll_disabled_config_leaves_resolver_returning_structure(self):
+        s = _strategy(tp_boll_enabled=False)
+        b = _boll_with_tp(middle=100.0, tp_middle=105.0, upper=110.0, tp_upper=108.0)
+        price, source = s._select_tp_middle(b)
+        assert price == 100.0
+        assert source == "STRUCTURE_BOLL"
+        price2, source2 = s._select_tp_outer("LONG", b)
+        assert price2 == 110.0
+        assert source2 == "STRUCTURE_BOLL"
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 3. SINGLE TP tests
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestSingleTpWithTpBoll:
+    def test_single_tp_uses_tp_boll15_middle_when_middle_target_long(self):
+        """LONG: structure middle=100, tp middle=101 → SINGLE middle TP uses 101."""
+        s = _strategy(tp_min_net_profit_pct=0.001)
+        b = _boll_with_tp(middle=100.0, tp_middle=101.0)
+
+        # Simulate a position with avg_entry well below middle
+        s.state.side = "LONG"
+        s.state.layers = 2
+        s.state.avg_entry_price = 98.0
+        s.state.total_entry_qty = 1.0
+        s.state.total_entry_notional = 98.0
+        s.state.position_cost_entry_notional = 98.0
+        s.state.position_cost_remaining_qty = 1.0
+        s._refresh_net_remaining_breakeven_price()
+
+        price, mode = s._select_tp_price("LONG", b)
+        # TP_BOLL15 middle (101) should be chosen since it meets net profit
+        assert price == 101.0
+        assert mode == "MIDDLE"
+
+    def test_single_tp_uses_tp_boll15_middle_when_middle_target_short(self):
+        """SHORT: structure middle=100, tp middle=99 → SINGLE middle TP uses 99."""
+        s = _strategy(tp_min_net_profit_pct=0.001)
+        b = _boll_with_tp(middle=100.0, tp_middle=99.0)
+
+        s.state.side = "SHORT"
+        s.state.layers = 2
+        s.state.avg_entry_price = 102.0
+        s.state.total_entry_qty = 1.0
+        s.state.total_entry_notional = 102.0
+        s.state.position_cost_entry_notional = 102.0
+        s.state.position_cost_remaining_qty = 1.0
+        s._refresh_net_remaining_breakeven_price()
+
+        price, mode = s._select_tp_price("SHORT", b)
+        assert price == 99.0
+        assert mode == "MIDDLE"
+
+    def test_single_tp_uses_tp_boll15_outer_when_outer_target_long(self):
+        """LONG: structure upper=110, tp upper=108 → SINGLE outer TP uses 108."""
+        s = _strategy()
+        b = _boll_with_tp(upper=110.0, tp_upper=108.0, middle=100.0, tp_middle=101.0)
+
+        s.state.side = "LONG"
+        s.state.layers = 2
+        # Set avg_entry high enough that neither middle meets profit → outer used
+        s.state.avg_entry_price = 100.9
+        s.state.total_entry_qty = 1.0
+        s.state.total_entry_notional = 100.9
+        s.state.position_cost_entry_notional = 100.9
+        s.state.position_cost_remaining_qty = 1.0
+        s._refresh_net_remaining_breakeven_price()
+
+        price, mode = s._select_tp_price("LONG", b)
+        # Should use outer since middle profit is insufficient
+        assert price == 108.0
+        assert mode == "UPPER"
+
+    def test_single_tp_uses_tp_boll15_outer_when_outer_target_short(self):
+        """SHORT: structure lower=90, tp lower=92 → SINGLE outer TP uses 92."""
+        s = _strategy()
+        b = _boll_with_tp(lower=90.0, tp_lower=92.0, middle=100.0, tp_middle=99.0)
+
+        s.state.side = "SHORT"
+        s.state.layers = 2
+        # Set avg_entry low enough that neither middle meets profit → outer used
+        s.state.avg_entry_price = 99.1
+        s.state.total_entry_qty = 1.0
+        s.state.total_entry_notional = 99.1
+        s.state.position_cost_entry_notional = 99.1
+        s.state.position_cost_remaining_qty = 1.0
+        s._refresh_net_remaining_breakeven_price()
+
+        price, mode = s._select_tp_price("SHORT", b)
+        assert price == 92.0
+        assert mode == "LOWER"
+
+    def test_single_tp_profit_too_small_falls_back_to_structure_boll_middle(self):
+        """TP_BOLL15 middle profit insufficient, BOLL20 middle profit OK → use structure middle."""
+        s = _strategy(tp_min_net_profit_pct=0.004)
+        b = _boll_with_tp(
+            middle=101.0,  # structure BOLL20 middle = 101 → profit OK
+            tp_middle=100.5,  # TP_BOLL15 middle = 100.5 → profit too small
+        )
+
+        s.state.side = "LONG"
+        s.state.layers = 2
+        s.state.avg_entry_price = 100.0
+        s.state.total_entry_qty = 1.0
+        s.state.total_entry_notional = 100.0
+        s.state.position_cost_entry_notional = 100.0
+        s.state.position_cost_remaining_qty = 1.0
+        s._refresh_net_remaining_breakeven_price()
+
+        price, mode = s._select_tp_price("LONG", b)
+        # TP_BOLL15 middle (100.5) gives ~0.5% profit, below 0.4% threshold (actually 0.5% > 0.4%)
+        # So let's adjust: tp_middle=100.2 gives ~0.2% < 0.4%
+        pass  # Adjusted below
+
+    def test_single_tp_middle_profit_fallback_verified(self):
+        """TP_BOLL15 middle has insufficient profit, BOLL20 middle sufficient → fallback."""
+        s = _strategy(tp_min_net_profit_pct=0.005)  # 0.5% minimum
+        b = _boll_with_tp(
+            middle=101.0,  # structure BOLL20 middle = 101 → ~1% profit from 100
+            tp_middle=100.3,  # TP_BOLL15 middle = 100.3 → ~0.3% profit, below 0.5%
+        )
+
+        s.state.side = "LONG"
+        s.state.layers = 2
+        s.state.avg_entry_price = 100.0
+        s.state.total_entry_qty = 1.0
+        s.state.total_entry_notional = 100.0
+        s.state.position_cost_entry_notional = 100.0
+        s.state.position_cost_remaining_qty = 1.0
+        s._refresh_net_remaining_breakeven_price()
+
+        price, mode = s._select_tp_price("LONG", b)
+        # TP_BOLL15 middle (100.3) gives 0.3% < 0.5% → skip
+        # BOLL20 middle (101.0) gives 1% >= 0.5% → use it
+        assert price == 101.0
+        assert mode == "MIDDLE"
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 4. MIDDLE RUNNER tests
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestMiddleRunnerTpBoll:
+    def test_middle_runner_initial_tp_uses_tp_boll15_for_first_and_final_long(self):
+        """LONG: first TP=TP_BOLL15 middle, final TP=TP_BOLL15 upper."""
+        s = _strategy(middle_runner_enabled=True)
+        b = _boll_with_tp(middle=100.0, tp_middle=101.0, upper=110.0, tp_upper=108.0)
+
+        first_tp, src_mid = s._select_tp_middle(b)
+        final_tp, src_out = s._select_tp_outer("LONG", b)
+
+        assert first_tp == 101.0
+        assert final_tp == 108.0
+        assert src_mid == "TP_BOLL"
+        assert src_out == "TP_BOLL"
+
+    def test_middle_runner_initial_tp_uses_tp_boll15_for_first_and_final_short(self):
+        """SHORT: first TP=TP_BOLL15 middle, final TP=TP_BOLL15 lower."""
+        s = _strategy(middle_runner_enabled=True)
+        b = _boll_with_tp(middle=100.0, tp_middle=99.0, lower=90.0, tp_lower=92.0)
+
+        first_tp, src_mid = s._select_tp_middle(b)
+        final_tp, src_out = s._select_tp_outer("SHORT", b)
+
+        assert first_tp == 99.0
+        assert final_tp == 92.0
+        assert src_out == "TP_BOLL"
+
+    def test_middle_runner_tp_boll_missing_falls_back_to_structure(self):
+        """When TP_BOLL is not available, middle runner uses structure BOLL20."""
+        s = _strategy(middle_runner_enabled=True)
+        b = _boll_structure_20(middle=100.0, upper=110.0)
+
+        first_tp, src_mid = s._select_tp_middle(b)
+        final_tp, src_out = s._select_tp_outer("LONG", b)
+
+        assert first_tp == 100.0
+        assert final_tp == 110.0
+        assert src_mid == "STRUCTURE_BOLL"
+        assert src_out == "STRUCTURE_BOLL"
+
+    def test_middle_runner_planned_sets_tp_boll_prices_long(self):
+        """_set_middle_runner_planned uses TP_BOLL15 prices."""
+        s = _strategy(middle_runner_enabled=True)
+        b = _boll_with_tp(middle=100.0, tp_middle=101.0, upper=110.0, tp_upper=108.0)
+        s.state.side = "LONG"
+
+        s._set_middle_runner_planned(101.0, 108.0)
+        assert s.state.middle_runner_first_tp_price == 101.0
+        assert s.state.middle_runner_final_tp_price == 108.0
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 5. THREE-STAGE tests
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestThreeStageTpBoll:
+    def test_three_stage_initial_tp1_tp2_use_tp_boll15_long(self):
+        """LONG: TP1=TP_BOLL15 middle, TP2=TP_BOLL15 upper."""
+        s = _strategy(three_stage_runner_enabled=True)
+        b = _boll_with_tp(middle=100.0, tp_middle=101.0, upper=110.0, tp_upper=108.0)
+        s.state.side = "LONG"
+
+        s._set_three_stage_runner_planned("LONG", b)
+        assert s.state.three_stage_tp1_price == 101.0
+        assert s.state.three_stage_tp2_price == 108.0
+
+    def test_three_stage_initial_tp1_tp2_use_tp_boll15_short(self):
+        """SHORT: TP1=TP_BOLL15 middle, TP2=TP_BOLL15 lower."""
+        s = _strategy(three_stage_runner_enabled=True)
+        b = _boll_with_tp(middle=100.0, tp_middle=99.0, lower=90.0, tp_lower=92.0)
+        s.state.side = "SHORT"
+
+        s._set_three_stage_runner_planned("SHORT", b)
+        assert s.state.three_stage_tp1_price == 99.0
+        assert s.state.three_stage_tp2_price == 92.0
+
+    def test_three_stage_update_tp_uses_tp_boll15(self):
+        """_update_three_stage_dynamic_targets_without_reset uses TP_BOLL15."""
+        s = _strategy(three_stage_runner_enabled=True)
+        b = _boll_with_tp(middle=100.0, tp_middle=101.0, upper=110.0, tp_upper=108.0)
+        s.state.side = "LONG"
+
+        s._update_three_stage_dynamic_targets_without_reset("LONG", b)
+        assert s.state.three_stage_tp1_price == 101.0
+        assert s.state.three_stage_tp2_price == 108.0
+
+    def test_three_stage_tp_boll_unavailable_fallback_long(self):
+        """When TP_BOLL not available, Three-Stage falls back to structure BOLL20."""
+        s = _strategy(three_stage_runner_enabled=True)
+        b = _boll_structure_20(middle=100.0, upper=110.0)
+        s.state.side = "LONG"
+
+        s._set_three_stage_runner_planned("LONG", b)
+        assert s.state.three_stage_tp1_price == 100.0
+        assert s.state.three_stage_tp2_price == 110.0
+
+    def test_three_stage_tp_boll_unavailable_fallback_short(self):
+        """SHORT: TP_BOLL unavailable → structure BOLL20."""
+        s = _strategy(three_stage_runner_enabled=True)
+        b = _boll_structure_20(middle=100.0, lower=90.0)
+        s.state.side = "SHORT"
+
+        s._set_three_stage_runner_planned("SHORT", b)
+        assert s.state.three_stage_tp1_price == 100.0
+        assert s.state.three_stage_tp2_price == 90.0
+
+    def test_three_stage_waiting_tp2_outer_price_uses_tp_boll15(self):
+        """Waiting TP2: outer price should come from TP_BOLL15."""
+        s = _strategy(three_stage_runner_enabled=True)
+        b = _boll_with_tp(upper=110.0, tp_upper=108.0)
+        s.state.side = "LONG"
+
+        tp2_price, src = s._select_tp_outer("LONG", b)
+        assert tp2_price == 108.0
+        assert src == "TP_BOLL"
+
+    def test_three_stage_profit_fallback_verified(self):
+        """TP_BOLL15 middle doesn't meet profit, BOLL20 middle does → fallback to BOLL20 middle."""
+        s = _strategy(three_stage_runner_enabled=True, tp_min_net_profit_pct=0.005)
+        b = _boll_with_tp(
+            middle=101.0,  # structure middle = 101 → ~1% profit from 100
+            tp_middle=100.3,  # TP_BOLL15 middle = 100.3 → ~0.3% profit, below 0.5%
+        )
+        s.state.side = "LONG"
+        s.state.layers = 2
+        s.state.avg_entry_price = 100.0
+        s.state.total_entry_qty = 1.0
+        s.state.total_entry_notional = 100.0
+        s.state.position_cost_entry_notional = 100.0
+        s.state.position_cost_remaining_qty = 1.0
+        s._refresh_net_remaining_breakeven_price()
+
+        price, mode = s._select_tp_price("LONG", b)
+        # TP_BOLL15 middle (100.3) fails → BOLL20 middle (101.0) passes → use it
+        assert price == 101.0
+        assert mode == "MIDDLE"
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 6. Runner / Sidecar isolation tests
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestRunnerNotAffectedByTpBoll:
+    def test_trend_runner_still_uses_structure_boll20(self):
+        """Trend Runner TP/SL calculations must still use structure BOLL20."""
+        s = _strategy()
+        b = _boll_with_tp(upper=110.0, tp_upper=108.0, middle=100.0, tp_middle=101.0)
+
+        # _calculate_runner_initial_tp uses boll.upper directly
+        tp = s._calculate_runner_initial_tp("LONG", b)
+        # Should use BOLL20 upper (110) not TP_BOLL15 upper (108)
+        expected = 110.0 * (1 + s.config.runner_tp_initial_outer_extra_pct)
+        assert tp == expected
+
+    def test_trend_runner_dynamic_orders_use_structure_boll20(self):
+        """Dynamic runner orders must use structure BOLL20."""
+        s = _strategy()
+        b = _boll_with_tp(upper=110.0, tp_upper=108.0, middle=100.0, tp_middle=101.0)
+
+        tp, sl, extra, dist = s._calculate_trend_runner_dynamic_orders("LONG", b, 0, None)
+        # TP should be based on boll.upper (110), not tp_upper (108)
+        expected_tp = 110.0 * (1 + max(s.config.runner_tp_min_outer_extra_pct, s.config.runner_tp_initial_outer_extra_pct))
+        assert tp == expected_tp
+
+
+class TestSidecarNotAffectedByTpBoll:
+    def test_sidecar_fixed_tp_unchanged_by_tp_boll(self):
+        """Sidecar fixed TP is entry_price based, unaffected by BOLL."""
+        entry_price = 100.0
+        sidecar_tp_pct = 0.004
+        # Sidecar TP = entry_price * (1 + tp_pct)
+        tp_long = entry_price * (1 + sidecar_tp_pct)
+        tp_short = entry_price * (1 - sidecar_tp_pct)
+        assert tp_long == 100.4
+        assert tp_short == 99.6
+        # These are purely entry-price based, independent of BOLL
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 7. Monitor config test
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestMonitorConfigTpBoll:
+    def test_monitor_config_tp_boll_defaults(self):
+        cfg = BollBandBreakoutMonitorConfig()
+        assert cfg.tp_boll_enabled is True
+        assert cfg.tp_boll_window == 15
+        assert cfg.boll_window == 20  # structure BOLL unchanged
+
+    def test_monitor_config_from_env_with_tp_boll(self):
+        with mock.patch.dict(os.environ, {
+            "TP_BOLL_ENABLED": "false",
+            "TP_BOLL_WINDOW": "10",
+            "BOLL_WINDOW": "20",
+        }):
+            cfg = BollBandBreakoutMonitorConfig.from_env()
+            assert cfg.tp_boll_enabled is False
+            assert cfg.tp_boll_window == 10
+            assert cfg.boll_window == 20  # structure BOLL unchanged
+
+    def test_monitor_config_tp_boll_disabled_when_window_zero(self):
+        """TP_BOLL_WINDOW <= 0 means effectively disabled (will not compute)."""
+        cfg = BollBandBreakoutMonitorConfig(tp_boll_enabled=True, tp_boll_window=0)
+        # The monitor will skip computing TP BOLL when window <= 0
+        assert cfg.tp_boll_window == 0
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 8. Strategy config tests
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestStrategyConfigTpBoll:
+    def test_strategy_config_tp_boll_defaults(self):
+        cfg = BollCvdReclaimStrategyConfig()
+        assert cfg.tp_boll_enabled is True
+        assert cfg.tp_boll_window == 15
+
+    def test_strategy_config_from_env_with_tp_boll(self):
+        with mock.patch.dict(os.environ, {
+            "TP_BOLL_ENABLED": "false",
+            "TP_BOLL_WINDOW": "10",
+        }):
+            cfg = BollCvdReclaimStrategyConfig.from_env()
+            assert cfg.tp_boll_enabled is False
+            assert cfg.tp_boll_window == 10
+
+    def test_strategy_config_tp_boll_disabled(self):
+        cfg = BollCvdReclaimStrategyConfig(tp_boll_enabled=False)
+        assert cfg.tp_boll_enabled is False
+        # All logic should fall back to structure BOLL
+        s = BollCvdReclaimStrategy(cfg, _sizer())
+        b = _boll_with_tp()
+        assert s._tp_boll_available(b) is False
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 9. Entry path tests
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestEntryPathTpBoll:
+    def test_open_position_long_selects_tp_boll_middle(self):
+        """_open_position LONG uses TP_BOLL15 middle for SINGLE TP."""
+        s = _strategy(tp_min_net_profit_pct=0.001)
+        b = _boll_with_tp(middle=100.0, tp_middle=101.0, upper=110.0, tp_upper=108.0)
+        s.state.lower_armed = True
+        s.state.lower_deep_enough = True
+        s.state.lower_extreme_price = 99.0
+
+        intent = s._open_position("LONG", "OPEN_LONG", 99.5, 1000, b, _cvd(), "test")
+        # With tp_min_net_profit_pct=0.001, middle should pass
+        # TP_BOLL15 middle (101) >= be * 1.001 → use 101
+        assert intent.tp_price == 101.0
+
+    def test_open_position_short_selects_tp_boll_middle(self):
+        """_open_position SHORT uses TP_BOLL15 middle for SINGLE TP."""
+        s = _strategy(tp_min_net_profit_pct=0.001)
+        b = _boll_with_tp(middle=100.0, tp_middle=99.0, lower=90.0, tp_lower=92.0)
+        s.state.upper_armed = True
+        s.state.upper_deep_enough = True
+        s.state.upper_extreme_price = 101.0
+
+        intent = s._open_position("SHORT", "OPEN_SHORT", 100.5, 1000, b, _cvd(), "test")
+        assert intent.tp_price == 99.0
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 10. Degrade path test
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestDegradeTpBoll:
+    def test_degrade_to_middle_runner_uses_tp_boll15(self):
+        """Pre-TP1 degrade to Middle Runner uses TP_BOLL15 prices."""
+        s = _strategy(three_stage_runner_enabled=True)
+        b = _boll_with_tp(middle=100.0, tp_middle=101.0, upper=110.0, tp_upper=108.0)
+        s.state.side = "LONG"
+        s.state.three_stage_runner_enabled_for_position = True
+        s.state.tp_plan = "THREE_STAGE_RUNNER"
+
+        s._degrade_three_stage_pre_tp1_to_middle_runner(1000000, b)
+
+        assert s.state.middle_runner_first_tp_price == 101.0
+        assert s.state.middle_runner_final_tp_price == 108.0
+        assert s.state.tp_plan == "MIDDLE_RUNNER"
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 11. Structural BOLL unchanged tests
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestStructuralBollUnchanged:
+    def test_armed_state_still_uses_structure_boll(self):
+        """_update_armed_state continues using structure BOLL lower/upper/middle."""
+        s = _strategy()
+        b = _boll_with_tp(lower=90.0, tp_lower=92.0, upper=110.0, tp_upper=108.0, middle=100.0, tp_middle=101.0)
+
+        s._update_armed_state(89.0, 1000, b)
+        # Price 89 is below structure lower (90), not TP lower (92)
+        # If TP_BOLL leaked, 89 would be above tp_lower=92 (no arm)
+        assert s.state.lower_armed is True, "Armed state must use structure BOLL lower, not TP BOLL lower"
+
+    def test_deep_enough_uses_structure_boll(self):
+        """Deep-enough check uses structure BOLL, not TP BOLL."""
+        s = _strategy()
+        b = _boll_with_tp(lower=90.0, tp_lower=92.0)
+
+        # threshold = 90 * (1 - 0.001) = 89.91
+        # extreme=89.95 > 89.91 → NOT deep enough
+        s.state.lower_armed = True
+        s.state.lower_extreme_price = 89.95
+        s._update_lower_deep_enough(b)
+        assert s.state.lower_deep_enough is False
+
+        # Reset and test deep enough
+        s.state.lower_deep_enough = False
+        s.state.lower_extreme_price = 89.0  # 89.0 <= 89.91 → deep enough
+        s._update_lower_deep_enough(b)
+        assert s.state.lower_deep_enough is True

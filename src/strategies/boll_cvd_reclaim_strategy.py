@@ -119,6 +119,10 @@ class BollCvdReclaimStrategyConfig:
     three_stage_pre_tp1_degrade_enabled: bool = True
     three_stage_pre_tp1_middle_runner_after_seconds: int = 10800
     three_stage_pre_tp1_single_after_seconds: int = 21600
+    # TP-only BOLL window (15) used exclusively for take-profit prices.
+    # BOLL_WINDOW=20 remains the structure window for entry/add/risk/SL/runner.
+    tp_boll_enabled: bool = True
+    tp_boll_window: int = 15
 
     def __post_init__(self) -> None:
         if (
@@ -218,6 +222,8 @@ class BollCvdReclaimStrategyConfig:
             three_stage_pre_tp1_degrade_enabled=_env_bool("THREE_STAGE_PRE_TP1_DEGRADE_ENABLED", True),
             three_stage_pre_tp1_middle_runner_after_seconds=int(os.getenv("THREE_STAGE_PRE_TP1_MIDDLE_RUNNER_AFTER_SECONDS", "10800")),
             three_stage_pre_tp1_single_after_seconds=int(os.getenv("THREE_STAGE_PRE_TP1_SINGLE_AFTER_SECONDS", "21600")),
+            tp_boll_enabled=_env_bool("TP_BOLL_ENABLED", True),
+            tp_boll_window=int(os.getenv("TP_BOLL_WINDOW", "15")),
         )
 
 
@@ -987,9 +993,9 @@ class BollCvdReclaimStrategy:
         tp_price, tp_mode = self._select_tp_price(side, boll)
         partial_tp_price, partial_tp_ratio, tp_plan = self._select_tp_plan(side, tp_price, next_layer, tp_mode=tp_mode, boll=boll)
         if tp_plan == "MIDDLE_RUNNER":
-            tp_price = boll.upper if side == "LONG" else boll.lower
+            tp_price, _tp_src = self._select_tp_outer(side, boll)
         if tp_plan == "THREE_STAGE_RUNNER":
-            tp_price = boll.upper if side == "LONG" else boll.lower
+            tp_price, _tp_src = self._select_tp_outer(side, boll)
         if tp_mode != "MIDDLE":
             reason = f"{reason} + 中轨净利润不足阈值，TP切换到{tp_mode}"
         if tp_plan == "SPLIT_PARTIAL_FINAL":
@@ -1039,6 +1045,18 @@ class BollCvdReclaimStrategy:
                 f"{self.state.trend_runner_sl_price:.4f}" if self.state.trend_runner_sl_price is not None else "-",
                 self.state.three_stage_runner_ratio,
             )
+        self._log_tp_boll_price_selected(
+            phase="initial",
+            boll=boll,
+            tp_price=tp_price,
+            tp_mode=tp_mode,
+            tp_plan=tp_plan,
+            partial_tp_price=partial_tp_price,
+            tp1_price=self.state.three_stage_tp1_price if tp_plan == "THREE_STAGE_RUNNER" else None,
+            tp2_price=self.state.three_stage_tp2_price if tp_plan == "THREE_STAGE_RUNNER" else None,
+            first_tp_price=self.state.middle_runner_first_tp_price if tp_plan == "MIDDLE_RUNNER" else None,
+            final_tp_price=self.state.middle_runner_final_tp_price if tp_plan == "MIDDLE_RUNNER" else None,
+        )
         return self._intent(intent_type, side, price, next_layer, tp_price, reason, size, boll, cvd, ts_ms)
 
     def _maybe_update_tp(self, price: float, ts_ms: int, boll: BollSnapshot, cvd: CvdSnapshot) -> TradeIntent | None:
@@ -1067,7 +1085,7 @@ class BollCvdReclaimStrategy:
         if self._three_stage_waiting_tp2():
             old_post_tp1_sl = self.state.three_stage_post_tp1_protective_sl_price
             old_tp2_price = self.state.three_stage_tp2_price
-            new_tp2_price = boll.upper if self.state.side == "LONG" else boll.lower
+            new_tp2_price, _tp2_src = self._select_tp_outer(self.state.side, boll)
             if self.config.three_stage_post_tp1_protective_sl_enabled:
                 self._advance_runner_sl_time_tighten_candle_count(
                     target="three_stage_post_tp1",
@@ -1103,6 +1121,14 @@ class BollCvdReclaimStrategy:
                     boll.candle_ts_ms,
                     force_reconcile,
                 )
+                self._log_tp_boll_price_selected(
+                    phase="waiting_tp2_dynamic",
+                    boll=boll,
+                    tp_price=new_tp2_price,
+                    tp_mode="UPPER" if self.state.side == "LONG" else "LOWER",
+                    tp_plan="THREE_STAGE_RUNNER",
+                    tp2_price=new_tp2_price,
+                )
                 return self._intent("UPDATE_TP", self.state.side, price, self.state.layers, new_tp2_price, reason_text, size, boll, cvd, ts_ms)
             self.state.startup_force_tp_reconcile = False
             logger.info(
@@ -1126,7 +1152,7 @@ class BollCvdReclaimStrategy:
         # sufficient net profit relative to the effective breakeven.
         # Exceptions: already-executed stages (TP1 consumed, runner active).
         if tp_mode != "MIDDLE":
-            outer = boll.upper if self.state.side == "LONG" else boll.lower
+            outer, _outer_src = self._select_tp_outer(self.state.side, boll)
             outer_mode: TpMode = "UPPER" if self.state.side == "LONG" else "LOWER"
             effective_be = self._effective_breakeven_for_tp_selection(self.state.side)
             min_profit = self.config.tp_min_net_profit_pct
@@ -1239,7 +1265,7 @@ class BollCvdReclaimStrategy:
             reason_override = "three_stage_pre_tp1_degraded_to_single"
         elif degrade_target == "MIDDLE_RUNNER":
             self._degrade_three_stage_pre_tp1_to_middle_runner(ts_ms, boll)
-            tp_price = self.state.tp_price or (boll.upper if self.state.side == "LONG" else boll.lower)
+            tp_price = self.state.tp_price or self._select_tp_outer(self.state.side, boll)[0]
             tp_mode = self.state.tp_mode
             partial_tp_price = self.state.partial_tp_price
             partial_tp_ratio = self.state.partial_tp_ratio
@@ -1272,7 +1298,7 @@ class BollCvdReclaimStrategy:
             else:
                 tp_price = self.state.trend_runner_tp_price or tp_price
         elif self.state.middle_runner_active:
-            tp_price = boll.upper if self.state.side == "LONG" else boll.lower
+            tp_price, _tp_src = self._select_tp_outer(self.state.side, boll)
             tp_mode = "UPPER" if self.state.side == "LONG" else "LOWER"
             partial_tp_price, partial_tp_ratio, tp_plan = None, 0.0, "SINGLE"
             self._advance_runner_sl_time_tighten_candle_count(
@@ -1285,17 +1311,17 @@ class BollCvdReclaimStrategy:
             self.state.middle_runner_final_tp_price = tp_price
             self.state.middle_runner_protective_sl_price = protective_sl
         elif self.state.middle_runner_pending:
-            tp_price = boll.upper if self.state.side == "LONG" else boll.lower
+            tp_price, _tp_src = self._select_tp_outer(self.state.side, boll)
             tp_mode = "UPPER" if self.state.side == "LONG" else "LOWER"
-            partial_tp_price = boll.middle
+            partial_tp_price, _ptp_src = self._select_tp_middle(boll)
             partial_tp_ratio = self.state.middle_runner_first_close_ratio or min(max(self.config.middle_runner_first_close_ratio, 0.1), 0.95)
             tp_plan = "MIDDLE_RUNNER"
             self.state.middle_runner_first_tp_price = partial_tp_price
             self.state.middle_runner_final_tp_price = tp_price
         elif self.state.three_stage_runner_enabled_for_position and not self.state.trend_runner_active:
-            tp_price = boll.upper if self.state.side == "LONG" else boll.lower
+            tp_price, _tp_src = self._select_tp_outer(self.state.side, boll)
             tp_mode = "UPPER" if self.state.side == "LONG" else "LOWER"
-            partial_tp_price = boll.middle
+            partial_tp_price, _ptp_src = self._select_tp_middle(boll)
             self._update_three_stage_dynamic_targets_without_reset(self.state.side, boll)
             tp1_ratio = self.state.three_stage_tp1_ratio
             partial_tp_ratio = tp1_ratio
@@ -1305,9 +1331,9 @@ class BollCvdReclaimStrategy:
         else:
             partial_tp_price, partial_tp_ratio, tp_plan = self._select_tp_plan(self.state.side, tp_price, self.state.layers, tp_mode=tp_mode, boll=boll)
             if tp_plan == "MIDDLE_RUNNER":
-                tp_price = boll.upper if self.state.side == "LONG" else boll.lower
+                tp_price, _tp_src = self._select_tp_outer(self.state.side, boll)
             if tp_plan == "THREE_STAGE_RUNNER":
-                tp_price = boll.upper if self.state.side == "LONG" else boll.lower
+                tp_price, _tp_src = self._select_tp_outer(self.state.side, boll)
             if tp_plan == "MIDDLE_RUNNER":
                 self._set_middle_runner_planned(partial_tp_price, tp_price)
             elif tp_plan == "THREE_STAGE_RUNNER":
@@ -1399,6 +1425,18 @@ class BollCvdReclaimStrategy:
             tp_price,
             force_reconcile,
         )
+        self._log_tp_boll_price_selected(
+            phase="waiting_tp2" if self._three_stage_waiting_tp2() else "update",
+            boll=boll,
+            tp_price=tp_price,
+            tp_mode=tp_mode,
+            tp_plan=tp_plan,
+            partial_tp_price=partial_tp_price,
+            tp1_price=self.state.three_stage_tp1_price if tp_plan == "THREE_STAGE_RUNNER" else None,
+            tp2_price=self.state.three_stage_tp2_price if tp_plan == "THREE_STAGE_RUNNER" else None,
+            first_tp_price=self.state.middle_runner_first_tp_price if tp_plan == "MIDDLE_RUNNER" else None,
+            final_tp_price=self.state.middle_runner_final_tp_price if tp_plan == "MIDDLE_RUNNER" else None,
+        )
         return self._intent("UPDATE_TP", self.state.side, price, self.state.layers, tp_price, reason_text, size, boll, cvd, ts_ms)
 
     def _three_stage_pre_tp1_age_seconds(self, ts_ms: int) -> float:
@@ -1446,8 +1484,8 @@ class BollCvdReclaimStrategy:
         old_tp2 = self.state.three_stage_tp2_price
         old_tp_plan = self.state.tp_plan
         age_seconds = self._three_stage_pre_tp1_age_seconds(ts_ms)
-        final_tp = boll.upper if self.state.side == "LONG" else boll.lower
-        first_tp = boll.middle
+        final_tp, _tp_src = self._select_tp_outer(self.state.side, boll)
+        first_tp, _first_src = self._select_tp_middle(boll)
 
         self._reset_three_stage_runner_state()
         self._set_middle_runner_planned(first_tp, final_tp)
@@ -2012,9 +2050,11 @@ class BollCvdReclaimStrategy:
 
     def _set_three_stage_runner_planned(self, side: PositionSide, boll: BollSnapshot) -> None:
         tp1_ratio, tp2_ratio, runner_ratio = self._normalized_three_stage_ratios()
+        tp_mid, _tp_mid_src = self._select_tp_middle(boll)
+        tp_outer, _tp_outer_src = self._select_tp_outer(side, boll)
         self.state.three_stage_runner_enabled_for_position = True
-        self.state.three_stage_tp1_price = boll.middle
-        self.state.three_stage_tp2_price = boll.upper if side == "LONG" else boll.lower
+        self.state.three_stage_tp1_price = tp_mid
+        self.state.three_stage_tp2_price = tp_outer
         self.state.three_stage_runner_initial_tp_price = None
         self.state.three_stage_tp1_ratio = tp1_ratio
         self.state.three_stage_tp2_ratio = tp2_ratio
@@ -2039,9 +2079,11 @@ class BollCvdReclaimStrategy:
 
     def _update_three_stage_dynamic_targets_without_reset(self, side: PositionSide, boll: BollSnapshot) -> None:
         tp1_ratio, tp2_ratio, runner_ratio = self._normalized_three_stage_ratios()
+        tp_mid, _tp_mid_src = self._select_tp_middle(boll)
+        tp_outer, _tp_outer_src = self._select_tp_outer(side, boll)
         self.state.three_stage_runner_enabled_for_position = True
-        self.state.three_stage_tp1_price = boll.middle
-        self.state.three_stage_tp2_price = boll.upper if side == "LONG" else boll.lower
+        self.state.three_stage_tp1_price = tp_mid
+        self.state.three_stage_tp2_price = tp_outer
         self.state.three_stage_tp1_ratio = tp1_ratio
         self.state.three_stage_tp2_ratio = tp2_ratio
         self.state.three_stage_runner_ratio = runner_ratio
@@ -2568,6 +2610,105 @@ class BollCvdReclaimStrategy:
         self.state.three_stage_post_tp1_sl_extension_triggered = True
         return new_sl
 
+    # ── TP BOLL resolver ──────────────────────────────────────────────
+    # Centralised helpers that select the correct price source for every
+    # TP price calculation.  All TP prices MUST flow through these methods
+    # so that TP_BOLL_WINDOW=15 is applied consistently and the fallback
+    # to structure BOLL20 is automatic.
+
+    def _tp_boll_available(self, boll: BollSnapshot) -> bool:
+        """True when a valid TP-only BOLL snapshot is present."""
+        return (
+            self.config.tp_boll_enabled
+            and getattr(boll, "tp_middle", None) is not None
+            and getattr(boll, "tp_upper", None) is not None
+            and getattr(boll, "tp_lower", None) is not None
+        )
+
+    def _select_tp_middle(self, boll: BollSnapshot) -> tuple[float, str]:
+        """Return (middle_price, source) preferring TP_BOLL15 middle."""
+        if self._tp_boll_available(boll):
+            return float(boll.tp_middle), "TP_BOLL"  # type: ignore[arg-type]
+        return float(boll.middle), "STRUCTURE_BOLL"
+
+    def _select_tp_outer(self, side: PositionSide, boll: BollSnapshot) -> tuple[float, str]:
+        """Return (outer_price, source) for the given side."""
+        if self._tp_boll_available(boll):
+            if side == "LONG":
+                return float(boll.tp_upper), "TP_BOLL"  # type: ignore[arg-type]
+            return float(boll.tp_lower), "TP_BOLL"  # type: ignore[arg-type]
+        if side == "LONG":
+            return float(boll.upper), "STRUCTURE_BOLL"
+        return float(boll.lower), "STRUCTURE_BOLL"
+
+    def _log_tp_boll_price_selected(
+        self,
+        *,
+        phase: str,
+        boll: BollSnapshot,
+        tp_price: float,
+        tp_mode: TpMode,
+        tp_plan: TpPlan,
+        partial_tp_price: float | None = None,
+        tp1_price: float | None = None,
+        tp2_price: float | None = None,
+        first_tp_price: float | None = None,
+        final_tp_price: float | None = None,
+    ) -> None:
+        """Log TP_BOLL_PRICE_SELECTED at initial TP gen or 15m UPDATE_TP only."""
+        tp_boll_avail = self._tp_boll_available(boll)
+        tp_mid, tp_mid_src = self._select_tp_middle(boll)
+        tp_outer, tp_outer_src = self._select_tp_outer(self.state.side or "LONG", boll)
+
+        # Determine the effective TP price sources
+        if tp_plan in ("THREE_STAGE_RUNNER", "MIDDLE_RUNNER"):
+            middle_source = tp_mid_src
+            outer_source = tp_outer_src
+        elif tp_mode == "MIDDLE":
+            middle_source = tp_mid_src
+            outer_source = "N/A"
+        elif tp_mode in ("UPPER", "LOWER"):
+            middle_source = "N/A"
+            outer_source = tp_outer_src
+        else:
+            middle_source = "N/A"
+            outer_source = "N/A"
+
+        tp_mid_str = f"{boll.tp_middle:.4f}" if tp_boll_avail and boll.tp_middle is not None else "-"
+        tp_up_str = f"{boll.tp_upper:.4f}" if tp_boll_avail and boll.tp_upper is not None else "-"
+        tp_lo_str = f"{boll.tp_lower:.4f}" if tp_boll_avail and boll.tp_lower is not None else "-"
+
+        tp1_str = (
+            f"{tp1_price:.4f}" if tp1_price is not None
+            else f"{first_tp_price:.4f}" if first_tp_price is not None
+            else f"{partial_tp_price:.4f}" if partial_tp_price is not None
+            else "-"
+        )
+        tp2_str = (
+            f"{tp2_price:.4f}" if tp2_price is not None
+            else f"{final_tp_price:.4f}" if final_tp_price is not None
+            else "-"
+        )
+
+        reason = "available" if tp_boll_avail else "fallback_structure_boll"
+
+        logger.info(
+            "TP_BOLL_PRICE_SELECTED | mode=%s phase=%s side=%s tp_boll_enabled=%s "
+            "tp_window=%s tp1_source=%s tp2_source=%s tp_price_source=%s "
+            "structure_middle=%.4f structure_upper=%.4f structure_lower=%.4f "
+            "tp_middle=%s tp_upper=%s tp_lower=%s "
+            "final_tp1_price=%s final_tp2_price=%s final_tp_price=%.4f "
+            "reason=tp_boll_%s",
+            tp_plan, phase, self.state.side or "-", self.config.tp_boll_enabled,
+            boll.tp_window if tp_boll_avail else "-",
+            middle_source, outer_source,
+            outer_source if tp_plan == "SINGLE" else middle_source,
+            boll.middle, boll.upper, boll.lower,
+            tp_mid_str, tp_up_str, tp_lo_str,
+            tp1_str, tp2_str, tp_price,
+            reason,
+        )
+
     def _effective_breakeven_for_tp_selection(self, side: PositionSide) -> float:
         net_be = float(getattr(self.state, "net_remaining_breakeven_price", 0.0) or 0.0)
         if net_be > 0:
@@ -2581,22 +2722,45 @@ class BollCvdReclaimStrategy:
         return avg * (1 - fee)
 
     def _select_tp_price(self, side: PositionSide, boll: BollSnapshot) -> tuple[float, TpMode]:
+        """Select TP price preferring TP_BOLL15, with fallback to structure BOLL20.
+
+        The profit-distance check is preserved exactly as before; only the price
+        *candidate* source changes.
+        """
         effective_be = self._effective_breakeven_for_tp_selection(side)
         if effective_be <= 0:
-            return boll.middle, "MIDDLE"
+            return float(boll.middle), "MIDDLE"
         min_net_profit = self.config.tp_min_net_profit_pct
-        fee = self.config.breakeven_fee_buffer_pct
+
         if side == "LONG":
             self.state.breakeven_price = effective_be
             middle_required_price = effective_be * (1 + min_net_profit)
-            if boll.middle < middle_required_price:
-                return boll.upper, "UPPER"
-            return boll.middle, "MIDDLE"
+
+            # 1) Try TP_BOLL15 middle
+            tp_mid, _tp_mid_src = self._select_tp_middle(boll)
+            if tp_mid >= middle_required_price:
+                return tp_mid, "MIDDLE"
+
+            # 2) Fallback to structure BOLL20 middle
+            if boll.middle >= middle_required_price:
+                return float(boll.middle), "MIDDLE"
+
+            # 3) Neither middle works — outer (TP_BOLL15 preferred)
+            tp_outer, _tp_outer_src = self._select_tp_outer(side, boll)
+            return tp_outer, "UPPER"
+
         self.state.breakeven_price = effective_be
         middle_required_price = effective_be * (1 - min_net_profit)
-        if boll.middle > middle_required_price:
-            return boll.lower, "LOWER"
-        return boll.middle, "MIDDLE"
+
+        tp_mid, _tp_mid_src = self._select_tp_middle(boll)
+        if tp_mid <= middle_required_price:
+            return tp_mid, "MIDDLE"
+
+        if boll.middle <= middle_required_price:
+            return float(boll.middle), "MIDDLE"
+
+        tp_outer, _tp_outer_src = self._select_tp_outer(side, boll)
+        return tp_outer, "LOWER"
 
     def _select_tp_plan(
         self,
@@ -2612,16 +2776,19 @@ class BollCvdReclaimStrategy:
         if self.state.three_stage_pre_tp1_degrade_stage == "MIDDLE_RUNNER":
             if tp_mode == "MIDDLE" and boll is not None:
                 first_close_ratio = min(max(self.config.middle_runner_first_close_ratio, 0.1), 0.95)
-                return boll.middle, first_close_ratio, "MIDDLE_RUNNER"
+                tp_mid, _tp_mid_src = self._select_tp_middle(boll)
+                return tp_mid, first_close_ratio, "MIDDLE_RUNNER"
             return None, 0.0, "SINGLE"
         if self._three_stage_runner_plan_allowed(tp_mode, boll):
             tp1_ratio, _tp2_ratio, _runner_ratio = self._normalized_three_stage_ratios()
-            return boll.middle, tp1_ratio, "THREE_STAGE_RUNNER"
+            tp_mid, _tp_mid_src = self._select_tp_middle(boll)
+            return tp_mid, tp1_ratio, "THREE_STAGE_RUNNER"
         if self.config.three_stage_runner_enabled:
             return None, 0.0, "SINGLE"
         if self._middle_runner_plan_allowed(tp_mode, boll):
             first_close_ratio = min(max(self.config.middle_runner_first_close_ratio, 0.1), 0.95)
-            return boll.middle, first_close_ratio, "MIDDLE_RUNNER"
+            tp_mid, _tp_mid_src = self._select_tp_middle(boll)
+            return tp_mid, first_close_ratio, "MIDDLE_RUNNER"
         if tp_mode != "MIDDLE":
             return None, 0.0, "SINGLE"
         if not self.config.split_tp_enabled:
