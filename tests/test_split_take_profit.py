@@ -8,12 +8,10 @@ from pathlib import Path
 from types import MethodType
 from unittest.mock import patch
 
-from scripts.run_boll_cvd_live import (
-    middle_runner_size_mismatch_needs_degraded_protection,
-)
 from src.execution.trader import PositionSnapshot, Trader
 from src.indicators.cvd_tracker import CvdSnapshot
 from src.monitors.boll_band_breakout_monitor import BollSnapshot
+from src.position_management.runner_live_helpers import middle_runner_size_mismatch_needs_degraded_protection
 from src.reporting.trade_journal import LiveTradeJournal
 from src.risk.simple_position_sizer import PositionSize, SimplePositionSizer, SimplePositionSizerConfig
 from src.position_management.tp_progress import (

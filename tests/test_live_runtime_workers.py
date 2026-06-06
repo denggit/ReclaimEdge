@@ -21,11 +21,9 @@ if importlib.util.find_spec("dotenv") is None:
 
 from scripts.run_boll_cvd_live import (  # noqa: E402
     account_position_sync_worker,
-    apply_three_stage_startup_safety_gate,
     execution_worker,
     restore_strategy_from_position,
     strategy_tick_worker,
-    three_stage_post_tp1_current_price,
     trusted_startup_saved_state,
 )
 from src.execution.trader import LiveTradeResult, PositionSnapshot  # noqa: E402
@@ -40,6 +38,10 @@ from src.live.runtime_types import AccountSnapshot, ExecutionState, TradeCommand
 from src.live.time_utils import next_weekly_summary_time  # noqa: E402
 from src.indicators.cvd_tracker import CvdSnapshot  # noqa: E402
 from src.monitors.boll_band_breakout_monitor import BollSnapshot, MarketTickEvent, TradeTick  # noqa: E402
+from src.position_management.runner_live_helpers import (  # noqa: E402
+    apply_three_stage_startup_safety_gate,
+    three_stage_post_tp1_current_price,
+)
 from src.position_management.tp_progress import (  # noqa: E402
     mark_middle_runner_active_if_position_reduced,
     mark_three_stage_progress_if_position_reduced,
@@ -560,7 +562,7 @@ class LiveRuntimeWorkerTest(unittest.IsolatedAsyncioTestCase):
         account_snapshot = AccountSnapshot(None, 100.0, 100.0, asyncio.get_running_loop().time(), 0, 1)
         execution_state = ExecutionState("pos-1", 100.0)
 
-        with self.assertLogs("scripts.run_boll_cvd_live", level="WARNING") as logs:
+        with self.assertLogs("src.position_management.runner_live_helpers", level="WARNING") as logs:
             await self.run_account_sync_until(
                 lambda: len(trader.post_tp1_stop_orders) == 1,
                 account_snapshot=account_snapshot,
@@ -797,7 +799,7 @@ class LiveRuntimeWorkerTest(unittest.IsolatedAsyncioTestCase):
         position = PositionSnapshot("LONG", Decimal("4"), 100.0, 0.4, Decimal("4"))
 
         with patch.dict(os.environ, {"LATEST_MARKET_PRICE_MAX_AGE_SECONDS": "30"}):
-            with self.assertLogs("scripts.run_boll_cvd_live", level="WARNING") as logs:
+            with self.assertLogs("src.position_management.runner_live_helpers", level="WARNING") as logs:
                 current_price, source = three_stage_post_tp1_current_price(account_snapshot, position, boll(), now_ms=100_000)
 
         self.assertEqual(current_price, 100.0)
