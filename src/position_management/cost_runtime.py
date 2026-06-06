@@ -96,20 +96,40 @@ def record_core_position_reduction_exit(
     price = float(exit_price or 0.0)
     if price <= 0:
         return
+
+    total_entry_qty = float(getattr(strategy_state, "total_entry_qty", 0.0) or 0.0)
     new_remaining_qty = remaining_total_qty_from_core_position(strategy_state, core_position)
     old_remaining_qty = float(getattr(strategy_state, "position_cost_remaining_qty", 0.0) or 0.0)
-    if expected_remaining_qty is not None and old_remaining_qty > expected_remaining_qty > new_remaining_qty:
-        qty = old_remaining_qty - expected_remaining_qty
+
+    if expected_remaining_qty is not None and expected_remaining_qty > new_remaining_qty:
+        # Simultaneous TP1+TP2: position was reduced by both TP1 and TP2
+        # in the same fill.  Compute TP1's reduction directly from
+        # total_entry_qty and the caller-supplied expected_remaining_qty,
+        # excluding sidecar open qty from the core reduction.
+        sidecar_qty_from_state = sidecar_open_qty(
+            list(getattr(strategy_state, "sidecar_legs", []) or [])
+        )
+        expected_core_remaining = max(expected_remaining_qty - sidecar_qty_from_state, 0.0)
+        reduced_qty = max(total_entry_qty - expected_core_remaining, 0.0)
         remaining_qty = expected_remaining_qty
     else:
-        qty = old_remaining_qty - new_remaining_qty
+        # Normal single reduction (or TP2 after TP1 in a previous cycle).
+        # Use tracked state for chaining correctness, but clamp to prevent
+        # inflation from stale state drift.
+        reduced_qty = max(old_remaining_qty - new_remaining_qty, 0.0)
+        max_reduced_qty = max(
+            total_entry_qty - float(core_position.eth_qty or 0.0), 0.0
+        )
+        if reduced_qty > max_reduced_qty:
+            reduced_qty = max_reduced_qty
+        # Also clamp: reduced_qty must not be less than 0
+        if reduced_qty <= 0:
+            reduced_qty = max_reduced_qty
         remaining_qty = new_remaining_qty
-    if qty <= 0:
-        total_entry_qty = float(getattr(strategy_state, "total_entry_qty", 0.0) or 0.0)
-        qty = max(total_entry_qty - float(core_position.eth_qty or 0.0), 0.0)
+
     record_remaining_exit_notional(
         strategy_state,
-        qty=qty,
+        qty=reduced_qty,
         price=price,
         remaining_qty=remaining_qty,
         fee_buffer_pct=fee_buffer_pct,

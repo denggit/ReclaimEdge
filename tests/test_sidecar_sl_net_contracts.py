@@ -289,9 +289,9 @@ class SidecarSLNetContractsTest(unittest.IsolatedAsyncioTestCase):
         placed_events = [e for e in journal.events if e[0] == "THREE_STAGE_TP1_PROTECTIVE_SL_PLACED"]
         self.assertEqual(len(placed_events), 1)
         pp = placed_events[0][1]
-        self.assertEqual(str(pp.get("core_contracts")), str(core_contracts))
-        self.assertEqual(str(pp.get("net_contracts")), str(net_contracts))
-        self.assertEqual(str(pp.get("sl_contracts")), str(net_contracts))
+        self.assertEqual(float(pp.get("core_contracts")), float(core_contracts))
+        self.assertEqual(float(pp.get("net_contracts")), float(net_contracts))
+        self.assertEqual(float(pp.get("sl_contracts")), float(net_contracts))
 
     # ── Test 2: Middle Runner partial TP SL uses net contracts ─────────
 
@@ -330,9 +330,9 @@ class SidecarSLNetContractsTest(unittest.IsolatedAsyncioTestCase):
                          if e[0] in ("MIDDLE_RUNNER_ACTIVATED", "MIDDLE_RUNNER_SIZE_MISMATCH_PROTECTED")]
         self.assertGreaterEqual(len(placed_events), 1)
         pp = placed_events[0][1]
-        self.assertEqual(str(pp.get("core_contracts")), str(core_contracts))
-        self.assertEqual(str(pp.get("net_contracts")), str(net_contracts))
-        self.assertEqual(str(pp.get("sl_contracts")), str(net_contracts))
+        self.assertEqual(float(pp.get("core_contracts")), float(core_contracts))
+        self.assertEqual(float(pp.get("net_contracts")), float(net_contracts))
+        self.assertEqual(float(pp.get("sl_contracts")), float(net_contracts))
 
     # ── Test 3: Three-Stage TP1 SL SHORT side ──────────────────────────
 
@@ -399,8 +399,8 @@ class SidecarSLNetContractsTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("core_contracts", pp)
         self.assertIn("net_contracts", pp)
         self.assertIn("sl_contracts", pp)
-        self.assertEqual(str(pp["core_contracts"]), str(core_contracts))
-        self.assertEqual(str(pp["net_contracts"]), str(net_contracts))
+        self.assertEqual(float(pp["core_contracts"]), float(core_contracts))
+        self.assertEqual(float(pp["net_contracts"]), float(net_contracts))
 
     # ── Test 5: Middle Runner SL journal includes core_contracts / net_contracts ──
 
@@ -499,9 +499,9 @@ class SidecarSLNetContractsTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("core_contracts", pp)
         self.assertIn("net_contracts", pp)
         self.assertIn("sl_contracts", pp)
-        self.assertEqual(str(pp.get("core_contracts")), str(core_contracts))
-        self.assertEqual(str(pp.get("net_contracts")), str(net_contracts))
-        self.assertEqual(str(pp.get("sl_contracts")), str(net_contracts))
+        self.assertEqual(float(pp.get("core_contracts")), float(core_contracts))
+        self.assertEqual(float(pp.get("net_contracts")), float(net_contracts))
+        self.assertEqual(float(pp.get("sl_contracts")), float(net_contracts))
 
     # ── Test 7: side missing from payload is handled defensively ─────────
 
@@ -626,7 +626,7 @@ class SidecarSLNetContractsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(placed_events), 1,
                          "SL placed event must be journaled even with pending orders")
         pp = placed_events[0][1]
-        self.assertEqual(str(pp.get("contracts")), str(net_contracts))
+        self.assertEqual(float(pp.get("contracts")), float(net_contracts))
         self.assertIn("core_contracts", pp)
         self.assertIn("net_contracts", pp)
 

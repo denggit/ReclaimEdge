@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+from src.utils import to_json_safe
+
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_JOURNAL_PATH = ROOT / "data" / "trade_journal" / "live_trade_events.jsonl"
 DEFAULT_SUMMARY_PATH = ROOT / "data" / "trade_journal" / "live_trade_summary.jsonl"
@@ -140,7 +142,7 @@ class LiveTradeJournal:
             event_type=event_type,
             ts_iso=utc_now_iso(),
             position_id=position_id,
-            payload=payload,
+            payload=to_json_safe(dict(payload)),
         )
         with self.path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(asdict(event), ensure_ascii=False, separators=(",", ":")) + "\n")
