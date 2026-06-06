@@ -325,28 +325,6 @@ class TestSingleTpWithTpBoll:
         assert price == 92.0
         assert mode == "LOWER"
 
-    def test_single_tp_profit_too_small_falls_back_to_structure_boll_middle(self):
-        """TP_BOLL15 middle profit insufficient, BOLL20 middle profit OK → use structure middle."""
-        s = _strategy(tp_min_net_profit_pct=0.004)
-        b = _boll_with_tp(
-            middle=101.0,  # structure BOLL20 middle = 101 → profit OK
-            tp_middle=100.5,  # TP_BOLL15 middle = 100.5 → profit too small
-        )
-
-        s.state.side = "LONG"
-        s.state.layers = 2
-        s.state.avg_entry_price = 100.0
-        s.state.total_entry_qty = 1.0
-        s.state.total_entry_notional = 100.0
-        s.state.position_cost_entry_notional = 100.0
-        s.state.position_cost_remaining_qty = 1.0
-        s._refresh_net_remaining_breakeven_price()
-
-        price, mode = s._select_tp_price("LONG", b)
-        # TP_BOLL15 middle (100.5) gives ~0.5% profit, below 0.4% threshold (actually 0.5% > 0.4%)
-        # So let's adjust: tp_middle=100.2 gives ~0.2% < 0.4%
-        pass  # Adjusted below
-
     def test_single_tp_middle_profit_fallback_verified(self):
         """TP_BOLL15 middle has insufficient profit, BOLL20 middle sufficient → fallback."""
         s = _strategy(tp_min_net_profit_pct=0.005)  # 0.5% minimum
@@ -691,3 +669,292 @@ class TestStructuralBollUnchanged:
         s.state.lower_extreme_price = 89.0  # 89.0 <= 89.91 → deep enough
         s._update_lower_deep_enough(b)
         assert s.state.lower_deep_enough is True
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 12. Profit fallback tests (TP_BOLL15 middle profit insufficient)
+# ═══════════════════════════════════════════════════════════════════════
+
+def _setup_position_state(s: BollCvdReclaimStrategy, side: str, avg_entry: float) -> None:
+    """Configure minimal position state for _effective_breakeven_for_tp_selection."""
+    s.state.side = side
+    s.state.layers = 2
+    s.state.avg_entry_price = avg_entry
+    s.state.total_entry_qty = 1.0
+    s.state.total_entry_notional = avg_entry
+    s.state.position_cost_entry_notional = avg_entry
+    s.state.position_cost_remaining_qty = 1.0
+    s._refresh_net_remaining_breakeven_price()
+
+
+class TestThreeStageTp1ProfitFallback:
+    """Verify Three-Stage TP1 uses BOLL20 middle when TP_BOLL15 middle profit is insufficient."""
+
+    def test_tp1_uses_structure_middle_when_tp_boll_middle_profit_too_small_long(self):
+        """LONG: TP_BOLL15 middle=100.3 (< 0.5% profit), BOLL20 middle=101.0 (OK) → TP1=101.0."""
+        s = _strategy(three_stage_runner_enabled=True, tp_min_net_profit_pct=0.005)
+        b = _boll_with_tp(
+            middle=101.0, tp_middle=100.3,
+            upper=110.0, tp_upper=108.0,
+        )
+        _setup_position_state(s, "LONG", 100.0)
+
+        # _select_tp_price should return BOLL20 middle after profit fallback
+        price, mode = s._select_tp_price("LONG", b)
+        assert price == 101.0
+        assert mode == "MIDDLE"
+
+        # _set_three_stage_runner_planned should also use BOLL20 middle for TP1
+        s._set_three_stage_runner_planned("LONG", b)
+        assert s.state.three_stage_tp1_price == 101.0, (
+            "TP1 must use BOLL20 middle (101.0) when TP_BOLL15 middle (100.3) "
+            "fails the profit check"
+        )
+        # TP2 still uses TP_BOLL15 outer
+        assert s.state.three_stage_tp2_price == 108.0, (
+            "TP2 should still use TP_BOLL15 outer (108.0)"
+        )
+
+    def test_tp1_uses_structure_middle_when_tp_boll_middle_profit_too_small_short(self):
+        """SHORT: TP_BOLL15 middle=99.7 (> 0.5% profit), BOLL20 middle=99.0 (OK) → TP1=99.0."""
+        s = _strategy(three_stage_runner_enabled=True, tp_min_net_profit_pct=0.005)
+        b = _boll_with_tp(
+            middle=99.0, tp_middle=99.7,
+            lower=90.0, tp_lower=92.0,
+        )
+        _setup_position_state(s, "SHORT", 100.0)
+
+        price, mode = s._select_tp_price("SHORT", b)
+        assert price == 99.0
+        assert mode == "MIDDLE"
+
+        s._set_three_stage_runner_planned("SHORT", b)
+        assert s.state.three_stage_tp1_price == 99.0
+        assert s.state.three_stage_tp2_price == 92.0
+
+    def test_tp1_uses_tp_boll_when_profit_ok_long(self):
+        """LONG: TP_BOLL15 middle=101.0 (>= 0.5% profit) → TP1=101.0 (no fallback)."""
+        s = _strategy(three_stage_runner_enabled=True, tp_min_net_profit_pct=0.005)
+        b = _boll_with_tp(
+            middle=101.0, tp_middle=101.0,
+            upper=110.0, tp_upper=108.0,
+        )
+        _setup_position_state(s, "LONG", 100.0)
+
+        s._set_three_stage_runner_planned("LONG", b)
+        assert s.state.three_stage_tp1_price == 101.0, "TP_BOLL15 middle meets profit → use it"
+        assert s.state.three_stage_tp2_price == 108.0
+
+    def test_update_dynamic_targets_keeps_profit_fallback(self):
+        """_update_three_stage_dynamic_targets_without_reset honours profit fallback."""
+        s = _strategy(three_stage_runner_enabled=True, tp_min_net_profit_pct=0.005)
+        b = _boll_with_tp(
+            middle=101.0, tp_middle=100.3,
+            upper=110.0, tp_upper=108.0,
+        )
+        _setup_position_state(s, "LONG", 100.0)
+
+        s._update_three_stage_dynamic_targets_without_reset("LONG", b)
+        assert s.state.three_stage_tp1_price == 101.0, "profit fallback applies to dynamic update"
+        assert s.state.three_stage_tp2_price == 108.0
+
+
+class TestMiddleRunnerFirstTpProfitFallback:
+    """Verify Middle Runner first TP uses BOLL20 middle when TP_BOLL15 profit insufficient."""
+
+    def test_first_tp_uses_structure_middle_when_tp_boll_profit_too_small_long(self):
+        """LONG: TP_BOLL15 middle=100.3, BOLL20 middle=101.0 → first TP=101.0."""
+        s = _strategy(middle_runner_enabled=True, tp_min_net_profit_pct=0.005)
+        b = _boll_with_tp(
+            middle=101.0, tp_middle=100.3,
+            upper=110.0, tp_upper=108.0,
+        )
+        _setup_position_state(s, "LONG", 100.0)
+
+        tp_mid, src = s._select_tp_middle_with_profit_fallback("LONG", b)
+        assert tp_mid == 101.0
+        assert src == "STRUCTURE_BOLL_PROFIT_FALLBACK"
+
+    def test_first_tp_uses_structure_middle_when_tp_boll_profit_too_small_short(self):
+        """SHORT: TP_BOLL15 middle=99.7, BOLL20 middle=99.0 → first TP=99.0."""
+        s = _strategy(middle_runner_enabled=True, tp_min_net_profit_pct=0.005)
+        b = _boll_with_tp(
+            middle=99.0, tp_middle=99.7,
+            lower=90.0, tp_lower=92.0,
+        )
+        _setup_position_state(s, "SHORT", 100.0)
+
+        tp_mid, src = s._select_tp_middle_with_profit_fallback("SHORT", b)
+        assert tp_mid == 99.0
+        assert src == "STRUCTURE_BOLL_PROFIT_FALLBACK"
+
+    def test_first_tp_uses_tp_boll_when_profit_ok_long(self):
+        """TP_BOLL15 middle=101.5 → enough profit → use it."""
+        s = _strategy(middle_runner_enabled=True, tp_min_net_profit_pct=0.005)
+        b = _boll_with_tp(
+            middle=101.0, tp_middle=101.5,
+            upper=110.0, tp_upper=108.0,
+        )
+        _setup_position_state(s, "LONG", 100.0)
+
+        tp_mid, src = s._select_tp_middle_with_profit_fallback("LONG", b)
+        assert tp_mid == 101.5
+        assert src == "TP_BOLL"
+
+    def test_planned_sets_fallback_prices_long(self):
+        """_set_middle_runner_planned with profit fallback."""
+        s = _strategy(middle_runner_enabled=True, tp_min_net_profit_pct=0.005)
+        b = _boll_with_tp(
+            middle=101.0, tp_middle=100.3,
+            upper=110.0, tp_upper=108.0,
+        )
+        _setup_position_state(s, "LONG", 100.0)
+        s.state.side = "LONG"
+
+        # Simulate what _select_tp_plan returns with fallback
+        tp_mid, _ = s._select_tp_middle_with_profit_fallback("LONG", b)
+        tp_outer, _ = s._select_tp_outer("LONG", b)
+        s._set_middle_runner_planned(tp_mid, tp_outer)
+
+        assert s.state.middle_runner_first_tp_price == 101.0
+        assert s.state.middle_runner_final_tp_price == 108.0
+
+
+class TestDegradeProfitFallback:
+    """Verify degrade to Middle Runner uses profit fallback for first TP."""
+
+    def test_degrade_uses_structure_middle_when_tp_boll_profit_too_small(self):
+        """Three-Stage degrade → Middle Runner: BOLL20 middle when TP_BOLL15 insufficient."""
+        s = _strategy(
+            three_stage_runner_enabled=True,
+            tp_min_net_profit_pct=0.005,
+            three_stage_pre_tp1_degrade_enabled=False,  # prevent auto-degrade
+        )
+        b = _boll_with_tp(
+            middle=101.0, tp_middle=100.3,
+            upper=110.0, tp_upper=108.0,
+        )
+        _setup_position_state(s, "LONG", 100.0)
+        s.state.side = "LONG"
+        s.state.three_stage_runner_enabled_for_position = True
+        s.state.tp_plan = "THREE_STAGE_RUNNER"
+        s.state.first_entry_ts_ms = 1000
+
+        s._degrade_three_stage_pre_tp1_to_middle_runner(2000000, b)
+
+        assert s.state.middle_runner_first_tp_price == 101.0, (
+            "Degrade first TP must fall back to BOLL20 middle when TP_BOLL15 profit insufficient"
+        )
+        assert s.state.middle_runner_final_tp_price == 108.0
+        assert s.state.tp_plan == "MIDDLE_RUNNER"
+
+
+class TestUpdateTpProfitFallback:
+    """Verify 15m UPDATE_TP keeps profit fallback for TP1/first TP."""
+
+    def test_three_stage_update_keeps_profit_fallback_for_tp1(self):
+        """_update_three_stage_dynamic_targets_without_reset honours fallback during update."""
+        s = _strategy(three_stage_runner_enabled=True, tp_min_net_profit_pct=0.005)
+        b = _boll_with_tp(
+            middle=101.0, tp_middle=100.3,
+            upper=110.0, tp_upper=108.0,
+        )
+        _setup_position_state(s, "LONG", 100.0)
+        s.state.side = "LONG"
+        s.state.three_stage_runner_enabled_for_position = True
+
+        # This is what _maybe_update_tp calls for three_stage pre-TP1
+        s._update_three_stage_dynamic_targets_without_reset("LONG", b)
+
+        assert s.state.three_stage_tp1_price == 101.0
+        assert s.state.three_stage_tp2_price == 108.0
+
+    def test_middle_runner_pending_update_keeps_profit_fallback_for_first_tp(self):
+        """_select_tp_middle_with_profit_fallback used in middle_runner_pending path."""
+        s = _strategy(middle_runner_enabled=True, tp_min_net_profit_pct=0.005)
+        b = _boll_with_tp(
+            middle=101.0, tp_middle=100.3,
+            upper=110.0, tp_upper=108.0,
+        )
+        _setup_position_state(s, "LONG", 100.0)
+        s.state.side = "LONG"
+
+        tp_mid, src = s._select_tp_middle_with_profit_fallback("LONG", b)
+        assert tp_mid == 101.0
+        assert src == "STRUCTURE_BOLL_PROFIT_FALLBACK"
+
+    def test_select_tp_plan_three_stage_uses_fallback(self):
+        """_select_tp_plan THREE_STAGE path uses profit fallback."""
+        s = _strategy(three_stage_runner_enabled=True, tp_min_net_profit_pct=0.005)
+        b = _boll_with_tp(
+            middle=101.0, tp_middle=100.3,
+            upper=110.0, tp_upper=108.0,
+        )
+        _setup_position_state(s, "LONG", 100.0)
+        s.state.side = "LONG"
+        s.state.breakeven_price = s.state.avg_entry_price * (1 + s.config.breakeven_fee_buffer_pct)
+
+        partial_tp, ratio, plan = s._select_tp_plan("LONG", 110.0, 5, tp_mode="MIDDLE", boll=b)
+        assert plan == "THREE_STAGE_RUNNER"
+        # partial TP (TP1) should be BOLL20 middle (101.0) due to profit fallback
+        assert partial_tp == 101.0, (
+            f"Expected TP1=101.0 (BOLL20 fallback), got {partial_tp}"
+        )
+
+    def test_select_tp_plan_middle_runner_uses_fallback(self):
+        """_select_tp_plan MIDDLE_RUNNER path uses profit fallback."""
+        s = _strategy(middle_runner_enabled=True, tp_min_net_profit_pct=0.005)
+        b = _boll_with_tp(
+            middle=101.0, tp_middle=100.3,
+            upper=110.0, tp_upper=108.0,
+        )
+        _setup_position_state(s, "LONG", 100.0)
+        s.state.side = "LONG"
+        s.state.breakeven_price = s.state.avg_entry_price * (1 + s.config.breakeven_fee_buffer_pct)
+
+        partial_tp, ratio, plan = s._select_tp_plan("LONG", 110.0, 5, tp_mode="MIDDLE", boll=b)
+        assert plan == "MIDDLE_RUNNER"
+        assert partial_tp == 101.0, f"Expected first TP=101.0 (BOLL20 fallback), got {partial_tp}"
+
+
+class TestTp2OuterStillUsesTpBoll:
+    """Verify TP2/final outer price still uses TP_BOLL15 even when TP1 falls back."""
+
+    def test_tp2_still_uses_tp_boll_outer_when_tp1_falls_back_long(self):
+        """TP1 falls back to BOLL20, TP2 still uses TP_BOLL15 outer."""
+        s = _strategy(three_stage_runner_enabled=True, tp_min_net_profit_pct=0.005)
+        b = _boll_with_tp(
+            middle=101.0, tp_middle=100.3,
+            upper=110.0, tp_upper=108.0,
+        )
+        _setup_position_state(s, "LONG", 100.0)
+
+        tp_outer, src = s._select_tp_outer("LONG", b)
+        assert tp_outer == 108.0
+        assert src == "TP_BOLL"
+
+    def test_tp2_still_uses_tp_boll_outer_when_tp1_falls_back_short(self):
+        """SHORT: TP1 falls back, TP2 still uses TP_BOLL15 lower."""
+        s = _strategy(three_stage_runner_enabled=True, tp_min_net_profit_pct=0.005)
+        b = _boll_with_tp(
+            middle=99.0, tp_middle=99.7,
+            lower=90.0, tp_lower=92.0,
+        )
+        _setup_position_state(s, "SHORT", 100.0)
+
+        tp_outer, src = s._select_tp_outer("SHORT", b)
+        assert tp_outer == 92.0
+        assert src == "TP_BOLL"
+
+    def test_final_tp_still_uses_tp_boll_outer_when_first_tp_falls_back(self):
+        """Middle Runner: first TP falls back, final outer still TP_BOLL15."""
+        s = _strategy(middle_runner_enabled=True, tp_min_net_profit_pct=0.005)
+        b = _boll_with_tp(
+            middle=101.0, tp_middle=100.3,
+            upper=110.0, tp_upper=108.0,
+        )
+        _setup_position_state(s, "LONG", 100.0)
+
+        tp_outer, src = s._select_tp_outer("LONG", b)
+        assert tp_outer == 108.0
+        assert src == "TP_BOLL"

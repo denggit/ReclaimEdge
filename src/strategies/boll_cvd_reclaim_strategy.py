@@ -1313,7 +1313,7 @@ class BollCvdReclaimStrategy:
         elif self.state.middle_runner_pending:
             tp_price, _tp_src = self._select_tp_outer(self.state.side, boll)
             tp_mode = "UPPER" if self.state.side == "LONG" else "LOWER"
-            partial_tp_price, _ptp_src = self._select_tp_middle(boll)
+            partial_tp_price, _ptp_src = self._select_tp_middle_with_profit_fallback(self.state.side, boll)
             partial_tp_ratio = self.state.middle_runner_first_close_ratio or min(max(self.config.middle_runner_first_close_ratio, 0.1), 0.95)
             tp_plan = "MIDDLE_RUNNER"
             self.state.middle_runner_first_tp_price = partial_tp_price
@@ -1321,7 +1321,7 @@ class BollCvdReclaimStrategy:
         elif self.state.three_stage_runner_enabled_for_position and not self.state.trend_runner_active:
             tp_price, _tp_src = self._select_tp_outer(self.state.side, boll)
             tp_mode = "UPPER" if self.state.side == "LONG" else "LOWER"
-            partial_tp_price, _ptp_src = self._select_tp_middle(boll)
+            partial_tp_price, _ptp_src = self._select_tp_middle_with_profit_fallback(self.state.side, boll)
             self._update_three_stage_dynamic_targets_without_reset(self.state.side, boll)
             tp1_ratio = self.state.three_stage_tp1_ratio
             partial_tp_ratio = tp1_ratio
@@ -1485,7 +1485,7 @@ class BollCvdReclaimStrategy:
         old_tp_plan = self.state.tp_plan
         age_seconds = self._three_stage_pre_tp1_age_seconds(ts_ms)
         final_tp, _tp_src = self._select_tp_outer(self.state.side, boll)
-        first_tp, _first_src = self._select_tp_middle(boll)
+        first_tp, _first_src = self._select_tp_middle_with_profit_fallback(self.state.side, boll)
 
         self._reset_three_stage_runner_state()
         self._set_middle_runner_planned(first_tp, final_tp)
@@ -2050,7 +2050,7 @@ class BollCvdReclaimStrategy:
 
     def _set_three_stage_runner_planned(self, side: PositionSide, boll: BollSnapshot) -> None:
         tp1_ratio, tp2_ratio, runner_ratio = self._normalized_three_stage_ratios()
-        tp_mid, _tp_mid_src = self._select_tp_middle(boll)
+        tp_mid, _tp_mid_src = self._select_tp_middle_with_profit_fallback(side, boll)
         tp_outer, _tp_outer_src = self._select_tp_outer(side, boll)
         self.state.three_stage_runner_enabled_for_position = True
         self.state.three_stage_tp1_price = tp_mid
@@ -2079,7 +2079,7 @@ class BollCvdReclaimStrategy:
 
     def _update_three_stage_dynamic_targets_without_reset(self, side: PositionSide, boll: BollSnapshot) -> None:
         tp1_ratio, tp2_ratio, runner_ratio = self._normalized_three_stage_ratios()
-        tp_mid, _tp_mid_src = self._select_tp_middle(boll)
+        tp_mid, _tp_mid_src = self._select_tp_middle_with_profit_fallback(side, boll)
         tp_outer, _tp_outer_src = self._select_tp_outer(side, boll)
         self.state.three_stage_runner_enabled_for_position = True
         self.state.three_stage_tp1_price = tp_mid
@@ -2631,6 +2631,56 @@ class BollCvdReclaimStrategy:
             return float(boll.tp_middle), "TP_BOLL"  # type: ignore[arg-type]
         return float(boll.middle), "STRUCTURE_BOLL"
 
+    def _select_tp_middle_with_profit_fallback(
+        self,
+        side: PositionSide,
+        boll: BollSnapshot,
+    ) -> tuple[float, str]:
+        """Return (middle_price, source) for TP1 / first TP with profit-distance fallback.
+
+        Unlike _select_tp_middle() which is the raw low-level resolver, this
+        helper enforces the min-net-profit check so that a TP1 price is never
+        worse than what _select_tp_price() would have accepted for SINGLE mode.
+
+        LONG:  TP_BOLL15 middle first → structure BOLL20 middle if TP_BOLL15
+               profit is insufficient → TP_BOLL15 middle as last resort.
+        SHORT: TP_BOLL15 middle first → structure BOLL20 middle if TP_BOLL15
+               profit is insufficient → TP_BOLL15 middle as last resort.
+        """
+        effective_be = self._effective_breakeven_for_tp_selection(side)
+        if effective_be <= 0:
+            return self._select_tp_middle(boll)
+
+        min_net_profit = self.config.tp_min_net_profit_pct
+
+        if side == "LONG":
+            required = effective_be * (1 + min_net_profit)
+
+            # 1) Try TP_BOLL15 middle
+            tp_mid, tp_mid_src = self._select_tp_middle(boll)
+            if tp_mid >= required:
+                return tp_mid, tp_mid_src
+
+            # 2) Fallback to structure BOLL20 middle (explicit profit check)
+            if boll.middle >= required:
+                return float(boll.middle), "STRUCTURE_BOLL_PROFIT_FALLBACK"
+
+            # 3) Neither meets profit — return TP_BOLL15 middle anyway
+            #    (caller should not enable complex modes when neither middle works)
+            return tp_mid, tp_mid_src
+
+        # SHORT
+        required = effective_be * (1 - min_net_profit)
+
+        tp_mid, tp_mid_src = self._select_tp_middle(boll)
+        if tp_mid <= required:
+            return tp_mid, tp_mid_src
+
+        if boll.middle <= required:
+            return float(boll.middle), "STRUCTURE_BOLL_PROFIT_FALLBACK"
+
+        return tp_mid, tp_mid_src
+
     def _select_tp_outer(self, side: PositionSide, boll: BollSnapshot) -> tuple[float, str]:
         """Return (outer_price, source) for the given side."""
         if self._tp_boll_available(boll):
@@ -2654,18 +2704,40 @@ class BollCvdReclaimStrategy:
         tp2_price: float | None = None,
         first_tp_price: float | None = None,
         final_tp_price: float | None = None,
+        tp1_source: str | None = None,
+        tp2_source: str | None = None,
     ) -> None:
         """Log TP_BOLL_PRICE_SELECTED at initial TP gen or 15m UPDATE_TP only."""
         tp_boll_avail = self._tp_boll_available(boll)
         tp_mid, tp_mid_src = self._select_tp_middle(boll)
         tp_outer, tp_outer_src = self._select_tp_outer(self.state.side or "LONG", boll)
 
-        # Determine the effective TP price sources
+        # Determine the effective TP price sources.
+        # Auto-detect profit fallback: if the actual TP1/first-tp price equals the
+        # structure BOLL middle while TP_BOLL middle was available but unused,
+        # we know the profit check forced a fallback.
+        actual_mid_price: float | None = None
+        if tp1_price is not None:
+            actual_mid_price = tp1_price
+        elif first_tp_price is not None:
+            actual_mid_price = first_tp_price
+        elif tp_mode == "MIDDLE" and tp_plan == "SINGLE":
+            actual_mid_price = tp_price
+
+        if (tp_boll_avail and actual_mid_price is not None
+                and boll.tp_middle is not None
+                and abs(actual_mid_price - float(boll.tp_middle)) > 0.0001
+                and abs(actual_mid_price - float(boll.middle)) < 0.0001):
+            resolved_middle_source = "STRUCTURE_BOLL_PROFIT_FALLBACK"
+        else:
+            resolved_middle_source = tp_mid_src
+
+        # Callers may override with explicit source hints.
         if tp_plan in ("THREE_STAGE_RUNNER", "MIDDLE_RUNNER"):
-            middle_source = tp_mid_src
-            outer_source = tp_outer_src
+            middle_source = tp1_source or resolved_middle_source
+            outer_source = tp2_source or tp_outer_src
         elif tp_mode == "MIDDLE":
-            middle_source = tp_mid_src
+            middle_source = tp1_source or resolved_middle_source
             outer_source = "N/A"
         elif tp_mode in ("UPPER", "LOWER"):
             middle_source = "N/A"
@@ -2776,18 +2848,18 @@ class BollCvdReclaimStrategy:
         if self.state.three_stage_pre_tp1_degrade_stage == "MIDDLE_RUNNER":
             if tp_mode == "MIDDLE" and boll is not None:
                 first_close_ratio = min(max(self.config.middle_runner_first_close_ratio, 0.1), 0.95)
-                tp_mid, _tp_mid_src = self._select_tp_middle(boll)
+                tp_mid, _tp_mid_src = self._select_tp_middle_with_profit_fallback(side, boll)
                 return tp_mid, first_close_ratio, "MIDDLE_RUNNER"
             return None, 0.0, "SINGLE"
         if self._three_stage_runner_plan_allowed(tp_mode, boll):
             tp1_ratio, _tp2_ratio, _runner_ratio = self._normalized_three_stage_ratios()
-            tp_mid, _tp_mid_src = self._select_tp_middle(boll)
+            tp_mid, _tp_mid_src = self._select_tp_middle_with_profit_fallback(side, boll)
             return tp_mid, tp1_ratio, "THREE_STAGE_RUNNER"
         if self.config.three_stage_runner_enabled:
             return None, 0.0, "SINGLE"
         if self._middle_runner_plan_allowed(tp_mode, boll):
             first_close_ratio = min(max(self.config.middle_runner_first_close_ratio, 0.1), 0.95)
-            tp_mid, _tp_mid_src = self._select_tp_middle(boll)
+            tp_mid, _tp_mid_src = self._select_tp_middle_with_profit_fallback(side, boll)
             return tp_mid, first_close_ratio, "MIDDLE_RUNNER"
         if tp_mode != "MIDDLE":
             return None, 0.0, "SINGLE"
