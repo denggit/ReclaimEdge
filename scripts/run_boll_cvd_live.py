@@ -32,7 +32,7 @@ from src.monitors.boll_band_breakout_monitor import (  # noqa: E402
     BollBandBreakoutMonitorConfig,
     MarketTickEvent,
 )
-from src.position_management.cost_basis import calculate_remaining_breakeven_price  # noqa: E402
+from src.position_management import cost_runtime as position_cost_runtime  # noqa: E402
 from src.position_management.sidecar.model import (  # noqa: E402
     SidecarLegStatus,
     sidecar_open_contracts,
@@ -84,7 +84,6 @@ POSITION_MANAGEMENT_INTENTS = {"UPDATE_TP", "NEAR_TP_REDUCE", "MARKET_EXIT_RUNNE
 THREE_STAGE_RESTART_DIRTY_HALT_REASON = "three_stage_post_tp1_sl_cancel_failed_on_tp2_restart"
 THREE_STAGE_RUNTIME_DIRTY_HALT_REASON = "three_stage_post_tp1_sl_dirty_state_blocked"
 THREE_STAGE_CANCEL_PENDING_HALT_REASON = "three_stage_post_tp1_sl_cancel_pending_on_tp2"
-DEFAULT_NET_REMAINING_FEE_BUFFER_PCT = 0.001
 
 
 def restore_strategy_from_position(strategy: BollCvdReclaimStrategy, position: PositionSnapshot, now_ms: int | None = None) -> None:
@@ -230,132 +229,6 @@ def restore_strategy_from_saved_state(strategy: BollCvdReclaimStrategy, saved_st
     )
 
 
-def sync_strategy_cost_from_position(strategy: BollCvdReclaimStrategy, position: PositionSnapshot) -> None:
-    if not position.has_position or position.side is None or position.avg_entry_price <= 0:
-        return
-    if strategy.state.side is None or strategy.state.side != position.side or strategy.state.layers <= 0:
-        restore_strategy_from_position(strategy, position)
-        return
-    if getattr(strategy.state, "three_stage_runner_enabled_for_position", False):
-        strategy.state.avg_entry_price = position.avg_entry_price
-        strategy.state.last_entry_price = strategy.state.last_entry_price or position.avg_entry_price
-        return
-    strategy.state.total_entry_qty = position.eth_qty
-    strategy.state.total_entry_notional = position.avg_entry_price * position.eth_qty
-    strategy.state.avg_entry_price = position.avg_entry_price
-    strategy.state.last_entry_price = strategy.state.last_entry_price or position.avg_entry_price
-
-
-def refresh_net_remaining_breakeven(strategy_state: StrategyPositionState, fee_buffer_pct: float = DEFAULT_NET_REMAINING_FEE_BUFFER_PCT) -> None:
-    if strategy_state.side not in {"LONG", "SHORT"}:
-        strategy_state.net_remaining_breakeven_price = 0.0
-        return
-    basis = calculate_remaining_breakeven_price(
-        side=strategy_state.side,
-        entry_notional=float(getattr(strategy_state, "position_cost_entry_notional", 0.0) or 0.0),
-        exit_notional=float(getattr(strategy_state, "position_cost_exit_notional", 0.0) or 0.0),
-        remaining_qty=float(getattr(strategy_state, "position_cost_remaining_qty", 0.0) or 0.0),
-        fee_buffer_pct=fee_buffer_pct,
-    )
-    strategy_state.net_remaining_breakeven_price = float(basis.buffered_breakeven_price or 0.0)
-
-
-def record_remaining_entry_notional(
-    strategy_state: StrategyPositionState,
-    *,
-    qty: float,
-    price: float,
-    fee_buffer_pct: float = DEFAULT_NET_REMAINING_FEE_BUFFER_PCT,
-) -> None:
-    if qty <= 0 or price <= 0:
-        return
-    strategy_state.position_cost_entry_notional += float(qty) * float(price)
-    strategy_state.position_cost_remaining_qty += float(qty)
-    refresh_net_remaining_breakeven(strategy_state, fee_buffer_pct)
-
-
-def record_remaining_exit_notional(
-    strategy_state: StrategyPositionState,
-    *,
-    qty: float,
-    price: float,
-    remaining_qty: float | None = None,
-    fee_buffer_pct: float = DEFAULT_NET_REMAINING_FEE_BUFFER_PCT,
-) -> None:
-    if qty <= 0 or price <= 0:
-        return
-    strategy_state.position_cost_exit_notional += float(qty) * float(price)
-    if remaining_qty is None:
-        strategy_state.position_cost_remaining_qty = max(float(strategy_state.position_cost_remaining_qty or 0.0) - float(qty), 0.0)
-    else:
-        strategy_state.position_cost_remaining_qty = max(float(remaining_qty or 0.0), 0.0)
-    refresh_net_remaining_breakeven(strategy_state, fee_buffer_pct)
-
-
-def remaining_total_qty_from_core_position(strategy_state: StrategyPositionState, core_position: PositionSnapshot) -> float:
-    return max(float(core_position.eth_qty or 0.0), 0.0) + sidecar_open_qty(list(getattr(strategy_state, "sidecar_legs", []) or []))
-
-
-def record_core_position_reduction_exit(
-    strategy_state: StrategyPositionState,
-    core_position: PositionSnapshot,
-    *,
-    exit_price: float | None,
-    fee_buffer_pct: float = DEFAULT_NET_REMAINING_FEE_BUFFER_PCT,
-    expected_remaining_qty: float | None = None,
-) -> None:
-    price = float(exit_price or 0.0)
-    if price <= 0:
-        return
-    new_remaining_qty = remaining_total_qty_from_core_position(strategy_state, core_position)
-    old_remaining_qty = float(getattr(strategy_state, "position_cost_remaining_qty", 0.0) or 0.0)
-    if expected_remaining_qty is not None and old_remaining_qty > expected_remaining_qty > new_remaining_qty:
-        qty = old_remaining_qty - expected_remaining_qty
-        remaining_qty = expected_remaining_qty
-    else:
-        qty = old_remaining_qty - new_remaining_qty
-        remaining_qty = new_remaining_qty
-    if qty <= 0:
-        total_entry_qty = float(getattr(strategy_state, "total_entry_qty", 0.0) or 0.0)
-        qty = max(total_entry_qty - float(core_position.eth_qty or 0.0), 0.0)
-    record_remaining_exit_notional(
-        strategy_state,
-        qty=qty,
-        price=price,
-        remaining_qty=remaining_qty,
-        fee_buffer_pct=fee_buffer_pct,
-    )
-
-
-def record_sidecar_tp_fill_exit(
-    strategy_state: StrategyPositionState,
-    leg: dict[str, Any],
-    status: dict[str, Any],
-    *,
-    fee_buffer_pct: float = DEFAULT_NET_REMAINING_FEE_BUFFER_PCT,
-) -> None:
-    filled_qty = _coerce_positive_float(status.get("filled_qty")) or _coerce_positive_float(leg.get("qty"))
-    fill_price = _coerce_positive_float(status.get("avg_fill_price")) or _coerce_positive_float(leg.get("tp_price"))
-    if filled_qty is None or fill_price is None:
-        return
-    record_remaining_exit_notional(
-        strategy_state,
-        qty=filled_qty,
-        price=fill_price,
-        fee_buffer_pct=fee_buffer_pct,
-    )
-
-
-def _coerce_positive_float(value: Any) -> float | None:
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError):
-        return None
-    if parsed <= 0:
-        return None
-    return parsed
-
-
 def mark_partial_tp_consumed_if_position_reduced(strategy: BollCvdReclaimStrategy, position: PositionSnapshot) -> bool:
     state = strategy.state
     original_plan = getattr(state, "tp_plan", "SINGLE")
@@ -374,7 +247,7 @@ def mark_partial_tp_consumed_if_position_reduced(strategy: BollCvdReclaimStrateg
     if reduction_ratio < required_ratio:
         return False
 
-    record_core_position_reduction_exit(
+    position_cost_runtime.record_core_position_reduction_exit(
         state,
         position,
         exit_price=old_partial_tp_price,
@@ -440,7 +313,7 @@ def mark_middle_runner_active_if_position_reduced(strategy: BollCvdReclaimStrate
                 )
         return False
 
-    record_core_position_reduction_exit(
+    position_cost_runtime.record_core_position_reduction_exit(
         state,
         position,
         exit_price=getattr(state, "middle_runner_first_tp_price", None),
@@ -504,7 +377,7 @@ def mark_three_stage_progress_if_position_reduced(strategy: BollCvdReclaimStrate
     if not getattr(state, "three_stage_tp1_consumed", False) and remaining_ratio <= after_tp1_ratio + tp1_tolerance:
         expected_after_tp1_qty = total_entry_qty * after_tp1_ratio + sidecar_open_qty(list(getattr(state, "sidecar_legs", []) or []))
         will_mark_tp2_now = remaining_ratio <= after_tp2_ratio + tp2_tolerance
-        record_core_position_reduction_exit(
+        position_cost_runtime.record_core_position_reduction_exit(
             state,
             position,
             exit_price=getattr(state, "three_stage_tp1_price", None),
@@ -544,7 +417,7 @@ def mark_three_stage_progress_if_position_reduced(strategy: BollCvdReclaimStrate
         and not getattr(state, "three_stage_tp2_consumed", False)
         and remaining_ratio <= after_tp2_ratio + tp2_tolerance
     ):
-        record_core_position_reduction_exit(
+        position_cost_runtime.record_core_position_reduction_exit(
             state,
             position,
             exit_price=getattr(state, "three_stage_tp2_price", None),
@@ -741,7 +614,7 @@ async def attach_sidecar_after_combined_entry(
     journal: LiveTradeJournal,
     state_store: LiveStateStore,
     trader_symbol: str,
-    fee_buffer_pct: float = DEFAULT_NET_REMAINING_FEE_BUFFER_PCT,
+    fee_buffer_pct: float = position_cost_runtime.DEFAULT_NET_REMAINING_FEE_BUFFER_PCT,
 ) -> bool:
     if not getattr(strategy_state, "sidecar_enabled_for_position", False):
         return True
@@ -750,7 +623,7 @@ async def attach_sidecar_after_combined_entry(
     position_id = execution_state.current_position_id
     contracts = str(sidecar_plan.sidecar_contracts)
     filled_qty = float(sidecar_plan.sidecar_qty)
-    record_remaining_entry_notional(
+    position_cost_runtime.record_remaining_entry_notional(
         strategy_state,
         qty=filled_qty,
         price=float(intent.price),
@@ -961,11 +834,15 @@ async def reconcile_sidecar_orders_before_core_view(
                 continue
 
             if order_status == "FILLED":
-                record_sidecar_tp_fill_exit(
+                position_cost_runtime.record_sidecar_tp_fill_exit(
                     strategy.state,
                     leg,
                     status_dict,
-                    fee_buffer_pct=getattr(getattr(strategy, "config", None), "breakeven_fee_buffer_pct", DEFAULT_NET_REMAINING_FEE_BUFFER_PCT),
+                    fee_buffer_pct=getattr(
+                        getattr(strategy, "config", None),
+                        "breakeven_fee_buffer_pct",
+                        position_cost_runtime.DEFAULT_NET_REMAINING_FEE_BUFFER_PCT,
+                    ),
                 )
                 strategy.state.sidecar_legs[index] = mark_sidecar_leg_tp_filled(leg, ts_ms)
                 if hasattr(journal, "append"):
@@ -1060,7 +937,7 @@ async def monitor_sidecar_orders_once(
     position_id: str | None,
     cash_before_position: float | None,
     ts_ms: int,
-    fee_buffer_pct: float = DEFAULT_NET_REMAINING_FEE_BUFFER_PCT,
+    fee_buffer_pct: float = position_cost_runtime.DEFAULT_NET_REMAINING_FEE_BUFFER_PCT,
 ) -> None:
     if not getattr(strategy_state, "sidecar_enabled_for_position", False):
         return
@@ -1084,7 +961,7 @@ async def monitor_sidecar_orders_once(
         if order_status == "OPEN":
             continue
         if order_status == "FILLED":
-            record_sidecar_tp_fill_exit(
+            position_cost_runtime.record_sidecar_tp_fill_exit(
                 strategy_state,
                 leg,
                 status,
@@ -1387,11 +1264,15 @@ async def apply_sidecar_startup_recovery(
         if status.get("status") == "OPEN":
             continue
         if status.get("status") == "FILLED":
-            record_sidecar_tp_fill_exit(
+            position_cost_runtime.record_sidecar_tp_fill_exit(
                 strategy.state,
                 leg,
                 status,
-                fee_buffer_pct=getattr(getattr(strategy, "config", None), "breakeven_fee_buffer_pct", DEFAULT_NET_REMAINING_FEE_BUFFER_PCT),
+                fee_buffer_pct=getattr(
+                    getattr(strategy, "config", None),
+                    "breakeven_fee_buffer_pct",
+                    position_cost_runtime.DEFAULT_NET_REMAINING_FEE_BUFFER_PCT,
+                ),
             )
             strategy.state.sidecar_legs[index] = mark_sidecar_leg_tp_filled(leg, live_time_utils.utc_ms())
             if hasattr(journal, "append"):
@@ -1739,7 +1620,11 @@ async def execution_worker(
                         strategy.state = copy.deepcopy(command.strategy_state_snapshot)
                         consumed = mark_partial_tp_consumed_if_position_reduced(strategy, position)
                         if consumed:
-                            sync_strategy_cost_from_position(strategy, position)
+                            position_cost_runtime.sync_strategy_cost_from_position(
+                                strategy,
+                                position,
+                                restore_from_position=restore_strategy_from_position,
+                            )
                             current_position_id = execution_state.current_position_id
                             cash_before_position = execution_state.cash_before_position
                             strategy_state_for_save = copy.deepcopy(strategy.state)
@@ -1972,7 +1857,11 @@ async def execution_worker(
                         execution_state.halt_reason = "near_tp_exit_all_waiting_flat"
                     elif getattr(result, "protective_sl_ok", False):
                         if remaining_position is not None:
-                            sync_strategy_cost_from_position(strategy, remaining_position)
+                            position_cost_runtime.sync_strategy_cost_from_position(
+                                strategy,
+                                remaining_position,
+                                restore_from_position=restore_strategy_from_position,
+                            )
                             account_snapshot.position = remaining_position
                             trader.position_contracts = remaining_position.contracts
                             near_tp_state_synced = True
@@ -2580,7 +2469,11 @@ async def account_position_sync_worker(
                     middle_runner_activated = mark_middle_runner_active_if_position_reduced(strategy, core_position)
                     three_stage_event = mark_three_stage_progress_if_position_reduced(strategy, core_position, live_time_utils.utc_ms())
                     mark_partial_tp_consumed_if_position_reduced(strategy, core_position)
-                    sync_strategy_cost_from_position(strategy, core_position)
+                    position_cost_runtime.sync_strategy_cost_from_position(
+                        strategy,
+                        core_position,
+                        restore_from_position=restore_strategy_from_position,
+                    )
                     if pending_order_count > 0 and three_stage_event is not None:
                         logger.warning(
                             "THREE_STAGE_POSITION_REDUCTION_DETECTED_WITH_PENDING_ORDERS | "
