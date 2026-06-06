@@ -10,9 +10,9 @@ import asyncio
 from scripts.run_boll_cvd_live import (
     apply_main_tp_startup_recovery,
     apply_sidecar_startup_recovery,
-    force_close_sidecar_after_core_flat,
     sidecar_open_contracts,
 )
+from src.position_management.sidecar.force_close_runtime import force_close_sidecar_after_core_flat
 from src.position_management.sidecar.monitor_runtime import monitor_sidecar_orders_once
 from src.position_management.sidecar.pre_core_reconcile import reconcile_sidecar_orders_before_core_view
 from src.execution.trader import PositionSnapshot

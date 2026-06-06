@@ -50,10 +50,10 @@ from src.position_management.sidecar.planner import (  # noqa: E402
 from src.position_management.sidecar.reconciler import (  # noqa: E402
     build_core_position_view,
     is_sidecar_dirty_missing_tp_order,
-    mark_sidecar_leg_force_closed,
     mark_sidecar_leg_tp_filled,
     mark_sidecar_leg_unknown_halted,
 )
+from src.position_management.sidecar import force_close_runtime as sidecar_force_close_runtime  # noqa: E402
 from src.position_management.sidecar import monitor_runtime as sidecar_monitor_runtime  # noqa: E402
 from src.position_management.sidecar import pre_core_reconcile as sidecar_pre_core_reconcile  # noqa: E402
 from src.reporting import live_report_helpers as report_helpers  # noqa: E402
@@ -232,86 +232,6 @@ def restore_strategy_from_saved_state(strategy: BollCvdReclaimStrategy, saved_st
         tp_plan,
         getattr(saved_state, "partial_tp_consumed", False),
     )
-
-async def force_close_sidecar_after_core_flat(
-    *,
-    trader: Trader,
-    strategy_state: StrategyPositionState,
-    execution_state: live_runtime_types.ExecutionState,
-    journal: LiveTradeJournal,
-    state_store: LiveStateStore,
-    trader_symbol: str,
-    position_id: str | None,
-    cash_before_position: float | None,
-    ts_ms: int,
-) -> bool:
-    if sidecar_open_qty(strategy_state.sidecar_legs) <= 0:
-        return True
-    expected_sidecar_contracts = sidecar_open_contracts(strategy_state.sidecar_legs)
-    okx_position = await trader.fetch_position_snapshot()
-    tolerance = Decimal(str(os.getenv("SIDECAR_FORCE_CLOSE_CONTRACT_TOLERANCE", "0.01")))
-    if (
-        not okx_position.has_position
-        or okx_position.side != strategy_state.side
-        or abs(okx_position.contracts - expected_sidecar_contracts) > tolerance
-    ):
-        execution_state.trading_halted = True
-        execution_state.halt_reason = "sidecar_force_close_position_mismatch"
-        strategy_state.sidecar_dirty = True
-        strategy_state.sidecar_halt_reason = "sidecar_force_close_position_mismatch"
-        payload = {
-            "okx_side": okx_position.side,
-            "okx_contracts": str(okx_position.contracts),
-            "sidecar_open_contracts": str(expected_sidecar_contracts),
-            "tolerance": str(tolerance),
-            "manual_intervention_required": True,
-        }
-        journal.append("SIDECAR_FORCE_CLOSE_POSITION_MISMATCH", payload, position_id=position_id)
-        logger.error(
-            "SIDECAR_FORCE_CLOSE_POSITION_MISMATCH | position_id=%s okx_side=%s okx_contracts=%s sidecar_open_contracts=%s tolerance=%s trading_halted=true manual_intervention_required=true",
-            position_id,
-            okx_position.side,
-            okx_position.contracts,
-            expected_sidecar_contracts,
-            tolerance,
-        )
-        state_store.save(LiveStateStore.from_strategy_state(position_id=position_id, symbol=trader_symbol, strategy_state=strategy_state, cash_before_position=cash_before_position))
-        return False
-    try:
-        for leg in strategy_state.sidecar_legs:
-            if leg.get("status") == SidecarLegStatus.OPEN.value and leg.get("tp_order_id"):
-                ok = await trader.cancel_sidecar_take_profit(str(leg["tp_order_id"]))
-                if not ok:
-                    raise RuntimeError(f"cancel_sidecar_tp_failed order_id={leg.get('tp_order_id')}")
-        side = strategy_state.side
-        if side is None:
-            raise RuntimeError("side_missing")
-        exit_ok, exit_message = await trader.market_exit_remaining_position_with_retries(
-            side,
-            retry_count=int(os.getenv("NEAR_TP_SL_FAIL_MARKET_EXIT_RETRY_COUNT", "3")),
-        )
-        if not exit_ok:
-            raise RuntimeError(exit_message)
-    except Exception as exc:
-        execution_state.trading_halted = True
-        execution_state.halt_reason = "sidecar_force_close_failed"
-        strategy_state.sidecar_dirty = True
-        strategy_state.sidecar_halt_reason = "sidecar_force_close_failed"
-        journal.append("SIDECAR_FORCE_CLOSE_FAILED", {"error": str(exc), "manual_intervention_required": True}, position_id=position_id)
-        logger.error("SIDECAR_FORCE_CLOSE_FAILED | position_id=%s error=%s manual_intervention_required=true", position_id, exc)
-        state_store.save(LiveStateStore.from_strategy_state(position_id=position_id, symbol=trader_symbol, strategy_state=strategy_state, cash_before_position=cash_before_position))
-        return False
-    strategy_state.sidecar_legs = [
-        mark_sidecar_leg_force_closed(leg, ts_ms)
-        if leg.get("status") in {SidecarLegStatus.OPEN.value, SidecarLegStatus.OPEN_UNPROTECTED.value}
-        else leg
-        for leg in strategy_state.sidecar_legs
-    ]
-    sidecar_runtime_state.refresh_sidecar_state_totals(strategy_state, int(os.getenv("SIDECAR_MAX_LEGS", "10")))
-    journal.append("SIDECAR_FORCE_CLOSED_AFTER_CORE_FLAT", {"side": strategy_state.side, "reason": "core_flat"}, position_id=position_id)
-    state_store.save(LiveStateStore.from_strategy_state(position_id=position_id, symbol=trader_symbol, strategy_state=strategy_state, cash_before_position=cash_before_position))
-    return True
-
 
 async def apply_sidecar_startup_recovery(
     *,
@@ -1845,7 +1765,7 @@ async def account_position_sync_worker(
                         last_logged_position_key = current_position_key
 
             if force_close_sidecar:
-                await force_close_sidecar_after_core_flat(
+                await sidecar_force_close_runtime.force_close_sidecar_after_core_flat(
                     trader=trader,
                     strategy_state=strategy.state,
                     execution_state=execution_state,
