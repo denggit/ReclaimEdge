@@ -14,6 +14,7 @@ from src.strategies import middle_runner as middle_runner_helpers
 from src.strategies import near_tp_reduce as near_tp_helpers
 from src.strategies import three_stage_runner as three_stage_helpers
 from src.strategies import tp_plan_selector
+from src.strategies import trend_runner as trend_runner_helpers
 from src.utils.log import get_logger
 
 logger = get_logger(__name__)
@@ -1568,36 +1569,28 @@ class BollCvdReclaimStrategy:
         if not self.state.trend_runner_active or self.state.side is None:
             return None
         side = self.state.side
-        sl_price = self.state.trend_runner_sl_price
-        tp_price = self.state.trend_runner_tp_price
-        if tp_price is not None:
-            if side == "LONG" and price >= tp_price:
-                return self._runner_market_exit_intent(price, ts_ms, boll, cvd, "trend_runner_tp_crossed")
-            if side == "SHORT" and price <= tp_price:
-                return self._runner_market_exit_intent(price, ts_ms, boll, cvd, "trend_runner_tp_crossed")
 
-        if sl_price is not None:
-            if side == "LONG" and price <= sl_price:
-                return self._runner_market_exit_intent(price, ts_ms, boll, cvd, "trend_runner_sl_failsafe")
-            if side == "SHORT" and price >= sl_price:
-                return self._runner_market_exit_intent(price, ts_ms, boll, cvd, "trend_runner_sl_failsafe")
+        decision = trend_runner_helpers.trend_runner_market_exit_reason(
+            side=side,
+            price=price,
+            boll_middle=boll.middle,
+            tp_price=self.state.trend_runner_tp_price,
+            sl_price=self.state.trend_runner_sl_price,
+            trend_start_ts_ms=self.state.trend_runner_trend_start_ts_ms,
+            ts_ms=ts_ms,
+            runner_max_trend_seconds_after_second_tp=self.config.runner_max_trend_seconds_after_second_tp,
+        )
 
-        if side == "LONG" and price < boll.middle:
-            return self._runner_market_exit_intent(price, ts_ms, boll, cvd, "trend_runner_middle_lost")
-        if side == "SHORT" and price > boll.middle:
-            return self._runner_market_exit_intent(price, ts_ms, boll, cvd, "trend_runner_middle_lost")
-
-        start_ts = int(self.state.trend_runner_trend_start_ts_ms or 0)
-        max_trend_ms = int(self.config.runner_max_trend_seconds_after_second_tp * 1000)
-        if start_ts > 0 and max_trend_ms > 0 and ts_ms - start_ts >= max_trend_ms:
-            logger.warning(
-                "TREND_RUNNER_MAX_TIME_EXIT | side=%s start_ts_ms=%s ts_ms=%s max_seconds=%s",
-                side,
-                start_ts,
-                ts_ms,
-                self.config.runner_max_trend_seconds_after_second_tp,
-            )
-            return self._runner_market_exit_intent(price, ts_ms, boll, cvd, "trend_runner_max_time_after_second_tp")
+        if decision.reason is not None:
+            if decision.reason == "trend_runner_max_time_after_second_tp":
+                logger.warning(
+                    "TREND_RUNNER_MAX_TIME_EXIT | side=%s start_ts_ms=%s ts_ms=%s max_seconds=%s",
+                    side,
+                    int(self.state.trend_runner_trend_start_ts_ms or 0),
+                    ts_ms,
+                    self.config.runner_max_trend_seconds_after_second_tp,
+                )
+            return self._runner_market_exit_intent(price, ts_ms, boll, cvd, decision.reason)
 
         reverse_reason = self._maybe_confirm_trend_runner_reverse_burst(side, price, ts_ms, cvd)
         if reverse_reason is not None:
@@ -1638,15 +1631,17 @@ class BollCvdReclaimStrategy:
             )
             return None
 
-        if side == "LONG":
-            self.state.trend_runner_reverse_extreme_price = min(self.state.trend_runner_reverse_extreme_price or price,
-                                                                price)
-        else:
-            self.state.trend_runner_reverse_extreme_price = max(self.state.trend_runner_reverse_extreme_price or price,
-                                                                price)
+        self.state.trend_runner_reverse_extreme_price = trend_runner_helpers.update_trend_runner_reverse_extreme_price(
+            side=side,
+            current_extreme_price=self.state.trend_runner_reverse_extreme_price,
+            price=price,
+        )
         samples.append((ts_ms, cvd.buy_ratio, cvd.sell_ratio, cvd.fast_cvd, price))
         cutoff_ts = ts_ms - max(self.config.runner_reverse_burst_confirm_seconds * 1000, 1)
-        self.state.trend_runner_reverse_samples = [sample for sample in samples if sample[0] >= cutoff_ts]
+        self.state.trend_runner_reverse_samples = trend_runner_helpers.prune_trend_runner_reverse_samples(
+            samples=samples,
+            cutoff_ts_ms=cutoff_ts,
+        )
 
         elapsed_ms = ts_ms - int(self.state.trend_runner_reverse_start_ts_ms or ts_ms)
         if elapsed_ms < self.config.runner_reverse_burst_confirm_seconds * 1000:
@@ -1663,52 +1658,35 @@ class BollCvdReclaimStrategy:
         return None
 
     def _trend_runner_reverse_candidate(self, side: PositionSide, cvd: CvdSnapshot) -> bool:
-        if side == "LONG":
-            return bool(
-                cvd.down_burst
-                or (
-                        cvd.sell_ratio >= self.config.runner_reverse_strong_ratio
-                        and cvd.fast_cvd < 0
-                        and cvd.cvd_decreasing
-                )
-            )
-        return bool(
-            cvd.up_burst
-            or (
-                    cvd.buy_ratio >= self.config.runner_reverse_strong_ratio
-                    and cvd.fast_cvd > 0
-                    and cvd.cvd_increasing
-            )
+        decision = trend_runner_helpers.trend_runner_reverse_candidate(
+            side=side,
+            up_burst=cvd.up_burst,
+            down_burst=cvd.down_burst,
+            buy_ratio=cvd.buy_ratio,
+            sell_ratio=cvd.sell_ratio,
+            fast_cvd=cvd.fast_cvd,
+            cvd_increasing=cvd.cvd_increasing,
+            cvd_decreasing=cvd.cvd_decreasing,
+            runner_reverse_strong_ratio=self.config.runner_reverse_strong_ratio,
         )
+        return decision.is_candidate
 
     def _trend_runner_reverse_confirmed(self, side: PositionSide, current_price: float, cvd: CvdSnapshot) -> bool:
         samples = self.state.trend_runner_reverse_samples or []
-        if not samples:
-            return False
-        start_price = self.state.trend_runner_reverse_start_price
-        extreme = self.state.trend_runner_reverse_extreme_price
-        if start_price is None or start_price <= 0 or extreme is None or extreme <= 0:
-            return False
-        if side == "LONG":
-            avg_sell_ratio = sum(float(sample[2]) for sample in samples) / len(samples)
-            price_damage_pct = (start_price - current_price) / start_price
-            recovery_pct = (current_price - extreme) / extreme
-            return (
-                    avg_sell_ratio >= self.config.runner_reverse_sell_ratio
-                    and cvd.fast_cvd < self.state.trend_runner_reverse_fast_cvd_start
-                    and price_damage_pct >= self.config.runner_reverse_min_price_damage_pct
-                    and recovery_pct < self.config.runner_reverse_recovery_cancel_pct
-            )
-
-        avg_buy_ratio = sum(float(sample[1]) for sample in samples) / len(samples)
-        price_damage_pct = (current_price - start_price) / start_price
-        recovery_pct = (extreme - current_price) / extreme
-        return (
-                avg_buy_ratio >= self.config.runner_reverse_buy_ratio
-                and cvd.fast_cvd > self.state.trend_runner_reverse_fast_cvd_start
-                and price_damage_pct >= self.config.runner_reverse_min_price_damage_pct
-                and recovery_pct < self.config.runner_reverse_recovery_cancel_pct
+        decision = trend_runner_helpers.trend_runner_reverse_confirmed(
+            side=side,
+            current_price=current_price,
+            samples=samples,
+            start_price=self.state.trend_runner_reverse_start_price,
+            extreme_price=self.state.trend_runner_reverse_extreme_price,
+            fast_cvd_start=self.state.trend_runner_reverse_fast_cvd_start,
+            current_fast_cvd=cvd.fast_cvd,
+            runner_reverse_sell_ratio=self.config.runner_reverse_sell_ratio,
+            runner_reverse_buy_ratio=self.config.runner_reverse_buy_ratio,
+            runner_reverse_min_price_damage_pct=self.config.runner_reverse_min_price_damage_pct,
+            runner_reverse_recovery_cancel_pct=self.config.runner_reverse_recovery_cancel_pct,
         )
+        return decision.confirmed
 
     def _runner_market_exit_intent(
             self,
@@ -2041,6 +2019,25 @@ class BollCvdReclaimStrategy:
         self.state.middle_runner_sl_time_tighten_last_candle_ts_ms = values.middle_runner_sl_time_tighten_last_candle_ts_ms
         self.state.middle_runner_sl_time_tighten_log_candle_ts_ms = values.middle_runner_sl_time_tighten_log_candle_ts_ms
 
+    def _apply_trend_runner_state_values(self, values: trend_runner_helpers.TrendRunnerStateValues) -> None:
+        self.state.trend_runner_active = values.trend_runner_active
+        self.state.trend_runner_trend_start_ts_ms = values.trend_runner_trend_start_ts_ms
+        self.state.trend_runner_adjust_count = values.trend_runner_adjust_count
+        self.state.trend_runner_last_update_candle_ts_ms = values.trend_runner_last_update_candle_ts_ms
+        self.state.trend_runner_tp_price = values.trend_runner_tp_price
+        self.state.trend_runner_sl_price = values.trend_runner_sl_price
+        self.state.trend_runner_tp_order_id = values.trend_runner_tp_order_id
+        self.state.trend_runner_sl_order_id = values.trend_runner_sl_order_id
+        self.state.trend_runner_exit_reason = values.trend_runner_exit_reason
+
+    def _apply_trend_runner_reverse_state_values(self, values: trend_runner_helpers.TrendRunnerReverseStateValues) -> None:
+        self.state.trend_runner_reverse_candidate = values.trend_runner_reverse_candidate
+        self.state.trend_runner_reverse_start_ts_ms = values.trend_runner_reverse_start_ts_ms
+        self.state.trend_runner_reverse_start_price = values.trend_runner_reverse_start_price
+        self.state.trend_runner_reverse_extreme_price = values.trend_runner_reverse_extreme_price
+        self.state.trend_runner_reverse_fast_cvd_start = values.trend_runner_reverse_fast_cvd_start
+        self.state.trend_runner_reverse_samples = values.trend_runner_reverse_samples
+
     def _reset_middle_runner_state(self) -> None:
         values = middle_runner_helpers.reset_middle_runner_state_values()
         self._apply_middle_runner_state_values(values)
@@ -2084,24 +2081,13 @@ class BollCvdReclaimStrategy:
     def _reset_three_stage_runner_state(self) -> None:
         values = three_stage_helpers.reset_three_stage_state_values()
         self._apply_three_stage_state_values(values)
-        self.state.trend_runner_active = False
-        self.state.trend_runner_trend_start_ts_ms = 0
-        self.state.trend_runner_adjust_count = 0
-        self.state.trend_runner_last_update_candle_ts_ms = 0
-        self.state.trend_runner_tp_price = None
-        self.state.trend_runner_sl_price = None
-        self.state.trend_runner_tp_order_id = None
-        self.state.trend_runner_sl_order_id = None
-        self.state.trend_runner_exit_reason = None
+        trend_values = trend_runner_helpers.reset_trend_runner_state_values()
+        self._apply_trend_runner_state_values(trend_values)
         self._reset_trend_runner_reverse_state()
 
     def _reset_trend_runner_reverse_state(self) -> None:
-        self.state.trend_runner_reverse_candidate = False
-        self.state.trend_runner_reverse_start_ts_ms = 0
-        self.state.trend_runner_reverse_start_price = None
-        self.state.trend_runner_reverse_extreme_price = None
-        self.state.trend_runner_reverse_fast_cvd_start = 0.0
-        self.state.trend_runner_reverse_samples = []
+        values = trend_runner_helpers.reset_trend_runner_reverse_state_values()
+        self._apply_trend_runner_reverse_state_values(values)
 
     def _reset_middle_runner_sl_time_tighten_state(self) -> None:
         self.state.middle_runner_sl_time_tighten_candle_count = 0
@@ -2137,15 +2123,8 @@ class BollCvdReclaimStrategy:
             ratios=ratios,
         )
         self._apply_three_stage_state_values(values)
-        self.state.trend_runner_active = False
-        self.state.trend_runner_trend_start_ts_ms = 0
-        self.state.trend_runner_adjust_count = 0
-        self.state.trend_runner_last_update_candle_ts_ms = 0
-        self.state.trend_runner_tp_price = None
-        self.state.trend_runner_sl_price = None
-        self.state.trend_runner_tp_order_id = None
-        self.state.trend_runner_sl_order_id = None
-        self.state.trend_runner_exit_reason = None
+        trend_values = trend_runner_helpers.reset_trend_runner_state_values()
+        self._apply_trend_runner_state_values(trend_values)
         self._reset_trend_runner_reverse_state()
 
     def _update_three_stage_dynamic_targets_without_reset(self, side: PositionSide, boll: BollSnapshot) -> None:
@@ -2185,23 +2164,21 @@ class BollCvdReclaimStrategy:
             adjust_count: int,
             old_sl: float | None,
     ) -> tuple[float, float, float, float]:
-        tp_extra_pct = max(
-            self.config.runner_tp_min_outer_extra_pct,
-            self.config.runner_tp_initial_outer_extra_pct - self.config.runner_tp_step_pct * adjust_count,
+        decision = trend_runner_helpers.calculate_trend_runner_dynamic_orders(
+            side=side,
+            boll_middle=boll.middle,
+            boll_upper=boll.upper,
+            boll_lower=boll.lower,
+            adjust_count=adjust_count,
+            current_sl_price=old_sl,
+            runner_tp_initial_outer_extra_pct=self.config.runner_tp_initial_outer_extra_pct,
+            runner_tp_step_pct=self.config.runner_tp_step_pct,
+            runner_tp_min_outer_extra_pct=self.config.runner_tp_min_outer_extra_pct,
+            runner_sl_initial_outer_distance_ratio=self.config.runner_sl_initial_outer_distance_ratio,
+            runner_sl_step_ratio=self.config.runner_sl_step_ratio,
+            runner_sl_min_outer_distance_ratio=self.config.runner_sl_min_outer_distance_ratio,
         )
-        sl_distance_ratio = max(
-            self.config.runner_sl_min_outer_distance_ratio,
-            self.config.runner_sl_initial_outer_distance_ratio - self.config.runner_sl_step_ratio * adjust_count,
-        )
-        if side == "LONG":
-            new_tp = boll.upper * (1 + tp_extra_pct)
-            calculated_sl = boll.upper - (boll.upper - boll.middle) * sl_distance_ratio
-            new_sl = calculated_sl if old_sl is None else max(old_sl, calculated_sl)
-        else:
-            new_tp = boll.lower * (1 - tp_extra_pct)
-            calculated_sl = boll.lower + (boll.middle - boll.lower) * sl_distance_ratio
-            new_sl = calculated_sl if old_sl is None else min(old_sl, calculated_sl)
-        return new_tp, new_sl, tp_extra_pct, sl_distance_ratio
+        return decision.tp_price, decision.sl_price, decision.tp_extra_pct, decision.sl_distance_ratio
 
     def _advance_runner_sl_time_tighten_candle_count(
             self,
