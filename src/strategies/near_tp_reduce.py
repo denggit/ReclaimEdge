@@ -46,12 +46,6 @@ class NearTpProgress:
 
 
 @dataclass(frozen=True)
-class NearTpArmingDecision:
-    should_arm: bool
-    progress: NearTpProgress
-
-
-@dataclass(frozen=True)
 class NearTpBestPriceDecision:
     best_price: float
     changed: bool

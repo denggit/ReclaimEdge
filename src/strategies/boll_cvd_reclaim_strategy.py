@@ -1769,8 +1769,11 @@ class BollCvdReclaimStrategy:
                               cvd: CvdSnapshot) -> TradeIntent | None:
         if not self.config.near_tp_enabled:
             return None
-        if self.state.sidecar_enabled_for_position:
-            if not self.state.near_tp_sidecar_skip_logged:
+        sidecar_gate = near_tp_helpers.near_tp_sidecar_skip_allowed(
+            sidecar_enabled_for_position=self.state.sidecar_enabled_for_position,
+        )
+        if not sidecar_gate.allowed:
+            if sidecar_gate.reason == "sidecar_enabled" and not self.state.near_tp_sidecar_skip_logged:
                 logger.info(
                     "NEAR_TP_REDUCE_SKIPPED | reason=sidecar_enabled side=%s price=%.4f sidecar_open_qty=%.8f",
                     self.state.side,

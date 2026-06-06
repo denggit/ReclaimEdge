@@ -6,7 +6,6 @@ no logger, no env.
 
 from __future__ import annotations
 
-import types
 import unittest
 
 from src.strategies import near_tp_reduce as helpers
