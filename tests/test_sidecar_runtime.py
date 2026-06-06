@@ -12,9 +12,9 @@ from scripts.run_boll_cvd_live import (
     apply_sidecar_startup_recovery,
     force_close_sidecar_after_core_flat,
     monitor_sidecar_orders_once,
-    reconcile_sidecar_orders_before_core_view,
     sidecar_open_contracts,
 )
+from src.position_management.sidecar.pre_core_reconcile import reconcile_sidecar_orders_before_core_view
 from src.execution.trader import PositionSnapshot
 from src.live.runtime_types import ExecutionState, SidecarPreCoreReconcileResult
 from src.position_management.core_position_view import sidecar_position_mismatch, with_entry_add_managed_core_contracts
