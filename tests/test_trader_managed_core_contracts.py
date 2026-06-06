@@ -47,7 +47,6 @@ def make_trader(**overrides) -> Trader:
     t.api_key = "key"
     t.secret_key = "secret"
     t.passphrase = "pass"
-    t._session = None
     t._timeout_seconds = 7.0
     t.symbol = "ETH-USDT-SWAP"
     t.td_mode = "isolated"

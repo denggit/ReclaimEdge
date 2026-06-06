@@ -1,20 +1,15 @@
 from __future__ import annotations
 
 import asyncio
-import base64
-import datetime
-import hmac
-import json
 import math
 import os
 from dataclasses import dataclass, replace
 from decimal import Decimal, ROUND_DOWN
 from typing import Any, Optional
 
-import aiohttp
-
 from config.env_loader import OKX_CONFIG
 from src.execution import order_specs
+from src.execution.okx_private_client import OkxPrivateClient, OkxPrivateClientConfig
 from src.position_management.sidecar.model import sanitize_okx_client_order_id
 from src.strategies.boll_cvd_reclaim_strategy import PositionSide, TradeIntent
 from src.utils.log import get_logger
@@ -98,8 +93,16 @@ class Trader:
         self._protected_reduce_only_order_ids: set[str] = set()
         self._managed_reduce_only_order_ids: set[str] = set()
         self._allow_cancel_unmanaged_reduce_only = True
-        self._session: aiohttp.ClientSession | None = None
         self._timeout_seconds = float(os.getenv("OKX_PRIVATE_REST_TIMEOUT_SECONDS", "10"))
+        self._client = OkxPrivateClient(
+            OkxPrivateClientConfig(
+                base_url=self.base_url,
+                api_key=self.api_key,
+                secret_key=self.secret_key,
+                passphrase=self.passphrase,
+                timeout_seconds=self._timeout_seconds,
+            )
+        )
 
         if not self.api_key or not self.secret_key or not self.passphrase:
             raise ValueError("OKX API config is incomplete. Check OKX_API_KEY, OKX_SECRET_KEY, OKX_PASSPHASE.")
@@ -107,15 +110,10 @@ class Trader:
             raise RuntimeError("LIVE_TRADING is not true. Refusing to initialize live trader.")
 
     async def start(self) -> None:
-        if self._session is not None and not self._session.closed:
-            return
-        self._session = aiohttp.ClientSession()
+        await self._client.start()
 
     async def close(self) -> None:
-        if self._session is None:
-            return
-        await self._session.close()
-        self._session = None
+        await self._client.close()
 
     async def initialize(self) -> None:
         equity = await self.fetch_usdt_equity()
@@ -1439,40 +1437,10 @@ class Trader:
             await self.request("POST", "/api/v5/account/set-leverage", body)
 
     async def request(self, method: str, endpoint: str, payload: Any | None = None) -> dict[str, Any]:
-        await self.start()
-        if self._session is None:
-            raise RuntimeError("OKX private REST session is not initialized")
-        method = method.upper()
-        body = "" if method == "GET" else json.dumps(payload or {}, separators=(",", ":"))
-        headers = self.headers(method, endpoint, body)
-        if method == "GET":
-            async with self._session.get(self.base_url + endpoint, headers=headers,
-                                         timeout=self._timeout_seconds) as resp:
-                res = await resp.json()
-        else:
-            async with self._session.post(self.base_url + endpoint, headers=headers, data=body,
-                                          timeout=self._timeout_seconds) as resp:
-                res = await resp.json()
-        if res.get("code") != "0":
-            raise RuntimeError(f"OKX API error: method={method} endpoint={endpoint} response={res}")
-        return res
+        return await self._client.request(method, endpoint, payload)
 
     def headers(self, method: str, endpoint: str, body: str) -> dict[str, str]:
-        timestamp = (
-            datetime.datetime.now(datetime.timezone.utc)
-            .isoformat(timespec="milliseconds")
-            .replace("+00:00", "Z")
-        )
-        message = timestamp + method + endpoint + body
-        digest = hmac.new(self.secret_key.encode("utf-8"), message.encode("utf-8"), digestmod="sha256").digest()
-        signature = base64.b64encode(digest).decode("utf-8")
-        return {
-            "OK-ACCESS-KEY": self.api_key,
-            "OK-ACCESS-SIGN": signature,
-            "OK-ACCESS-TIMESTAMP": timestamp,
-            "OK-ACCESS-PASSPHRASE": self.passphrase,
-            "Content-Type": "application/json",
-        }
+        return self._client.headers(method, endpoint, body)
 
     def eth_qty_to_contracts(self, eth_qty: Decimal) -> Decimal:
         raw_contracts = eth_qty / self.contract_multiplier
