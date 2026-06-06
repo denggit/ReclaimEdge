@@ -47,15 +47,9 @@ from src.position_management.sidecar.model import (  # noqa: E402
     sidecar_open_qty,
 )
 
-from src.position_management.sidecar.reconciler import (  # noqa: E402
-    build_core_position_view,
-    is_sidecar_dirty_missing_tp_order,
-    mark_sidecar_leg_tp_filled,
-    mark_sidecar_leg_unknown_halted,
-)
+from src.position_management.sidecar.reconciler import build_core_position_view  # noqa: E402
 from src.position_management.sidecar import force_close_runtime as sidecar_force_close_runtime  # noqa: E402
 from src.position_management.sidecar import monitor_runtime as sidecar_monitor_runtime  # noqa: E402
-from src.position_management.sidecar import pre_core_reconcile as sidecar_pre_core_reconcile  # noqa: E402
 from src.reporting import live_report_helpers as report_helpers  # noqa: E402
 from src.reporting.daily_trade_reporter import DailyTradeReporter  # noqa: E402
 from src.reporting.journal_compactor import compact_after_weekly_summary  # noqa: E402
