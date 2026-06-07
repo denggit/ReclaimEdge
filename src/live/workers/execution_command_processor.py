@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import html
+import os
 from dataclasses import dataclass, replace
 from decimal import Decimal
 from typing import Any
@@ -18,6 +19,8 @@ from src.position_management import cost_runtime as position_cost_runtime
 from src.position_management import runner_live_helpers
 from src.position_management import tp_progress as tp_progress_helpers
 from src.position_management.sidecar import entry_runtime as sidecar_entry_runtime
+from src.position_management.sidecar import runtime_state as sidecar_runtime_state
+from src.position_management.sidecar.core_exit_safety import classify_sidecar_core_final_exit_risk, open_sidecar_legs
 from src.position_management.sidecar.planner import (
     SidecarExecutionPlan,
     build_combined_entry_intent,
@@ -224,6 +227,10 @@ class ExecutionCommandProcessor:
             command = replace(command, intent=combined_plan.execution_intent)
             sidecar_plan = combined_plan.sidecar_plan
 
+        # ── sidecar core final exit safety guard ─────────────────────────
+        if command.intent.intent_type == "UPDATE_TP":
+            await self._align_sidecar_tp_with_unsafe_core_final_exit(command)
+
         # ── execute intent ───────────────────────────────────────────────
         result = await self.trader.execute_intent(command.intent)
         if not result.ok:
@@ -240,6 +247,193 @@ class ExecutionCommandProcessor:
             await self._apply_entry_result(command, result, entry_cash_before, sidecar_plan)
 
         return result
+
+    # ── sidecar core final exit safety guard ────────────────────────────
+
+    async def _align_sidecar_tp_with_unsafe_core_final_exit(self, command: TradeCommand) -> None:
+        """Realign sidecar TP orders when core final TP would leave sidecar exposed."""
+        # 1. Guard: sidecar not enabled
+        if not getattr(self.strategy.state, "sidecar_enabled_for_position", False):
+            return
+
+        # 2. Guard: no open sidecar legs
+        sidecar_legs: list[dict[str, Any]] = list(getattr(self.strategy.state, "sidecar_legs", []) or [])
+        if not open_sidecar_legs(sidecar_legs):
+            return
+
+        # 3. Read core TP params
+        side = command.intent.side
+        core_tp_price = command.intent.tp_price
+        breakeven_price: float | None = getattr(command.intent, "breakeven_price", None)
+        if breakeven_price is None or breakeven_price <= 0:
+            breakeven_price = getattr(self.strategy.state, "breakeven_price", None)
+
+        # 4. Classify risk
+        risk = classify_sidecar_core_final_exit_risk(
+            side=side,
+            core_tp_price=core_tp_price,
+            breakeven_price=breakeven_price,
+            sidecar_legs=sidecar_legs,
+        )
+        if not risk.risky:
+            return
+
+        logger.warning(
+            "SIDECAR_CORE_FINAL_EXIT_RISK_DETECTED | risk=%s position_id=%s side=%s core_tp_price=%.4f breakeven_price=%s risky_leg_ids=%s",
+            risk.reason,
+            self.execution_state.current_position_id,
+            side,
+            core_tp_price,
+            breakeven_price,
+            list(risk.risky_leg_ids),
+        )
+
+        # 5. Realign all open sidecar legs (not just risky ones)
+        async with self.state_lock:
+            current_position_id = self.execution_state.current_position_id
+            cash_before_position = self.execution_state.cash_before_position
+
+        try:
+            for leg in sidecar_legs:
+                status = str(leg.get("status") or "")
+                if status not in {"OPEN", "OPEN_UNPROTECTED"}:
+                    continue
+
+                old_tp_order_id = leg.get("tp_order_id")
+                old_tp_price = leg.get("tp_price")
+                contracts = leg["contracts"]
+                leg_id = str(leg.get("leg_id") or "")
+
+                # Cancel old sidecar TP if exists
+                if old_tp_order_id:
+                    ok = await self.trader.cancel_sidecar_take_profit(str(old_tp_order_id))
+                    if not ok:
+                        raise RuntimeError(
+                            f"cancel_sidecar_tp_failed leg_id={leg_id} order_id={old_tp_order_id}"
+                        )
+
+                # Place new TP aligned to core final exit
+                client_order_id = f"{leg_id}-COREEXIT"
+                new_tp_order_id = await self.trader.place_sidecar_fixed_take_profit(
+                    side=side,
+                    contracts=contracts,
+                    tp_price=core_tp_price,
+                    client_order_id=client_order_id,
+                )
+
+                # Update leg state
+                leg["tp_price"] = float(core_tp_price)
+                leg["tp_order_id"] = new_tp_order_id
+                leg["updated_ts_ms"] = command.intent.ts_ms
+                leg["core_exit_aligned"] = True
+                leg["core_exit_alignment_reason"] = risk.reason
+
+                logger.warning(
+                    "SIDECAR_TP_REALIGNED_TO_CORE_EXIT | position_id=%s side=%s core_tp_price=%.4f reason=%s leg_id=%s old_tp_price=%s old_tp_order_id=%s new_tp_order_id=%s",
+                    current_position_id,
+                    side,
+                    core_tp_price,
+                    risk.reason,
+                    leg_id,
+                    old_tp_price,
+                    old_tp_order_id,
+                    new_tp_order_id,
+                )
+
+                self.journal.append(
+                    "SIDECAR_TP_REALIGNED_TO_CORE_EXIT",
+                    {
+                        "side": side,
+                        "core_tp_price": core_tp_price,
+                        "reason": risk.reason,
+                        "leg_id": leg_id,
+                        "old_tp_price": old_tp_price,
+                        "old_tp_order_id": old_tp_order_id,
+                        "new_tp_order_id": new_tp_order_id,
+                    },
+                    position_id=current_position_id,
+                )
+
+            # Refresh sidecar state totals
+            sidecar_runtime_state.refresh_sidecar_state_totals(
+                self.strategy.state, int(os.getenv("SIDECAR_MAX_LEGS", "10"))
+            )
+            self.state_store.save(
+                LiveStateStore.from_strategy_state(
+                    position_id=current_position_id,
+                    symbol=self.trader.symbol,
+                    strategy_state=self.strategy.state,
+                    cash_before_position=cash_before_position,
+                )
+            )
+
+        except Exception as exc:
+            logger.error(
+                "SIDECAR_CORE_EXIT_ALIGNMENT_FAILED | position_id=%s side=%s core_tp_price=%.4f reason=%s error=%s market_exit_attempted=true",
+                current_position_id,
+                side,
+                core_tp_price,
+                risk.reason,
+                exc,
+            )
+
+            # Attempt market exit
+            retry_count = int(
+                os.getenv(
+                    "SIDECAR_CORE_EXIT_ALIGNMENT_FAIL_MARKET_EXIT_RETRY_COUNT",
+                    os.getenv("NEAR_TP_SL_FAIL_MARKET_EXIT_RETRY_COUNT", "3"),
+                )
+            )
+            exit_ok, exit_message = await self.trader.market_exit_remaining_position_with_retries(
+                side,
+                retry_count=retry_count,
+            )
+
+            async with self.state_lock:
+                self.execution_state.trading_halted = True
+                if exit_ok:
+                    self.execution_state.halt_reason = (
+                        "sidecar_core_exit_alignment_failed_market_exit_waiting_flat"
+                    )
+                    self.strategy.state.sidecar_halt_reason = (
+                        "sidecar_core_exit_alignment_failed_market_exit_waiting_flat"
+                    )
+                else:
+                    self.execution_state.halt_reason = "sidecar_core_exit_alignment_failed"
+                    self.strategy.state.sidecar_halt_reason = "sidecar_core_exit_alignment_failed"
+                self.strategy.state.sidecar_dirty = True
+
+            self.journal.append(
+                "SIDECAR_CORE_EXIT_ALIGNMENT_FAILED",
+                {
+                    "side": side,
+                    "core_tp_price": core_tp_price,
+                    "risk_reason": risk.reason,
+                    "error": str(exc),
+                    "exit_ok": exit_ok,
+                    "exit_message": exit_message,
+                    "market_exit_attempted": True,
+                    "manual_intervention_required": not exit_ok,
+                },
+                position_id=current_position_id,
+            )
+
+            self.state_store.save(
+                LiveStateStore.from_strategy_state(
+                    position_id=current_position_id,
+                    symbol=self.trader.symbol,
+                    strategy_state=self.strategy.state,
+                    cash_before_position=cash_before_position,
+                )
+            )
+
+            if exit_ok:
+                raise RuntimeError(
+                    "sidecar_core_exit_alignment_failed_market_exit_waiting_flat"
+                )
+            raise RuntimeError(
+                "sidecar_core_exit_alignment_failed_manual_intervention_required"
+            )
 
     # ── result application helpers ───────────────────────────────────────
 

@@ -36,10 +36,38 @@ async def force_close_sidecar_after_core_flat(
         return True
     expected_sidecar_contracts = sidecar_open_contracts(strategy_state.sidecar_legs)
     okx_position = await trader.fetch_position_snapshot()
+
+    # ── OKX already flat: sidecar TP was likely filled by core-exit-aligned TP ──
+    if not okx_position.has_position:
+        strategy_state.sidecar_legs = [
+            mark_sidecar_leg_force_closed(leg, ts_ms)
+            if leg.get("status") in {SidecarLegStatus.OPEN.value, SidecarLegStatus.OPEN_UNPROTECTED.value}
+            else leg
+            for leg in strategy_state.sidecar_legs
+        ]
+        sidecar_runtime_state.refresh_sidecar_state_totals(strategy_state, int(os.getenv("SIDECAR_MAX_LEGS", "10")))
+        journal.append(
+            "SIDECAR_FORCE_CLOSED_AFTER_CORE_FLAT",
+            {"side": strategy_state.side, "reason": "okx_already_flat"},
+            position_id=position_id,
+        )
+        logger.warning(
+            "SIDECAR_FORCE_CLOSED_AFTER_CORE_FLAT | position_id=%s reason=okx_already_flat",
+            position_id,
+        )
+        state_store.save(
+            LiveStateStore.from_strategy_state(
+                position_id=position_id,
+                symbol=trader_symbol,
+                strategy_state=strategy_state,
+                cash_before_position=cash_before_position,
+            )
+        )
+        return True
+
     tolerance = Decimal(str(os.getenv("SIDECAR_FORCE_CLOSE_CONTRACT_TOLERANCE", "0.01")))
     if (
-            not okx_position.has_position
-            or okx_position.side != strategy_state.side
+            okx_position.side != strategy_state.side
             or abs(okx_position.contracts - expected_sidecar_contracts) > tolerance
     ):
         execution_state.trading_halted = True

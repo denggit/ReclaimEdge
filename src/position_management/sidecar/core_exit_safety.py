@@ -1,0 +1,70 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any
+
+from src.position_management.sidecar.model import SidecarLegStatus
+
+
+@dataclass(frozen=True)
+class SidecarCoreExitRisk:
+    risky: bool
+    reason: str
+    risky_leg_ids: tuple[str, ...]
+
+
+def open_sidecar_legs(legs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        leg for leg in legs
+        if leg.get("status") in {SidecarLegStatus.OPEN.value, SidecarLegStatus.OPEN_UNPROTECTED.value}
+    ]
+
+
+def core_tp_is_loss_for_position(side: str, core_tp_price: float, breakeven_price: float | None) -> bool:
+    if breakeven_price is None or breakeven_price <= 0:
+        return False
+    if side == "LONG":
+        return core_tp_price <= breakeven_price
+    if side == "SHORT":
+        return core_tp_price >= breakeven_price
+    return False
+
+
+def sidecar_leg_tp_is_beyond_core_exit(side: str, core_tp_price: float, leg_tp_price: float) -> bool:
+    # LONG: price rises to TP. If sidecar TP is higher than core TP, core can close first.
+    if side == "LONG":
+        return leg_tp_price > core_tp_price
+    # SHORT: price falls to TP. If sidecar TP is lower than core TP, core can close first.
+    if side == "SHORT":
+        return leg_tp_price < core_tp_price
+    return False
+
+
+def classify_sidecar_core_final_exit_risk(
+    *,
+    side: str,
+    core_tp_price: float,
+    breakeven_price: float | None,
+    sidecar_legs: list[dict[str, Any]],
+) -> SidecarCoreExitRisk:
+    open_legs = open_sidecar_legs(sidecar_legs)
+    if not open_legs:
+        return SidecarCoreExitRisk(False, "no_open_sidecar_legs", ())
+    if core_tp_is_loss_for_position(side, core_tp_price, breakeven_price):
+        return SidecarCoreExitRisk(
+            True,
+            "core_tp_loss_vs_breakeven",
+            tuple(str(leg.get("leg_id") or "") for leg in open_legs),
+        )
+    risky_leg_ids = []
+    for leg in open_legs:
+        try:
+            leg_tp = float(leg.get("tp_price"))
+        except Exception:
+            risky_leg_ids.append(str(leg.get("leg_id") or ""))
+            continue
+        if sidecar_leg_tp_is_beyond_core_exit(side, core_tp_price, leg_tp):
+            risky_leg_ids.append(str(leg.get("leg_id") or ""))
+    if risky_leg_ids:
+        return SidecarCoreExitRisk(True, "sidecar_tp_beyond_core_final_exit", tuple(risky_leg_ids))
+    return SidecarCoreExitRisk(False, "sidecar_tp_reaches_before_or_at_core_exit", ())

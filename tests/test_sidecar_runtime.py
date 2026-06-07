@@ -618,6 +618,50 @@ async def test_sidecar_force_close_mismatch_halts_without_market_exit() -> None:
     assert journal.events[0][0] == "SIDECAR_FORCE_CLOSE_POSITION_MISMATCH"
 
 
+@pytest.mark.asyncio
+async def test_force_close_sidecar_already_flat_marks_legs_and_returns_true() -> None:
+    """Test 12: when okx is already flat, mark legs FORCE_CLOSED without halt."""
+    state = sidecar_state()
+    state.sidecar_legs = [
+        {"leg_id": "leg-1", "status": "OPEN", "tp_order_id": "tp-1", "qty": 0.1, "contracts": "1", "created_ts_ms": 1,
+         "updated_ts_ms": 1}
+    ]
+    refresh_sidecar_state_totals(state)
+    trader = Trader()
+    # OKX returns no position
+    trader.position_snapshot = PositionSnapshot(None, Decimal("0"), 0.0, 0.0, Decimal("0"))
+    execution = ExecutionState("pos-1", 1000.0)
+    journal = Journal()
+    store = Store()
+
+    ok = await force_close_sidecar_after_core_flat(
+        trader=trader,
+        strategy_state=state,
+        execution_state=execution,
+        journal=journal,
+        state_store=store,
+        trader_symbol="ETH-USDT-SWAP",
+        position_id="pos-1",
+        cash_before_position=1000.0,
+        ts_ms=2,
+    )
+
+    assert ok
+    # Should NOT halt
+    assert not execution.trading_halted
+    # Should mark legs FORCE_CLOSED
+    assert state.sidecar_legs[0]["status"] == "FORCE_CLOSED"
+    # Should journal SIDECAR_FORCE_CLOSED_AFTER_CORE_FLAT with reason okx_already_flat
+    force_close_events = [e for e in journal.events if e[0] == "SIDECAR_FORCE_CLOSED_AFTER_CORE_FLAT"]
+    assert len(force_close_events) == 1
+    assert force_close_events[0][1]["reason"] == "okx_already_flat"
+    # Should save state
+    assert len(store.saved) >= 1
+    # Should NOT have called cancel / place / market exit
+    assert trader.cancelled_sidecar_tps == []
+    assert trader.market_exits == []
+
+
 def test_core_sidecar_position_mismatch_detected() -> None:
     state = sidecar_state()
     state.sidecar_legs = [{"status": "OPEN", "qty": 0.2, "contracts": "2", "tp_order_id": "tp"}]

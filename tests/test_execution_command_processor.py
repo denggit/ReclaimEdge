@@ -133,6 +133,13 @@ class FakeTrader:
         self._position: PositionSnapshot = flat_position()
         self._cash_balance: float = 1000.0
         self.config = types.SimpleNamespace(leverage=50)
+        # sidecar tracking
+        self.cancelled_sidecar_tps: list[str] = []
+        self.sidecar_tps: list[tuple] = []
+        self.market_exits: list[tuple] = []
+        self._cancel_sidecar_tp_returns: bool = True
+        self._place_sidecar_tp_raises: Exception | None = None
+        self._market_exit_returns: tuple[bool, str] = (True, "ok")
 
     async def execute_intent(self, trade_intent: TradeIntent) -> LiveTradeResult:
         self.executed.append(trade_intent.ts_ms)
@@ -152,6 +159,24 @@ class FakeTrader:
             tp_ok=True,
             tp_order_ids=(f"tp-{trade_intent.ts_ms}",),
         )
+
+    async def cancel_sidecar_take_profit(self, order_id: str) -> bool:
+        self.cancelled_sidecar_tps.append(order_id)
+        return self._cancel_sidecar_tp_returns
+
+    async def place_sidecar_fixed_take_profit(
+        self, *, side: str, contracts: str, tp_price: float, client_order_id: str | None = None
+    ) -> str:
+        if self._place_sidecar_tp_raises is not None:
+            raise self._place_sidecar_tp_raises
+        self.sidecar_tps.append((side, contracts, tp_price, client_order_id))
+        return f"sidecar-tp-{len(self.sidecar_tps)}"
+
+    async def market_exit_remaining_position_with_retries(
+        self, side: str, retry_count: int
+    ) -> tuple[bool, str]:
+        self.market_exits.append((side, retry_count))
+        return self._market_exit_returns
 
     async def fetch_position_snapshot(self) -> PositionSnapshot:
         return self._position
@@ -1123,6 +1148,384 @@ class TestExecutionCommandProcessorWithSidecar(unittest.IsolatedAsyncioTestCase)
 
         self.assertIsNotNone(result)
         # Should have executed only core entry
+        self.assertGreaterEqual(len(trader.executed), 1)
+
+    # ── sidecar core exit safety tests ────────────────────────────────
+
+    @staticmethod
+    def _unsafe_update_tp_command(
+        ts_ms: int = 5_000,
+        core_tp_price: float = 105.0,
+        side: str = "LONG",
+    ) -> TradeCommand:
+        intent = TradeIntent(
+            intent_type="UPDATE_TP",  # type: ignore[arg-type]
+            side=side,  # type: ignore[arg-type]
+            price=104.0,
+            layer_index=1,
+            tp_price=core_tp_price,
+            reason="test_unsafe_core_tp",
+            size=PositionSize(1.0, 50.0, 1.0, 1, 1.0),
+            fast_cvd=1.0,
+            previous_fast_cvd=0.0,
+            buy_ratio=1.0,
+            sell_ratio=0.0,
+            boll_upper=110.0,
+            boll_middle=100.0,
+            boll_lower=90.0,
+            ts_ms=ts_ms,
+            avg_entry_price=100.0,
+            breakeven_price=100.0,
+            tp_mode="MIDDLE",
+        )
+        return TradeCommand(
+            intent,
+            StrategyPositionState(side=side),
+            ts_ms,
+            asyncio.get_running_loop().time(),
+            0,
+            "test_unsafe_core_tp",
+        )
+
+    async def test_update_tp_unsafe_sidecar_realigns_before_execute(self) -> None:
+        """Test 8: UPDATE_TP with unsafe core TP realigns sidecar TP before execute_intent."""
+        strategy = BollCvdShockReclaimStrategy(
+            BollCvdReclaimStrategyConfig(),
+            SimplePositionSizer(SimplePositionSizerConfig()),
+        )
+        strategy.state = StrategyPositionState(
+            side="LONG",
+            layers=1,
+            sidecar_enabled_for_position=True,
+            sidecar_legs=[
+                {
+                    "leg_id": "leg-open-1",
+                    "tp_order_id": "old123",
+                    "tp_price": 106.0,
+                    "contracts": "1",
+                    "qty": 0.1,
+                    "status": "OPEN",
+                    "entry_price": 3000.0,
+                    "side": "LONG",
+                    "layer_index": 1,
+                    "tp_pct": 0.004,
+                    "margin_pct": 0.01,
+                    "layer_multiplier": 1.0,
+                    "position_id": "pos-1",
+                    "created_ts_ms": 1000,
+                    "updated_ts_ms": 1000,
+                },
+            ],
+            breakeven_price=100.0,
+        )
+        execution_state = ExecutionState("pos-test", 1000.0)
+        trader = self._sidecar_trader()
+        journal = FakeJournal()
+        state_store = FakeStateStore()
+        processor, _, _, _ = make_processor(
+            execution_state=execution_state,
+            strategy=strategy,
+            trader=trader,
+            journal=journal,
+            state_store=state_store,
+        )
+
+        # core_tp=105, sidecar leg tp=106 → LONG sidecar tp beyond core → risky
+        command = self._unsafe_update_tp_command(ts_ms=5_000, core_tp_price=105.0)
+
+        result = await processor.process(command)
+
+        self.assertIsNotNone(result)
+        # Assert cancel called before place
+        self.assertIn("old123", trader.cancelled_sidecar_tps)
+        self.assertGreaterEqual(len(trader.sidecar_tps), 1)
+        placed_tp = trader.sidecar_tps[0]
+        self.assertEqual(placed_tp[2], 105.0)  # tp_price matches core
+        # Assert execute_intent called after realignment
+        self.assertGreaterEqual(len(trader.executed), 1)
+        # Assert leg updated
+        leg = strategy.state.sidecar_legs[0]
+        self.assertEqual(leg["tp_price"], 105.0)
+        self.assertEqual(leg["tp_order_id"], "sidecar-tp-1")
+        self.assertTrue(leg.get("core_exit_aligned"))
+        self.assertEqual(leg.get("core_exit_alignment_reason"), "sidecar_tp_beyond_core_final_exit")
+        # Assert journal event
+        realign_events = [e for e in journal.events if e[0] == "SIDECAR_TP_REALIGNED_TO_CORE_EXIT"]
+        self.assertEqual(len(realign_events), 1)
+
+    async def test_update_tp_safe_sidecar_does_nothing(self) -> None:
+        """Test 9: UPDATE_TP with safe core TP does not touch sidecar TPs."""
+        strategy = BollCvdShockReclaimStrategy(
+            BollCvdReclaimStrategyConfig(),
+            SimplePositionSizer(SimplePositionSizerConfig()),
+        )
+        strategy.state = StrategyPositionState(
+            side="LONG",
+            layers=1,
+            sidecar_enabled_for_position=True,
+            sidecar_legs=[
+                {
+                    "leg_id": "leg-open-1",
+                    "tp_order_id": "old123",
+                    "tp_price": 106.0,
+                    "contracts": "1",
+                    "qty": 0.1,
+                    "status": "OPEN",
+                    "entry_price": 3000.0,
+                    "side": "LONG",
+                    "layer_index": 1,
+                    "tp_pct": 0.004,
+                    "margin_pct": 0.01,
+                    "layer_multiplier": 1.0,
+                    "position_id": "pos-1",
+                    "created_ts_ms": 1000,
+                    "updated_ts_ms": 1000,
+                },
+            ],
+            breakeven_price=100.0,
+        )
+        execution_state = ExecutionState("pos-safe", 1000.0)
+        trader = self._sidecar_trader()
+        journal = FakeJournal()
+        processor, _, _, _ = make_processor(
+            execution_state=execution_state,
+            strategy=strategy,
+            trader=trader,
+            journal=journal,
+        )
+
+        # core_tp=107, sidecar leg tp=106 → LONG sidecar tp before core → safe
+        command = self._unsafe_update_tp_command(ts_ms=5_000, core_tp_price=107.0)
+
+        result = await processor.process(command)
+
+        self.assertIsNotNone(result)
+        # No sidecar cancel/place calls
+        self.assertEqual(len(trader.cancelled_sidecar_tps), 0)
+        self.assertEqual(len(trader.sidecar_tps), 0)
+        # execute_intent called normally
+        self.assertGreaterEqual(len(trader.executed), 1)
+        # No realignment journal
+        realign_events = [e for e in journal.events if e[0] == "SIDECAR_TP_REALIGNED_TO_CORE_EXIT"]
+        self.assertEqual(len(realign_events), 0)
+
+    async def test_sidecar_realignment_cancel_failure_market_exits(self) -> None:
+        """Test 10: cancel_sidecar_take_profit failure triggers market exit and halt."""
+        strategy = BollCvdShockReclaimStrategy(
+            BollCvdReclaimStrategyConfig(),
+            SimplePositionSizer(SimplePositionSizerConfig()),
+        )
+        strategy.state = StrategyPositionState(
+            side="LONG",
+            layers=1,
+            sidecar_enabled_for_position=True,
+            sidecar_legs=[
+                {
+                    "leg_id": "leg-open-1",
+                    "tp_order_id": "old123",
+                    "tp_price": 106.0,
+                    "contracts": "1",
+                    "qty": 0.1,
+                    "status": "OPEN",
+                    "entry_price": 3000.0,
+                    "side": "LONG",
+                    "layer_index": 1,
+                    "tp_pct": 0.004,
+                    "margin_pct": 0.01,
+                    "layer_multiplier": 1.0,
+                    "position_id": "pos-1",
+                    "created_ts_ms": 1000,
+                    "updated_ts_ms": 1000,
+                },
+            ],
+            breakeven_price=100.0,
+        )
+        execution_state = ExecutionState("pos-cancel-fail", 1000.0)
+        trader = self._sidecar_trader()
+        trader._cancel_sidecar_tp_returns = False  # simulate cancel failure
+        journal = FakeJournal()
+        state_store = FakeStateStore()
+        processor, _, _, _ = make_processor(
+            execution_state=execution_state,
+            strategy=strategy,
+            trader=trader,
+            journal=journal,
+            state_store=state_store,
+        )
+
+        command = self._unsafe_update_tp_command(ts_ms=5_000, core_tp_price=105.0)
+
+        with self.assertRaises(RuntimeError) as ctx:
+            await processor.process(command)
+        self.assertIn("sidecar_core_exit_alignment_failed", str(ctx.exception))
+
+        # market exit attempted
+        self.assertGreaterEqual(len(trader.market_exits), 1)
+        # execute_intent NOT called
+        self.assertEqual(len(trader.executed), 0)
+        # trading halted
+        self.assertTrue(execution_state.trading_halted)
+        # journal event
+        fail_events = [e for e in journal.events if e[0] == "SIDECAR_CORE_EXIT_ALIGNMENT_FAILED"]
+        self.assertEqual(len(fail_events), 1)
+
+    async def test_sidecar_realignment_place_failure_market_exits(self) -> None:
+        """Test 11: place_sidecar_fixed_take_profit failure triggers market exit and halt."""
+        strategy = BollCvdShockReclaimStrategy(
+            BollCvdReclaimStrategyConfig(),
+            SimplePositionSizer(SimplePositionSizerConfig()),
+        )
+        strategy.state = StrategyPositionState(
+            side="LONG",
+            layers=1,
+            sidecar_enabled_for_position=True,
+            sidecar_legs=[
+                {
+                    "leg_id": "leg-open-1",
+                    "tp_order_id": "old123",
+                    "tp_price": 106.0,
+                    "contracts": "1",
+                    "qty": 0.1,
+                    "status": "OPEN",
+                    "entry_price": 3000.0,
+                    "side": "LONG",
+                    "layer_index": 1,
+                    "tp_pct": 0.004,
+                    "margin_pct": 0.01,
+                    "layer_multiplier": 1.0,
+                    "position_id": "pos-1",
+                    "created_ts_ms": 1000,
+                    "updated_ts_ms": 1000,
+                },
+            ],
+            breakeven_price=100.0,
+        )
+        execution_state = ExecutionState("pos-place-fail", 1000.0)
+        trader = self._sidecar_trader()
+        trader._place_sidecar_tp_raises = RuntimeError("place_tp_failed")
+        journal = FakeJournal()
+        state_store = FakeStateStore()
+        processor, _, _, _ = make_processor(
+            execution_state=execution_state,
+            strategy=strategy,
+            trader=trader,
+            journal=journal,
+            state_store=state_store,
+        )
+
+        command = self._unsafe_update_tp_command(ts_ms=5_000, core_tp_price=105.0)
+
+        with self.assertRaises(RuntimeError) as ctx:
+            await processor.process(command)
+        self.assertIn("sidecar_core_exit_alignment_failed", str(ctx.exception))
+
+        # cancel succeeded
+        self.assertIn("old123", trader.cancelled_sidecar_tps)
+        # market exit attempted
+        self.assertGreaterEqual(len(trader.market_exits), 1)
+        # execute_intent NOT called
+        self.assertEqual(len(trader.executed), 0)
+        # trading halted
+        self.assertTrue(execution_state.trading_halted)
+        # journal event
+        fail_events = [e for e in journal.events if e[0] == "SIDECAR_CORE_EXIT_ALIGNMENT_FAILED"]
+        self.assertEqual(len(fail_events), 1)
+
+    async def test_update_tp_sidecar_not_enabled_no_alignment(self) -> None:
+        """UPDATE_TP with sidecar disabled does nothing even if unsafe."""
+        strategy = BollCvdShockReclaimStrategy(
+            BollCvdReclaimStrategyConfig(),
+            SimplePositionSizer(SimplePositionSizerConfig()),
+        )
+        strategy.state = StrategyPositionState(
+            side="LONG",
+            layers=1,
+            sidecar_enabled_for_position=False,  # disabled
+            sidecar_legs=[
+                {
+                    "leg_id": "leg-open-1",
+                    "tp_order_id": "old123",
+                    "tp_price": 106.0,
+                    "contracts": "1",
+                    "qty": 0.1,
+                    "status": "OPEN",
+                    "entry_price": 3000.0,
+                    "side": "LONG",
+                    "layer_index": 1,
+                    "tp_pct": 0.004,
+                    "margin_pct": 0.01,
+                    "layer_multiplier": 1.0,
+                    "position_id": "pos-1",
+                    "created_ts_ms": 1000,
+                    "updated_ts_ms": 1000,
+                },
+            ],
+        )
+        execution_state = ExecutionState("pos-disabled", 1000.0)
+        trader = self._sidecar_trader()
+        processor, _, _, _ = make_processor(
+            execution_state=execution_state,
+            strategy=strategy,
+            trader=trader,
+        )
+
+        command = self._unsafe_update_tp_command(ts_ms=5_000, core_tp_price=105.0)
+        result = await processor.process(command)
+
+        self.assertIsNotNone(result)
+        # No sidecar cancel/place
+        self.assertEqual(len(trader.cancelled_sidecar_tps), 0)
+        self.assertEqual(len(trader.sidecar_tps), 0)
+        # execute_intent called normally
+        self.assertGreaterEqual(len(trader.executed), 1)
+
+    async def test_update_tp_no_open_sidecar_legs_no_alignment(self) -> None:
+        """UPDATE_TP with no open sidecar legs does nothing."""
+        strategy = BollCvdShockReclaimStrategy(
+            BollCvdReclaimStrategyConfig(),
+            SimplePositionSizer(SimplePositionSizerConfig()),
+        )
+        strategy.state = StrategyPositionState(
+            side="LONG",
+            layers=1,
+            sidecar_enabled_for_position=True,
+            sidecar_legs=[
+                {
+                    "leg_id": "leg-filled",
+                    "status": "TP_FILLED",
+                    "tp_price": 106.0,
+                    "tp_order_id": "old456",
+                    "contracts": "1",
+                    "qty": 0.1,
+                    "entry_price": 3000.0,
+                    "side": "LONG",
+                    "layer_index": 1,
+                    "tp_pct": 0.004,
+                    "margin_pct": 0.01,
+                    "layer_multiplier": 1.0,
+                    "position_id": "pos-1",
+                    "created_ts_ms": 1000,
+                    "updated_ts_ms": 1000,
+                },
+            ],
+            breakeven_price=100.0,
+        )
+        execution_state = ExecutionState("pos-no-open", 1000.0)
+        trader = self._sidecar_trader()
+        processor, _, _, _ = make_processor(
+            execution_state=execution_state,
+            strategy=strategy,
+            trader=trader,
+        )
+
+        command = self._unsafe_update_tp_command(ts_ms=5_000, core_tp_price=105.0)
+        result = await processor.process(command)
+
+        self.assertIsNotNone(result)
+        # No sidecar cancel/place
+        self.assertEqual(len(trader.cancelled_sidecar_tps), 0)
+        self.assertEqual(len(trader.sidecar_tps), 0)
+        # execute_intent called normally
         self.assertGreaterEqual(len(trader.executed), 1)
 
 
