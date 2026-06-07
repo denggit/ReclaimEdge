@@ -721,3 +721,340 @@ class TestMiddleRunnerRunnerTooSmallClassifiesFinalFullSize:
         assert result.middle_bucket_split_executed is False
         assert result.middle_bucket_split_actual_order_mode == "FINAL_FULL_SIZE"
         assert result.middle_bucket_split_disabled_reason is not None
+
+
+# ── Protective SL failure paths preserve actual_order_mode ───────────────
+
+
+class TestMiddleRunnerSlFailurePreservesActualOrderModeFinalFullSize:
+    """When middle runner protective SL fails and specs are final,
+    the classifier (called BEFORE protective SL) must still classify
+    as FINAL_FULL_SIZE and the fields must be carried in the early return."""
+
+    @pytest.mark.asyncio
+    async def test_middle_runner_sl_failure_preserves_actual_order_mode_final_full_size(self):
+        from src.execution.tp_sl_execution_manager import TpSlExecutionManager
+        from src.execution.trader import PositionSnapshot, Trader
+
+        trader = Trader.__new__(Trader)
+        trader.symbol = "ETH-USDT-SWAP"
+        trader.td_mode = "isolated"
+        trader.leverage = "50"
+        trader.pos_side_mode = "net"
+        trader.live_trading = True
+        trader.contract_multiplier = Decimal("0.1")
+        trader.contract_precision = Decimal("0.01")
+        trader.min_contracts = Decimal("0.01")
+        trader.position_contracts = Decimal("10")
+        trader.tp_order_id = None
+        trader.near_tp_protective_sl_order_id = None
+        trader.middle_runner_protective_sl_order_id = None
+        trader.three_stage_post_tp1_protective_sl_order_id = None
+        trader.trend_runner_sl_order_id = None
+        trader.account_equity_usdt = 0.0
+        trader._protected_reduce_only_order_ids = set()
+        trader._managed_reduce_only_order_ids = set()
+        trader._allow_cancel_unmanaged_reduce_only = True
+        trader.decimal_to_str = lambda d: str(d)
+        trader.price_to_str = lambda p: f"{p:.1f}"
+        trader.round_contracts_down = lambda c: c
+        trader._tp_price_summary = lambda specs: trader.price_to_str(specs[0][2])
+
+        async def fake_fetch():
+            return PositionSnapshot("LONG", Decimal("10"), 3000.0, Decimal("1"), Decimal("10"))
+        trader.fetch_position_snapshot = fake_fetch
+
+        facade = TpSlExecutionManager(trader)
+
+        from src.strategies.boll_cvd_reclaim_strategy import TradeIntent
+        from src.risk.simple_position_sizer import PositionSize
+
+        intent = TradeIntent(
+            intent_type="UPDATE_TP",
+            side="LONG",
+            price=3000.0,
+            layer_index=1,
+            tp_price=3100.0,
+            reason="test_middle_runner_sl_failure",
+            size=PositionSize(
+                eth_qty=0.1, margin_usdt=300.0, notional_usdt=3000.0,
+                layer_index=1, layer_multiplier=1.0,
+            ),
+            fast_cvd=0.0, previous_fast_cvd=0.0,
+            buy_ratio=0.5, sell_ratio=0.5,
+            boll_upper=3200.0, boll_middle=3100.0, boll_lower=3000.0,
+            ts_ms=1000,
+            avg_entry_price=3000.0,
+            breakeven_price=3000.0,
+            tp_mode="MIDDLE",
+            tp_plan="THREE_STAGE_RUNNER",
+            three_stage_tp1_price=3050.0,
+            three_stage_tp2_price=3200.0,
+            three_stage_tp1_ratio=0.70,
+            three_stage_tp2_ratio=0.20,
+            three_stage_runner_ratio=0.10,
+            middle_bucket_split_active=True,
+            middle_bucket_split_fast_price=3060.0,
+            middle_bucket_split_slow_price=3040.0,
+            middle_bucket_split_effective_price=3054.0,
+            middle_bucket_split_middle_bucket_ratio=0.70,
+            middle_bucket_split_fast_ratio_of_bucket=0.70,
+            middle_bucket_split_slow_ratio_of_bucket=0.30,
+            middle_bucket_split_fast_total_ratio=0.49,
+            middle_bucket_split_slow_total_ratio=0.21,
+            # Trigger middle runner protective SL path
+            middle_runner_active=True,
+            middle_runner_protective_sl_price=2900.0,
+        )
+
+        # Build specs that yield single "final" (e.g. fallback to final)
+        final_specs = [("final", Decimal("10"), 3100.0)]
+        facade.core_tp._build_take_profit_order_specs = mock.MagicMock(
+            return_value=(final_specs, None)
+        )
+
+        trader._cancel_existing_take_profit_orders_for_intent = mock.AsyncMock()
+        trader._cancel_stale_runner_protective_stops_for_degrade = mock.AsyncMock()
+        trader._place_reduce_only_take_profit_orders = mock.AsyncMock(
+            return_value=["final-order"]
+        )
+
+        # Mock middle runner SL failure
+        trader.place_middle_runner_protective_stop_with_retries = mock.AsyncMock(
+            return_value=(False, None, "simulated middle runner SL failure")
+        )
+
+        result = await facade.replace_take_profit(intent)
+
+        assert result.ok is False
+        assert "middle_runner_protective_sl_failed" in result.message
+        assert result.middle_bucket_split_executed is False
+        assert result.middle_bucket_split_actual_order_mode == "FINAL_FULL_SIZE"
+        assert result.middle_bucket_split_disabled_reason is not None
+
+
+class TestThreeStagePostTp1SlFailurePreservesActualOrderModeUnsplitMiddleBucket:
+    """When three-stage post-TP1 protective SL fails and specs are unsplit
+    middle bucket, the classifier must return UNSPLIT_MIDDLE_BUCKET."""
+
+    @pytest.mark.asyncio
+    async def test_three_stage_post_tp1_sl_failure_preserves_actual_order_mode_unsplit_middle_bucket(self):
+        from src.execution.tp_sl_execution_manager import TpSlExecutionManager
+        from src.execution.trader import PositionSnapshot, Trader
+
+        trader = Trader.__new__(Trader)
+        trader.symbol = "ETH-USDT-SWAP"
+        trader.td_mode = "isolated"
+        trader.leverage = "50"
+        trader.pos_side_mode = "net"
+        trader.live_trading = True
+        trader.contract_multiplier = Decimal("0.1")
+        trader.contract_precision = Decimal("0.01")
+        trader.min_contracts = Decimal("0.01")
+        trader.position_contracts = Decimal("10")
+        trader.tp_order_id = None
+        trader.near_tp_protective_sl_order_id = None
+        trader.middle_runner_protective_sl_order_id = None
+        trader.three_stage_post_tp1_protective_sl_order_id = None
+        trader.trend_runner_sl_order_id = None
+        trader.account_equity_usdt = 0.0
+        trader._protected_reduce_only_order_ids = set()
+        trader._managed_reduce_only_order_ids = set()
+        trader._allow_cancel_unmanaged_reduce_only = True
+        trader.decimal_to_str = lambda d: str(d)
+        trader.price_to_str = lambda p: f"{p:.1f}"
+        trader.round_contracts_down = lambda c: c
+        trader._tp_price_summary = lambda specs: trader.price_to_str(specs[0][2])
+
+        async def fake_fetch():
+            return PositionSnapshot("LONG", Decimal("10"), 3000.0, Decimal("1"), Decimal("10"))
+        trader.fetch_position_snapshot = fake_fetch
+
+        facade = TpSlExecutionManager(trader)
+
+        from src.strategies.boll_cvd_reclaim_strategy import TradeIntent
+        from src.risk.simple_position_sizer import PositionSize
+
+        intent = TradeIntent(
+            intent_type="UPDATE_TP",
+            side="LONG",
+            price=3000.0,
+            layer_index=1,
+            tp_price=3100.0,
+            reason="test_post_tp1_sl_failure",
+            size=PositionSize(
+                eth_qty=0.1, margin_usdt=300.0, notional_usdt=3000.0,
+                layer_index=1, layer_multiplier=1.0,
+            ),
+            fast_cvd=0.0, previous_fast_cvd=0.0,
+            buy_ratio=0.5, sell_ratio=0.5,
+            boll_upper=3200.0, boll_middle=3100.0, boll_lower=3000.0,
+            ts_ms=1000,
+            avg_entry_price=3000.0,
+            breakeven_price=3000.0,
+            tp_mode="MIDDLE",
+            tp_plan="THREE_STAGE_RUNNER",
+            three_stage_tp1_price=3050.0,
+            three_stage_tp2_price=3200.0,
+            three_stage_tp1_ratio=0.70,
+            three_stage_tp2_ratio=0.20,
+            three_stage_runner_ratio=0.10,
+            middle_bucket_split_active=True,
+            middle_bucket_split_fast_price=3060.0,
+            middle_bucket_split_slow_price=3040.0,
+            middle_bucket_split_effective_price=3054.0,
+            middle_bucket_split_middle_bucket_ratio=0.70,
+            middle_bucket_split_fast_ratio_of_bucket=0.70,
+            middle_bucket_split_slow_ratio_of_bucket=0.30,
+            middle_bucket_split_fast_total_ratio=0.49,
+            middle_bucket_split_slow_total_ratio=0.21,
+            # Trigger post-TP1 protective SL path (NOT middle runner, NOT trend runner)
+            middle_runner_active=False,
+            trend_runner_active=False,
+            three_stage_tp1_consumed=True,
+            three_stage_tp2_consumed=False,
+            three_stage_post_tp1_protective_sl_price=2950.0,
+        )
+
+        # Build specs with unsplit middle bucket labels
+        unsplit_specs = [
+            ("tp1_middle", Decimal("7"), 3050.0),
+            ("tp2_outer", Decimal("3"), 3200.0),
+        ]
+        facade.core_tp._build_take_profit_order_specs = mock.MagicMock(
+            return_value=(unsplit_specs, "subleg_too_small")
+        )
+
+        trader._cancel_existing_take_profit_orders_for_intent = mock.AsyncMock()
+        trader._cancel_stale_runner_protective_stops_for_degrade = mock.AsyncMock()
+        trader._place_reduce_only_take_profit_orders = mock.AsyncMock(
+            return_value=["tp1-middle", "tp2-outer"]
+        )
+
+        # Mock three-stage post-TP1 SL failure
+        trader.place_three_stage_post_tp1_protective_stop_with_retries = mock.AsyncMock(
+            return_value=(False, None, "simulated post_tp1 SL failure")
+        )
+
+        result = await facade.replace_take_profit(intent)
+
+        assert result.ok is False
+        assert "three_stage_post_tp1_protective_sl_failed" in result.message
+        assert result.middle_bucket_split_executed is False
+        assert result.middle_bucket_split_actual_order_mode == "UNSPLIT_MIDDLE_BUCKET"
+        assert result.middle_bucket_split_disabled_reason == "subleg_too_small"
+
+
+class TestTrendRunnerSlFailurePreservesActualOrderModeSplitFastSlow:
+    """When trend runner protective SL fails and specs were real split labels,
+    the classifier must return SPLIT_FAST_SLOW and the early return must carry it."""
+
+    @pytest.mark.asyncio
+    async def test_trend_runner_sl_failure_preserves_actual_order_mode_split_fast_slow(self):
+        from src.execution.tp_sl_execution_manager import TpSlExecutionManager
+        from src.execution.trader import PositionSnapshot, Trader
+
+        trader = Trader.__new__(Trader)
+        trader.symbol = "ETH-USDT-SWAP"
+        trader.td_mode = "isolated"
+        trader.leverage = "50"
+        trader.pos_side_mode = "net"
+        trader.live_trading = True
+        trader.contract_multiplier = Decimal("0.1")
+        trader.contract_precision = Decimal("0.01")
+        trader.min_contracts = Decimal("0.01")
+        trader.position_contracts = Decimal("10")
+        trader.tp_order_id = None
+        trader.near_tp_protective_sl_order_id = None
+        trader.middle_runner_protective_sl_order_id = None
+        trader.three_stage_post_tp1_protective_sl_order_id = None
+        trader.trend_runner_sl_order_id = None
+        trader.account_equity_usdt = 0.0
+        trader._protected_reduce_only_order_ids = set()
+        trader._managed_reduce_only_order_ids = set()
+        trader._allow_cancel_unmanaged_reduce_only = True
+        trader.decimal_to_str = lambda d: str(d)
+        trader.price_to_str = lambda p: f"{p:.1f}"
+        trader.round_contracts_down = lambda c: c
+        trader._tp_price_summary = lambda specs: trader.price_to_str(specs[0][2])
+
+        # _trend_runner_sl_contracts is needed by the trend runner SL path
+        trader._trend_runner_sl_contracts = lambda intent, net: Decimal("5")
+
+        async def fake_fetch():
+            return PositionSnapshot("LONG", Decimal("10"), 3000.0, Decimal("1"), Decimal("10"))
+        trader.fetch_position_snapshot = fake_fetch
+
+        facade = TpSlExecutionManager(trader)
+
+        from src.strategies.boll_cvd_reclaim_strategy import TradeIntent
+        from src.risk.simple_position_sizer import PositionSize
+
+        intent = TradeIntent(
+            intent_type="UPDATE_TP",
+            side="LONG",
+            price=3000.0,
+            layer_index=1,
+            tp_price=3100.0,
+            reason="test_trend_runner_sl_failure",
+            size=PositionSize(
+                eth_qty=0.1, margin_usdt=300.0, notional_usdt=3000.0,
+                layer_index=1, layer_multiplier=1.0,
+            ),
+            fast_cvd=0.0, previous_fast_cvd=0.0,
+            buy_ratio=0.5, sell_ratio=0.5,
+            boll_upper=3200.0, boll_middle=3100.0, boll_lower=3000.0,
+            ts_ms=1000,
+            avg_entry_price=3000.0,
+            breakeven_price=3000.0,
+            tp_mode="MIDDLE",
+            tp_plan="THREE_STAGE_RUNNER",
+            three_stage_tp1_price=3050.0,
+            three_stage_tp2_price=3200.0,
+            three_stage_tp1_ratio=0.70,
+            three_stage_tp2_ratio=0.20,
+            three_stage_runner_ratio=0.10,
+            middle_bucket_split_active=True,
+            middle_bucket_split_fast_price=3060.0,
+            middle_bucket_split_slow_price=3040.0,
+            middle_bucket_split_effective_price=3054.0,
+            middle_bucket_split_middle_bucket_ratio=0.70,
+            middle_bucket_split_fast_ratio_of_bucket=0.70,
+            middle_bucket_split_slow_ratio_of_bucket=0.30,
+            middle_bucket_split_fast_total_ratio=0.49,
+            middle_bucket_split_slow_total_ratio=0.21,
+            # Skip middle runner SL so we reach trend runner
+            middle_runner_active=False,
+            # Trigger trend runner protective SL path
+            trend_runner_active=True,
+            trend_runner_sl_price=2800.0,
+        )
+
+        # Build specs with real split labels
+        split_specs = [
+            ("tp1_middle_fast", Decimal("3.43"), 3060.0),
+            ("tp1_middle_slow", Decimal("1.47"), 3040.0),
+            ("tp2_outer", Decimal("2.00"), 3200.0),
+        ]
+        facade.core_tp._build_take_profit_order_specs = mock.MagicMock(
+            return_value=(split_specs, None)
+        )
+
+        trader._cancel_existing_take_profit_orders_for_intent = mock.AsyncMock()
+        trader._cancel_stale_runner_protective_stops_for_degrade = mock.AsyncMock()
+        trader._place_reduce_only_take_profit_orders = mock.AsyncMock(
+            return_value=["fast-order", "slow-order", "outer-order"]
+        )
+
+        # Mock trend runner SL failure
+        trader.place_trend_runner_protective_stop_with_retries = mock.AsyncMock(
+            return_value=(False, None, "simulated trend runner SL failure")
+        )
+
+        result = await facade.replace_take_profit(intent)
+
+        assert result.ok is False
+        assert "trend_runner_protective_sl_failed" in result.message
+        assert result.middle_bucket_split_executed is True
+        assert result.middle_bucket_split_actual_order_mode == "SPLIT_FAST_SLOW"
+        assert result.middle_bucket_split_disabled_reason is None

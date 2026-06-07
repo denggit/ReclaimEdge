@@ -178,6 +178,18 @@ class CoreTakeProfitManager:
             specs = fallback_specs
             message = "split take-profit placement failed; fallback to single final TP"
 
+        # ── Middle Bucket Split status (classified BEFORE protective SL so
+        #    all early-return paths carry the fields) ────────────────────
+        (
+            middle_bucket_split_executed,
+            middle_bucket_split_disabled_reason_val,
+            middle_bucket_split_actual_order_mode_val,
+        ) = _classify_middle_bucket_split_actual_order_mode(
+            split_was_active=split_was_active,
+            specs=specs,
+            split_disabled_reason=split_disabled_reason,
+        )
+
         tp_order_id = ",".join(placed_order_ids)
         t.tp_order_id = tp_order_id
         tp_price_text = self.trader._tp_price_summary(specs)
@@ -210,6 +222,9 @@ class CoreTakeProfitManager:
                     tp_order_ids=tuple(placed_order_ids),
                     protective_sl_price=protective_sl_price_text,
                     protective_sl_ok=False,
+                    middle_bucket_split_executed=middle_bucket_split_executed,
+                    middle_bucket_split_disabled_reason=middle_bucket_split_disabled_reason_val,
+                    middle_bucket_split_actual_order_mode=middle_bucket_split_actual_order_mode_val,
                 )
             protective_sl_order_id = sl_order_id
             protective_sl_ok = True
@@ -257,6 +272,9 @@ class CoreTakeProfitManager:
                     tp_order_ids=tuple(placed_order_ids),
                     protective_sl_price=protective_sl_price_text,
                     protective_sl_ok=False,
+                    middle_bucket_split_executed=middle_bucket_split_executed,
+                    middle_bucket_split_disabled_reason=middle_bucket_split_disabled_reason_val,
+                    middle_bucket_split_actual_order_mode=middle_bucket_split_actual_order_mode_val,
                 )
             protective_sl_order_id = sl_order_id
             protective_sl_ok = True
@@ -305,6 +323,9 @@ class CoreTakeProfitManager:
                     tp_order_ids=tuple(placed_order_ids),
                     protective_sl_price=protective_sl_price_text,
                     protective_sl_ok=False,
+                    middle_bucket_split_executed=middle_bucket_split_executed,
+                    middle_bucket_split_disabled_reason=middle_bucket_split_disabled_reason_val,
+                    middle_bucket_split_actual_order_mode=middle_bucket_split_actual_order_mode_val,
                 )
             protective_sl_order_id = sl_order_id
             protective_sl_ok = True
@@ -321,18 +342,6 @@ class CoreTakeProfitManager:
                 old_sl_order_id,
                 sl_order_id,
             )
-        # ── Middle Bucket Split status ────────────────────────────────
-        split_was_active = bool(getattr(intent, "middle_bucket_split_active", False))
-        (
-            middle_bucket_split_executed,
-            middle_bucket_split_disabled_reason_val,
-            middle_bucket_split_actual_order_mode_val,
-        ) = _classify_middle_bucket_split_actual_order_mode(
-            split_was_active=split_was_active,
-            specs=specs,
-            split_disabled_reason=split_disabled_reason,
-        )
-
         return LiveTradeResult(
             True,
             intent.intent_type,
