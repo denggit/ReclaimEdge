@@ -170,6 +170,58 @@ def select_tp_outer(
     return TpOuterSelection(price=float(tp_band.lower), source="STRUCTURE_BOLL")
 
 
+def select_tp_outer_with_profit_fallback(
+        *,
+        side: PositionSide,
+        effective_be: float,
+        min_net_profit: float,
+        tp_band: TpBandSnapshot,
+        tp_boll_enabled: bool,
+) -> TpOuterSelection:
+    """Select outer TP with profit-distance fallback.
+
+    1) Try TP_BOLL15 outer first.
+    2) If profit insufficient, try structure BOLL20 outer.
+    3) If both insufficient, use the direction-correct farther outer
+       as last resort (caller MUST log TP_OUTER_PROFIT_INSUFFICIENT_FALLBACK).
+
+    LONG  outer valid: price >= effective_be * (1 + min_net_profit)
+    SHORT outer valid: price <= effective_be * (1 - min_net_profit)
+    """
+    if effective_be <= 0:
+        return select_tp_outer(side=side, tp_band=tp_band, tp_boll_enabled=tp_boll_enabled)
+
+    tp_outer = select_tp_outer(side=side, tp_band=tp_band, tp_boll_enabled=tp_boll_enabled)
+
+    if side == "LONG":
+        required = effective_be * (1 + min_net_profit)
+        if tp_outer.price >= required:
+            return tp_outer
+
+        # TP_BOLL15 outer insufficient → try structure BOLL20 outer
+        structure_outer = float(tp_band.upper)
+        if structure_outer >= required:
+            return TpOuterSelection(price=structure_outer, source="STRUCTURE_BOLL_OUTER_PROFIT_FALLBACK")
+
+        # Both insufficient → farther outer as last resort
+        fallback = max(tp_outer.price, structure_outer)
+        return TpOuterSelection(price=fallback, source="TP_OUTER_PROFIT_INSUFFICIENT_FALLBACK")
+
+    # SHORT
+    required = effective_be * (1 - min_net_profit)
+    if tp_outer.price <= required:
+        return tp_outer
+
+    # TP_BOLL15 outer insufficient → try structure BOLL20 outer
+    structure_outer = float(tp_band.lower)
+    if structure_outer <= required:
+        return TpOuterSelection(price=structure_outer, source="STRUCTURE_BOLL_OUTER_PROFIT_FALLBACK")
+
+    # Both insufficient → farther outer as last resort
+    fallback = min(tp_outer.price, structure_outer)
+    return TpOuterSelection(price=fallback, source="TP_OUTER_PROFIT_INSUFFICIENT_FALLBACK")
+
+
 # ── Effective breakeven ─────────────────────────────────────────────────
 
 def effective_breakeven_for_tp_selection(
@@ -199,10 +251,10 @@ def select_tp_price(
         tp_band: TpBandSnapshot,
         tp_boll_enabled: bool,
 ) -> TpPriceSelection:
-    """Select TP price preferring TP_BOLL15, with fallback to structure BOLL20.
+    """Select TP price preferring TP_BOLL15, with profit-distance fallback.
 
-    The profit-distance check is preserved exactly as before; only the price
-    *candidate* source changes.
+    For MIDDLE: TP_BOLL15 middle → BOLL20 middle → outer with profit fallback.
+    Outer fallback: TP_BOLL15 outer → BOLL20 outer → farther outer as last resort.
     """
     if effective_be <= 0:
         return TpPriceSelection(price=float(tp_band.middle), mode="MIDDLE")
@@ -219,8 +271,14 @@ def select_tp_price(
         if tp_band.middle >= middle_required_price:
             return TpPriceSelection(price=float(tp_band.middle), mode="MIDDLE")
 
-        # 3) Neither middle works — outer (TP_BOLL15 preferred)
-        tp_outer = select_tp_outer(side=side, tp_band=tp_band, tp_boll_enabled=tp_boll_enabled)
+        # 3) Neither middle works — outer with profit fallback
+        tp_outer = select_tp_outer_with_profit_fallback(
+            side=side,
+            effective_be=effective_be,
+            min_net_profit=min_net_profit,
+            tp_band=tp_band,
+            tp_boll_enabled=tp_boll_enabled,
+        )
         return TpPriceSelection(price=tp_outer.price, mode="UPPER")
 
     # SHORT
@@ -233,7 +291,13 @@ def select_tp_price(
     if tp_band.middle <= middle_required_price:
         return TpPriceSelection(price=float(tp_band.middle), mode="MIDDLE")
 
-    tp_outer = select_tp_outer(side=side, tp_band=tp_band, tp_boll_enabled=tp_boll_enabled)
+    tp_outer = select_tp_outer_with_profit_fallback(
+        side=side,
+        effective_be=effective_be,
+        min_net_profit=min_net_profit,
+        tp_band=tp_band,
+        tp_boll_enabled=tp_boll_enabled,
+    )
     return TpPriceSelection(price=tp_outer.price, mode="LOWER")
 
 

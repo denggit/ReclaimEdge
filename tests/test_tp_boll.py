@@ -1212,3 +1212,124 @@ class TestTp2OuterStillUsesTpBollShortAndFinal:
         tp_outer, src = s._select_tp_outer("LONG", b)
         assert tp_outer == 108.0
         assert src == "TP_BOLL"
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 13. Outer profit fallback tests
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestOuterProfitFallback:
+    """Verify outer TP profit-distance fallback: TP_BOLL15 → BOLL20 → last resort."""
+
+    def test_long_tp_boll_outer_insufficient_structure_outer_fallback(self):
+        """LONG: TP_BOLL15 upper insufficient profit, BOLL20 upper sufficient → fallback."""
+        s = _strategy(tp_min_net_profit_pct=0.005)
+        b = _boll_with_tp(
+            middle=100.0, tp_middle=100.8,
+            upper=110.0, tp_upper=104.5,
+        )
+        _setup_position_state(s, "LONG", 104.0)
+        # effective_be ~ 104.0, required_outer = 104.0 * 1.005 = 104.52
+        # tp_upper=104.5 < 104.52 → insufficient
+        # upper=110.0 >= 104.52 → fallback to BOLL20 upper
+
+        price, mode = s._select_tp_price("LONG", b)
+        assert price == 110.0
+        assert mode == "UPPER"
+
+    def test_short_tp_boll_outer_insufficient_structure_outer_fallback(self):
+        """SHORT: TP_BOLL15 lower insufficient, BOLL20 lower sufficient → fallback."""
+        s = _strategy(tp_min_net_profit_pct=0.005)
+        b = _boll_with_tp(
+            middle=99.3, tp_middle=99.5,
+            lower=90.0, tp_lower=95.8,
+        )
+        _setup_position_state(s, "SHORT", 96.0)
+        # effective_be ~ 96.0, required = 96.0 * 0.995 = 95.52
+        # tp_middle=99.5 > 95.52 → insufficient middle
+        # middle=99.3 > 95.52 → insufficient middle
+        # tp_lower=95.8 > 95.52 → insufficient outer
+        # lower=90.0 <= 95.52 → fallback to BOLL20 lower
+
+        price, mode = s._select_tp_price("SHORT", b)
+        assert price == 90.0
+        assert mode == "LOWER"
+
+    def test_long_both_outer_insufficient_warning_fallback(self):
+        """LONG: both outers insufficient → farther outer with WARNING source."""
+        s = _strategy(tp_min_net_profit_pct=0.005)
+        b = _boll_with_tp(
+            middle=107.5, tp_middle=107.6,
+            upper=108.0, tp_upper=107.0,
+        )
+        _setup_position_state(s, "LONG", 107.5)
+        # effective_be ~ 107.5, required = 107.5 * 1.005 = 108.0375
+        # tp_upper=107.0 < 108.0375 → insufficient
+        # upper=108.0 < 108.0375 → insufficient
+        # farther = max(107.0, 108.0) = 108.0
+
+        tp_outer, src = s._select_valid_tp_outer_with_profit_fallback("LONG", b)
+        assert tp_outer == 108.0
+        assert src == "TP_OUTER_PROFIT_INSUFFICIENT_FALLBACK"
+
+    def test_short_both_outer_insufficient_warning_fallback(self):
+        """SHORT: both outers insufficient → farther outer with WARNING source."""
+        s = _strategy(tp_min_net_profit_pct=0.005)
+        b = _boll_with_tp(
+            middle=93.5, tp_middle=94.0,
+            lower=93.55, tp_lower=93.6,
+        )
+        _setup_position_state(s, "SHORT", 94.0)
+        # effective_be ~ 94.0, required = 94.0 * 0.995 = 93.53
+        # tp_lower=93.6 > 93.53 → insufficient
+        # lower=93.55 > 93.53 → insufficient
+        # farther = min(93.6, 93.55) = 93.55
+
+        tp_outer, src = s._select_valid_tp_outer_with_profit_fallback("SHORT", b)
+        assert tp_outer == 93.55
+        assert src == "TP_OUTER_PROFIT_INSUFFICIENT_FALLBACK"
+
+    def test_tp2_uses_outer_fallback_via_three_stage_planned_long(self):
+        """Three-Stage TP2 uses profit-validated outer when TP1 passes profit check."""
+        s = _strategy(three_stage_runner_enabled=True, tp_min_net_profit_pct=0.005)
+        b = _boll_with_tp(
+            middle=106.5, tp_middle=106.5,
+            upper=110.0, tp_upper=105.0,
+        )
+        _setup_position_state(s, "LONG", 104.5)
+        # effective_be ~ 104.5, required_mid = 105.0225
+        # tp_middle=106.5 >= 105.0225 → TP1 passes
+        # required_outer = 105.0225
+        # tp_upper=105.0 < 105.0225 → insufficient
+        # upper=110.0 >= 105.0225 → fallback for TP2
+
+        s._set_three_stage_runner_planned("LONG", b)
+        assert s.state.three_stage_tp1_price == 106.5
+        assert s.state.three_stage_tp2_price == 110.0, (
+            "TP2 must fall back to BOLL20 upper when TP_BOLL15 upper insufficient"
+        )
+
+    def test_degrade_final_tp_uses_outer_fallback_long(self):
+        """Degrade to Middle Runner: final TP uses profit-validated outer."""
+        s = _strategy(
+            three_stage_runner_enabled=True,
+            tp_min_net_profit_pct=0.005,
+            three_stage_pre_tp1_degrade_enabled=False,
+        )
+        b = _boll_with_tp(
+            middle=106.5, tp_middle=106.5,
+            upper=110.0, tp_upper=105.0,
+        )
+        _setup_position_state(s, "LONG", 104.5)
+        s.state.side = "LONG"
+        s.state.three_stage_runner_enabled_for_position = True
+        s.state.tp_plan = "THREE_STAGE_RUNNER"
+        s.state.first_entry_ts_ms = 1000
+
+        s._degrade_three_stage_pre_tp1_to_middle_runner(2000000, b)
+
+        assert s.state.tp_plan == "MIDDLE_RUNNER"
+        assert s.state.middle_runner_first_tp_price == 106.5
+        assert s.state.middle_runner_final_tp_price == 110.0, (
+            "Final TP must fall back to BOLL20 upper when TP_BOLL15 upper insufficient"
+        )

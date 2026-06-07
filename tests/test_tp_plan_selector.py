@@ -13,6 +13,7 @@ from src.strategies.tp_plan_selector import (
     select_tp_middle,
     select_tp_middle_with_profit_fallback,
     select_tp_outer,
+    select_tp_outer_with_profit_fallback,
     select_tp_plan,
     select_tp_price,
     three_stage_runner_plan_allowed,
@@ -170,7 +171,124 @@ class TestSelectTpOuter:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 4. select_tp_middle_with_profit_fallback (LONG)
+# 4. select_tp_outer_with_profit_fallback
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestSelectTpOuterWithProfitFallbackLong:
+    def test_effective_be_zero_returns_basic_outer(self):
+        tp_band = _tp_band(tp_upper=108.0, upper=110.0)
+        sel = select_tp_outer_with_profit_fallback(
+            side="LONG", effective_be=0.0, min_net_profit=0.005,
+            tp_band=tp_band, tp_boll_enabled=True,
+        )
+        assert sel.price == 108.0
+        assert sel.source == "TP_BOLL"
+
+    def test_tp_boll_outer_meets_profit(self):
+        tp_band = _tp_band(tp_upper=108.0, upper=110.0)
+        # effective_be=100.0, required=100.5, 108.0 >= 100.5 → OK
+        sel = select_tp_outer_with_profit_fallback(
+            side="LONG", effective_be=100.0, min_net_profit=0.005,
+            tp_band=tp_band, tp_boll_enabled=True,
+        )
+        assert sel.price == 108.0
+        assert sel.source == "TP_BOLL"
+
+    def test_tp_boll_outer_insufficient_structure_outer_sufficient(self):
+        tp_band = _tp_band(tp_upper=105.0, upper=110.0)
+        # effective_be=100.0, required=100.5*100=100.5, oh wait
+        # effective_be=100.0, required=100.5, 105.0 >= 100.5 → OK
+        # Let me adjust:
+        # effective_be=104.0, required=104.0*1.005=104.52, tp_upper=105.0 >= 104.52 → still OK
+        # Let me use a tighter scenario:
+        # effective_be=104.5, required=104.5*1.005=105.0225, tp_upper=105.0 < 105.0225 → fail
+        # structure upper=110.0 >= 105.0225 → fallback
+        sel = select_tp_outer_with_profit_fallback(
+            side="LONG", effective_be=104.5, min_net_profit=0.005,
+            tp_band=tp_band, tp_boll_enabled=True,
+        )
+        assert sel.price == 110.0
+        assert sel.source == "STRUCTURE_BOLL_OUTER_PROFIT_FALLBACK"
+
+    def test_both_outer_insufficient_returns_farther_with_warning_source(self):
+        tp_band = _tp_band(tp_upper=107.0, upper=108.0)
+        # effective_be=107.0, required=107.0*1.005=107.535
+        # tp_upper=107.0 < 107.535 → fail
+        # structure upper=108.0 >= 107.535 → OK, not insufficient
+        # Let me adjust to make both insufficient:
+        # effective_be=107.5, required=107.5*1.005=108.0375
+        # tp_upper=107.0 < 108.0375 → fail
+        # structure upper=108.0 < 108.0375 → fail
+        # farther = max(107.0, 108.0) = 108.0
+        sel = select_tp_outer_with_profit_fallback(
+            side="LONG", effective_be=107.5, min_net_profit=0.005,
+            tp_band=tp_band, tp_boll_enabled=True,
+        )
+        assert sel.price == 108.0
+        assert sel.source == "TP_OUTER_PROFIT_INSUFFICIENT_FALLBACK"
+
+
+class TestSelectTpOuterWithProfitFallbackShort:
+    def test_effective_be_zero_returns_basic_outer(self):
+        tp_band = _tp_band(tp_lower=92.0, lower=90.0)
+        sel = select_tp_outer_with_profit_fallback(
+            side="SHORT", effective_be=0.0, min_net_profit=0.005,
+            tp_band=tp_band, tp_boll_enabled=True,
+        )
+        assert sel.price == 92.0
+        assert sel.source == "TP_BOLL"
+
+    def test_tp_boll_outer_meets_profit(self):
+        tp_band = _tp_band(tp_lower=92.0, lower=90.0)
+        # effective_be=100.0, required=99.5, 92.0 <= 99.5 → OK
+        sel = select_tp_outer_with_profit_fallback(
+            side="SHORT", effective_be=100.0, min_net_profit=0.005,
+            tp_band=tp_band, tp_boll_enabled=True,
+        )
+        assert sel.price == 92.0
+        assert sel.source == "TP_BOLL"
+
+    def test_tp_boll_outer_insufficient_structure_outer_sufficient(self):
+        tp_band = _tp_band(tp_lower=95.6, lower=90.0)
+        # effective_be=96.0, required=96.0*0.995=95.52, tp_lower=95.6 > 95.52 → insufficient
+        # structure lower=90.0 <= 95.52 → sufficient
+        sel = select_tp_outer_with_profit_fallback(
+            side="SHORT", effective_be=96.0, min_net_profit=0.005,
+            tp_band=tp_band, tp_boll_enabled=True,
+        )
+        assert sel.price == 90.0
+        assert sel.source == "STRUCTURE_BOLL_OUTER_PROFIT_FALLBACK"
+
+    def test_both_outer_insufficient_returns_farther_with_warning_source(self):
+        tp_band = _tp_band(tp_lower=93.0, lower=92.0)
+        # effective_be=93.5, required=93.5*0.995=93.0325
+        # tp_lower=93.0 > 93.0325 → insufficient (SHORT needs <=)
+        # structure lower=92.0 < 93.0325 → sufficient, so not both insufficient
+        # Let me adjust:
+        # effective_be=93.5, required=93.5*0.995=93.0325
+        # tp_lower=93.1 > 93.0325 → insufficient
+        # structure lower=93.0 < 93.0325 → sufficient, still not both
+        # Let me try:
+        # tp_lower=93.5, lower=93.2
+        # effective_be=94.0, required=94.0*0.995=93.53
+        # tp_lower=93.5 > 93.53 → insufficient (SHORT: price > required means insufficient)
+        # structure lower=93.2 < 93.53 → sufficient, hmm
+        # I need both tp_lower AND structure_lower > required:
+        # tp_lower=93.6, lower=93.55
+        # effective_be=94.0, required=93.53
+        # tp_lower=93.6 > 93.53 → insufficient
+        # structure lower=93.55 > 93.53 → insufficient
+        # farther = min(93.6, 93.55) = 93.55
+        sel = select_tp_outer_with_profit_fallback(
+            side="SHORT", effective_be=94.0, min_net_profit=0.005,
+            tp_band=_tp_band(tp_lower=93.6, lower=93.55), tp_boll_enabled=True,
+        )
+        assert sel.price == 93.55
+        assert sel.source == "TP_OUTER_PROFIT_INSUFFICIENT_FALLBACK"
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 5. select_tp_middle_with_profit_fallback (LONG)
 # ═══════════════════════════════════════════════════════════════════════
 
 class TestSelectTpMiddleWithProfitFallbackLong:
