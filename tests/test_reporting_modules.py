@@ -351,6 +351,13 @@ class CashEventsHtmlTest(unittest.TestCase):
         html_result = render_cash_events_section_html(events, net_cash_transfer)
         self.assertIn("真实转出", html_result)
 
+    def test_sidecar_tp_filled_reason_label(self) -> None:
+        """reason containing 'sidecar_tp_filled' should show Chinese label '持仓中副仓止盈导致现金变化'."""
+        label = cash_drift_reason_label(
+            "position_cash_change:sidecar_tp_filled;unsafe_state:has_position"
+        )
+        self.assertIn("副仓止盈", label)
+
     def test_no_events_shows_empty_message(self) -> None:
         events: list[JournalEvent] = []
         html_result = render_cash_events_section_html(events, net_cash_transfer)

@@ -6,6 +6,10 @@ from src.execution.trader import PositionSnapshot, Trader
 from src.live import runtime_types as live_runtime_types
 from src.position_management import cost_runtime as position_cost_runtime
 from src.position_management.sidecar import runtime_state as sidecar_runtime_state
+from src.position_management.sidecar.fill_telemetry import (
+    build_sidecar_fill_telemetry,
+    log_sidecar_tp_filled,
+)
 from src.position_management.sidecar.model import SidecarLegStatus
 from src.position_management.sidecar.reconciler import (
     is_sidecar_dirty_missing_tp_order,
@@ -65,6 +69,19 @@ async def monitor_sidecar_orders_once(
             strategy_state.sidecar_legs[index] = mark_sidecar_leg_tp_filled(leg, ts_ms)
             journal.append("SIDECAR_TP_FILLED", {**dict(leg), **status}, position_id=position_id)
             changed = True
+            # Log sidecar TP fill in main log for observability
+            _mt_telemetry = build_sidecar_fill_telemetry(
+                source="monitor_runtime",
+                leg=leg,
+                status=status,
+            )
+            log_sidecar_tp_filled(
+                logger,
+                position_id=position_id,
+                telemetry=_mt_telemetry,
+                leg=leg,
+                status=status,
+            )
             # Sidecar TP filled reduces OKX net position → existing global SL orders
             # may now exceed current net position. Must halt for manual reconciliation.
             active_global_sl_orders: list[str] = []

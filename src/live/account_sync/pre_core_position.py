@@ -47,6 +47,10 @@ class AccountSyncPreCorePositionResult:
     last_logged_equity: float
     last_cash_event_log: float
     last_flat_detected_monotonic: float
+    sidecar_tp_filled_count: int = 0
+    sidecar_tp_filled_leg_ids: tuple[str, ...] = ()
+    sidecar_tp_filled_order_ids: tuple[str, ...] = ()
+    sidecar_tp_filled_qty: float = 0.0
 
 
 async def run_account_sync_pre_core_position_phase(
@@ -110,6 +114,10 @@ async def run_account_sync_pre_core_position_phase(
     )
     sidecar_reconciled_this_sync = _sidecar_pre_core_result.queried
     sidecar_state_changed_this_sync = _sidecar_pre_core_result.changed
+    _sidecar_tp_filled_count = _sidecar_pre_core_result.sidecar_tp_filled_count
+    _sidecar_tp_filled_leg_ids = _sidecar_pre_core_result.sidecar_tp_filled_leg_ids
+    _sidecar_tp_filled_order_ids = _sidecar_pre_core_result.sidecar_tp_filled_order_ids
+    _sidecar_tp_filled_qty = _sidecar_pre_core_result.sidecar_tp_filled_qty
     # ── End pre-core reconciliation ──────────────────────────────
     async with state_lock:
         pending_order_count = execution_state.pending_order_count
@@ -265,15 +273,30 @@ async def run_account_sync_pre_core_position_phase(
                     )
                     last_cash_event_log = now
             elif unsafe_reasons and abs(cash_delta) >= cash_drift_min_delta_usdt:
-                drift_reason = "unsafe_state:" + ",".join(unsafe_reasons)
-                cash_drift_payload = {
-                    "amount": cash_delta,
-                    "cash_before": last_logged_cash,
-                    "cash_after": cash,
-                    "equity_before": last_logged_equity,
-                    "equity_after": equity,
-                    "reason": drift_reason,
-                }
+                if _sidecar_tp_filled_count > 0:
+                    drift_reason = "position_cash_change:sidecar_tp_filled;unsafe_state:" + ",".join(unsafe_reasons)
+                    cash_drift_payload = {
+                        "amount": cash_delta,
+                        "cash_before": last_logged_cash,
+                        "cash_after": cash,
+                        "equity_before": last_logged_equity,
+                        "equity_after": equity,
+                        "reason": drift_reason,
+                        "sidecar_tp_filled_count": _sidecar_tp_filled_count,
+                        "sidecar_tp_filled_leg_ids": list(_sidecar_tp_filled_leg_ids),
+                        "sidecar_tp_filled_order_ids": list(_sidecar_tp_filled_order_ids),
+                        "sidecar_tp_filled_qty": _sidecar_tp_filled_qty,
+                    }
+                else:
+                    drift_reason = "unsafe_state:" + ",".join(unsafe_reasons)
+                    cash_drift_payload = {
+                        "amount": cash_delta,
+                        "cash_before": last_logged_cash,
+                        "cash_after": cash,
+                        "equity_before": last_logged_equity,
+                        "equity_after": equity,
+                        "reason": drift_reason,
+                    }
                 if now - last_cash_event_log >= cash_event_log_interval_seconds:
                     logger.warning(
                         "ACCOUNT_CASH_DRIFT | amount=%.4f cash_before=%.4f cash_after=%.4f reason=%s",
@@ -317,4 +340,8 @@ async def run_account_sync_pre_core_position_phase(
         last_logged_equity=last_logged_equity,
         last_cash_event_log=last_cash_event_log,
         last_flat_detected_monotonic=last_flat_detected_monotonic,
+        sidecar_tp_filled_count=_sidecar_tp_filled_count,
+        sidecar_tp_filled_leg_ids=_sidecar_tp_filled_leg_ids,
+        sidecar_tp_filled_order_ids=_sidecar_tp_filled_order_ids,
+        sidecar_tp_filled_qty=_sidecar_tp_filled_qty,
     )

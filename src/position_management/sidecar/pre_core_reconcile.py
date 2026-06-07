@@ -8,6 +8,12 @@ from src.execution.trader import Trader
 from src.live import runtime_types as live_runtime_types
 from src.position_management import cost_runtime as position_cost_runtime
 from src.position_management.sidecar import runtime_state as sidecar_runtime_state
+from src.position_management.sidecar.fill_telemetry import (
+    SidecarFillTelemetry,
+    build_sidecar_fill_telemetry,
+    log_sidecar_tp_filled,
+    merge_sidecar_fill_telemetry,
+)
 from src.position_management.sidecar.model import SidecarLegStatus
 from src.position_management.sidecar.reconciler import (
     is_sidecar_dirty_missing_tp_order,
@@ -111,6 +117,7 @@ async def reconcile_sidecar_orders_before_core_view(
 
     # --- Phase 3: apply updates under lock ---
     changed = dirty_changed
+    _telemetry_items: list[SidecarFillTelemetry] = []
     async with state_lock:
         for index, order_status, status_dict, expected_leg_id in leg_updates:
             if index >= len(strategy.state.sidecar_legs):
@@ -136,6 +143,21 @@ async def reconcile_sidecar_orders_before_core_view(
                 if hasattr(journal, "append"):
                     journal.append("SIDECAR_TP_FILLED", {**dict(leg), **status_dict}, position_id=position_id)
                 changed = True
+
+                # Build and accumulate fill telemetry
+                _tp_telemetry = build_sidecar_fill_telemetry(
+                    source="pre_core_reconcile",
+                    leg=leg,
+                    status=status_dict,
+                )
+                _telemetry_items.append(_tp_telemetry)
+                log_sidecar_tp_filled(
+                    logger,
+                    position_id=position_id,
+                    telemetry=_tp_telemetry,
+                    leg=leg,
+                    status=status_dict,
+                )
 
                 # Sidecar TP reduces OKX net position → existing global SL orders
                 # may now exceed current net position. Must halt for manual reconciliation.
@@ -210,4 +232,12 @@ async def reconcile_sidecar_orders_before_core_view(
                 cash_before_position=cash_before_position,
             ))
 
-    return live_runtime_types.SidecarPreCoreReconcileResult(queried=True, changed=changed)
+    _merged = merge_sidecar_fill_telemetry(_telemetry_items)
+    return live_runtime_types.SidecarPreCoreReconcileResult(
+        queried=True,
+        changed=changed,
+        sidecar_tp_filled_count=_merged.filled_count,
+        sidecar_tp_filled_leg_ids=_merged.filled_leg_ids,
+        sidecar_tp_filled_order_ids=_merged.filled_order_ids,
+        sidecar_tp_filled_qty=_merged.filled_qty,
+    )

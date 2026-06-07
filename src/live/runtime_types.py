@@ -33,6 +33,10 @@ class AccountSnapshot:
 class SidecarPreCoreReconcileResult:
     queried: bool
     changed: bool
+    sidecar_tp_filled_count: int = 0
+    sidecar_tp_filled_leg_ids: tuple[str, ...] = ()
+    sidecar_tp_filled_order_ids: tuple[str, ...] = ()
+    sidecar_tp_filled_qty: float = 0.0
 
 
 @dataclass

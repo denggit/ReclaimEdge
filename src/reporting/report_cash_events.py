@@ -28,6 +28,8 @@ def cash_drift_reason_label(reason: str) -> str:
     """Return a human-readable Chinese label for ACCOUNT_CASH_DRIFT reason strings."""
     if not reason:
         return "未知原因"
+    if "sidecar_tp_filled" in reason:
+        return "持仓中副仓止盈导致现金变化"
     keywords = ["has_position", "strategy_layers", "current_position_id", "order_settle"]
     if any(kw in reason for kw in keywords):
         return "持仓/补仓/订单结算期间的可用现金变化，非转账行为"

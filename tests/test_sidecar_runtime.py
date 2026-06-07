@@ -5,6 +5,7 @@ from dataclasses import replace
 from decimal import Decimal, ROUND_DOWN
 
 import pytest
+from _pytest.logging import LogCaptureFixture
 
 from src.execution.trader import PositionSnapshot
 from src.live.runtime_types import ExecutionState, SidecarPreCoreReconcileResult
@@ -1615,3 +1616,104 @@ async def test_pre_core_reconcile_sl_on_trader_triggers_halt() -> None:
     assert "SIDECAR_TP_FILLED_REQUIRES_GLOBAL_SL_RECONCILE" in event_names
     # state_store.save must be called
     assert len(store.saved) > 0
+
+
+# ---------------------------------------------------------------------------
+# Tests: Sidecar TP fill telemetry & log observability
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_pre_core_reconcile_logs_sidecar_tp_filled_and_returns_fill_summary(caplog: pytest.LogCaptureFixture) -> None:
+    """Pre-core reconcile must:
+    - log SIDECAR_TP_FILLED at WARNING level with source=pre_core_reconcile
+    - return SidecarPreCoreReconcileResult with fill summary fields populated
+    """
+    import logging
+    caplog.set_level(logging.WARNING, logger="src.position_management.sidecar.pre_core_reconcile")
+
+    state = sidecar_state()
+    state.sidecar_legs = [
+        {
+            "leg_id": "leg-1",
+            "status": "OPEN",
+            "tp_order_id": "tp-1",
+            "qty": 0.1,
+            "contracts": "1",
+            "entry_price": 3000.0,
+            "created_ts_ms": 1,
+            "updated_ts_ms": 1,
+        }
+    ]
+    refresh_sidecar_state_totals(state)
+
+    trader = Trader()
+    trader.status_by_order["tp-1"] = "FILLED"
+    execution = ExecutionState("pos-1", 1000.0)
+    journal = Journal()
+    store = Store()
+    state_lock = asyncio.Lock()
+
+    strategy = type("S", (), {"state": state})()
+
+    result = await reconcile_sidecar_orders_before_core_view(
+        trader=trader,
+        strategy=strategy,
+        execution_state=execution,
+        journal=journal,
+        state_store=store,
+        trader_symbol="ETH-USDT-SWAP",
+        ts_ms=2,
+        state_lock=state_lock,
+    )
+
+    assert isinstance(result, SidecarPreCoreReconcileResult)
+    assert result.queried is True
+    assert result.changed is True
+    assert result.sidecar_tp_filled_count == 1
+    assert "leg-1" in result.sidecar_tp_filled_leg_ids
+    assert "tp-1" in result.sidecar_tp_filled_order_ids
+
+    assert state.sidecar_legs[0]["status"] == "TP_FILLED"
+
+    event_names = [e[0] for e in journal.events]
+    assert "SIDECAR_TP_FILLED" in event_names
+
+    assert "SIDECAR_TP_FILLED" in caplog.text
+    assert "source=pre_core_reconcile" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_monitor_runtime_logs_sidecar_tp_filled(caplog: pytest.LogCaptureFixture) -> None:
+    """monitor_sidecar_orders_once must log SIDECAR_TP_FILLED at WARNING level
+    with source=monitor_runtime when a sidecar TP is detected as FILLED."""
+    import logging
+    caplog.set_level(logging.WARNING, logger="src.position_management.sidecar.monitor_runtime")
+
+    state = sidecar_state()
+    state.sidecar_legs = [
+        {"leg_id": "leg-1", "status": "OPEN", "tp_order_id": "tp-1", "qty": 0.1, "contracts": "1", "tp_price": 3012.0,
+         "created_ts_ms": 1, "updated_ts_ms": 1}]
+    refresh_sidecar_state_totals(state)
+    trader = Trader()
+    trader.status_by_order["tp-1"] = "FILLED"
+    journal = Journal()
+
+    await monitor_sidecar_orders_once(
+        trader=trader,
+        strategy_state=state,
+        execution_state=ExecutionState("pos-1", 1000.0),
+        journal=journal,
+        state_store=Store(),
+        trader_symbol="ETH-USDT-SWAP",
+        core_position=PositionSnapshot("LONG", Decimal("5"), 3000, 0.5, Decimal("5")),
+        position_id="pos-1",
+        cash_before_position=1000.0,
+        ts_ms=2,
+    )
+
+    assert state.sidecar_legs[0]["status"] == "TP_FILLED"
+    assert journal.events[0][0] == "SIDECAR_TP_FILLED"
+
+    assert "SIDECAR_TP_FILLED" in caplog.text
+    assert "source=monitor_runtime" in caplog.text
