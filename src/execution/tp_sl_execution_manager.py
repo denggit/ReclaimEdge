@@ -72,10 +72,10 @@ class TpSlExecutionManager:
     # ------------------------------------------------------------------
 
     def _build_take_profit_order_specs(self, intent: TradeIntent) -> list[tuple[str, Decimal, float]]:
-        return self.core_tp._build_take_profit_order_specs(intent)
+        return self.core_tp._build_take_profit_order_specs_public(intent)
 
     def _build_three_stage_order_specs(self, intent: TradeIntent) -> list[tuple[str, Decimal, float]]:
-        return self.core_tp._build_three_stage_order_specs(intent)
+        return self.core_tp._build_three_stage_order_specs_public(intent)
 
     def _trend_runner_sl_contracts(self, intent: TradeIntent, net_contracts_for_sl: Decimal) -> Decimal:
         return self.core_tp._trend_runner_sl_contracts(intent, net_contracts_for_sl)

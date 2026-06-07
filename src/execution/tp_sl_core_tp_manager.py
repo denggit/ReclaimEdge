@@ -4,6 +4,7 @@ import os
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
+from src.execution import middle_bucket_split_size as _split_size
 from src.execution import order_specs
 from src.execution.trader import LiveTradeResult
 from src.utils.log import get_logger
@@ -86,7 +87,7 @@ class CoreTakeProfitManager:
         await self.trader._cancel_existing_take_profit_orders_for_intent(intent)
         await self.trader._cancel_stale_runner_protective_stops_for_degrade(intent)
 
-        specs = self.trader._build_take_profit_order_specs(intent)
+        specs, split_disabled_reason = self._build_take_profit_order_specs(intent)
         placed_order_ids: list[str] = []
         message = "take-profit replaced"
         try:
@@ -244,6 +245,17 @@ class CoreTakeProfitManager:
                 old_sl_order_id,
                 sl_order_id,
             )
+        # ── Middle Bucket Split status ────────────────────────────────
+        split_was_active = bool(getattr(intent, "middle_bucket_split_active", False))
+        middle_bucket_split_executed: bool | None = None
+        middle_bucket_split_disabled_reason_val: str | None = None
+        if split_was_active:
+            if split_disabled_reason is not None:
+                middle_bucket_split_executed = False
+                middle_bucket_split_disabled_reason_val = split_disabled_reason
+            else:
+                middle_bucket_split_executed = True
+
         return LiveTradeResult(
             True,
             intent.intent_type,
@@ -258,6 +270,8 @@ class CoreTakeProfitManager:
             protective_sl_order_id=protective_sl_order_id,
             protective_sl_price=protective_sl_price_text,
             protective_sl_ok=protective_sl_ok,
+            middle_bucket_split_executed=middle_bucket_split_executed,
+            middle_bucket_split_disabled_reason=middle_bucket_split_disabled_reason_val,
         )
 
     async def _cancel_existing_take_profit_orders_for_intent(self, intent: TradeIntent) -> None:
@@ -328,24 +342,74 @@ class CoreTakeProfitManager:
             )
         return contracts
 
-    def _build_take_profit_order_specs(self, intent: TradeIntent) -> list[tuple[str, Decimal, float]]:
+    def _build_take_profit_order_specs(
+        self, intent: TradeIntent,
+    ) -> tuple[list[tuple[str, Decimal, float]], str | None]:
+        """Build take-profit order specs with middle-bucket-split size pre-check.
+
+        Returns:
+            (specs, split_disabled_reason)
+
+            split_disabled_reason is None when split was either not requested or
+            was successfully applied.  It is a non-empty string when split was
+            active but had to be disabled due to sub-leg size constraints.
+        """
         t = self.trader
 
         # ── Middle Bucket Split input ─────────────────────────────────
         split_active = bool(getattr(intent, "middle_bucket_split_active", False))
+        split_disabled_reason: str | None = None
         middle_bucket_split_input = None
+
         if split_active:
-            middle_bucket_split_input = order_specs.MiddleBucketSplitOrderInput(
-                active=True,
-                fast_price=getattr(intent, "middle_bucket_split_fast_price", None),
-                slow_price=getattr(intent, "middle_bucket_split_slow_price", None),
-                effective_price=getattr(intent, "middle_bucket_split_effective_price", None),
-                middle_bucket_ratio=Decimal(str(getattr(intent, "middle_bucket_split_middle_bucket_ratio", 0.0))),
-                fast_ratio_of_bucket=Decimal(str(getattr(intent, "middle_bucket_split_fast_ratio_of_bucket", 0.0))),
-                slow_ratio_of_bucket=Decimal(str(getattr(intent, "middle_bucket_split_slow_ratio_of_bucket", 0.0))),
-                fast_total_ratio=Decimal(str(getattr(intent, "middle_bucket_split_fast_total_ratio", 0.0))),
-                slow_total_ratio=Decimal(str(getattr(intent, "middle_bucket_split_slow_total_ratio", 0.0))),
-            )
+            # ── Pre-check split sub-leg sizes BEFORE constructing input ──
+            tp_plan = str(getattr(intent, "tp_plan", "SINGLE"))
+            fast_ratio = Decimal(str(getattr(intent, "middle_bucket_split_fast_ratio_of_bucket", 0.0)))
+
+            if tp_plan == "THREE_STAGE_RUNNER":
+                size_check = _split_size.check_three_stage_middle_bucket_split_size(
+                    position_contracts=t.position_contracts,
+                    min_contracts=t.min_contracts,
+                    contract_precision=t.contract_precision,
+                    three_stage_tp1_ratio=Decimal(str(getattr(intent, "three_stage_tp1_ratio", 0.0))),
+                    fast_ratio_of_bucket=fast_ratio,
+                )
+            elif tp_plan == "MIDDLE_RUNNER":
+                size_check = _split_size.check_middle_runner_bucket_split_size(
+                    position_contracts=t.position_contracts,
+                    min_contracts=t.min_contracts,
+                    contract_precision=t.contract_precision,
+                    partial_tp_ratio=Decimal(str(getattr(intent, "partial_tp_ratio", 0.0))),
+                    fast_ratio_of_bucket=fast_ratio,
+                )
+            else:
+                size_check = None
+
+            if size_check is not None and not size_check.ok:
+                split_disabled_reason = "subleg_too_small"
+                logger.warning(
+                    "MIDDLE_BUCKET_SPLIT_DISABLED_ON_ORDER_BUILD | "
+                    "reason=subleg_too_small tp_plan=%s "
+                    "position_contracts=%s tp1_total=%s fast=%s slow=%s min=%s",
+                    tp_plan,
+                    t.decimal_to_str(t.position_contracts),
+                    t.decimal_to_str(size_check.tp1_total_contracts),
+                    t.decimal_to_str(size_check.fast_contracts),
+                    t.decimal_to_str(size_check.slow_contracts),
+                    t.decimal_to_str(size_check.min_contracts),
+                )
+            else:
+                middle_bucket_split_input = order_specs.MiddleBucketSplitOrderInput(
+                    active=True,
+                    fast_price=getattr(intent, "middle_bucket_split_fast_price", None),
+                    slow_price=getattr(intent, "middle_bucket_split_slow_price", None),
+                    effective_price=getattr(intent, "middle_bucket_split_effective_price", None),
+                    middle_bucket_ratio=Decimal(str(getattr(intent, "middle_bucket_split_middle_bucket_ratio", 0.0))),
+                    fast_ratio_of_bucket=fast_ratio,
+                    slow_ratio_of_bucket=Decimal(str(getattr(intent, "middle_bucket_split_slow_ratio_of_bucket", 0.0))),
+                    fast_total_ratio=Decimal(str(getattr(intent, "middle_bucket_split_fast_total_ratio", 0.0))),
+                    slow_total_ratio=Decimal(str(getattr(intent, "middle_bucket_split_slow_total_ratio", 0.0))),
+                )
 
         decision = order_specs.build_take_profit_order_specs(
             position_contracts=t.position_contracts,
@@ -418,10 +482,25 @@ class CoreTakeProfitManager:
                     [s.label for s in decision.specs],
                     ctx.get("total_contracts", "?"),
                 )
-        return [(spec.label, spec.contracts, spec.price) for spec in decision.specs]
+        specs = [(spec.label, spec.contracts, spec.price) for spec in decision.specs]
+        return specs, split_disabled_reason
+
+    def _build_take_profit_order_specs_public(
+        self, intent: TradeIntent,
+    ) -> list[tuple[str, Decimal, float]]:
+        """Public delegation: returns just the specs list (backward-compat)."""
+        specs, _split_reason = self._build_take_profit_order_specs(intent)
+        return specs
 
     def _build_three_stage_order_specs(self, intent: TradeIntent) -> list[tuple[str, Decimal, float]]:
-        return self.trader._build_take_profit_order_specs(intent)
+        specs, _split_reason = self._build_take_profit_order_specs(intent)
+        return specs
+
+    def _build_three_stage_order_specs_public(
+        self, intent: TradeIntent,
+    ) -> list[tuple[str, Decimal, float]]:
+        """Public delegation: returns just the specs list (backward-compat)."""
+        return self._build_three_stage_order_specs(intent)
 
     def _trend_runner_sl_contracts(self, intent: TradeIntent, net_contracts_for_sl: Decimal) -> Decimal:
         t = self.trader

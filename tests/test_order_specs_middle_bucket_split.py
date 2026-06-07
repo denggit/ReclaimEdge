@@ -183,6 +183,18 @@ class TestThreeStageSplit:
         assert "tp1_middle" in labels
         assert "tp1_middle_fast" not in labels
 
+        # Verify enriched fallback context
+        assert decision.fallback_reason == "MIDDLE_BUCKET_SPLIT_SUBLEG_TOO_SMALL_UNSPLIT"
+        assert decision.fallback_context is not None
+        ctx = decision.fallback_context
+        assert ctx["split_active"] is True
+        assert "fast_contracts" in ctx
+        assert "slow_contracts" in ctx
+        assert "min_contracts" in ctx
+        assert ctx["min_contracts"] == Decimal("10")
+        # fast = round(70 * 0.99) = 69, slow = 70 - 69 = 1 < 10
+        assert int(ctx["slow_contracts"]) < int(ctx["min_contracts"])
+
 
 class TestMiddleRunnerSplit:
     """Middle Runner TP with middle bucket split active."""
@@ -296,3 +308,45 @@ class TestMiddleRunnerSplit:
         assert "middle" in labels
         assert "runner" in labels
         assert "middle_fast" not in labels
+
+    def test_split_fallback_when_sub_leg_too_small_middle_runner(self):
+        """Middle Runner: when fast or slow contracts < min_contracts, fallback to unsplit."""
+        split = _make_split_input(
+            fast_price=1650.0,
+            slow_price=1640.0,
+            middle_bucket_ratio=Decimal("0.80"),
+            fast_ratio=Decimal("0.99"),  # slow = ~1 contract
+        )
+        decision = build_take_profit_order_specs(
+            position_contracts=Decimal("100"),
+            min_contracts=Decimal("10"),
+            contract_precision=Decimal("1"),
+            tp_plan="MIDDLE_RUNNER",
+            final_tp_price=1700.0,
+            partial_tp_price=1647.0,
+            partial_tp_ratio=Decimal("0.80"),
+            partial_tp_consumed=False,
+            middle_runner_active=False,
+            three_stage_tp1_price=None,
+            three_stage_tp2_price=None,
+            three_stage_tp1_ratio=Decimal("0"),
+            three_stage_tp2_ratio=Decimal("0"),
+            three_stage_tp1_consumed=False,
+            three_stage_tp2_consumed=False,
+            three_stage_runner_ratio=Decimal("0"),
+            middle_bucket_split=split,
+        )
+
+        specs = decision.specs
+        labels = [s.label for s in specs]
+        assert "middle" in labels
+        assert "middle_fast" not in labels
+
+        assert decision.fallback_reason == "MIDDLE_BUCKET_SPLIT_SUBLEG_TOO_SMALL_UNSPLIT"
+        assert decision.fallback_context is not None
+        ctx = decision.fallback_context
+        assert ctx["split_active"] is True
+        assert "fast_contracts" in ctx
+        assert "slow_contracts" in ctx
+        assert "min_contracts" in ctx
+        assert ctx["min_contracts"] == Decimal("10")

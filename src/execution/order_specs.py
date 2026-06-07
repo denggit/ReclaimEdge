@@ -287,16 +287,19 @@ def build_take_profit_order_specs(
         runner_contracts = position_contracts - tp1_total_contracts - tp2_contracts
 
         # ── Middle Bucket Split for Three-Stage ──────────────────────
-        if (
+        _split_fast_contracts_3s: Decimal | None = None
+        _split_slow_contracts_3s: Decimal | None = None
+        _split_active_3s = (
             middle_bucket_split is not None
             and middle_bucket_split.active
             and middle_bucket_split.fast_price is not None
             and middle_bucket_split.slow_price is not None
-        ):
-            fast_ratio = float(middle_bucket_split.fast_ratio_of_bucket)
-            fast_contracts = _rnd(tp1_total_contracts * Decimal(str(fast_ratio)))
-            slow_contracts = tp1_total_contracts - fast_contracts
-            if fast_contracts >= min_contracts and slow_contracts >= min_contracts:
+        )
+        if _split_active_3s:
+            fast_ratio = float(middle_bucket_split.fast_ratio_of_bucket)  # type: ignore[union-attr]
+            _split_fast_contracts_3s = _rnd(tp1_total_contracts * Decimal(str(fast_ratio)))
+            _split_slow_contracts_3s = tp1_total_contracts - _split_fast_contracts_3s
+            if _split_fast_contracts_3s >= min_contracts and _split_slow_contracts_3s >= min_contracts:
                 if tp2_contracts < min_contracts or runner_contracts < min_contracts:
                     return TakeProfitSpecsDecision(
                         specs=(TakeProfitOrderSpec(label="final", contracts=position_contracts, price=final_tp_price),),
@@ -304,8 +307,8 @@ def build_take_profit_order_specs(
                         fallback_context={
                             "total_contracts": position_contracts,
                             "tp1_total_contracts": tp1_total_contracts,
-                            "fast_contracts": fast_contracts,
-                            "slow_contracts": slow_contracts,
+                            "fast_contracts": _split_fast_contracts_3s,
+                            "slow_contracts": _split_slow_contracts_3s,
                             "tp2_contracts": tp2_contracts,
                             "runner_contracts": runner_contracts,
                             "min_contracts": min_contracts,
@@ -313,18 +316,15 @@ def build_take_profit_order_specs(
                     )
                 return TakeProfitSpecsDecision(
                     specs=(
-                        TakeProfitOrderSpec(label="tp1_middle_fast", contracts=fast_contracts,
+                        TakeProfitOrderSpec(label="tp1_middle_fast", contracts=_split_fast_contracts_3s,
                                            price=float(middle_bucket_split.fast_price)),
-                        TakeProfitOrderSpec(label="tp1_middle_slow", contracts=slow_contracts,
+                        TakeProfitOrderSpec(label="tp1_middle_slow", contracts=_split_slow_contracts_3s,
                                            price=float(middle_bucket_split.slow_price)),
                         TakeProfitOrderSpec(label="tp2_outer", contracts=tp2_contracts,
                                            price=float(three_stage_tp2_price)),
                     ),
                 )
-            # Split sub-leg too small → fallback to unsplit middle bucket
-            if fast_contracts < min_contracts or slow_contracts < min_contracts:
-                # Fall through to unsplit below with explicit reason
-                pass
+            # Split sub-leg too small → fall through to unsplit below
 
         if tp1_total_contracts < min_contracts or tp2_contracts < min_contracts or runner_contracts < min_contracts:
             return TakeProfitSpecsDecision(
@@ -338,25 +338,21 @@ def build_take_profit_order_specs(
                     "min_contracts": min_contracts,
                 },
             )
-        # Check if split was active but subleg too small → fallback with reason
-        _split_fallback = (
-            middle_bucket_split is not None
-            and middle_bucket_split.active
-            and middle_bucket_split.fast_price is not None
-            and middle_bucket_split.slow_price is not None
-        )
         return TakeProfitSpecsDecision(
             specs=(
                 TakeProfitOrderSpec(label="tp1_middle", contracts=tp1_total_contracts, price=float(three_stage_tp1_price)),
                 TakeProfitOrderSpec(label="tp2_outer", contracts=tp2_contracts, price=float(three_stage_tp2_price)),
             ),
-            fallback_reason="MIDDLE_BUCKET_SPLIT_SUBLEG_TOO_SMALL_UNSPLIT" if _split_fallback else None,
+            fallback_reason="MIDDLE_BUCKET_SPLIT_SUBLEG_TOO_SMALL_UNSPLIT" if _split_active_3s else None,
             fallback_context={
                 "total_contracts": position_contracts,
                 "tp1_total_contracts": tp1_total_contracts,
+                "fast_contracts": _split_fast_contracts_3s,
+                "slow_contracts": _split_slow_contracts_3s,
+                "min_contracts": min_contracts,
                 "split_active": True,
                 "reason": "split_subleg_too_small_unsplit_fallback",
-            } if _split_fallback else None,
+            } if _split_active_3s else None,
         )
 
     # ── Non-Three-Stage branch ──
@@ -425,6 +421,11 @@ def build_take_profit_order_specs(
             and middle_bucket_split.fast_price is not None
             and middle_bucket_split.slow_price is not None
         )
+        _mr_fast_contracts: Decimal | None = None
+        _mr_slow_contracts: Decimal | None = None
+        if _mr_split_fallback:
+            _mr_fast_contracts = fast_contracts
+            _mr_slow_contracts = slow_contracts
         return TakeProfitSpecsDecision(
             specs=(
                 TakeProfitOrderSpec(label="middle", contracts=partial_contracts, price=float(partial_tp_price)),
@@ -434,6 +435,9 @@ def build_take_profit_order_specs(
             fallback_context={
                 "total_contracts": position_contracts,
                 "middle_total_contracts": partial_contracts,
+                "fast_contracts": _mr_fast_contracts,
+                "slow_contracts": _mr_slow_contracts,
+                "min_contracts": min_contracts,
                 "split_active": True,
                 "reason": "split_subleg_too_small_unsplit_fallback",
             } if _mr_split_fallback else None,

@@ -35,6 +35,8 @@ class LiveTradeResult:
     contracts_after: str = ""
     near_tp_exit_all: bool = False
     reduce_filled: bool = False
+    middle_bucket_split_executed: bool | None = None
+    middle_bucket_split_disabled_reason: str | None = None
 
 
 @dataclass(frozen=True)

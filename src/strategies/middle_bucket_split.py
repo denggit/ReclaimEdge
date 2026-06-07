@@ -15,10 +15,21 @@ from typing import Literal
 
 @dataclass(frozen=True)
 class MiddleBucketSplitDecision:
-    """Result of evaluating whether the middle bucket can be split."""
+    """Result of evaluating whether the middle bucket can be split.
+
+    The ``action`` field is the canonical driver for upstream control flow.
+    Callers MUST branch on ``action``, not on ``reason`` strings.
+    """
 
     enabled: bool
     reason: str
+    action: Literal[
+        "DISABLED",
+        "SPLIT",
+        "UNSPLIT_SLOW_MIDDLE",
+        "FALLBACK_OUTER",
+        "INVALID",
+    ]
     middle_bucket_ratio: float
     fast_ratio_of_bucket: float
     slow_ratio_of_bucket: float
@@ -48,10 +59,14 @@ def build_middle_bucket_split_decision(
     effective breakeven price.
     """
 
-    def _disabled(reason: str) -> MiddleBucketSplitDecision:
+    def _disabled(
+        reason: str,
+        action: Literal["DISABLED", "INVALID"] = "INVALID",
+    ) -> MiddleBucketSplitDecision:
         return MiddleBucketSplitDecision(
             enabled=False,
             reason=reason,
+            action=action,
             middle_bucket_ratio=middle_bucket_ratio,
             fast_ratio_of_bucket=fast_ratio_of_bucket,
             slow_ratio_of_bucket=1.0 - fast_ratio_of_bucket,
@@ -64,7 +79,7 @@ def build_middle_bucket_split_decision(
         )
 
     if not enabled:
-        return _disabled("disabled")
+        return _disabled("disabled", action="DISABLED")
 
     if middle_bucket_ratio <= 0.0 or middle_bucket_ratio >= 1.0:
         return _disabled("invalid_middle_bucket_ratio")
@@ -104,6 +119,7 @@ def build_middle_bucket_split_decision(
         return MiddleBucketSplitDecision(
             enabled=True,
             reason="split_enabled",
+            action="SPLIT",
             middle_bucket_ratio=middle_bucket_ratio,
             fast_ratio_of_bucket=fast_ratio_of_bucket,
             slow_ratio_of_bucket=slow_ratio_of_bucket,
@@ -119,6 +135,7 @@ def build_middle_bucket_split_decision(
         return MiddleBucketSplitDecision(
             enabled=False,
             reason="fast_middle_profit_insufficient_slow_middle_ok",
+            action="UNSPLIT_SLOW_MIDDLE",
             middle_bucket_ratio=middle_bucket_ratio,
             fast_ratio_of_bucket=fast_ratio_of_bucket,
             slow_ratio_of_bucket=slow_ratio_of_bucket,
@@ -134,6 +151,7 @@ def build_middle_bucket_split_decision(
         return MiddleBucketSplitDecision(
             enabled=False,
             reason="middle_profit_insufficient",
+            action="FALLBACK_OUTER",
             middle_bucket_ratio=middle_bucket_ratio,
             fast_ratio_of_bucket=fast_ratio_of_bucket,
             slow_ratio_of_bucket=slow_ratio_of_bucket,
@@ -149,6 +167,7 @@ def build_middle_bucket_split_decision(
     return MiddleBucketSplitDecision(
         enabled=False,
         reason="slow_middle_profit_insufficient",
+        action="FALLBACK_OUTER",
         middle_bucket_ratio=middle_bucket_ratio,
         fast_ratio_of_bucket=fast_ratio_of_bucket,
         slow_ratio_of_bucket=slow_ratio_of_bucket,

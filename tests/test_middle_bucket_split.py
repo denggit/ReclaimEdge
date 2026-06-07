@@ -24,6 +24,7 @@ class TestBuildMiddleBucketSplitDecision:
         )
         assert decision.enabled is False
         assert decision.reason == "disabled"
+        assert decision.action == "DISABLED"
 
     def test_long_fast_and_slow_both_sufficient(self):
         """LONG: fast=1650, slow=1640, breakeven=1600, min_profit=0.002 → required=1603.2.
@@ -40,6 +41,7 @@ class TestBuildMiddleBucketSplitDecision:
         )
         assert decision.enabled is True
         assert decision.reason == "split_enabled"
+        assert decision.action == "SPLIT"
         # fast_total = 0.70 * 0.70 = 0.49
         assert abs(decision.fast_total_ratio - 0.49) < 0.0001
         # slow_total = 0.70 * 0.30 = 0.21
@@ -62,6 +64,7 @@ class TestBuildMiddleBucketSplitDecision:
         )
         assert decision.enabled is False
         assert decision.reason == "fast_middle_profit_insufficient_slow_middle_ok"
+        assert decision.action == "UNSPLIT_SLOW_MIDDLE"
 
     def test_long_both_insufficient(self):
         """LONG: breakeven=1600, required=1603.2. fast=1601, slow=1602 → both insufficient."""
@@ -77,6 +80,7 @@ class TestBuildMiddleBucketSplitDecision:
         )
         assert decision.enabled is False
         assert decision.reason == "middle_profit_insufficient"
+        assert decision.action == "FALLBACK_OUTER"
 
     def test_short_fast_and_slow_both_sufficient(self):
         """SHORT: breakeven=1600, min_profit=0.002 → required=1596.8.
@@ -93,6 +97,7 @@ class TestBuildMiddleBucketSplitDecision:
         )
         assert decision.enabled is True
         assert decision.reason == "split_enabled"
+        assert decision.action == "SPLIT"
         # fast_total = 0.70 * 0.70 = 0.49
         assert abs(decision.fast_total_ratio - 0.49) < 0.0001
         # slow_total = 0.70 * 0.30 = 0.21
@@ -114,6 +119,7 @@ class TestBuildMiddleBucketSplitDecision:
         )
         assert decision.enabled is False
         assert decision.reason == "fast_middle_profit_insufficient_slow_middle_ok"
+        assert decision.action == "UNSPLIT_SLOW_MIDDLE"
 
     def test_short_both_insufficient(self):
         """SHORT: breakeven=1600, required=1596.8. fast=1598, slow=1599 → both insufficient."""
@@ -129,6 +135,7 @@ class TestBuildMiddleBucketSplitDecision:
         )
         assert decision.enabled is False
         assert decision.reason == "middle_profit_insufficient"
+        assert decision.action == "FALLBACK_OUTER"
 
     def test_invalid_middle_bucket_ratio(self):
         decision = build_middle_bucket_split_decision(
@@ -143,6 +150,7 @@ class TestBuildMiddleBucketSplitDecision:
         )
         assert decision.enabled is False
         assert decision.reason == "invalid_middle_bucket_ratio"
+        assert decision.action == "INVALID"
 
     def test_invalid_fast_ratio(self):
         decision = build_middle_bucket_split_decision(
@@ -157,6 +165,7 @@ class TestBuildMiddleBucketSplitDecision:
         )
         assert decision.enabled is False
         assert decision.reason == "invalid_fast_ratio"
+        assert decision.action == "INVALID"
 
     def test_fast_middle_missing(self):
         decision = build_middle_bucket_split_decision(
@@ -171,6 +180,7 @@ class TestBuildMiddleBucketSplitDecision:
         )
         assert decision.enabled is False
         assert decision.reason == "fast_middle_missing"
+        assert decision.action == "INVALID"
 
     def test_slow_middle_missing(self):
         decision = build_middle_bucket_split_decision(
@@ -185,6 +195,7 @@ class TestBuildMiddleBucketSplitDecision:
         )
         assert decision.enabled is False
         assert decision.reason == "slow_middle_missing"
+        assert decision.action == "INVALID"
 
     def test_invalid_effective_breakeven(self):
         decision = build_middle_bucket_split_decision(
@@ -199,6 +210,7 @@ class TestBuildMiddleBucketSplitDecision:
         )
         assert decision.enabled is False
         assert decision.reason == "invalid_effective_breakeven"
+        assert decision.action == "INVALID"
 
     def test_ratios_are_formula_computed_not_hardcoded(self):
         """Verify that fast/slow ratios are computed from inputs, not hardcoded.
@@ -218,6 +230,7 @@ class TestBuildMiddleBucketSplitDecision:
             min_net_profit_pct=0.002,
         )
         assert decision.enabled is True
+        assert decision.action == "SPLIT"
         expected_fast = 0.60 * 0.80
         expected_slow = 0.60 * 0.20
         assert abs(decision.fast_total_ratio - expected_fast) < 0.0001
@@ -237,6 +250,7 @@ class TestBuildMiddleBucketSplitDecision:
         )
         assert decision.enabled is False
         assert decision.reason == "slow_middle_profit_insufficient"
+        assert decision.action == "FALLBACK_OUTER"
 
 
 class TestCalculateFastProtectiveSl:

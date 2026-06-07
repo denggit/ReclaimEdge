@@ -137,10 +137,10 @@ class TpSlExecutionManagerFacadeTest(unittest.TestCase):
         trader = make_trader()
         facade = TpSlExecutionManager(trader)
         mock_specs = [("final", Decimal("10"), 3100.0)]
-        facade.core_tp._build_take_profit_order_specs = MagicMock(return_value=mock_specs)
+        facade.core_tp._build_take_profit_order_specs_public = MagicMock(return_value=mock_specs)
         result = facade._build_take_profit_order_specs(None)
         self.assertEqual(result, mock_specs)
-        facade.core_tp._build_take_profit_order_specs.assert_called_once_with(None)
+        facade.core_tp._build_take_profit_order_specs_public.assert_called_once_with(None)
 
     # ------------------------------------------------------------------
     # _build_three_stage_order_specs (sync delegation)
@@ -150,10 +150,10 @@ class TpSlExecutionManagerFacadeTest(unittest.TestCase):
         trader = make_trader()
         facade = TpSlExecutionManager(trader)
         mock_specs = [("partial", Decimal("3"), 3050.0), ("final", Decimal("7"), 3100.0)]
-        facade.core_tp._build_three_stage_order_specs = MagicMock(return_value=mock_specs)
+        facade.core_tp._build_three_stage_order_specs_public = MagicMock(return_value=mock_specs)
         result = facade._build_three_stage_order_specs(None)
         self.assertEqual(result, mock_specs)
-        facade.core_tp._build_three_stage_order_specs.assert_called_once_with(None)
+        facade.core_tp._build_three_stage_order_specs_public.assert_called_once_with(None)
 
     # ------------------------------------------------------------------
     # _trend_runner_sl_contracts (sync delegation)

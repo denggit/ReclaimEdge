@@ -10,6 +10,7 @@ Phase 39 of the refactoring plan:
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from src.strategies import middle_bucket_split as _mbs
@@ -25,6 +26,21 @@ if TYPE_CHECKING:
     )
 
 logger = get_logger(__name__)
+
+
+@dataclass(frozen=True)
+class MiddleBucketSplitApplyResult:
+    """Result of applying a middle-bucket-split decision to a TP branch.
+
+    Callers MUST branch on ``action``, not on ``split_active`` or reason strings.
+    """
+
+    action: str
+    split_active: bool
+    partial_tp_price: float | None
+    partial_tp_ratio: float
+    tp_plan: str | None
+    reason: str | None
 
 
 # Re-use the module-level helper from the strategy module so behaviour is
@@ -528,20 +544,29 @@ class TpUpdateCoordinator:
 
         # ── Middle Bucket Split for Middle Runner ─────────────────────
         if s.config.middle_bucket_split_enabled and not s.state.middle_runner_active:
-            split_applied = self._apply_middle_bucket_split_for_middle_runner(boll)
-            if split_applied:
-                partial_tp_price = s.state.partial_tp_price
-                partial_tp_ratio = s.state.middle_runner_first_close_ratio or min(
-                    max(s.config.middle_runner_first_close_ratio, 0.1), 0.95)
+            split_result = self._apply_middle_bucket_split_for_middle_runner(boll)
+
+            if split_result.action == "SPLIT":
+                partial_tp_price = split_result.partial_tp_price
+                partial_tp_ratio = split_result.partial_tp_ratio
                 tp_plan = "MIDDLE_RUNNER"
                 s.state.middle_runner_first_tp_price = partial_tp_price
                 s.state.middle_runner_final_tp_price = tp_price
                 s.state.middle_runner_pending = True
                 return tp_price, tp_mode, partial_tp_price, partial_tp_ratio, tp_plan, reason_override
-            # If split was not applied but slow middle is OK, the helper already set
-            # middle_runner_first_tp_price = boll.middle. We fall through to the normal
-            # _select_valid_tp_middle_with_profit_fallback which uses BOLL20 middle.
-            # This is the correct behavior: full middle bucket at BOLL20.
+
+            if split_result.action == "UNSPLIT_SLOW_MIDDLE":
+                # BOLL15 insufficient, BOLL20 sufficient — use BOLL20 middle as
+                # the full unsplit middle bucket.  MUST NOT fall back to outer.
+                partial_tp_price = split_result.partial_tp_price  # boll.middle
+                partial_tp_ratio = split_result.partial_tp_ratio
+                tp_plan = "MIDDLE_RUNNER"
+                s.state.middle_runner_first_tp_price = partial_tp_price
+                s.state.middle_runner_final_tp_price = tp_price
+                s.state.middle_runner_pending = True
+                return tp_price, tp_mode, partial_tp_price, partial_tp_ratio, tp_plan, reason_override
+
+            # FALLBACK_OUTER / INVALID / DISABLED — fall through to old logic
 
         partial_tp_price, _ptp_src = s._select_valid_tp_middle_with_profit_fallback(s.state.side, boll)
 
@@ -598,27 +623,28 @@ class TpUpdateCoordinator:
             and not s.state.three_stage_tp1_consumed
             and not s.state.trend_runner_active
         ):
-            split_applied = self._apply_middle_bucket_split_for_three_stage(boll)
-            if split_applied:
-                tp1_ratio = s.state.three_stage_tp1_ratio
-                partial_tp_ratio = tp1_ratio
+            split_result = self._apply_middle_bucket_split_for_three_stage(boll)
+
+            if split_result.action == "SPLIT":
+                return (
+                    tp_price, tp_mode,
+                    split_result.partial_tp_price, split_result.partial_tp_ratio,
+                    split_result.tp_plan or "THREE_STAGE_RUNNER",
+                    reason_override,
+                )
+
+            if split_result.action == "UNSPLIT_SLOW_MIDDLE":
+                # BOLL15 insufficient, BOLL20 sufficient — use BOLL20 middle as
+                # the full unsplit middle bucket.  MUST NOT fall back to outer.
+                partial_tp_price = split_result.partial_tp_price  # boll.middle
+                partial_tp_ratio = split_result.partial_tp_ratio
                 tp_plan = "THREE_STAGE_RUNNER"
-                return tp_price, tp_mode, s.state.three_stage_tp1_price, partial_tp_ratio, tp_plan, reason_override
-            # If split was not applied but slow middle is OK (BOLL15 insufficient, BOLL20 sufficient),
-            # the helper already set three_stage_tp1_price = boll.middle and we must use it as
-            # the full unsplit middle bucket instead of falling back to outer.
-            if (
-                not s.state.middle_bucket_split_active
-                and s.state.three_stage_tp1_price is not None
-                and getattr(s.state, "middle_bucket_split_reason", None) is None
-            ):
-                # Helper cleared split state and set tp1_price to boll.middle — use it directly.
-                # We explicitly route to THREE_STAGE_RUNNER with BOLL20 middle tp1.
-                pass  # fall through to normal _select_valid_tp_middle_with_profit_fallback below
-            elif not s.state.middle_bucket_split_active:
-                # Helper cleared split state due to insufficient profit (both booths) —
-                # fall through to normal middle profit check which may fallback outer.
-                pass
+                # Set Three-Stage targets: tp1 = BOLL20 middle, tp2 = selected outer
+                s.state.three_stage_tp1_price = partial_tp_price
+                s.state.three_stage_tp2_price = tp_price
+                return tp_price, tp_mode, partial_tp_price, partial_tp_ratio, tp_plan, reason_override
+
+            # FALLBACK_OUTER / INVALID / DISABLED — fall through to old logic
 
         partial_tp_price, _ptp_src = s._select_valid_tp_middle_with_profit_fallback(s.state.side, boll)
         updated = partial_tp_price is not None and s._update_three_stage_dynamic_targets_without_reset(
@@ -901,18 +927,33 @@ class TpUpdateCoordinator:
     def _apply_middle_bucket_split_for_three_stage(
         self,
         boll: BollSnapshot,
-    ) -> bool:
+    ) -> MiddleBucketSplitApplyResult:
         """Try to enable middle bucket split for the Three-Stage branch.
 
-        Returns True when split was applied and state was mutated.
-        Returns False when split was not applicable — caller should proceed
-        with the existing non-split logic.
+        Returns a MiddleBucketSplitApplyResult whose ``action`` field drives the
+        caller's control flow.  The caller MUST NOT fall back to outer when
+        action is ``UNSPLIT_SLOW_MIDDLE`` — it must use BOLL20 middle as the
+        full unsplit middle bucket.
         """
         s = self.strategy
         if not s.config.middle_bucket_split_enabled:
-            return False
+            return MiddleBucketSplitApplyResult(
+                action="DISABLED",
+                split_active=False,
+                partial_tp_price=None,
+                partial_tp_ratio=0.0,
+                tp_plan=None,
+                reason="middle_bucket_split_config_disabled",
+            )
         if s.state.side is None:
-            return False
+            return MiddleBucketSplitApplyResult(
+                action="INVALID",
+                split_active=False,
+                partial_tp_price=None,
+                partial_tp_ratio=0.0,
+                tp_plan=None,
+                reason="side_is_none",
+            )
 
         middle_bucket_ratio = float(s.state.three_stage_tp1_ratio or 0.0)
         fast_middle_price = getattr(boll, "tp_middle", None)
@@ -931,7 +972,7 @@ class TpUpdateCoordinator:
             min_net_profit_pct=s.config.tp_min_net_profit_pct,
         )
 
-        if decision.reason == "split_enabled":
+        if decision.action == "SPLIT":
             s.state.middle_bucket_split_active = True
             s.state.middle_bucket_split_fast_consumed = False
             s.state.middle_bucket_split_slow_consumed = False
@@ -965,40 +1006,84 @@ class TpUpdateCoordinator:
                 decision.reason,
                 candle_ts,
             )
-            return True
+            tp1_ratio = s.state.three_stage_tp1_ratio
+            return MiddleBucketSplitApplyResult(
+                action="SPLIT",
+                split_active=True,
+                partial_tp_price=decision.effective_price,
+                partial_tp_ratio=tp1_ratio,
+                tp_plan="THREE_STAGE_RUNNER",
+                reason=decision.reason,
+            )
 
-        if decision.reason == "fast_middle_profit_insufficient_slow_middle_ok":
+        if decision.action == "UNSPLIT_SLOW_MIDDLE":
             self._reset_middle_bucket_split_state()
             s.state.three_stage_tp1_price = slow_middle_price
             candle_ts = getattr(boll, "candle_ts_ms", 0)
             logger.warning(
                 "MIDDLE_BUCKET_SPLIT_SKIPPED | "
-                "plan=THREE_STAGE_RUNNER side=%s reason=%s "
+                "plan=THREE_STAGE_RUNNER side=%s reason=%s action=%s "
                 "fast_price=%s slow_price=%.4f required_price=%.4f "
                 "using_full_middle_bucket_at_20 candle_ts=%s",
                 s.state.side,
                 decision.reason,
+                decision.action,
                 f"{float(decision.fast_price or 0.0):.4f}" if decision.fast_price is not None else "-",
                 float(decision.slow_price or 0.0),
                 float(decision.required_price or 0.0),
                 candle_ts,
             )
-            return False
+            tp1_ratio = s.state.three_stage_tp1_ratio
+            return MiddleBucketSplitApplyResult(
+                action="UNSPLIT_SLOW_MIDDLE",
+                split_active=False,
+                partial_tp_price=slow_middle_price,
+                partial_tp_ratio=tp1_ratio,
+                tp_plan="THREE_STAGE_RUNNER",
+                reason=decision.reason,
+            )
 
-        # middle_profit_insufficient or slow_middle_profit_insufficient
+        # FALLBACK_OUTER, INVALID, DISABLED — reset split state, return old behaviour
         self._reset_middle_bucket_split_state()
-        return False
+        return MiddleBucketSplitApplyResult(
+            action=decision.action,
+            split_active=False,
+            partial_tp_price=None,
+            partial_tp_ratio=0.0,
+            tp_plan=None,
+            reason=decision.reason,
+        )
 
     def _apply_middle_bucket_split_for_middle_runner(
         self,
         boll: BollSnapshot,
-    ) -> bool:
-        """Try to enable middle bucket split for the Middle Runner branch."""
+    ) -> MiddleBucketSplitApplyResult:
+        """Try to enable middle bucket split for the Middle Runner branch.
+
+        Returns a MiddleBucketSplitApplyResult whose ``action`` field drives the
+        caller's control flow.  The caller MUST NOT fall back to outer when
+        action is ``UNSPLIT_SLOW_MIDDLE`` — it must use BOLL20 middle as the
+        full unsplit middle bucket.
+        """
         s = self.strategy
         if not s.config.middle_bucket_split_enabled:
-            return False
+            return MiddleBucketSplitApplyResult(
+                action="DISABLED",
+                split_active=False,
+                partial_tp_price=None,
+                partial_tp_ratio=0.0,
+                tp_plan=None,
+                reason="middle_bucket_split_config_disabled",
+            )
         if s.state.side is None:
-            return False
+            return MiddleBucketSplitApplyResult(
+                action="INVALID",
+                split_active=False,
+                partial_tp_price=None,
+                partial_tp_ratio=0.0,
+                tp_plan=None,
+                reason="side_is_none",
+            )
 
         middle_bucket_ratio = float(s.state.middle_runner_first_close_ratio or 0.0)
         if middle_bucket_ratio <= 0.0:
@@ -1019,7 +1104,7 @@ class TpUpdateCoordinator:
             min_net_profit_pct=s.config.tp_min_net_profit_pct,
         )
 
-        if decision.reason == "split_enabled":
+        if decision.action == "SPLIT":
             s.state.middle_bucket_split_active = True
             s.state.middle_bucket_split_fast_consumed = False
             s.state.middle_bucket_split_slow_consumed = False
@@ -1054,29 +1139,56 @@ class TpUpdateCoordinator:
                 decision.reason,
                 candle_ts,
             )
-            return True
+            partial_tp_ratio_val = s.state.middle_runner_first_close_ratio or min(
+                max(s.config.middle_runner_first_close_ratio, 0.1), 0.95)
+            return MiddleBucketSplitApplyResult(
+                action="SPLIT",
+                split_active=True,
+                partial_tp_price=decision.effective_price,
+                partial_tp_ratio=partial_tp_ratio_val,
+                tp_plan="MIDDLE_RUNNER",
+                reason=decision.reason,
+            )
 
-        if decision.reason == "fast_middle_profit_insufficient_slow_middle_ok":
+        if decision.action == "UNSPLIT_SLOW_MIDDLE":
             self._reset_middle_bucket_split_state()
             s.state.middle_runner_first_tp_price = slow_middle_price
             s.state.partial_tp_price = slow_middle_price
             candle_ts = getattr(boll, "candle_ts_ms", 0)
             logger.warning(
                 "MIDDLE_BUCKET_SPLIT_SKIPPED | "
-                "plan=MIDDLE_RUNNER side=%s reason=%s "
+                "plan=MIDDLE_RUNNER side=%s reason=%s action=%s "
                 "fast_price=%s slow_price=%.4f required_price=%.4f "
                 "using_full_middle_bucket_at_20 candle_ts=%s",
                 s.state.side,
                 decision.reason,
+                decision.action,
                 f"{float(decision.fast_price or 0.0):.4f}" if decision.fast_price is not None else "-",
                 float(decision.slow_price or 0.0),
                 float(decision.required_price or 0.0),
                 candle_ts,
             )
-            return False
+            partial_tp_ratio_val = s.state.middle_runner_first_close_ratio or min(
+                max(s.config.middle_runner_first_close_ratio, 0.1), 0.95)
+            return MiddleBucketSplitApplyResult(
+                action="UNSPLIT_SLOW_MIDDLE",
+                split_active=False,
+                partial_tp_price=slow_middle_price,
+                partial_tp_ratio=partial_tp_ratio_val,
+                tp_plan="MIDDLE_RUNNER",
+                reason=decision.reason,
+            )
 
+        # FALLBACK_OUTER, INVALID, DISABLED
         self._reset_middle_bucket_split_state()
-        return False
+        return MiddleBucketSplitApplyResult(
+            action=decision.action,
+            split_active=False,
+            partial_tp_price=None,
+            partial_tp_ratio=0.0,
+            tp_plan=None,
+            reason=decision.reason,
+        )
 
     def _clear_middle_bucket_split_if_not_active(self, tp_plan: str) -> None:
         """If the current TP plan is not using split, clear any stale split state."""
