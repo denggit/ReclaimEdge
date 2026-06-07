@@ -132,10 +132,17 @@ async def run_account_sync_protective_orders_phase(
             old_sl_order_id = three_stage_post_tp1_sl_payload.get("old_sl_order_id")
             if old_sl_order_id and old_sl_order_id != sl_order_id:
                 await trader.cancel_three_stage_post_tp1_protective_stop(old_sl_order_id)
+            # Also cancel any stale middle bucket fast SL (from split slow fill)
+            fast_sl_order_id = getattr(strategy.state, "middle_bucket_split_fast_sl_order_id", None)
+            if fast_sl_order_id and fast_sl_order_id != sl_order_id:
+                await trader.cancel_middle_bucket_fast_protective_stop(fast_sl_order_id)
             async with state_lock:
                 strategy.state.three_stage_post_tp1_protective_sl_order_id = sl_order_id
                 strategy.state.three_stage_post_tp1_protective_sl_price = float(sl_price)
                 strategy.state.three_stage_post_tp1_protected = True
+                # Clear stale fast SL state after slow fill (replaced by post-TP1 SL)
+                strategy.state.middle_bucket_split_fast_sl_order_id = None
+                strategy.state.middle_bucket_split_fast_sl_protected = False
                 save_state_payload = (execution_state.current_position_id, copy.deepcopy(strategy.state),
                                       execution_state.cash_before_position)
             if hasattr(journal, "append"):
@@ -258,9 +265,16 @@ async def run_account_sync_protective_orders_phase(
             old_sl_order_id = middle_runner_sl_payload.get("old_sl_order_id")
             if old_sl_order_id and old_sl_order_id != sl_order_id:
                 await trader.cancel_middle_runner_protective_stop(old_sl_order_id)
+            # Also cancel any stale middle bucket fast SL (from split slow fill)
+            fast_sl_order_id = getattr(strategy.state, "middle_bucket_split_fast_sl_order_id", None)
+            if fast_sl_order_id and fast_sl_order_id != sl_order_id:
+                await trader.cancel_middle_bucket_fast_protective_stop(fast_sl_order_id)
             async with state_lock:
                 strategy.state.middle_runner_protective_sl_order_id = sl_order_id
                 strategy.state.middle_runner_protective_sl_price = float(sl_price)
+                # Clear stale fast SL state after slow fill (replaced by middle runner SL)
+                strategy.state.middle_bucket_split_fast_sl_order_id = None
+                strategy.state.middle_bucket_split_fast_sl_protected = False
                 if middle_runner_sl_payload.get("reason") == "partial_size_mismatch_degraded":
                     strategy.state.middle_runner_size_mismatch_protected = True
                 save_state_payload = (execution_state.current_position_id, copy.deepcopy(strategy.state),

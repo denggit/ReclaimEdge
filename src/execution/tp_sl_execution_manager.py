@@ -132,6 +132,17 @@ class TpSlExecutionManager:
         return await self.protective_stops.place_three_stage_post_tp1_protective_stop_with_retries(
             side, contracts, stop_price, retry_count, retry_interval_seconds)
 
+    async def place_middle_bucket_fast_protective_stop_with_retries(
+            self,
+            side: PositionSide,
+            contracts: Decimal,
+            stop_price: float,
+            retry_count: int,
+            retry_interval_seconds: float,
+    ) -> tuple[bool, str | None, str]:
+        return await self.protective_stops.place_middle_bucket_fast_protective_stop_with_retries(
+            side, contracts, stop_price, retry_count, retry_interval_seconds)
+
     async def _cancel_unverified_near_tp_algo(self, algo_id: str, *, phase: str) -> None:
         return await self.protective_stops._cancel_unverified_near_tp_algo(algo_id, phase=phase)
 

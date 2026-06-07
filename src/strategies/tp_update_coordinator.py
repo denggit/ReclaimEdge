@@ -538,9 +538,10 @@ class TpUpdateCoordinator:
                 s.state.middle_runner_final_tp_price = tp_price
                 s.state.middle_runner_pending = True
                 return tp_price, tp_mode, partial_tp_price, partial_tp_ratio, tp_plan, reason_override
-            # If split not applied but slow middle is OK, the helper already set
-            # middle_runner_first_tp_price / partial_tp_price to boll.middle.
-            # Fall through to the existing logic which will use structure BOLL20.
+            # If split was not applied but slow middle is OK, the helper already set
+            # middle_runner_first_tp_price = boll.middle. We fall through to the normal
+            # _select_valid_tp_middle_with_profit_fallback which uses BOLL20 middle.
+            # This is the correct behavior: full middle bucket at BOLL20.
 
         partial_tp_price, _ptp_src = s._select_valid_tp_middle_with_profit_fallback(s.state.side, boll)
 
@@ -603,11 +604,21 @@ class TpUpdateCoordinator:
                 partial_tp_ratio = tp1_ratio
                 tp_plan = "THREE_STAGE_RUNNER"
                 return tp_price, tp_mode, s.state.three_stage_tp1_price, partial_tp_ratio, tp_plan, reason_override
-            # If split not applied but slow middle is OK (BOLL15 insufficient, BOLL20 sufficient),
-            # three_stage_tp1_price was already set to boll.middle by the helper.
-            # Continue to the existing logic which will use structure BOLL20 middle via
-            # _select_valid_tp_middle_with_profit_fallback → STRUCTURE_BOLL_PROFIT_FALLBACK.
-            # We must NOT fall back to outer in this case.
+            # If split was not applied but slow middle is OK (BOLL15 insufficient, BOLL20 sufficient),
+            # the helper already set three_stage_tp1_price = boll.middle and we must use it as
+            # the full unsplit middle bucket instead of falling back to outer.
+            if (
+                not s.state.middle_bucket_split_active
+                and s.state.three_stage_tp1_price is not None
+                and getattr(s.state, "middle_bucket_split_reason", None) is None
+            ):
+                # Helper cleared split state and set tp1_price to boll.middle — use it directly.
+                # We explicitly route to THREE_STAGE_RUNNER with BOLL20 middle tp1.
+                pass  # fall through to normal _select_valid_tp_middle_with_profit_fallback below
+            elif not s.state.middle_bucket_split_active:
+                # Helper cleared split state due to insufficient profit (both booths) —
+                # fall through to normal middle profit check which may fallback outer.
+                pass
 
         partial_tp_price, _ptp_src = s._select_valid_tp_middle_with_profit_fallback(s.state.side, boll)
         updated = partial_tp_price is not None and s._update_three_stage_dynamic_targets_without_reset(

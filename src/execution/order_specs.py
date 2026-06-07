@@ -321,7 +321,10 @@ def build_take_profit_order_specs(
                                            price=float(three_stage_tp2_price)),
                     ),
                 )
-            # Fall through to unsplit if either sub-leg too small
+            # Split sub-leg too small → fallback to unsplit middle bucket
+            if fast_contracts < min_contracts or slow_contracts < min_contracts:
+                # Fall through to unsplit below with explicit reason
+                pass
 
         if tp1_total_contracts < min_contracts or tp2_contracts < min_contracts or runner_contracts < min_contracts:
             return TakeProfitSpecsDecision(
@@ -335,11 +338,25 @@ def build_take_profit_order_specs(
                     "min_contracts": min_contracts,
                 },
             )
+        # Check if split was active but subleg too small → fallback with reason
+        _split_fallback = (
+            middle_bucket_split is not None
+            and middle_bucket_split.active
+            and middle_bucket_split.fast_price is not None
+            and middle_bucket_split.slow_price is not None
+        )
         return TakeProfitSpecsDecision(
             specs=(
                 TakeProfitOrderSpec(label="tp1_middle", contracts=tp1_total_contracts, price=float(three_stage_tp1_price)),
                 TakeProfitOrderSpec(label="tp2_outer", contracts=tp2_contracts, price=float(three_stage_tp2_price)),
             ),
+            fallback_reason="MIDDLE_BUCKET_SPLIT_SUBLEG_TOO_SMALL_UNSPLIT" if _split_fallback else None,
+            fallback_context={
+                "total_contracts": position_contracts,
+                "tp1_total_contracts": tp1_total_contracts,
+                "split_active": True,
+                "reason": "split_subleg_too_small_unsplit_fallback",
+            } if _split_fallback else None,
         )
 
     # ── Non-Three-Stage branch ──
@@ -402,11 +419,24 @@ def build_take_profit_order_specs(
                     ),
                 )
             # Fall through to unsplit if either sub-leg too small
+        _mr_split_fallback = (
+            middle_bucket_split is not None
+            and middle_bucket_split.active
+            and middle_bucket_split.fast_price is not None
+            and middle_bucket_split.slow_price is not None
+        )
         return TakeProfitSpecsDecision(
             specs=(
                 TakeProfitOrderSpec(label="middle", contracts=partial_contracts, price=float(partial_tp_price)),
                 TakeProfitOrderSpec(label="runner", contracts=final_contracts, price=final_tp_price),
             ),
+            fallback_reason="MIDDLE_BUCKET_SPLIT_SUBLEG_TOO_SMALL_UNSPLIT" if _mr_split_fallback else None,
+            fallback_context={
+                "total_contracts": position_contracts,
+                "middle_total_contracts": partial_contracts,
+                "split_active": True,
+                "reason": "split_subleg_too_small_unsplit_fallback",
+            } if _mr_split_fallback else None,
         )
     return TakeProfitSpecsDecision(
         specs=(

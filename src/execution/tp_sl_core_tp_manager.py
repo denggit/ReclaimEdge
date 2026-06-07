@@ -410,6 +410,14 @@ class CoreTakeProfitManager:
                     ctx["runner_contracts"],
                     ctx["min_contracts"],
                 )
+            elif reason == "MIDDLE_BUCKET_SPLIT_SUBLEG_TOO_SMALL_UNSPLIT":
+                logger.warning(
+                    "MIDDLE_BUCKET_SPLIT_FALLBACK_UNSPLIT | reason=subleg_too_small state_split_active=true "
+                    "actual_order_labels=%s | state and order structure are now consistent (unsplit) "
+                    "total_contracts=%s",
+                    [s.label for s in decision.specs],
+                    ctx.get("total_contracts", "?"),
+                )
         return [(spec.label, spec.contracts, spec.price) for spec in decision.specs]
 
     def _build_three_stage_order_specs(self, intent: TradeIntent) -> list[tuple[str, Decimal, float]]:

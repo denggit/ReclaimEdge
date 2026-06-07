@@ -66,11 +66,9 @@ def run_account_sync_tp_progress_phase(
     middle_bucket_split_event = tp_progress_helpers.mark_middle_bucket_split_progress_if_position_reduced(
         strategy, core_position)
 
-    split_active_and_incomplete = (
-        getattr(strategy.state, "middle_bucket_split_active", False)
-        and not getattr(strategy.state, "middle_bucket_split_slow_consumed", False)
-    )
-    if split_active_and_incomplete:
+    # Explicitly decide which progress path runs based on the split event
+    split_owns_progress = middle_bucket_split_event in {"MIDDLE_BUCKET_FAST", "MIDDLE_BUCKET_SLOW"}
+    if split_owns_progress:
         # Split owns the progress path; skip old TP progress entirely
         middle_runner_activated = False
         three_stage_event = None
@@ -394,6 +392,113 @@ def run_account_sync_tp_progress_phase(
                 "enabled": bool(getattr(strategy.config, "middle_bucket_split_fast_sl_enabled", True)),
                 "old_sl_order_id": getattr(strategy.state, "middle_bucket_split_fast_sl_order_id", None),
             }
+
+        # ── Slow fill → generate post-TP1 / middle_runner dynamic SL ──
+        if middle_bucket_split_event == "MIDDLE_BUCKET_SLOW":
+            tp_plan = getattr(strategy.state, "tp_plan", "SINGLE")
+            old_fast_sl_order_id = getattr(strategy.state, "middle_bucket_split_fast_sl_order_id", None)
+
+            if tp_plan == "THREE_STAGE_RUNNER" and getattr(strategy.state, "three_stage_tp1_consumed", False):
+                config = getattr(strategy, "config", None)
+                if bool(getattr(config, "three_stage_post_tp1_protective_sl_enabled", True)):
+                    post_tp1_boll = runner_live_helpers.three_stage_post_tp1_boll(strategy)
+                    protective_sl = None
+                    current_price = None
+                    price_source = "missing"
+                    if post_tp1_boll is not None and core_position.side is not None:
+                        current_price, price_source = runner_live_helpers.three_stage_post_tp1_current_price(
+                            account_snapshot, core_position, post_tp1_boll, live_time_utils.utc_ms())
+                        base_sl = strategy._calculate_three_stage_post_tp1_protective_sl(
+                            core_position.side, current_price, post_tp1_boll)
+                        extension_sl = strategy._apply_three_stage_post_tp1_extension_trigger(
+                            core_position.side, current_price, post_tp1_boll, base_sl)
+                        protective_sl = strategy._tighten_optional_three_stage_post_tp1_sl(
+                            core_position.side, base_sl, extension_sl)
+                    strategy.state.three_stage_post_tp1_protective_sl_price = protective_sl
+                    if not position.has_position or position.side != core_position.side or position.contracts <= 0:
+                        execution_state.trading_halted = True
+                        execution_state.halt_reason = "middle_bucket_slow_post_tp1_net_position_missing"
+                        logger.error(
+                            "MIDDLE_BUCKET_SPLIT_SLOW_THREE_STAGE_NET_MISSING | position_id=%s trading_halted=true",
+                            execution_state.current_position_id,
+                        )
+                    else:
+                        three_stage_post_tp1_sl_payload = {
+                            "position_id": execution_state.current_position_id,
+                            "side": core_position.side,
+                            "contracts": position.contracts,
+                            "core_contracts": core_position.contracts,
+                            "net_contracts": position.contracts,
+                            "protective_sl_price": protective_sl,
+                            "old_sl_order_id": old_fast_sl_order_id or getattr(
+                                strategy.state, "three_stage_post_tp1_protective_sl_order_id", None),
+                            "current_price": current_price,
+                            "current_price_source": price_source,
+                            "reason": "middle_bucket_slow_filled",
+                        }
+                # Generate event payload for slow fill (journal + log context)
+                three_stage_event = "TP1"  # signal that TP1 was filled via split slow path
+                three_stage_event_payload = {
+                    "event": "TP1",
+                    "position_id": execution_state.current_position_id,
+                    "side": core_position.side,
+                    "layers": strategy.state.layers,
+                    "avg_entry_price": strategy.state.avg_entry_price,
+                    "tp_plan": "THREE_STAGE_RUNNER",
+                    "tp1_price": getattr(strategy.state, "three_stage_tp1_price", None),
+                    "tp1_ratio": getattr(strategy.state, "three_stage_tp1_ratio", 0.0),
+                    "tp2_price": getattr(strategy.state, "three_stage_tp2_price", None),
+                    "tp2_ratio": getattr(strategy.state, "three_stage_tp2_ratio", 0.0),
+                    "runner_tp_price": getattr(strategy.state, "trend_runner_tp_price", None),
+                    "runner_sl_price": getattr(strategy.state, "trend_runner_sl_price", None),
+                    "runner_ratio": getattr(strategy.state, "three_stage_runner_ratio", 0.0),
+                    "trend_runner_active": getattr(strategy.state, "trend_runner_active", False),
+                    "trend_runner_adjust_count": getattr(strategy.state, "trend_runner_adjust_count", 0),
+                    "trend_runner_trend_start_ts_ms": getattr(strategy.state, "trend_runner_trend_start_ts_ms", 0),
+                    "split_source": "middle_bucket_slow",
+                }
+
+            elif tp_plan == "MIDDLE_RUNNER" and getattr(strategy.state, "middle_runner_active", False):
+                config = getattr(strategy, "config", None)
+                if bool(getattr(config, "middle_runner_protective_sl_enabled", True)):
+                    runner_boll = runner_live_helpers.middle_runner_activation_boll(strategy)
+                    current_price = getattr(runner_boll, "middle", 0.0) if runner_boll is not None else 0.0
+                    protective_sl = (
+                        strategy._calculate_middle_runner_protective_sl(core_position.side, current_price, runner_boll)
+                        if runner_boll is not None and core_position.side is not None
+                        else None
+                    )
+                    strategy.state.middle_runner_protective_sl_price = protective_sl
+                    if not position.has_position or position.side != core_position.side or position.contracts <= 0:
+                        execution_state.trading_halted = True
+                        execution_state.halt_reason = "middle_bucket_slow_middle_runner_net_position_missing"
+                        logger.error(
+                            "MIDDLE_BUCKET_SPLIT_SLOW_MIDDLE_RUNNER_NET_MISSING | position_id=%s trading_halted=true",
+                            execution_state.current_position_id,
+                        )
+                    else:
+                        middle_runner_sl_payload = {
+                            "position_id": execution_state.current_position_id,
+                            "side": core_position.side,
+                            "contracts": position.contracts,
+                            "core_contracts": core_position.contracts,
+                            "net_contracts": position.contracts,
+                            "protective_sl_price": protective_sl,
+                            "old_sl_order_id": old_fast_sl_order_id or getattr(
+                                strategy.state, "middle_runner_protective_sl_order_id", None),
+                            "reason": "middle_bucket_slow_filled",
+                        }
+                    middle_runner_activation_payload = {
+                        "position_id": execution_state.current_position_id,
+                        "side": core_position.side,
+                        "layers": strategy.state.layers,
+                        "avg_entry_price": strategy.state.avg_entry_price,
+                        "first_tp_price": getattr(strategy.state, "middle_runner_first_tp_price", None),
+                        "final_tp_price": getattr(strategy.state, "middle_runner_final_tp_price", None),
+                        "first_close_ratio": getattr(strategy.state, "middle_runner_first_close_ratio", 0.0),
+                        "keep_ratio": getattr(strategy.state, "middle_runner_keep_ratio", 0.0),
+                        "reason": "middle_bucket_slow_filled",
+                    }
 
     if (
             execution_state.trading_halted
