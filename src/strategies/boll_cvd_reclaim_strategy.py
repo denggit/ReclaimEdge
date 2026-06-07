@@ -7,7 +7,6 @@ from typing import Literal, Optional
 from src.indicators.cvd_tracker import CvdSnapshot
 from src.monitors.boll_band_breakout_monitor import BollSnapshot
 from src.position_management.cost_basis import calculate_remaining_breakeven_price
-from src.position_management.sidecar.model import trim_sidecar_legs_for_state
 from src.risk.simple_position_sizer import PositionSize, SimplePositionSizer
 from src.strategies import add_layer_gates
 from src.strategies import middle_runner as middle_runner_helpers
@@ -1081,6 +1080,12 @@ class BollCvdReclaimStrategy:
             self._tp_update_coordinator = TpUpdateCoordinator(self)
         return self._tp_update_coordinator
 
+    def _intent_factory(self):
+        if not hasattr(self, "_strategy_intent_factory"):
+            from src.strategies.strategy_intent_factory import StrategyIntentFactory
+            self._strategy_intent_factory = StrategyIntentFactory(self)
+        return self._strategy_intent_factory
+
     def _maybe_update_tp(self, price: float, ts_ms: int, boll: BollSnapshot, cvd: CvdSnapshot) -> TradeIntent | None:
         return self._tp_update().maybe_update_tp(price, ts_ms, boll, cvd)
 
@@ -1355,36 +1360,16 @@ class BollCvdReclaimStrategy:
             self.state.trend_runner_active,
             self.state.trend_runner_adjust_count,
         )
-        return TradeIntent(
-            intent_type="MARKET_EXIT_RUNNER",
+        return self._intent_factory().build_runner_market_exit_intent(
             side=side,
             price=price,
             layer_index=self.state.layers,
             tp_price=self.state.trend_runner_tp_price or self.state.tp_price or price,
             reason=reason,
             size=size,
-            fast_cvd=cvd.fast_cvd,
-            previous_fast_cvd=cvd.previous_fast_cvd,
-            buy_ratio=cvd.buy_ratio,
-            sell_ratio=cvd.sell_ratio,
-            boll_upper=boll.upper,
-            boll_middle=boll.middle,
-            boll_lower=boll.lower,
+            boll=boll,
+            cvd=cvd,
             ts_ms=ts_ms,
-            avg_entry_price=self.state.avg_entry_price,
-            breakeven_price=self.state.breakeven_price,
-            tp_mode=self.state.tp_mode,
-            partial_tp_price=None,
-            partial_tp_ratio=0.0,
-            tp_plan="SINGLE",
-            partial_tp_consumed=True,
-            trend_runner_active=True,
-            trend_runner_tp_price=self.state.trend_runner_tp_price,
-            trend_runner_sl_price=self.state.trend_runner_sl_price,
-            trend_runner_tp_order_id=self.state.trend_runner_tp_order_id,
-            trend_runner_sl_order_id=self.state.trend_runner_sl_order_id,
-            trend_runner_exit_reason=reason,
-            trend_runner_adjust_count=self.state.trend_runner_adjust_count,
         )
 
     def _maybe_near_tp_reduce(self, price: float, ts_ms: int, boll: BollSnapshot,
@@ -1574,35 +1559,21 @@ class BollCvdReclaimStrategy:
             self.config.near_tp_reduce_ratio,
             protective_sl,
         )
-        return TradeIntent(
-            intent_type="NEAR_TP_REDUCE",
+        return self._intent_factory().build_near_tp_reduce_intent(
             side=side,
             price=price,
             layer_index=self.state.layers,
             tp_price=self.state.tp_price,
             reason="near_tp_giveback_protection",
             size=size,
-            fast_cvd=cvd.fast_cvd,
-            previous_fast_cvd=cvd.previous_fast_cvd,
-            buy_ratio=cvd.buy_ratio,
-            sell_ratio=cvd.sell_ratio,
-            boll_upper=boll.upper,
-            boll_middle=boll.middle,
-            boll_lower=boll.lower,
+            boll=boll,
+            cvd=cvd,
             ts_ms=ts_ms,
-            avg_entry_price=self.state.avg_entry_price,
-            breakeven_price=self.state.breakeven_price,
-            tp_mode=self.state.tp_mode,
-            partial_tp_price=None,
-            partial_tp_ratio=0.0,
-            tp_plan="SINGLE",
-            partial_tp_consumed=True,
-            near_tp_progress_ratio=progress,
-            near_tp_best_price=best,
-            near_tp_giveback=giveback,
-            near_tp_giveback_threshold=giveback_threshold,
-            near_tp_reduce_ratio=self.config.near_tp_reduce_ratio,
-            near_tp_protective_sl_price=protective_sl,
+            progress=progress,
+            best=best,
+            giveback=giveback,
+            giveback_threshold=giveback_threshold,
+            protective_sl=protective_sl,
         )
 
     def _update_position_cost(self, entry_price: float, eth_qty: float) -> None:
@@ -2671,7 +2642,7 @@ class BollCvdReclaimStrategy:
             cvd: CvdSnapshot,
             ts_ms: int,
     ) -> TradeIntent:
-        return TradeIntent(
+        return self._intent_factory().build_intent(
             intent_type=intent_type,
             side=side,
             price=price,
@@ -2679,86 +2650,19 @@ class BollCvdReclaimStrategy:
             tp_price=tp_price,
             reason=reason,
             size=size,
-            fast_cvd=cvd.fast_cvd,
-            previous_fast_cvd=cvd.previous_fast_cvd,
-            buy_ratio=cvd.buy_ratio,
-            sell_ratio=cvd.sell_ratio,
-            boll_upper=boll.upper,
-            boll_middle=boll.middle,
-            boll_lower=boll.lower,
+            boll=boll,
+            cvd=cvd,
             ts_ms=ts_ms,
-            avg_entry_price=self.state.avg_entry_price,
-            breakeven_price=self.state.breakeven_price,
-            tp_mode=self.state.tp_mode,
-            partial_tp_price=self.state.partial_tp_price,
-            partial_tp_ratio=self.state.partial_tp_ratio,
-            tp_plan=self.state.tp_plan,
-            partial_tp_consumed=self.state.partial_tp_consumed,
-            middle_runner_enabled_for_position=self.state.middle_runner_enabled_for_position,
-            middle_runner_pending=self.state.middle_runner_pending,
-            middle_runner_active=self.state.middle_runner_active,
-            middle_runner_first_close_ratio=self.state.middle_runner_first_close_ratio,
-            middle_runner_keep_ratio=self.state.middle_runner_keep_ratio,
-            middle_runner_first_tp_price=self.state.middle_runner_first_tp_price,
-            middle_runner_final_tp_price=self.state.middle_runner_final_tp_price,
-            middle_runner_protective_sl_price=self.state.middle_runner_protective_sl_price,
-            middle_runner_protective_sl_order_id=self.state.middle_runner_protective_sl_order_id,
-            middle_runner_extension_triggered=self.state.middle_runner_extension_triggered,
-            middle_runner_add_disabled=self.state.middle_runner_add_disabled,
-            three_stage_tp1_price=self.state.three_stage_tp1_price,
-            three_stage_tp1_ratio=self.state.three_stage_tp1_ratio,
-            three_stage_tp2_price=self.state.three_stage_tp2_price,
-            three_stage_tp2_ratio=self.state.three_stage_tp2_ratio,
-            three_stage_runner_tp_price=self.state.trend_runner_tp_price,
-            three_stage_runner_ratio=self.state.three_stage_runner_ratio,
-            three_stage_runner_sl_price=self.state.trend_runner_sl_price,
-            three_stage_tp1_consumed=self.state.three_stage_tp1_consumed,
-            three_stage_tp2_consumed=self.state.three_stage_tp2_consumed,
-            three_stage_post_tp1_protective_sl_price=self.state.three_stage_post_tp1_protective_sl_price,
-            three_stage_post_tp1_protective_sl_order_id=self.state.three_stage_post_tp1_protective_sl_order_id,
-            three_stage_post_tp1_sl_extension_triggered=self.state.three_stage_post_tp1_sl_extension_triggered,
-            three_stage_post_tp1_protected=self.state.three_stage_post_tp1_protected,
-            trend_runner_active=self.state.trend_runner_active,
-            trend_runner_tp_price=self.state.trend_runner_tp_price,
-            trend_runner_sl_price=self.state.trend_runner_sl_price,
-            trend_runner_tp_order_id=self.state.trend_runner_tp_order_id,
-            trend_runner_sl_order_id=self.state.trend_runner_sl_order_id,
-            trend_runner_exit_reason=self.state.trend_runner_exit_reason,
-            trend_runner_adjust_count=self.state.trend_runner_adjust_count,
-            protected_order_ids=self._protected_order_ids(),
-            managed_core_contracts=self._managed_core_contracts_for_intent(intent_type),
-            managed_core_eth_qty=self._managed_core_eth_qty_for_intent(intent_type),
         )
 
     def _managed_core_contracts_for_intent(self, intent_type: TradeIntentType) -> str | None:
-        if not self.state.sidecar_enabled_for_position:
-            return None
-        if intent_type in {"UPDATE_TP", "NEAR_TP_REDUCE", "MARKET_EXIT_RUNNER"}:
-            return self.state.core_contracts
-        return None
+        return self._intent_factory().managed_core_contracts_for_intent(intent_type)
 
     def _managed_core_eth_qty_for_intent(self, intent_type: TradeIntentType) -> float:
-        if not self.state.sidecar_enabled_for_position:
-            return 0.0
-        if intent_type in {"OPEN_LONG", "OPEN_SHORT", "ADD_LONG", "ADD_SHORT", "UPDATE_TP"}:
-            return float(self.state.total_entry_qty or 0.0)
-        return float(self.state.core_eth_qty or 0.0)
+        return self._intent_factory().managed_core_eth_qty_for_intent(intent_type)
 
     def _protected_order_ids(self) -> tuple[str, ...]:
-        ids: list[str] = []
-        max_legs = int(getattr(self.sizer.config, "sidecar_max_legs", 10) or 10)
-        for leg in trim_sidecar_legs_for_state(self.state.sidecar_legs, max_legs):
-            if leg.get("status") in {"OPEN", "OPEN_UNPROTECTED"} and leg.get("tp_order_id"):
-                ids.append(str(leg["tp_order_id"]))
-        for order_id in (
-                self.state.near_tp_protective_sl_order_id,
-                self.state.middle_runner_protective_sl_order_id,
-                self.state.three_stage_post_tp1_protective_sl_order_id,
-                self.state.trend_runner_sl_order_id,
-        ):
-            if order_id:
-                ids.append(str(order_id))
-        return tuple(dict.fromkeys(ids))
+        return self._intent_factory().protected_order_ids()
 
     def _cooldown_ok(self, ts_ms: int) -> bool:
         return ts_ms - self.state.last_order_ts_ms >= self.config.order_cooldown_seconds * 1000
