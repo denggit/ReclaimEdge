@@ -579,3 +579,78 @@ class TestPlanUnchangedSkip:
         # Second call with same candle → skip
         result2 = s._maybe_update_tp(101.0, 2000, boll, cvd)
         assert result2 is None
+
+
+# ── 16. degrade branch exclusivity (regression for Phase 39) ──────────────
+
+class TestDegradeBranchExclusivity:
+    """Verifies that degrade to SINGLE / MIDDLE_RUNNER is exclusive with
+    all subsequent branches, matching the original if/elif chain."""
+
+    def test_degrade_to_single_does_not_enter_normal_plan_branch(self):
+        """When three-stage degrade targets SINGLE, the normal plan
+        selection branch must NOT be reached in the same cycle."""
+        s = _strategy(
+            three_stage_pre_tp1_degrade_enabled=True,
+            three_stage_pre_tp1_single_after_seconds=600,
+            three_stage_pre_tp1_middle_runner_after_seconds=300,
+        )
+        _setup_position_state(
+            s, side="LONG", layers=1,
+            avg_entry_price=100.0, breakeven_price=100.2,
+            net_remaining_breakeven_price=100.2,
+        )
+        s.state.three_stage_runner_enabled_for_position = True
+        s.state.three_stage_tp1_consumed = False
+        s.state.first_entry_ts_ms = 1000  # age = (3000000-1000)/1000 = 2999s >= 600s → SINGLE
+
+        coordinator = s._tp_update()
+
+        with mock.patch.object(
+            coordinator, "_apply_normal_plan_selection_branch",
+            side_effect=AssertionError("BUG: normal plan branch entered after degrade to SINGLE"),
+        ) as mock_normal:
+            boll = _boll_with_tp(candle_ts_ms=2000)
+            cvd = _cvd()
+            result = s._maybe_update_tp(101.0, 3000000, boll, cvd)
+
+            assert result is not None
+            assert result.intent_type == "UPDATE_TP"
+            assert s.state.tp_plan == "SINGLE"
+            assert "three_stage_pre_tp1_degraded_to_single" in result.reason
+            mock_normal.assert_not_called()
+
+    def test_degrade_to_middle_runner_does_not_enter_pending_branch(self):
+        """When three-stage degrade targets MIDDLE_RUNNER, the
+        middle_runner_pending branch must NOT be reached in the same cycle."""
+        s = _strategy(
+            three_stage_pre_tp1_degrade_enabled=True,
+            three_stage_pre_tp1_single_after_seconds=9999,
+            three_stage_pre_tp1_middle_runner_after_seconds=300,
+            middle_runner_enabled=True,
+            tp_min_net_profit_pct=0.0,
+        )
+        _setup_position_state(
+            s, side="LONG", layers=1,
+            avg_entry_price=100.0, breakeven_price=100.2,
+            net_remaining_breakeven_price=100.2,
+        )
+        s.state.three_stage_runner_enabled_for_position = True
+        s.state.three_stage_tp1_consumed = False
+        s.state.first_entry_ts_ms = 1000  # age = (400000-1000)/1000 = 399s, >= 300s, < 9999s → MIDDLE_RUNNER
+
+        coordinator = s._tp_update()
+
+        with mock.patch.object(
+            coordinator, "_apply_middle_runner_pending_branch",
+            side_effect=AssertionError("BUG: middle runner pending branch entered after degrade"),
+        ) as mock_pending:
+            boll = _boll_with_tp(candle_ts_ms=2000)
+            cvd = _cvd()
+            result = s._maybe_update_tp(101.0, 400000, boll, cvd)
+
+            assert result is not None
+            assert result.intent_type == "UPDATE_TP"
+            assert s.state.tp_plan == "MIDDLE_RUNNER"
+            assert "three_stage_pre_tp1_degraded_to_middle_runner" in result.reason
+            mock_pending.assert_not_called()

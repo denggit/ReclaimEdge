@@ -108,28 +108,29 @@ class TpUpdateCoordinator:
             )
 
         # ── Three-Stage pre-TP1 degrade ───────────────────────────────
+        degrade_applied = False
         if middle_profit_fallback_locked:
             pass
         else:
             tp_price, tp_mode, partial_tp_price, partial_tp_ratio, tp_plan, \
-                reason_override = self._apply_three_stage_pre_tp1_degrade(
+                reason_override, degrade_applied = self._apply_three_stage_pre_tp1_degrade(
                     tp_price, tp_mode, boll, ts_ms, reason_override,
                 )
 
         # ── Trend Runner active branch ────────────────────────────────
-        if not middle_profit_fallback_locked and s.state.trend_runner_active:
+        if not middle_profit_fallback_locked and not degrade_applied and s.state.trend_runner_active:
             tp_price, tp_mode, partial_tp_price, partial_tp_ratio, tp_plan = \
                 self._apply_trend_runner_active_branch(
                     tp_price, boll, old_trend_runner_tp, old_trend_runner_sl,
                 )
 
         # ── Middle Runner active branch ───────────────────────────────
-        elif not middle_profit_fallback_locked and s.state.middle_runner_active:
+        elif not middle_profit_fallback_locked and not degrade_applied and s.state.middle_runner_active:
             tp_price, partial_tp_price, partial_tp_ratio, tp_plan = \
                 self._apply_middle_runner_active_branch(price, boll, old_runner_sl)
 
         # ── Middle Runner pending branch ──────────────────────────────
-        elif not middle_profit_fallback_locked and s.state.middle_runner_pending:
+        elif not middle_profit_fallback_locked and not degrade_applied and s.state.middle_runner_pending:
             tp_price, tp_mode, partial_tp_price, partial_tp_ratio, tp_plan, \
                 reason_override = self._apply_middle_runner_pending_branch(
                     tp_price, boll, ts_ms, reason_override,
@@ -138,6 +139,7 @@ class TpUpdateCoordinator:
         # ── Three-Stage enabled branch ────────────────────────────────
         elif (
             not middle_profit_fallback_locked
+            and not degrade_applied
             and s.state.three_stage_runner_enabled_for_position
             and not s.state.trend_runner_active
         ):
@@ -147,13 +149,13 @@ class TpUpdateCoordinator:
                 )
 
         # ── Near-TP protected / add_disabled branch ───────────────────
-        elif not middle_profit_fallback_locked and (
+        elif not middle_profit_fallback_locked and not degrade_applied and (
             s.state.near_tp_protected or s.state.near_tp_add_disabled
         ):
             partial_tp_price, partial_tp_ratio, tp_plan = None, 0.0, "SINGLE"
 
         # ── Normal _select_tp_plan branch ─────────────────────────────
-        elif not middle_profit_fallback_locked:
+        elif not middle_profit_fallback_locked and not degrade_applied:
             tp_price, tp_mode, partial_tp_price, partial_tp_ratio, tp_plan, \
                 reason_override = self._apply_normal_plan_selection_branch(
                     tp_price, tp_mode, boll, ts_ms, reason_override,
@@ -409,8 +411,17 @@ class TpUpdateCoordinator:
         boll: BollSnapshot,
         ts_ms: int,
         reason_override: str | None,
-    ) -> tuple[float, TpMode, float | None, float, str, str | None]:
-        """Three-Stage pre-TP1 degrade logic."""
+    ) -> tuple[float, TpMode, float | None, float, str, str | None, bool]:
+        """Three-Stage pre-TP1 degrade logic.
+
+        Returns (tp_price, tp_mode, partial_tp_price, partial_tp_ratio,
+                 tp_plan, reason_override, degrade_applied).
+
+        degrade_applied is True when a degrade was executed (SINGLE or
+        MIDDLE_RUNNER).  Callers MUST skip all subsequent branch logic
+        when degrade_applied is True to preserve the original if/elif
+        exclusivity.
+        """
         s = self.strategy
 
         degrade_target = s._three_stage_pre_tp1_degrade_target(ts_ms)
@@ -419,7 +430,7 @@ class TpUpdateCoordinator:
             tp_price, tp_mode = s._degrade_three_stage_pre_tp1_to_single(ts_ms, boll)
             partial_tp_price, partial_tp_ratio, tp_plan = None, 0.0, "SINGLE"
             reason_override = "three_stage_pre_tp1_degraded_to_single"
-            return tp_price, tp_mode, partial_tp_price, partial_tp_ratio, tp_plan, reason_override
+            return tp_price, tp_mode, partial_tp_price, partial_tp_ratio, tp_plan, reason_override, True
 
         if degrade_target == "MIDDLE_RUNNER":
             s._degrade_three_stage_pre_tp1_to_middle_runner(ts_ms, boll)
@@ -433,9 +444,9 @@ class TpUpdateCoordinator:
                 if tp_plan == "MIDDLE_RUNNER"
                 else "three_stage_pre_tp1_middle_degrade_middle_profit_insufficient"
             )
-            return tp_price, tp_mode, partial_tp_price, partial_tp_ratio, tp_plan, reason_override
+            return tp_price, tp_mode, partial_tp_price, partial_tp_ratio, tp_plan, reason_override, True
 
-        return tp_price, tp_mode, None, 0.0, s.state.tp_plan, reason_override
+        return tp_price, tp_mode, None, 0.0, s.state.tp_plan, reason_override, False
 
     def _apply_trend_runner_active_branch(
         self,
