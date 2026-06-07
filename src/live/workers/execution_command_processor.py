@@ -19,6 +19,7 @@ from src.position_management import cost_runtime as position_cost_runtime
 from src.position_management import runner_live_helpers
 from src.position_management.middle_bucket_split_state import (
     clear_middle_bucket_split_state,
+    degrade_middle_bucket_split_to_single_final,
 )
 from src.position_management import tp_progress as tp_progress_helpers
 from src.position_management.sidecar import entry_runtime as sidecar_entry_runtime
@@ -841,9 +842,13 @@ class ExecutionCommandProcessor:
         result: Any,
         current_position_id: str | None,
     ) -> bool:
-        """Clear strategy split state when the execution result says split was disabled.
+        """Clear or degrade strategy split state based on actual order mode.
 
-        Returns True if state was cleared, False otherwise.
+        - FINAL_FULL_SIZE: degrade TP plan to SINGLE (full-size final TP).
+        - UNSPLIT_MIDDLE_BUCKET: clear only split fields (keep plan).
+        - None with backward-compat: infer from disabled_reason.
+
+        Returns True if state was mutated, False otherwise.
         Must be called inside ``state_lock``.
         """
         split_executed = getattr(result, "middle_bucket_split_executed", None)
@@ -851,14 +856,94 @@ class ExecutionCommandProcessor:
             return False
 
         reason = getattr(result, "middle_bucket_split_disabled_reason", None) or "unknown"
-        clear_middle_bucket_split_state(self.strategy.state, reason=reason)
+        actual_order_mode = getattr(result, "middle_bucket_split_actual_order_mode", None)
 
+        if actual_order_mode == "FINAL_FULL_SIZE":
+            # ── Actual orders are full-size final TP ──────────────────
+            previous_tp_plan = getattr(self.strategy.state, "tp_plan", "SINGLE")
+            degrade_middle_bucket_split_to_single_final(
+                self.strategy.state, reason=reason,
+            )
+            logger.warning(
+                "MIDDLE_BUCKET_SPLIT_DEGRADED_TO_SINGLE_FINAL | "
+                "reason=%s actual_order_mode=FINAL_FULL_SIZE "
+                "previous_tp_plan=%s state_order_consistent=true",
+                reason,
+                previous_tp_plan,
+            )
+            if hasattr(self.journal, "append"):
+                self.journal.append(
+                    "MIDDLE_BUCKET_SPLIT_DEGRADED_TO_SINGLE_FINAL",
+                    {
+                        "reason": reason,
+                        "actual_order_mode": "FINAL_FULL_SIZE",
+                        "state_order_consistent": True,
+                        "previous_tp_plan": previous_tp_plan,
+                        "new_tp_plan": "SINGLE",
+                        "tp_order_id": getattr(result, "tp_order_id", None),
+                        "tp_order_ids": getattr(result, "tp_order_ids", ()),
+                    },
+                    position_id=current_position_id,
+                )
+            return True
+
+        if actual_order_mode == "UNSPLIT_MIDDLE_BUCKET":
+            # ── Actual orders are unsplit middle bucket ───────────────
+            clear_middle_bucket_split_state(self.strategy.state, reason=reason)
+            logger.warning(
+                "MIDDLE_BUCKET_SPLIT_STATE_CLEARED_ON_ORDER_BUILD | "
+                "reason=%s actual_orders_unsplit_or_final=true state_order_consistent=true",
+                reason,
+            )
+            if hasattr(self.journal, "append"):
+                self.journal.append(
+                    "MIDDLE_BUCKET_SPLIT_DISABLED_ON_ORDER_BUILD",
+                    {
+                        "reason": reason,
+                        "state_split_active_was": True,
+                        "actual_orders_unsplit_or_final": True,
+                        "state_order_consistent": True,
+                    },
+                    position_id=current_position_id,
+                )
+            return True
+
+        # ── Backward-compat: actual_order_mode is None ────────────────
+        logger.warning(
+            "MIDDLE_BUCKET_SPLIT_ACTUAL_ORDER_MODE_MISSING | "
+            "reason=%s actual_order_mode_missing_degraded_by_reason=true "
+            "split_executed=False",
+            reason,
+        )
+        if reason == "split_order_placement_failed_fallback_final":
+            previous_tp_plan = getattr(self.strategy.state, "tp_plan", "SINGLE")
+            degrade_middle_bucket_split_to_single_final(
+                self.strategy.state, reason=reason,
+            )
+            if hasattr(self.journal, "append"):
+                self.journal.append(
+                    "MIDDLE_BUCKET_SPLIT_DEGRADED_TO_SINGLE_FINAL",
+                    {
+                        "reason": reason,
+                        "actual_order_mode": "FINAL_FULL_SIZE",
+                        "state_order_consistent": True,
+                        "previous_tp_plan": previous_tp_plan,
+                        "new_tp_plan": "SINGLE",
+                        "tp_order_id": getattr(result, "tp_order_id", None),
+                        "tp_order_ids": getattr(result, "tp_order_ids", ()),
+                        "actual_order_mode_missing": True,
+                    },
+                    position_id=current_position_id,
+                )
+            return True
+
+        # Default: clear split state only
+        clear_middle_bucket_split_state(self.strategy.state, reason=reason)
         logger.warning(
             "MIDDLE_BUCKET_SPLIT_STATE_CLEARED_ON_ORDER_BUILD | "
             "reason=%s actual_orders_unsplit_or_final=true state_order_consistent=true",
             reason,
         )
-
         if hasattr(self.journal, "append"):
             self.journal.append(
                 "MIDDLE_BUCKET_SPLIT_DISABLED_ON_ORDER_BUILD",

@@ -602,3 +602,718 @@ class TestFallbackFinalReturnsSplitExecutedFalse:
             result.middle_bucket_split_disabled_reason
             == "split_order_placement_failed_fallback_final"
         )
+
+
+# ── degrade_middle_bucket_split_to_single_final tests ──────────────────
+
+class TestDegradeMiddleBucketSplitToSingleFinal:
+    """Verify the TP plan degrading helper."""
+
+    def test_degrades_tp_plan_to_single(self):
+        """All split fields cleared AND tp_plan degraded to SINGLE."""
+        from src.position_management.middle_bucket_split_state import (
+            degrade_middle_bucket_split_to_single_final,
+        )
+        from src.strategies.boll_cvd_reclaim_strategy import StrategyPositionState
+
+        state = StrategyPositionState()
+        # Set up full Three-Stage + split state
+        state.tp_plan = "THREE_STAGE_RUNNER"
+        state.partial_tp_price = 3050.0
+        state.partial_tp_ratio = 0.80
+        state.partial_tp_consumed = True
+        state.three_stage_tp1_price = 3050.0
+        state.three_stage_tp2_price = 3200.0
+        state.three_stage_tp1_consumed = True
+        state.three_stage_tp2_consumed = False
+        state.three_stage_post_tp1_protective_sl_price = 2995.0
+        state.three_stage_post_tp1_protective_sl_order_id = "sl-order-123"
+        state.three_stage_post_tp1_protected = True
+        state.trend_runner_active = True
+        state.trend_runner_tp_price = 3300.0
+        state.trend_runner_sl_price = 3100.0
+        state.trend_runner_tp_order_id = "runner-tp-123"
+        state.trend_runner_sl_order_id = "runner-sl-123"
+        state.middle_runner_pending = True
+        state.middle_runner_active = True
+        state.middle_runner_first_tp_price = 3060.0
+        state.middle_runner_final_tp_price = 3200.0
+        state.middle_runner_protective_sl_price = 2990.0
+        state.middle_runner_protective_sl_order_id = "mr-sl-123"
+        state.middle_bucket_split_active = True
+        state.middle_bucket_split_reason = "split_enabled"
+
+        degrade_middle_bucket_split_to_single_final(
+            state, reason="split_order_placement_failed_fallback_final",
+        )
+
+        # ── Split fields cleared ──
+        assert state.middle_bucket_split_active is False
+        assert state.middle_bucket_split_reason == "split_order_placement_failed_fallback_final"
+
+        # ── TP plan degraded ──
+        assert state.tp_plan == "SINGLE"
+        assert state.partial_tp_price is None
+        assert state.partial_tp_ratio == 0.0
+        assert state.partial_tp_consumed is False
+
+        # ── Three-Stage runtime cleared ──
+        assert state.three_stage_tp1_price is None
+        assert state.three_stage_tp2_price is None
+        assert state.three_stage_tp1_consumed is False
+        assert state.three_stage_tp2_consumed is False
+        assert state.three_stage_post_tp1_protective_sl_price is None
+        assert state.three_stage_post_tp1_protective_sl_order_id is None
+        assert state.three_stage_post_tp1_protected is False
+
+        # ── Trend Runner runtime cleared ──
+        assert state.trend_runner_active is False
+        assert state.trend_runner_tp_price is None
+        assert state.trend_runner_sl_price is None
+        assert state.trend_runner_tp_order_id is None
+        assert state.trend_runner_sl_order_id is None
+
+        # ── Middle Runner runtime cleared ──
+        assert state.middle_runner_pending is False
+        assert state.middle_runner_active is False
+        assert state.middle_runner_first_tp_price is None
+        assert state.middle_runner_final_tp_price is None
+        assert state.middle_runner_protective_sl_price is None
+        assert state.middle_runner_protective_sl_order_id is None
+
+    def test_does_not_clear_config_ratios(self):
+        """Configuration fields like three_stage_tp1_ratio are NOT touched."""
+        from src.position_management.middle_bucket_split_state import (
+            degrade_middle_bucket_split_to_single_final,
+        )
+        from src.strategies.boll_cvd_reclaim_strategy import StrategyPositionState
+
+        state = StrategyPositionState()
+        state.tp_plan = "THREE_STAGE_RUNNER"
+        state.three_stage_tp1_ratio = 0.60
+        state.three_stage_tp2_ratio = 0.20
+        state.three_stage_runner_ratio = 0.20
+        state.middle_runner_first_close_ratio = 0.80
+        state.middle_runner_keep_ratio = 0.20
+        state.middle_bucket_split_active = True
+
+        degrade_middle_bucket_split_to_single_final(
+            state, reason="split_order_placement_failed_fallback_final",
+        )
+
+        # Config ratios preserved
+        assert state.three_stage_tp1_ratio == 0.60
+        assert state.three_stage_tp2_ratio == 0.20
+        assert state.three_stage_runner_ratio == 0.20
+        assert state.middle_runner_first_close_ratio == 0.80
+        assert state.middle_runner_keep_ratio == 0.20
+
+    def test_preserves_position_cost_fields(self):
+        """Position cost / entry fields are NOT cleared."""
+        from src.position_management.middle_bucket_split_state import (
+            degrade_middle_bucket_split_to_single_final,
+        )
+        from src.strategies.boll_cvd_reclaim_strategy import StrategyPositionState
+
+        state = StrategyPositionState()
+        state.side = "LONG"
+        state.layers = 3
+        state.avg_entry_price = 3000.0
+        state.breakeven_price = 3005.0
+        state.total_entry_qty = 1.0
+        state.position_cost_entry_notional = 3000.0
+        state.tp_plan = "THREE_STAGE_RUNNER"
+        state.middle_bucket_split_active = True
+
+        degrade_middle_bucket_split_to_single_final(
+            state, reason="split_order_placement_failed_fallback_final",
+        )
+
+        assert state.side == "LONG"
+        assert state.layers == 3
+        assert state.avg_entry_price == 3000.0
+        assert state.breakeven_price == 3005.0
+        assert state.total_entry_qty == 1.0
+        assert state.position_cost_entry_notional == 3000.0
+
+
+# ── actual_order_mode routing tests ─────────────────────────────────────
+
+class TestMaybeClearAfterExecutionResultRouting:
+    """Verify that _maybe_clear_middle_bucket_split_after_execution_result
+    routes to degrade or clear based on actual_order_mode."""
+
+    def _make_processor(self):
+        from unittest import mock
+        import asyncio
+
+        from src.live.workers.execution_command_processor import (
+            ExecutionCommandProcessor,
+        )
+        from src.strategies.boll_cvd_reclaim_strategy import StrategyPositionState
+
+        processor = ExecutionCommandProcessor.__new__(ExecutionCommandProcessor)
+        processor.state_lock = asyncio.Lock()
+        processor.strategy = mock.MagicMock()
+        processor.strategy.state = StrategyPositionState()
+        processor.journal = mock.MagicMock()
+        processor.journal.append = mock.MagicMock()
+        processor.execution_state = mock.MagicMock()
+        processor.account_snapshot = mock.MagicMock()
+        processor.trader = mock.MagicMock()
+        processor.state_store = mock.MagicMock()
+        processor.email_sender = mock.MagicMock()
+        processor._background_tasks = set()
+        return processor
+
+    def _make_result(self, **kwargs):
+        from src.execution.trader import LiveTradeResult
+
+        defaults = dict(
+            ok=True, action="UPDATE_TP", order_id=None,
+            tp_order_id="tp-123", contracts="10", tp_price="1700.0",
+            message="test",
+        )
+        defaults.update(kwargs)
+        return LiveTradeResult(**defaults)
+
+    def test_final_full_size_degrades_to_single(self):
+        """When actual_order_mode=FINAL_FULL_SIZE, degrade to SINGLE."""
+        processor = self._make_processor()
+        state = processor.strategy.state
+        state.tp_plan = "THREE_STAGE_RUNNER"
+        state.three_stage_tp1_price = 3050.0
+        state.three_stage_tp2_price = 3200.0
+        state.trend_runner_active = True
+        state.middle_bucket_split_active = True
+
+        result = self._make_result(
+            middle_bucket_split_executed=False,
+            middle_bucket_split_disabled_reason="split_order_placement_failed_fallback_final",
+            middle_bucket_split_actual_order_mode="FINAL_FULL_SIZE",
+            tp_order_id="final-order",
+            tp_order_ids=("final-order",),
+        )
+
+        changed = processor._maybe_clear_middle_bucket_split_after_execution_result(
+            result=result,
+            current_position_id="pos-1",
+        )
+
+        assert changed is True
+        assert state.tp_plan == "SINGLE"
+        assert state.middle_bucket_split_active is False
+        assert state.three_stage_tp1_price is None
+        assert state.three_stage_tp2_price is None
+        assert state.trend_runner_active is False
+        assert state.middle_runner_active is False
+
+        # Journal event
+        processor.journal.append.assert_called_once()
+        call_args = processor.journal.append.call_args
+        assert call_args[0][0] == "MIDDLE_BUCKET_SPLIT_DEGRADED_TO_SINGLE_FINAL"
+        payload = call_args[0][1]
+        assert payload["actual_order_mode"] == "FINAL_FULL_SIZE"
+        assert payload["previous_tp_plan"] == "THREE_STAGE_RUNNER"
+        assert payload["new_tp_plan"] == "SINGLE"
+        assert payload["state_order_consistent"] is True
+
+    def test_unsplit_middle_bucket_clears_only_split(self):
+        """When actual_order_mode=UNSPLIT_MIDDLE_BUCKET, clear split only."""
+        processor = self._make_processor()
+        state = processor.strategy.state
+        state.tp_plan = "MIDDLE_RUNNER"
+        state.middle_runner_pending = True
+        state.middle_runner_first_tp_price = 3060.0
+        state.middle_bucket_split_active = True
+        state.middle_bucket_split_reason = "split_enabled"
+
+        result = self._make_result(
+            middle_bucket_split_executed=False,
+            middle_bucket_split_disabled_reason="subleg_too_small",
+            middle_bucket_split_actual_order_mode="UNSPLIT_MIDDLE_BUCKET",
+        )
+
+        changed = processor._maybe_clear_middle_bucket_split_after_execution_result(
+            result=result,
+            current_position_id="pos-1",
+        )
+
+        assert changed is True
+        # Split state cleared
+        assert state.middle_bucket_split_active is False
+        assert state.middle_bucket_split_reason == "subleg_too_small"
+        # TP plan preserved
+        assert state.tp_plan == "MIDDLE_RUNNER"
+        assert state.middle_runner_pending is True
+        assert state.middle_runner_first_tp_price == 3060.0
+
+        # Journal event is MIDDLE_BUCKET_SPLIT_DISABLED_ON_ORDER_BUILD
+        processor.journal.append.assert_called_once()
+        call_args = processor.journal.append.call_args
+        assert call_args[0][0] == "MIDDLE_BUCKET_SPLIT_DISABLED_ON_ORDER_BUILD"
+
+    def test_unsplit_middle_bucket_keeps_three_stage_plan(self):
+        """When actual_order_mode=UNSPLIT_MIDDLE_BUCKET on THREE_STAGE,
+        only split fields cleared; tp_plan stays THREE_STAGE_RUNNER."""
+        processor = self._make_processor()
+        state = processor.strategy.state
+        state.tp_plan = "THREE_STAGE_RUNNER"
+        state.three_stage_tp1_price = 3050.0
+        state.three_stage_tp2_price = 3200.0
+        state.middle_bucket_split_active = True
+        state.middle_bucket_split_reason = "split_enabled"
+
+        result = self._make_result(
+            middle_bucket_split_executed=False,
+            middle_bucket_split_disabled_reason="subleg_too_small",
+            middle_bucket_split_actual_order_mode="UNSPLIT_MIDDLE_BUCKET",
+        )
+
+        changed = processor._maybe_clear_middle_bucket_split_after_execution_result(
+            result=result,
+            current_position_id="pos-1",
+        )
+
+        assert changed is True
+        assert state.middle_bucket_split_active is False
+        assert state.middle_bucket_split_reason == "subleg_too_small"
+        # TP plan preserved
+        assert state.tp_plan == "THREE_STAGE_RUNNER"
+        assert state.three_stage_tp1_price == 3050.0
+        assert state.three_stage_tp2_price == 3200.0
+
+    def test_split_executed_true_returns_false(self):
+        """When split succeeded, no state modification."""
+        processor = self._make_processor()
+        state = processor.strategy.state
+        state.tp_plan = "THREE_STAGE_RUNNER"
+        state.middle_bucket_split_active = True
+
+        result = self._make_result(
+            middle_bucket_split_executed=True,
+            middle_bucket_split_disabled_reason=None,
+            middle_bucket_split_actual_order_mode="SPLIT_FAST_SLOW",
+        )
+
+        changed = processor._maybe_clear_middle_bucket_split_after_execution_result(
+            result=result,
+            current_position_id="pos-1",
+        )
+
+        assert changed is False
+        assert state.tp_plan == "THREE_STAGE_RUNNER"
+        assert state.middle_bucket_split_active is True
+        processor.journal.append.assert_not_called()
+
+    def test_split_executed_none_returns_false(self):
+        """When split not involved at all, no state modification."""
+        processor = self._make_processor()
+
+        result = self._make_result(
+            middle_bucket_split_executed=None,
+            middle_bucket_split_disabled_reason=None,
+            middle_bucket_split_actual_order_mode=None,
+        )
+
+        changed = processor._maybe_clear_middle_bucket_split_after_execution_result(
+            result=result,
+            current_position_id="pos-1",
+        )
+
+        assert changed is False
+
+    def test_backward_compat_fallback_final_reason_degrades(self):
+        """When actual_order_mode is None but reason is placement_failed,
+        backward-compat degrades to SINGLE."""
+        processor = self._make_processor()
+        state = processor.strategy.state
+        state.tp_plan = "THREE_STAGE_RUNNER"
+        state.three_stage_tp1_price = 3050.0
+        state.middle_bucket_split_active = True
+
+        result = self._make_result(
+            middle_bucket_split_executed=False,
+            middle_bucket_split_disabled_reason="split_order_placement_failed_fallback_final",
+            middle_bucket_split_actual_order_mode=None,
+        )
+
+        changed = processor._maybe_clear_middle_bucket_split_after_execution_result(
+            result=result,
+            current_position_id="pos-1",
+        )
+
+        assert changed is True
+        assert state.tp_plan == "SINGLE"
+        # Journal event is also DEGRADED (backward-compat)
+        processor.journal.append.assert_called_once()
+        call_args = processor.journal.append.call_args
+        assert call_args[0][0] == "MIDDLE_BUCKET_SPLIT_DEGRADED_TO_SINGLE_FINAL"
+
+
+# ── LiveTradeResult actual_order_mode field tests ───────────────────────
+
+class TestActualOrderModeOnLiveTradeResult:
+    """Verify the new middle_bucket_split_actual_order_mode field."""
+
+    def test_field_defaults_to_none(self):
+        from src.execution.trader import LiveTradeResult
+        result = LiveTradeResult(
+            ok=True, action="UPDATE_TP", order_id=None,
+            tp_order_id="123", contracts="10", tp_price="1700.0",
+            message="test",
+        )
+        assert result.middle_bucket_split_actual_order_mode is None
+
+    def test_split_fast_slow_explicit(self):
+        from src.execution.trader import LiveTradeResult
+        result = LiveTradeResult(
+            ok=True, action="UPDATE_TP", order_id=None,
+            tp_order_id="123", contracts="10", tp_price="1700.0",
+            message="test",
+            middle_bucket_split_executed=True,
+            middle_bucket_split_actual_order_mode="SPLIT_FAST_SLOW",
+        )
+        assert result.middle_bucket_split_actual_order_mode == "SPLIT_FAST_SLOW"
+
+    def test_unsplit_middle_bucket_explicit(self):
+        from src.execution.trader import LiveTradeResult
+        result = LiveTradeResult(
+            ok=True, action="UPDATE_TP", order_id=None,
+            tp_order_id="123", contracts="10", tp_price="1700.0",
+            message="test",
+            middle_bucket_split_executed=False,
+            middle_bucket_split_disabled_reason="subleg_too_small",
+            middle_bucket_split_actual_order_mode="UNSPLIT_MIDDLE_BUCKET",
+        )
+        assert result.middle_bucket_split_actual_order_mode == "UNSPLIT_MIDDLE_BUCKET"
+
+    def test_final_full_size_explicit(self):
+        from src.execution.trader import LiveTradeResult
+        result = LiveTradeResult(
+            ok=True, action="UPDATE_TP", order_id=None,
+            tp_order_id="final-order", contracts="10",
+            tp_price="1700.0",
+            message="split take-profit placement failed; fallback to single final TP",
+            middle_bucket_split_executed=False,
+            middle_bucket_split_disabled_reason="split_order_placement_failed_fallback_final",
+            middle_bucket_split_actual_order_mode="FINAL_FULL_SIZE",
+        )
+        assert result.middle_bucket_split_actual_order_mode == "FINAL_FULL_SIZE"
+
+
+# ── Trader entry wrapper actual_order_mode propagation tests ────────────
+
+class TestTraderEntryActualOrderModePropagation:
+    """Verify entry wrapper propagates actual_order_mode."""
+
+    def test_entry_success_propagates_actual_order_mode(self):
+        """Entry success branch includes actual_order_mode from tp result."""
+        from src.execution.trader import LiveTradeResult
+
+        tp = LiveTradeResult(
+            ok=True, action="UPDATE_TP", order_id=None,
+            tp_order_id="tp-123", contracts="10", tp_price="1700.0",
+            message="take-profit replaced", tp_ok=True,
+            middle_bucket_split_executed=True,
+            middle_bucket_split_disabled_reason=None,
+            middle_bucket_split_actual_order_mode="SPLIT_FAST_SLOW",
+        )
+        assert tp.middle_bucket_split_actual_order_mode == "SPLIT_FAST_SLOW"
+
+        # Simulate what execute_intent does:
+        outer = LiveTradeResult(
+            ok=True, action="OPEN_LONG", order_id="entry-1",
+            tp_order_id=tp.tp_order_id, contracts="10",
+            tp_price=tp.tp_price,
+            message="market order placed and take-profit protected",
+            entry_filled=True, tp_ok=True,
+            tp_order_ids=tp.tp_order_ids,
+            protective_sl_order_id=tp.protective_sl_order_id,
+            protective_sl_price=tp.protective_sl_price,
+            protective_sl_ok=tp.protective_sl_ok,
+            middle_bucket_split_executed=tp.middle_bucket_split_executed,
+            middle_bucket_split_disabled_reason=tp.middle_bucket_split_disabled_reason,
+            middle_bucket_split_actual_order_mode=tp.middle_bucket_split_actual_order_mode,
+        )
+        assert outer.middle_bucket_split_actual_order_mode == "SPLIT_FAST_SLOW"
+
+    def test_entry_tp_failed_propagates_actual_order_mode(self):
+        """Entry_filled_but_tp_failed branch includes actual_order_mode."""
+        from src.execution.trader import LiveTradeResult
+
+        tp = LiveTradeResult(
+            ok=False, action="UPDATE_TP", order_id=None,
+            tp_order_id=None, contracts="10", tp_price="1700.0",
+            message="tp failed", tp_ok=False,
+            middle_bucket_split_executed=False,
+            middle_bucket_split_disabled_reason="split_order_placement_failed_fallback_final",
+            middle_bucket_split_actual_order_mode="FINAL_FULL_SIZE",
+        )
+        assert tp.middle_bucket_split_actual_order_mode == "FINAL_FULL_SIZE"
+
+        outer = LiveTradeResult(
+            ok=False, action="OPEN_LONG", order_id="entry-1",
+            tp_order_id=tp.tp_order_id, contracts="10",
+            tp_price=tp.tp_price,
+            message=f"entry_filled_but_tp_failed: {tp.message}",
+            entry_filled=True, tp_ok=False,
+            tp_order_ids=tp.tp_order_ids,
+            protective_sl_order_id=tp.protective_sl_order_id,
+            protective_sl_price=tp.protective_sl_price,
+            protective_sl_ok=tp.protective_sl_ok,
+            middle_bucket_split_executed=tp.middle_bucket_split_executed,
+            middle_bucket_split_disabled_reason=tp.middle_bucket_split_disabled_reason,
+            middle_bucket_split_actual_order_mode=tp.middle_bucket_split_actual_order_mode,
+        )
+        assert outer.middle_bucket_split_actual_order_mode == "FINAL_FULL_SIZE"
+
+
+# ── Update TP result degrades tp_plan integration test ──────────────────
+
+class TestUpdateTpResultDegradesToSingle:
+    """Integration test: _apply_update_tp_result degrades tp_plan to SINGLE
+    when actual_order_mode=FINAL_FULL_SIZE."""
+
+    @pytest.mark.asyncio
+    async def test_fallback_final_degrades_tp_plan_to_single_on_update_tp(self):
+        from unittest import mock
+        import asyncio
+
+        from src.live.workers.execution_command_processor import (
+            ExecutionCommandProcessor,
+        )
+        from src.live import runtime_types as live_runtime_types
+        from src.strategies.boll_cvd_reclaim_strategy import (
+            BollCvdReclaimStrategy,
+            BollCvdReclaimStrategyConfig,
+            StrategyPositionState,
+        )
+        from src.risk.simple_position_sizer import SimplePositionSizer
+
+        # Build a real strategy with state
+        config = BollCvdReclaimStrategyConfig()
+        sizer = SimplePositionSizer(config)
+        strategy = BollCvdReclaimStrategy(config, sizer)
+
+        # Set up full Three-Stage + split state
+        state = strategy.state
+        state.tp_plan = "THREE_STAGE_RUNNER"
+        state.three_stage_tp1_price = 3050.0
+        state.three_stage_tp2_price = 3200.0
+        state.three_stage_tp1_consumed = False
+        state.three_stage_tp2_consumed = False
+        state.trend_runner_active = True
+        state.trend_runner_tp_price = 3300.0
+        state.middle_bucket_split_active = True
+
+        # Build processor with mocks
+        es = live_runtime_types.ExecutionState(
+            current_position_id="pos-1",
+            cash_before_position=1000.0,
+        )
+        account_snapshot = live_runtime_types.AccountSnapshot(
+            position=None, cash=1000.0, equity=1000.0,
+            updated_monotonic=0, updated_ts_ms=0,
+        )
+
+        processor = ExecutionCommandProcessor.__new__(ExecutionCommandProcessor)
+        processor.state_lock = asyncio.Lock()
+        processor.execution_state = es
+        processor.account_snapshot = account_snapshot
+        processor.strategy = strategy
+        processor.trader = mock.MagicMock()
+        processor.trader.symbol = "ETH-USDT-SWAP"
+        processor.journal = mock.MagicMock()
+        processor.journal.record_tp_update = mock.MagicMock()
+        processor.journal.append = mock.MagicMock()
+        processor.state_store = mock.MagicMock()
+        processor.email_sender = mock.MagicMock()
+        processor._background_tasks = set()
+
+        # Build TradeIntent
+        from src.strategies.boll_cvd_reclaim_strategy import TradeIntent
+        from src.risk.simple_position_sizer import PositionSize
+
+        intent = TradeIntent(
+            intent_type="UPDATE_TP",
+            side="LONG",
+            price=3000.0,
+            layer_index=1,
+            tp_price=3100.0,
+            reason="test_degrade",
+            size=PositionSize(eth_qty=0.1, margin_usdt=300.0, notional_usdt=3000.0, layer_index=1, layer_multiplier=1.0),
+            fast_cvd=0.0, previous_fast_cvd=0.0,
+            buy_ratio=0.5, sell_ratio=0.5,
+            boll_upper=3200.0, boll_middle=3100.0, boll_lower=3000.0,
+            ts_ms=2000,
+            avg_entry_price=3000.0,
+            breakeven_price=3000.0,
+            tp_mode="MIDDLE",
+            tp_plan="THREE_STAGE_RUNNER",
+            middle_bucket_split_active=True,
+        )
+
+        snapshot = StrategyPositionState()
+        snapshot.tp_plan = "THREE_STAGE_RUNNER"
+
+        command = live_runtime_types.TradeCommand(
+            intent=intent,
+            strategy_state_snapshot=snapshot,
+            tick_ts_ms=2000,
+            created_monotonic=0,
+            account_snapshot_updated_ts_ms=0,
+            reason="test_degrade",
+        )
+
+        # Build result with FINAL_FULL_SIZE
+        from src.execution.trader import LiveTradeResult
+        result = LiveTradeResult(
+            ok=True,
+            action="UPDATE_TP",
+            order_id=None,
+            tp_order_id="final-order",
+            contracts="10",
+            tp_price="3100.0",
+            message="split take-profit placement failed; fallback to single final TP",
+            middle_bucket_split_executed=False,
+            middle_bucket_split_disabled_reason="split_order_placement_failed_fallback_final",
+            middle_bucket_split_actual_order_mode="FINAL_FULL_SIZE",
+            tp_order_ids=("final-order",),
+        )
+
+        # Execute
+        await processor._apply_update_tp_result(command, result)
+
+        # Assert degrade happened
+        assert state.tp_plan == "SINGLE"
+        assert state.middle_bucket_split_active is False
+        assert state.three_stage_tp1_price is None
+        assert state.three_stage_tp2_price is None
+        assert state.trend_runner_active is False
+
+        # Journal events
+        journal_calls = [c[0][0] for c in processor.journal.append.call_args_list]
+        assert "MIDDLE_BUCKET_SPLIT_DEGRADED_TO_SINGLE_FINAL" in journal_calls
+
+        # State saved
+        processor.state_store.save.assert_called_once()
+
+
+# ── Entry result degrades tp_plan integration test ──────────────────────
+
+class TestEntryResultDegradesToSingle:
+    """Integration test: _apply_entry_result degrades tp_plan to SINGLE
+    when actual_order_mode=FINAL_FULL_SIZE."""
+
+    @pytest.mark.asyncio
+    async def test_fallback_final_degrades_tp_plan_to_single_on_entry_result(self):
+        from unittest import mock
+        import asyncio
+
+        from src.live.workers.execution_command_processor import (
+            ExecutionCommandProcessor,
+        )
+        from src.live import runtime_types as live_runtime_types
+        from src.strategies.boll_cvd_reclaim_strategy import (
+            BollCvdReclaimStrategy,
+            BollCvdReclaimStrategyConfig,
+            StrategyPositionState,
+        )
+        from src.risk.simple_position_sizer import SimplePositionSizer
+
+        config = BollCvdReclaimStrategyConfig()
+        sizer = SimplePositionSizer(config)
+        strategy = BollCvdReclaimStrategy(config, sizer)
+
+        state = strategy.state
+        state.tp_plan = "MIDDLE_RUNNER"
+        state.middle_runner_pending = True
+        state.middle_runner_first_tp_price = 3060.0
+        state.middle_runner_active = True
+        state.middle_bucket_split_active = True
+
+        es = live_runtime_types.ExecutionState(
+            current_position_id="pos-1",
+            cash_before_position=1000.0,
+        )
+        account_snapshot = live_runtime_types.AccountSnapshot(
+            position=None, cash=1000.0, equity=1000.0,
+            updated_monotonic=0, updated_ts_ms=0,
+        )
+
+        processor = ExecutionCommandProcessor.__new__(ExecutionCommandProcessor)
+        processor.state_lock = asyncio.Lock()
+        processor.execution_state = es
+        processor.account_snapshot = account_snapshot
+        processor.strategy = strategy
+        processor.trader = mock.MagicMock()
+        processor.trader.symbol = "ETH-USDT-SWAP"
+        processor.journal = mock.MagicMock()
+        processor.journal.record_entry = mock.MagicMock()
+        processor.journal.append = mock.MagicMock()
+        processor.state_store = mock.MagicMock()
+        processor.email_sender = mock.MagicMock()
+        processor._background_tasks = set()
+
+        from src.strategies.boll_cvd_reclaim_strategy import TradeIntent
+        from src.risk.simple_position_sizer import PositionSize
+
+        intent = TradeIntent(
+            intent_type="OPEN_LONG",
+            side="LONG",
+            price=3000.0,
+            layer_index=1,
+            tp_price=3100.0,
+            reason="test_degrade_entry",
+            size=PositionSize(eth_qty=0.1, margin_usdt=300.0, notional_usdt=3000.0, layer_index=1, layer_multiplier=1.0),
+            fast_cvd=0.0, previous_fast_cvd=0.0,
+            buy_ratio=0.5, sell_ratio=0.5,
+            boll_upper=3200.0, boll_middle=3100.0, boll_lower=3000.0,
+            ts_ms=2000,
+            avg_entry_price=3000.0,
+            breakeven_price=3000.0,
+            tp_mode="MIDDLE",
+            tp_plan="MIDDLE_RUNNER",
+            middle_bucket_split_active=True,
+        )
+
+        snapshot = StrategyPositionState()
+        snapshot.tp_plan = "MIDDLE_RUNNER"
+
+        command = live_runtime_types.TradeCommand(
+            intent=intent,
+            strategy_state_snapshot=snapshot,
+            tick_ts_ms=2000,
+            created_monotonic=0,
+            account_snapshot_updated_ts_ms=0,
+            reason="test_degrade_entry",
+        )
+
+        from src.execution.trader import LiveTradeResult
+        result = LiveTradeResult(
+            ok=True,
+            action="OPEN_LONG",
+            order_id="entry-1",
+            tp_order_id="final-order",
+            contracts="10",
+            tp_price="3100.0",
+            message="entry_filled_but_tp_failed: split placement failed; fallback to single final TP",
+            entry_filled=True,
+            tp_ok=True,
+            tp_order_ids=("final-order",),
+            middle_bucket_split_executed=False,
+            middle_bucket_split_disabled_reason="split_order_placement_failed_fallback_final",
+            middle_bucket_split_actual_order_mode="FINAL_FULL_SIZE",
+        )
+
+        # entry_cash_before=None, sidecar_plan=None
+        await processor._apply_entry_result(command, result, None, None)
+
+        assert state.tp_plan == "SINGLE"
+        assert state.middle_bucket_split_active is False
+        assert state.middle_runner_pending is False
+        assert state.middle_runner_active is False
+
+        journal_calls = [c[0][0] for c in processor.journal.append.call_args_list]
+        assert "MIDDLE_BUCKET_SPLIT_DEGRADED_TO_SINGLE_FINAL" in journal_calls

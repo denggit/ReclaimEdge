@@ -262,12 +262,25 @@ class CoreTakeProfitManager:
         split_was_active = bool(getattr(intent, "middle_bucket_split_active", False))
         middle_bucket_split_executed: bool | None = None
         middle_bucket_split_disabled_reason_val: str | None = None
+        middle_bucket_split_actual_order_mode_val: str | None = None
         if split_was_active:
             if split_disabled_reason is not None:
                 middle_bucket_split_executed = False
                 middle_bucket_split_disabled_reason_val = split_disabled_reason
             else:
                 middle_bucket_split_executed = True
+            # ── Determine actual order mode ──────────────────────────
+            if middle_bucket_split_executed:
+                middle_bucket_split_actual_order_mode_val = "SPLIT_FAST_SLOW"
+            elif middle_bucket_split_disabled_reason_val == "subleg_too_small":
+                middle_bucket_split_actual_order_mode_val = "UNSPLIT_MIDDLE_BUCKET"
+            elif (
+                middle_bucket_split_disabled_reason_val
+                == MIDDLE_BUCKET_SPLIT_DISABLED_ORDER_PLACEMENT_FAILED_FALLBACK_FINAL
+            ):
+                middle_bucket_split_actual_order_mode_val = "FINAL_FULL_SIZE"
+            else:
+                middle_bucket_split_actual_order_mode_val = "FINAL_FULL_SIZE"
 
         return LiveTradeResult(
             True,
@@ -285,6 +298,7 @@ class CoreTakeProfitManager:
             protective_sl_ok=protective_sl_ok,
             middle_bucket_split_executed=middle_bucket_split_executed,
             middle_bucket_split_disabled_reason=middle_bucket_split_disabled_reason_val,
+            middle_bucket_split_actual_order_mode=middle_bucket_split_actual_order_mode_val,
         )
 
     async def _cancel_existing_take_profit_orders_for_intent(self, intent: TradeIntent) -> None:

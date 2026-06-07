@@ -37,6 +37,7 @@ class LiveTradeResult:
     reduce_filled: bool = False
     middle_bucket_split_executed: bool | None = None
     middle_bucket_split_disabled_reason: str | None = None
+    middle_bucket_split_actual_order_mode: str | None = None
 
 
 @dataclass(frozen=True)
@@ -197,6 +198,7 @@ class Trader:
                     protective_sl_ok=tp.protective_sl_ok,
                     middle_bucket_split_executed=tp.middle_bucket_split_executed,
                     middle_bucket_split_disabled_reason=tp.middle_bucket_split_disabled_reason,
+                    middle_bucket_split_actual_order_mode=tp.middle_bucket_split_actual_order_mode,
                 )
             return LiveTradeResult(
                 ok=True,
@@ -214,6 +216,7 @@ class Trader:
                 protective_sl_ok=tp.protective_sl_ok,
                 middle_bucket_split_executed=tp.middle_bucket_split_executed,
                 middle_bucket_split_disabled_reason=tp.middle_bucket_split_disabled_reason,
+                middle_bucket_split_actual_order_mode=tp.middle_bucket_split_actual_order_mode,
             )
         except Exception as exc:
             logger.exception("Entry appears filled, but TP placement raised an exception")
