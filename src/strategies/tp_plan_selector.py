@@ -188,6 +188,8 @@ def select_tp_outer_with_profit_fallback(
     LONG  outer valid: price >= effective_be * (1 + min_net_profit)
     SHORT outer valid: price <= effective_be * (1 - min_net_profit)
     """
+    min_net_profit = abs(float(min_net_profit))
+
     if effective_be <= 0:
         return select_tp_outer(side=side, tp_band=tp_band, tp_boll_enabled=tp_boll_enabled)
 
@@ -256,6 +258,8 @@ def select_tp_price(
     For MIDDLE: TP_BOLL15 middle → BOLL20 middle → outer with profit fallback.
     Outer fallback: TP_BOLL15 outer → BOLL20 outer → farther outer as last resort.
     """
+    min_net_profit = abs(float(min_net_profit))
+
     if effective_be <= 0:
         return TpPriceSelection(price=float(tp_band.middle), mode="MIDDLE")
 
