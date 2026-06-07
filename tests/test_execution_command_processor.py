@@ -140,6 +140,8 @@ class FakeTrader:
         self._cancel_sidecar_tp_returns: bool = True
         self._place_sidecar_tp_raises: Exception | None = None
         self._market_exit_returns: tuple[bool, str] = (True, "ok")
+        self._fetch_position_raises: Exception | None = None
+        self._market_exit_raises: Exception | None = None
 
     async def execute_intent(self, trade_intent: TradeIntent) -> LiveTradeResult:
         self.executed.append(trade_intent.ts_ms)
@@ -176,9 +178,13 @@ class FakeTrader:
         self, side: str, retry_count: int
     ) -> tuple[bool, str]:
         self.market_exits.append((side, retry_count))
+        if self._market_exit_raises is not None:
+            raise self._market_exit_raises
         return self._market_exit_returns
 
     async def fetch_position_snapshot(self) -> PositionSnapshot:
+        if self._fetch_position_raises is not None:
+            raise self._fetch_position_raises
         return self._position
 
     async def fetch_usdt_equity(self) -> float:
@@ -1842,6 +1848,219 @@ class TestExecutionCommandProcessorWithSidecar(unittest.IsolatedAsyncioTestCase)
         self.assertEqual(len(trader.sidecar_tps), 0)
         # execute_intent called normally
         self.assertGreaterEqual(len(trader.executed), 1)
+
+    # ── delayed exit position fetch failure tests ──────────────────────
+
+    async def test_delayed_exit_fetch_position_failure_attempts_market_exit(self) -> None:
+        """fetch_position_snapshot raises → still attempts market exit, not skipped as flat."""
+        strategy = BollCvdShockReclaimStrategy(
+            BollCvdReclaimStrategyConfig(),
+            SimplePositionSizer(SimplePositionSizerConfig()),
+        )
+        strategy.state = StrategyPositionState(
+            side="LONG",
+            layers=1,
+            sidecar_enabled_for_position=True,
+            sidecar_legs=[
+                {
+                    "leg_id": "leg-open-1",
+                    "tp_order_id": "old123",
+                    "tp_price": 106.0,
+                    "contracts": "1",
+                    "qty": 0.1,
+                    "status": "OPEN",
+                    "entry_price": 3000.0,
+                    "side": "LONG",
+                    "layer_index": 1,
+                    "tp_pct": 0.004,
+                    "margin_pct": 0.01,
+                    "layer_multiplier": 1.0,
+                    "position_id": "pos-1",
+                    "created_ts_ms": 1000,
+                    "updated_ts_ms": 1000,
+                },
+            ],
+            breakeven_price=100.0,
+        )
+        execution_state = ExecutionState("pos-fetch-fail", 1000.0)
+        trader = self._sidecar_trader()
+        trader._cancel_sidecar_tp_returns = False  # simulate cancel failure
+        trader._fetch_position_raises = RuntimeError("fetch failed")
+        journal = FakeJournal()
+        state_store = FakeStateStore()
+        email_sender = FakeEmailSender()
+        processor, _, _, _ = make_processor(
+            execution_state=execution_state,
+            strategy=strategy,
+            trader=trader,
+            journal=journal,
+            state_store=state_store,
+            email_sender=email_sender,
+        )
+
+        with patch.dict("os.environ", {"SIDECAR_CORE_EXIT_ALIGNMENT_FAIL_AUTO_EXIT_DELAY_SECONDS": "0"}):
+            command = self._unsafe_update_tp_command(ts_ms=5_000, core_tp_price=105.0)
+            result = await processor.process(command)
+
+        self.assertIsNotNone(result)
+        self.assertTrue(result.ok)  # type: ignore[union-attr]
+
+        # Drain event loop — background task should run
+        await asyncio.sleep(0)
+
+        # market exit WAS called (fetch failure does NOT skip)
+        self.assertGreaterEqual(len(trader.market_exits), 1)
+        # EXECUTED journal present
+        all_event_names = [e[0] for e in journal.events]
+        self.assertIn("SIDECAR_CORE_EXIT_DELAYED_MARKET_EXIT_EXECUTED", all_event_names)
+        # SKIPPED_ALREADY_FLAT NOT present
+        self.assertNotIn("SIDECAR_CORE_EXIT_DELAYED_MARKET_EXIT_SKIPPED_ALREADY_FLAT", all_event_names)
+        # position_fetch_error in payload
+        executed_events = [e for e in journal.events if e[0] == "SIDECAR_CORE_EXIT_DELAYED_MARKET_EXIT_EXECUTED"]
+        self.assertEqual(len(executed_events), 1)
+        self.assertIn("fetch failed", str(executed_events[0][1].get("position_fetch_error", "")))
+        # sidecar legs marked FORCE_CLOSED
+        leg = strategy.state.sidecar_legs[0]
+        self.assertEqual(leg["status"], "FORCE_CLOSED")
+
+    async def test_delayed_exit_fetch_position_failure_and_market_exit_fails(self) -> None:
+        """fetch_position_snapshot raises AND market exit fails → halt + manual intervention."""
+        strategy = BollCvdShockReclaimStrategy(
+            BollCvdReclaimStrategyConfig(),
+            SimplePositionSizer(SimplePositionSizerConfig()),
+        )
+        strategy.state = StrategyPositionState(
+            side="LONG",
+            layers=1,
+            sidecar_enabled_for_position=True,
+            sidecar_legs=[
+                {
+                    "leg_id": "leg-open-1",
+                    "tp_order_id": "old123",
+                    "tp_price": 106.0,
+                    "contracts": "1",
+                    "qty": 0.1,
+                    "status": "OPEN",
+                    "entry_price": 3000.0,
+                    "side": "LONG",
+                    "layer_index": 1,
+                    "tp_pct": 0.004,
+                    "margin_pct": 0.01,
+                    "layer_multiplier": 1.0,
+                    "position_id": "pos-1",
+                    "created_ts_ms": 1000,
+                    "updated_ts_ms": 1000,
+                },
+            ],
+            breakeven_price=100.0,
+        )
+        execution_state = ExecutionState("pos-ff-fail", 1000.0)
+        trader = self._sidecar_trader()
+        trader._cancel_sidecar_tp_returns = False
+        trader._fetch_position_raises = RuntimeError("fetch failed")
+        trader._market_exit_returns = (False, "market failed")
+        journal = FakeJournal()
+        state_store = FakeStateStore()
+        email_sender = FakeEmailSender()
+        processor, _, _, _ = make_processor(
+            execution_state=execution_state,
+            strategy=strategy,
+            trader=trader,
+            journal=journal,
+            state_store=state_store,
+            email_sender=email_sender,
+        )
+
+        with patch.dict("os.environ", {"SIDECAR_CORE_EXIT_ALIGNMENT_FAIL_AUTO_EXIT_DELAY_SECONDS": "0"}):
+            command = self._unsafe_update_tp_command(ts_ms=5_000, core_tp_price=105.0)
+            result = await processor.process(command)
+
+        self.assertIsNotNone(result)
+        await asyncio.sleep(0)
+
+        # market exit attempted
+        self.assertGreaterEqual(len(trader.market_exits), 1)
+        # trading halted
+        self.assertTrue(execution_state.trading_halted)
+        self.assertEqual(
+            execution_state.halt_reason,
+            "sidecar_core_exit_delayed_market_exit_failed",
+        )
+        # FAILED journal present
+        all_event_names = [e[0] for e in journal.events]
+        self.assertIn("SIDECAR_CORE_EXIT_DELAYED_MARKET_EXIT_FAILED", all_event_names)
+        failed_events = [e for e in journal.events if e[0] == "SIDECAR_CORE_EXIT_DELAYED_MARKET_EXIT_FAILED"]
+        self.assertEqual(len(failed_events), 1)
+        self.assertTrue(failed_events[0][1]["manual_intervention_required"])
+        self.assertIn("fetch failed", str(failed_events[0][1].get("position_fetch_error", "")))
+
+    async def test_delayed_exit_unhandled_exception_guard_records_task_failed(self) -> None:
+        """market_exit raises unhandled exception → top-level guard catches and journals TASK_FAILED."""
+        strategy = BollCvdShockReclaimStrategy(
+            BollCvdReclaimStrategyConfig(),
+            SimplePositionSizer(SimplePositionSizerConfig()),
+        )
+        strategy.state = StrategyPositionState(
+            side="LONG",
+            layers=1,
+            sidecar_enabled_for_position=True,
+            sidecar_legs=[
+                {
+                    "leg_id": "leg-open-1",
+                    "tp_order_id": "old123",
+                    "tp_price": 106.0,
+                    "contracts": "1",
+                    "qty": 0.1,
+                    "status": "OPEN",
+                    "entry_price": 3000.0,
+                    "side": "LONG",
+                    "layer_index": 1,
+                    "tp_pct": 0.004,
+                    "margin_pct": 0.01,
+                    "layer_multiplier": 1.0,
+                    "position_id": "pos-1",
+                    "created_ts_ms": 1000,
+                    "updated_ts_ms": 1000,
+                },
+            ],
+            breakeven_price=100.0,
+        )
+        execution_state = ExecutionState("pos-boom", 1000.0)
+        trader = self._sidecar_trader()
+        trader._cancel_sidecar_tp_returns = False
+        # Set position to LONG so it doesn't skip as flat
+        trader.set_position(long_position())
+        # market_exit raises unhandled exception (not just returns False)
+        trader._market_exit_raises = RuntimeError("unhandled market exit crash")
+        journal = FakeJournal()
+        state_store = FakeStateStore()
+        email_sender = FakeEmailSender()
+        processor, _, _, _ = make_processor(
+            execution_state=execution_state,
+            strategy=strategy,
+            trader=trader,
+            journal=journal,
+            state_store=state_store,
+            email_sender=email_sender,
+        )
+
+        with patch.dict("os.environ", {"SIDECAR_CORE_EXIT_ALIGNMENT_FAIL_AUTO_EXIT_DELAY_SECONDS": "0"}):
+            command = self._unsafe_update_tp_command(ts_ms=5_000, core_tp_price=105.0)
+            result = await processor.process(command)
+
+        self.assertIsNotNone(result)
+        await asyncio.sleep(0)
+
+        # No test-level unhandled task exception — caught by guard
+        # TASK_FAILED journal present
+        all_event_names = [e[0] for e in journal.events]
+        self.assertIn("SIDECAR_CORE_EXIT_DELAYED_MARKET_EXIT_TASK_FAILED", all_event_names)
+        # trading halted with task_failed reason
+        self.assertTrue(execution_state.trading_halted)
+        self.assertEqual(
+            execution_state.halt_reason,
+            "sidecar_core_exit_delayed_market_exit_task_failed",
+        )
 
 
 if __name__ == "__main__":
