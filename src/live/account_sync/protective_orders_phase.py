@@ -36,6 +36,8 @@ async def run_account_sync_protective_orders_phase(
         three_stage_post_tp1_sl_payload: dict[str, Any] | None,
         middle_runner_sl_payload: dict[str, Any] | None,
         middle_runner_activation_payload: dict[str, Any] | None,
+        middle_bucket_split_event_payload: dict[str, Any] | None = None,
+        middle_bucket_split_fast_protection_payload: dict[str, Any] | None = None,
 ) -> AccountSyncProtectiveOrdersResult:
     if three_stage_post_tp1_cancel_payload is not None:
         old_order_id = three_stage_post_tp1_cancel_payload.get("protective_sl_order_id")
@@ -343,6 +345,186 @@ async def run_account_sync_protective_orders_phase(
             },
             position_id=middle_runner_activation_payload.get("position_id"),
         )
+
+    # ── Middle Bucket Split fast protection ──────────────────────────
+    if middle_bucket_split_fast_protection_payload is not None:
+        from src.position_management.middle_bucket_fast_protection import (
+            build_fast_protection_decision,
+        )
+        side = middle_bucket_split_fast_protection_payload.get("side")
+        avg_entry = float(middle_bucket_split_fast_protection_payload.get("avg_entry_price", 0.0) or 0.0)
+        current_price = float(middle_bucket_split_fast_protection_payload.get("current_price", 0.0) or 0.0)
+        fast_sl_price = middle_bucket_split_fast_protection_payload.get("fast_sl_price")
+        invalid_action = str(middle_bucket_split_fast_protection_payload.get("invalid_action", "MARKET_EXIT"))
+        enabled = bool(middle_bucket_split_fast_protection_payload.get("enabled", True))
+        old_sl_order_id = middle_bucket_split_fast_protection_payload.get("old_sl_order_id")
+        fee_buffer_pct = float(getattr(strategy.config, "middle_bucket_split_fast_sl_fee_buffer_pct", 0.001))
+
+        decision = build_fast_protection_decision(
+            side=side,
+            avg_entry_price=avg_entry,
+            current_price=current_price,
+            fee_buffer_pct=fee_buffer_pct,
+            invalid_action=invalid_action,
+            enabled=enabled,
+        )
+
+        if decision.action == "PLACE_SL" and side is not None:
+            # Cancel old fast SL if exists
+            if old_sl_order_id:
+                await trader.cancel_middle_bucket_fast_protective_stop(old_sl_order_id)
+            net_contracts = middle_bucket_split_fast_protection_payload.get("net_contracts")
+            sl_ok, sl_order_id, sl_message = (False, None, "side_missing")
+            if net_contracts and float(net_contracts or 0) > 0:
+                try:
+                    sl_ok, sl_order_id, sl_message = await trader.place_middle_bucket_fast_protective_stop_with_retries(
+                        side,
+                        net_contracts,
+                        float(decision.sl_price or fast_sl_price or 0.0),
+                        retry_count=int(os.getenv("NEAR_TP_PROTECTIVE_SL_RETRY_COUNT", "3")),
+                        retry_interval_seconds=float(os.getenv("NEAR_TP_PROTECTIVE_SL_RETRY_INTERVAL_SECONDS", "1")),
+                    )
+                except Exception as exc:
+                    sl_ok = False
+                    sl_order_id = None
+                    sl_message = f"trader_exception: {type(exc).__name__}: {exc}"
+            if sl_ok:
+                async with state_lock:
+                    strategy.state.middle_bucket_split_fast_sl_order_id = sl_order_id
+                    strategy.state.middle_bucket_split_fast_sl_price = float(decision.sl_price or fast_sl_price or 0.0)
+                    strategy.state.middle_bucket_split_fast_sl_protected = True
+                    save_state_payload = (execution_state.current_position_id, copy.deepcopy(strategy.state),
+                                          execution_state.cash_before_position)
+                if hasattr(journal, "append"):
+                    journal.append(
+                        "MIDDLE_BUCKET_FAST_PROTECTIVE_SL_PLACED",
+                        {
+                            "position_id": middle_bucket_split_fast_protection_payload.get("position_id"),
+                            "side": side,
+                            "fast_sl_price": decision.sl_price,
+                            "sl_order_id": sl_order_id,
+                            "avg_entry_price": avg_entry,
+                            "current_price": current_price,
+                            "current_price_source": middle_bucket_split_fast_protection_payload.get(
+                                "current_price_source"),
+                            "reason": "middle_bucket_fast_filled_protect",
+                        },
+                        position_id=middle_bucket_split_fast_protection_payload.get("position_id"),
+                    )
+                logger.warning(
+                    "MIDDLE_BUCKET_FAST_PROTECTIVE_SL_PLACED | position_id=%s side=%s fast_sl_price=%.4f sl_order_id=%s avg_entry=%.4f current_price=%.4f",
+                    middle_bucket_split_fast_protection_payload.get("position_id"),
+                    side,
+                    decision.sl_price,
+                    sl_order_id,
+                    avg_entry,
+                    current_price,
+                )
+            else:
+                # SL placement failed → market exit
+                exit_ok, exit_message = (False, "side_missing")
+                if side is not None:
+                    exit_ok, exit_message = await trader.market_exit_remaining_position_with_retries(
+                        side,
+                        retry_count=int(os.getenv("NEAR_TP_SL_FAIL_MARKET_EXIT_RETRY_COUNT", "3")),
+                    )
+                halt_reason = (
+                    "middle_bucket_fast_sl_failed_market_exit_waiting_flat" if exit_ok
+                    else "middle_bucket_fast_sl_failed_market_exit_failed"
+                )
+                async with state_lock:
+                    execution_state.trading_halted = True
+                    execution_state.halt_reason = halt_reason
+                    strategy.state.middle_bucket_split_fast_sl_invalid_action_taken = "MARKET_EXIT"
+                if hasattr(journal, "append"):
+                    journal.append(
+                        "MIDDLE_BUCKET_FAST_PROTECTIVE_SL_FAILED",
+                        {
+                            "position_id": middle_bucket_split_fast_protection_payload.get("position_id"),
+                            "side": side,
+                            "fast_sl_price": decision.sl_price,
+                            "reason": sl_message,
+                            "trading_halted": True,
+                            "halt_reason": halt_reason,
+                            "market_exit_attempted": True,
+                            "market_exit_ok": exit_ok,
+                            "market_exit_message": exit_message,
+                            "manual_intervention_required": not exit_ok,
+                        },
+                        position_id=middle_bucket_split_fast_protection_payload.get("position_id"),
+                    )
+                logger.error(
+                    "MIDDLE_BUCKET_FAST_PROTECTIVE_SL_FAILED | position_id=%s side=%s sl_price=%s sl_message=%s market_exit_ok=%s halt_reason=%s",
+                    middle_bucket_split_fast_protection_payload.get("position_id"),
+                    side,
+                    decision.sl_price,
+                    sl_message,
+                    exit_ok,
+                    halt_reason,
+                )
+
+        elif decision.action == "MARKET_EXIT" and side is not None:
+            exit_ok, exit_message = await trader.market_exit_remaining_position_with_retries(
+                side,
+                retry_count=int(os.getenv("NEAR_TP_SL_FAIL_MARKET_EXIT_RETRY_COUNT", "3")),
+            )
+            halt_reason = (
+                "middle_bucket_fast_sl_invalid_market_exit_waiting_flat" if exit_ok
+                else "middle_bucket_fast_sl_invalid_market_exit_failed"
+            )
+            async with state_lock:
+                execution_state.trading_halted = True
+                execution_state.halt_reason = halt_reason
+                strategy.state.middle_bucket_split_fast_sl_invalid_action_taken = "MARKET_EXIT"
+            if hasattr(journal, "append"):
+                journal.append(
+                    "MIDDLE_BUCKET_FAST_PROTECTIVE_SL_INVALID_MARKET_EXIT",
+                    {
+                        "position_id": middle_bucket_split_fast_protection_payload.get("position_id"),
+                        "side": side,
+                        "fast_sl_price": decision.sl_price,
+                        "current_price": current_price,
+                        "avg_entry_price": avg_entry,
+                        "reason": decision.reason,
+                        "trading_halted": True,
+                        "halt_reason": halt_reason,
+                        "market_exit_ok": exit_ok,
+                        "market_exit_message": exit_message,
+                        "manual_intervention_required": not exit_ok,
+                    },
+                    position_id=middle_bucket_split_fast_protection_payload.get("position_id"),
+                )
+            logger.error(
+                "MIDDLE_BUCKET_FAST_PROTECTIVE_SL_INVALID_MARKET_EXIT | position_id=%s side=%s sl_price=%.4f current_price=%.4f market_exit_ok=%s halt_reason=%s",
+                middle_bucket_split_fast_protection_payload.get("position_id"),
+                side,
+                decision.sl_price,
+                current_price,
+                exit_ok,
+                halt_reason,
+            )
+
+        elif decision.action == "HALT_ONLY":
+            async with state_lock:
+                execution_state.trading_halted = True
+                execution_state.halt_reason = "middle_bucket_fast_sl_invalid_halt_only"
+            logger.error(
+                "MIDDLE_BUCKET_FAST_PROTECTIVE_SL_INVALID_HALT_ONLY | position_id=%s side=%s sl_price=%.4f current_price=%.4f manual_intervention_required=true",
+                middle_bucket_split_fast_protection_payload.get("position_id"),
+                side,
+                decision.sl_price,
+                current_price,
+            )
+
+        elif decision.action == "KEEP_POSITION":
+            logger.error(
+                "MIDDLE_BUCKET_FAST_PROTECTIVE_SL_INVALID_KEEP_POSITION | position_id=%s side=%s sl_price=%.4f current_price=%.4f risk=naked_remaining_core manual_intervention_required=true",
+                middle_bucket_split_fast_protection_payload.get("position_id"),
+                side,
+                decision.sl_price,
+                current_price,
+            )
+
     return AccountSyncProtectiveOrdersResult(
         save_state_payload=save_state_payload,
     )

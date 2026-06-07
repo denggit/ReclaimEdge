@@ -59,12 +59,26 @@ def run_account_sync_tp_progress_phase(
     middle_runner_sl_payload: dict[str, Any] | None = None
     middle_runner_activation_payload: dict[str, Any] | None = None
 
-    middle_runner_activated = tp_progress_helpers.mark_middle_runner_active_if_position_reduced(strategy, core_position)
-    three_stage_event = tp_progress_helpers.mark_three_stage_progress_if_position_reduced(strategy, core_position,
-                                                                                          live_time_utils.utc_ms())
-    tp_progress_helpers.mark_partial_tp_consumed_if_position_reduced(strategy, core_position)
+    # ── Middle Bucket Split progress MUST run first when active ──────
+    # When split is active, the split progress owns fast/slow fill detection.
+    # Old TP progress (mark_middle_runner_active, mark_three_stage_progress)
+    # must NOT run for the same fills to avoid duplicate cost recording.
     middle_bucket_split_event = tp_progress_helpers.mark_middle_bucket_split_progress_if_position_reduced(
         strategy, core_position)
+
+    split_active_and_incomplete = (
+        getattr(strategy.state, "middle_bucket_split_active", False)
+        and not getattr(strategy.state, "middle_bucket_split_slow_consumed", False)
+    )
+    if split_active_and_incomplete:
+        # Split owns the progress path; skip old TP progress entirely
+        middle_runner_activated = False
+        three_stage_event = None
+    else:
+        middle_runner_activated = tp_progress_helpers.mark_middle_runner_active_if_position_reduced(strategy, core_position)
+        three_stage_event = tp_progress_helpers.mark_three_stage_progress_if_position_reduced(strategy, core_position,
+                                                                                              live_time_utils.utc_ms())
+    tp_progress_helpers.mark_partial_tp_consumed_if_position_reduced(strategy, core_position)
     position_cost_runtime.sync_strategy_cost_from_position(
         strategy,
         core_position,
@@ -351,13 +365,29 @@ def run_account_sync_tp_progress_phase(
         # Fast fill → trigger protection
         if middle_bucket_split_event == "MIDDLE_BUCKET_FAST":
             fast_sl_price = getattr(strategy.state, "middle_bucket_split_fast_sl_price", None)
-            current_price = float(position.avg_entry_price or 0.0) if hasattr(position, "avg_entry_price") else 0.0
+            # Use actual market price, NOT position.avg_entry_price
+            current_price = 0.0
+            current_price_source = "missing"
+            current_price_ts_ms = 0
+            latest_market = getattr(account_snapshot, "latest_market_price", None)
+            if latest_market is not None and float(latest_market) > 0:
+                current_price = float(latest_market)
+                current_price_source = "latest_market_price"
+                current_price_ts_ms = live_time_utils.utc_ms()
+            elif hasattr(core_position, "mark_price") and getattr(core_position, "mark_price", None) is not None:
+                current_price = float(getattr(core_position, "mark_price", 0.0) or 0.0)
+                current_price_source = "mark_price"
+            elif hasattr(position, "avg_entry_price") and position.avg_entry_price > 0:
+                current_price = float(position.avg_entry_price)
+                current_price_source = "degraded_current_price_source_avg_entry"
             middle_bucket_split_fast_protection_payload = {
                 "position_id": execution_state.current_position_id,
                 "side": core_position.side,
                 "avg_entry_price": float(strategy.state.avg_entry_price or 0.0),
                 "fast_sl_price": fast_sl_price,
                 "current_price": current_price,
+                "current_price_source": current_price_source,
+                "current_price_ts_ms": current_price_ts_ms,
                 "core_contracts": core_position.contracts,
                 "net_contracts": position.contracts if position.has_position else 0,
                 "invalid_action": getattr(strategy.config, "middle_bucket_split_fast_sl_invalid_action", "MARKET_EXIT"),

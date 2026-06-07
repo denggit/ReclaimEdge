@@ -278,3 +278,14 @@ class TpSlExecutionManager:
         if ok:
             logger.warning("THREE_STAGE_TP1_PROTECTIVE_SL_CANCELLED | algoId=%s", order_id)
         return ok
+
+    async def cancel_middle_bucket_fast_protective_stop(self, order_id: str | None) -> bool:
+        t = self.trader
+        if not order_id:
+            return True
+        ok = await self.trader.cancel_near_tp_protective_stop(order_id)
+        if ok and getattr(t, "middle_bucket_fast_sl_order_id", None) == order_id:
+            t.middle_bucket_fast_sl_order_id = None
+        if ok:
+            logger.warning("MIDDLE_BUCKET_FAST_SL_CANCELLED | algoId=%s", order_id)
+        return ok

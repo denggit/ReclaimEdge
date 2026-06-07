@@ -98,6 +98,25 @@ class ProtectiveStopManager:
             self.trader.middle_runner_protective_sl_order_id = order_id
         return ok, order_id, message
 
+    async def place_middle_bucket_fast_protective_stop_with_retries(
+            self,
+            side: PositionSide,
+            contracts: Decimal,
+            stop_price: float,
+            retry_count: int,
+            retry_interval_seconds: float,
+    ) -> tuple[bool, str | None, str]:
+        ok, order_id, message = await self.trader.place_near_tp_protective_stop_with_retries(
+            side,
+            contracts,
+            stop_price,
+            retry_count=retry_count,
+            retry_interval_seconds=retry_interval_seconds,
+        )
+        if ok:
+            self.trader.middle_bucket_fast_sl_order_id = order_id
+        return ok, order_id, message
+
     async def place_trend_runner_protective_stop_with_retries(
             self,
             side: PositionSide,

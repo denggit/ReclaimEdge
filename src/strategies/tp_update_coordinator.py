@@ -538,6 +538,9 @@ class TpUpdateCoordinator:
                 s.state.middle_runner_final_tp_price = tp_price
                 s.state.middle_runner_pending = True
                 return tp_price, tp_mode, partial_tp_price, partial_tp_ratio, tp_plan, reason_override
+            # If split not applied but slow middle is OK, the helper already set
+            # middle_runner_first_tp_price / partial_tp_price to boll.middle.
+            # Fall through to the existing logic which will use structure BOLL20.
 
         partial_tp_price, _ptp_src = s._select_valid_tp_middle_with_profit_fallback(s.state.side, boll)
 
@@ -600,6 +603,11 @@ class TpUpdateCoordinator:
                 partial_tp_ratio = tp1_ratio
                 tp_plan = "THREE_STAGE_RUNNER"
                 return tp_price, tp_mode, s.state.three_stage_tp1_price, partial_tp_ratio, tp_plan, reason_override
+            # If split not applied but slow middle is OK (BOLL15 insufficient, BOLL20 sufficient),
+            # three_stage_tp1_price was already set to boll.middle by the helper.
+            # Continue to the existing logic which will use structure BOLL20 middle via
+            # _select_valid_tp_middle_with_profit_fallback → STRUCTURE_BOLL_PROFIT_FALLBACK.
+            # We must NOT fall back to outer in this case.
 
         partial_tp_price, _ptp_src = s._select_valid_tp_middle_with_profit_fallback(s.state.side, boll)
         updated = partial_tp_price is not None and s._update_three_stage_dynamic_targets_without_reset(
@@ -770,7 +778,15 @@ class TpUpdateCoordinator:
         if tp_plan == "MIDDLE_RUNNER":
             s._set_middle_runner_planned(partial_tp_price, tp_price)
         if tp_plan == "THREE_STAGE_RUNNER":
-            if not s._update_three_stage_dynamic_targets_without_reset(s.state.side, boll):
+            # When middle bucket split is active, preserve the effective TP1 price
+            # (weighted average of fast/slow) — do NOT let dynamic target update
+            # overwrite it with plain BOLL15 middle.
+            if getattr(s.state, "middle_bucket_split_active", False):
+                # Only update TP2 (outer); keep split effective TP1 unchanged
+                tp2_price, _tp2_src = s._select_valid_tp_outer_with_profit_fallback(s.state.side, boll)
+                s.state.three_stage_tp2_price = tp2_price
+                s.state.tp_price = tp2_price
+            elif not s._update_three_stage_dynamic_targets_without_reset(s.state.side, boll):
                 tp_price, tp_mode = s._fallback_to_single_outer_due_middle_profit_insufficient(
                     side=s.state.side,
                     boll=boll,

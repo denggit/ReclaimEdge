@@ -126,6 +126,8 @@ async def account_position_sync_worker(
             three_stage_post_tp1_sl_payload: dict[str, Any] | None = None
             three_stage_post_tp1_cancel_payload: dict[str, Any] | None = None
             three_stage_event_payload: dict[str, Any] | None = None
+            middle_bucket_split_event_payload: dict[str, Any] | None = None
+            middle_bucket_split_fast_protection_payload: dict[str, Any] | None = None
             clear_state = False
             flat_previous_halt_reason: str | None = None
             if pending_flat_payload is None and core_position.has_position:
@@ -148,6 +150,8 @@ async def account_position_sync_worker(
                 three_stage_post_tp1_sl_payload = tp_progress_result.three_stage_post_tp1_sl_payload
                 three_stage_post_tp1_cancel_payload = tp_progress_result.three_stage_post_tp1_cancel_payload
                 three_stage_event_payload = tp_progress_result.three_stage_event_payload
+                middle_bucket_split_event_payload = tp_progress_result.middle_bucket_split_event_payload
+                middle_bucket_split_fast_protection_payload = tp_progress_result.middle_bucket_split_fast_protection_payload
                 last_logged_position_key = tp_progress_result.last_logged_position_key
 
             if force_close_sidecar:
@@ -246,6 +250,8 @@ async def account_position_sync_worker(
                 three_stage_post_tp1_sl_payload=three_stage_post_tp1_sl_payload,
                 middle_runner_sl_payload=middle_runner_sl_payload,
                 middle_runner_activation_payload=middle_runner_activation_payload,
+                middle_bucket_split_event_payload=middle_bucket_split_event_payload,
+                middle_bucket_split_fast_protection_payload=middle_bucket_split_fast_protection_payload,
             )
             save_state_payload = protective_result.save_state_payload
             await account_sync_flat_settlement_phase.finalize_account_sync_flat_settlement_phase(

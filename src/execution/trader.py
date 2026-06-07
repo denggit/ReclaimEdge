@@ -86,6 +86,7 @@ class Trader:
         self.middle_runner_protective_sl_order_id: str | None = None
         self.three_stage_post_tp1_protective_sl_order_id: str | None = None
         self.trend_runner_sl_order_id: str | None = None
+        self.middle_bucket_fast_sl_order_id: str | None = None
         self.position_contracts = Decimal("0")
         self.account_equity_usdt: float = 0.0
         self._protected_reduce_only_order_ids: set[str] = set()
@@ -302,6 +303,17 @@ class Trader:
         return await self._tp_sl_manager.place_middle_runner_protective_stop_with_retries(
             side, contracts, stop_price, retry_count, retry_interval_seconds)
 
+    async def place_middle_bucket_fast_protective_stop_with_retries(
+            self,
+            side: PositionSide,
+            contracts: Decimal,
+            stop_price: float,
+            retry_count: int,
+            retry_interval_seconds: float,
+    ) -> tuple[bool, str | None, str]:
+        return await self._tp_sl_manager.place_middle_bucket_fast_protective_stop_with_retries(
+            side, contracts, stop_price, retry_count, retry_interval_seconds)
+
     async def place_trend_runner_protective_stop_with_retries(
             self,
             side: PositionSide,
@@ -443,6 +455,9 @@ class Trader:
     async def cancel_middle_runner_protective_stop(self, order_id: str | None) -> bool:
         return await self._tp_sl_manager.cancel_middle_runner_protective_stop(order_id)
 
+    async def cancel_middle_bucket_fast_protective_stop(self, order_id: str | None) -> bool:
+        return await self._tp_sl_manager.cancel_middle_bucket_fast_protective_stop(order_id)
+
     async def cancel_trend_runner_protective_stop(self, order_id: str | None) -> bool:
         return await self._tp_sl_manager.cancel_trend_runner_protective_stop(order_id)
 
@@ -498,6 +513,7 @@ class Trader:
         self.middle_runner_protective_sl_order_id = None
         self.three_stage_post_tp1_protective_sl_order_id = None
         self.trend_runner_sl_order_id = None
+        self.middle_bucket_fast_sl_order_id = None
 
     async def set_leverage(self) -> None:
         bodies = order_specs.build_set_leverage_bodies(

@@ -58,6 +58,10 @@ def mark_partial_tp_consumed_if_position_reduced(strategy: BollCvdReclaimStrateg
 
 def mark_middle_runner_active_if_position_reduced(strategy: BollCvdReclaimStrategy, position: PositionSnapshot) -> bool:
     state = strategy.state
+    # Gate: when middle bucket split is active and slow hasn't consumed yet,
+    # split progress owns the path — do NOT run old Middle Runner progress
+    if getattr(state, "middle_bucket_split_active", False) and not getattr(state, "middle_bucket_split_slow_consumed", False):
+        return False
     if not getattr(state, "middle_runner_pending", False):
         return False
     if getattr(state, "middle_runner_active", False):
@@ -149,6 +153,10 @@ def mark_middle_runner_active_if_position_reduced(strategy: BollCvdReclaimStrate
 def mark_three_stage_progress_if_position_reduced(strategy: BollCvdReclaimStrategy, position: PositionSnapshot,
                                                   ts_ms: int) -> str | None:
     state = strategy.state
+    # Gate: when middle bucket split is active and slow hasn't consumed yet,
+    # split progress owns the path — do NOT run old Three-Stage progress
+    if getattr(state, "middle_bucket_split_active", False) and not getattr(state, "middle_bucket_split_slow_consumed", False):
+        return None
     if not getattr(state, "three_stage_runner_enabled_for_position", False):
         return None
     if not position.has_position or position.side != state.side:
