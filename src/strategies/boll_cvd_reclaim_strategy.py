@@ -2779,33 +2779,6 @@ class BollCvdReclaimStrategy:
         )
         return sel.price, sel.source
 
-    def _select_tp_middle_with_profit_fallback(
-            self,
-            side: PositionSide,
-            boll: BollSnapshot,
-    ) -> tuple[float, str]:
-        """Return (middle_price, source) for TP1 / first TP with profit-distance fallback.
-
-        Unlike _select_tp_middle() which is the raw low-level resolver, this
-        helper enforces the min-net-profit check so that a TP1 price is never
-        worse than what _select_tp_price() would have accepted for SINGLE mode.
-
-        LONG:  TP_BOLL15 middle first → structure BOLL20 middle if TP_BOLL15
-               profit is insufficient → TP_BOLL15 middle as last resort.
-        SHORT: TP_BOLL15 middle first → structure BOLL20 middle if TP_BOLL15
-               profit is insufficient → TP_BOLL15 middle as last resort.
-        """
-        effective_be = self._effective_breakeven_for_tp_selection(side)
-        tp_band = self._tp_band_snapshot(boll)
-        sel = tp_plan_selector.select_tp_middle_with_profit_fallback(
-            side=side,
-            effective_be=effective_be,
-            min_net_profit=self.config.tp_min_net_profit_pct,
-            tp_band=tp_band,
-            tp_boll_enabled=self.config.tp_boll_enabled,
-        )
-        return sel.price, sel.source
-
     def _select_valid_tp_middle_with_profit_fallback(
             self,
             side: PositionSide,

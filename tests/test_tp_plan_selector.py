@@ -174,14 +174,13 @@ class TestSelectTpOuter:
 # ═══════════════════════════════════════════════════════════════════════
 
 class TestSelectTpMiddleWithProfitFallbackLong:
-    def test_effective_be_zero_uses_basic_middle(self):
+    def test_effective_be_zero_returns_none(self):
         tp_band = _tp_band(tp_middle=101.0, middle=100.0)
         sel = select_tp_middle_with_profit_fallback(
             side="LONG", effective_be=0.0, min_net_profit=0.002,
             tp_band=tp_band, tp_boll_enabled=True,
         )
-        assert sel.price == 101.0
-        assert sel.source == "TP_BOLL"
+        assert sel is None, "must return None when effective_be <= 0"
 
     def test_tp_boll_middle_meets_profit(self):
         tp_band = _tp_band(tp_middle=101.0, middle=100.0)
@@ -204,15 +203,14 @@ class TestSelectTpMiddleWithProfitFallbackLong:
         assert sel.price == 101.0
         assert sel.source == "STRUCTURE_BOLL_PROFIT_FALLBACK"
 
-    def test_neither_meets_profit_returns_tp_boll_middle(self):
+    def test_neither_meets_profit_returns_none(self):
         tp_band = _tp_band(tp_middle=100.3, middle=100.4)
-        # effective_be=100.0, required=101.0, neither >= 101.0 → return tp_mid
+        # effective_be=100.0, required=101.0, neither >= 101.0 → None
         sel = select_tp_middle_with_profit_fallback(
             side="LONG", effective_be=100.0, min_net_profit=0.01,
             tp_band=tp_band, tp_boll_enabled=True,
         )
-        assert sel.price == 100.3
-        assert sel.source == "TP_BOLL"
+        assert sel is None, "must return None when neither middle meets profit"
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -220,14 +218,13 @@ class TestSelectTpMiddleWithProfitFallbackLong:
 # ═══════════════════════════════════════════════════════════════════════
 
 class TestSelectTpMiddleWithProfitFallbackShort:
-    def test_effective_be_zero_uses_basic_middle(self):
+    def test_effective_be_zero_returns_none(self):
         tp_band = _tp_band(tp_middle=99.0, middle=100.0)
         sel = select_tp_middle_with_profit_fallback(
             side="SHORT", effective_be=0.0, min_net_profit=0.002,
             tp_band=tp_band, tp_boll_enabled=True,
         )
-        assert sel.price == 99.0
-        assert sel.source == "TP_BOLL"
+        assert sel is None, "must return None when effective_be <= 0"
 
     def test_tp_boll_middle_meets_profit(self):
         tp_band = _tp_band(tp_middle=99.0, middle=100.0)
@@ -250,15 +247,14 @@ class TestSelectTpMiddleWithProfitFallbackShort:
         assert sel.price == 99.0
         assert sel.source == "STRUCTURE_BOLL_PROFIT_FALLBACK"
 
-    def test_neither_meets_profit_returns_tp_boll_middle(self):
+    def test_neither_meets_profit_returns_none(self):
         tp_band = _tp_band(tp_middle=99.7, middle=99.6)
-        # effective_be=100.0, required=99.0, neither <= 99.0 → return tp_mid
+        # effective_be=100.0, required=99.0, neither <= 99.0 → None
         sel = select_tp_middle_with_profit_fallback(
             side="SHORT", effective_be=100.0, min_net_profit=0.01,
             tp_band=tp_band, tp_boll_enabled=True,
         )
-        assert sel.price == 99.7
-        assert sel.source == "TP_BOLL"
+        assert sel is None, "must return None when neither middle meets profit"
 
 
 # ═══════════════════════════════════════════════════════════════════════

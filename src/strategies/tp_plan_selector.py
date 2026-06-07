@@ -99,20 +99,25 @@ def select_tp_middle_with_profit_fallback(
         min_net_profit: float,
         tp_band: TpBandSnapshot,
         tp_boll_enabled: bool,
-) -> TpMiddleSelection:
+) -> TpMiddleSelection | None:
     """Return (middle_price, source) for TP1 / first TP with profit-distance fallback.
 
     Unlike select_tp_middle() which is the raw low-level resolver, this
     helper enforces the min-net-profit check so that a TP1 price is never
     worse than what select_tp_price() would have accepted for SINGLE mode.
 
+    Returns None when:
+    - effective_be <= 0 (no breakeven → cannot validate profit).
+    - Neither TP_BOLL15 middle nor structure BOLL20 middle meets the
+      min-net-profit requirement (caller must fall back to SINGLE outer).
+
     LONG:  TP_BOLL15 middle first → structure BOLL20 middle if TP_BOLL15
-           profit is insufficient → TP_BOLL15 middle as last resort.
+           profit is insufficient → None if neither works.
     SHORT: TP_BOLL15 middle first → structure BOLL20 middle if TP_BOLL15
-           profit is insufficient → TP_BOLL15 middle as last resort.
+           profit is insufficient → None if neither works.
     """
     if effective_be <= 0:
-        return select_tp_middle(tp_band=tp_band, tp_boll_enabled=tp_boll_enabled)
+        return None
 
     if side == "LONG":
         required = effective_be * (1 + min_net_profit)
@@ -126,9 +131,8 @@ def select_tp_middle_with_profit_fallback(
         if tp_band.middle >= required:
             return TpMiddleSelection(price=float(tp_band.middle), source="STRUCTURE_BOLL_PROFIT_FALLBACK")
 
-        # 3) Neither meets profit — return TP_BOLL15 middle anyway
-        #    (caller should not enable complex modes when neither middle works)
-        return tp_mid
+        # 3) Neither meets profit — None (caller must fall back to SINGLE outer)
+        return None
 
     # SHORT
     required = effective_be * (1 - min_net_profit)
@@ -140,7 +144,7 @@ def select_tp_middle_with_profit_fallback(
     if tp_band.middle <= required:
         return TpMiddleSelection(price=float(tp_band.middle), source="STRUCTURE_BOLL_PROFIT_FALLBACK")
 
-    return tp_mid
+    return None
 
 
 # ── Outer price selection ───────────────────────────────────────────────
