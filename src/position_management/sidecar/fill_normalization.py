@@ -8,8 +8,8 @@ from typing import Any
 class SidecarFillSnapshot:
     """Normalized sidecar TP fill quantities from leg dict + order status.
 
-    All quantities are in ETH (not contracts).  This module converts
-    OKX accFillSz (contracts) to ETH using contract_multiplier.
+    ``filled_contracts`` is contracts (OKX accFillSz).
+    ``filled_eth_qty`` is ETH.
     """
 
     leg_id: str = ""
@@ -34,6 +34,11 @@ def _safe_float(value: Any, *, positive_only: bool = False) -> float | None:
     return parsed
 
 
+def safe_positive_float(value: Any) -> float | None:
+    """Public safe parser for a positive float. Returns None on any failure or non-positive."""
+    return _safe_float(value, positive_only=True)
+
+
 def normalize_sidecar_tp_fill(
     *,
     leg: dict[str, Any],
@@ -53,7 +58,10 @@ def normalize_sidecar_tp_fill(
 
     filled_contracts:
       - If status["filled_qty"] exists: float(status["filled_qty"])
-      - Else: float(leg.get("contracts", leg.get("qty", 0)))  (no multiplier needed)
+      - Else: float(leg.get("contracts"))
+      - If leg["contracts"] is also missing but leg["qty"] exists:
+          filled_contracts = leg_qty / contract_multiplier
+        (leg["qty"] is ETH, not contracts — must convert.)
     """
     status_dict = status or {}
     leg_id = str(leg.get("leg_id", ""))
@@ -65,14 +73,23 @@ def normalize_sidecar_tp_fill(
         filled_contracts = raw_filled
     else:
         leg_contracts = _safe_float(leg.get("contracts"))
-        if leg_contracts is None:
-            leg_contracts = _safe_float(leg.get("qty")) or 0.0
-        filled_contracts = leg_contracts
+        if leg_contracts is not None:
+            filled_contracts = leg_contracts
+        else:
+            leg_qty_val = _safe_float(leg.get("qty"))
+            if leg_qty_val is not None and contract_multiplier > 0:
+                filled_contracts = leg_qty_val / contract_multiplier
+            else:
+                filled_contracts = leg_qty_val or 0.0
 
     # ── filled_eth_qty ──
     eth_from_status = _safe_float(status_dict.get("filled_qty"), positive_only=True)
     if eth_from_status is not None:
-        filled_eth_qty = eth_from_status * contract_multiplier
+        # status["filled_qty"] is contracts → multiply by contract_multiplier
+        if contract_multiplier > 0:
+            filled_eth_qty = eth_from_status * contract_multiplier
+        else:
+            filled_eth_qty = eth_from_status  # fallback: treat as ETH directly
     else:
         filled_eth_qty = _safe_float(leg.get("qty")) or 0.0
 

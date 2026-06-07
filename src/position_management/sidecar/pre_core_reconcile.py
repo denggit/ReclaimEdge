@@ -13,6 +13,7 @@ from src.position_management.sidecar.fill_telemetry import (
     build_sidecar_fill_telemetry,
     log_sidecar_tp_filled,
     merge_sidecar_fill_telemetry,
+    normalized_sidecar_fill_payload,
 )
 from src.position_management.sidecar.model import SidecarLegStatus, sidecar_open_qty
 from src.position_management.sidecar.reconciler import (
@@ -141,7 +142,19 @@ async def reconcile_sidecar_orders_before_core_view(
                 )
                 strategy.state.sidecar_legs[index] = mark_sidecar_leg_tp_filled(leg, ts_ms)
                 if hasattr(journal, "append"):
-                    journal.append("SIDECAR_TP_FILLED", {**dict(leg), **status_dict}, position_id=position_id)
+                    _normalized = normalized_sidecar_fill_payload(leg, status_dict)
+                    journal.append(
+                        "SIDECAR_TP_FILLED",
+                        {
+                            **dict(leg),
+                            **status_dict,
+                            "filled_contracts": _normalized["filled_contracts"],
+                            "filled_eth_qty": _normalized["filled_eth_qty"],
+                            "filled_notional_usdt": _normalized["filled_notional_usdt"],
+                            "filled_qty_unit": "contracts_from_okx_accFillSz",
+                        },
+                        position_id=position_id,
+                    )
                 changed = True
 
                 # Compute real remaining sidecar open qty after this fill

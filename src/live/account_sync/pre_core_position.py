@@ -13,6 +13,7 @@ from src.live.account_sync import flat_balance as live_flat_balance
 from src.position_management import core_position_view as core_position_view_helpers
 from src.position_management.sidecar import pre_core_reconcile as sidecar_pre_core_reconcile
 from src.position_management.sidecar import runtime_state as sidecar_runtime_state
+from src.position_management.sidecar.fill_normalization import normalize_sidecar_tp_fill
 from src.position_management.sidecar.model import (
     SidecarLegStatus,
     sidecar_open_contracts,
@@ -276,7 +277,12 @@ async def run_account_sync_pre_core_position_phase(
                     last_cash_event_log = now
             elif unsafe_reasons and abs(cash_delta) >= cash_drift_min_delta_usdt:
                 # ── Determine sidecar TP fill context ──────────────────
-                _lookback_s = float(os.getenv("SIDECAR_TP_CASH_DRIFT_LOOKBACK_SECONDS", "120"))
+                try:
+                    _lookback_s = float(os.getenv("SIDECAR_TP_CASH_DRIFT_LOOKBACK_SECONDS", "120"))
+                    if _lookback_s <= 0:
+                        _lookback_s = 120.0
+                except (TypeError, ValueError):
+                    _lookback_s = 120.0
                 _now_ms = live_time_utils.utc_ms()
 
                 # Same-sync: pre-core reconcile detected a fill this cycle
@@ -292,16 +298,29 @@ async def run_account_sync_pre_core_position_phase(
                     for _leg in strategy.state.sidecar_legs:
                         if _leg.get("status") != SidecarLegStatus.TP_FILLED.value:
                             continue
-                        _leg_updated = _leg.get("updated_ts_ms", 0)
-                        if _leg_updated > 0 and (_now_ms - _leg_updated) <= (_lookback_s * 1000):
-                            _rid = str(_leg.get("leg_id", ""))
-                            _recent_fill_leg_ids.append(_rid)
-                            _oid = str(_leg.get("tp_order_id", ""))
-                            if _oid:
-                                _recent_fill_order_ids.append(_oid)
-                            _recent_fill_qty += float(_leg.get("qty", 0.0))
-                            _leg_contracts = float(_leg.get("contracts", 0.0) or 0.0)
-                            _recent_fill_contracts += _leg_contracts
+                        # ── Safe parse updated_ts_ms ──
+                        try:
+                            _leg_updated = int(_leg.get("updated_ts_ms", 0))
+                        except (TypeError, ValueError):
+                            continue
+                        if _leg_updated <= 0:
+                            continue
+                        if _leg_updated > _now_ms:
+                            # future timestamp → skip
+                            continue
+                        _delta_ms = _now_ms - _leg_updated
+                        if _delta_ms < 0 or _delta_ms > (_lookback_s * 1000):
+                            continue
+                        _snapshot = normalize_sidecar_tp_fill(leg=_leg, status=None)
+                        _rid = _snapshot.leg_id
+                        if not _rid:
+                            continue
+                        _recent_fill_leg_ids.append(_rid)
+                        _oid = _snapshot.order_id
+                        if _oid:
+                            _recent_fill_order_ids.append(_oid)
+                        _recent_fill_qty += _snapshot.filled_eth_qty
+                        _recent_fill_contracts += _snapshot.filled_contracts
                 _has_recent_fill = len(_recent_fill_leg_ids) > 0
 
                 if _same_sync_fill:

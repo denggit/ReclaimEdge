@@ -68,6 +68,34 @@ def build_sidecar_fill_telemetry(
     return _telemetry_from_snapshot(source, snapshot)
 
 
+def normalized_sidecar_fill_payload(
+    leg: dict[str, Any],
+    status: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return a dict with normalized fill quantities suitable for journal payloads.
+
+    Uses normalize_sidecar_tp_fill internally.  All numeric fields are
+    guaranteed to be JSON-serializable (float or None).
+
+    Returns keys:
+      filled_contracts
+      filled_eth_qty
+      filled_notional_usdt
+      avg_fill_price
+      tp_price
+      filled_qty_unit = "contracts_from_okx_accFillSz"
+    """
+    snapshot = normalize_sidecar_tp_fill(leg=leg, status=status)
+    return {
+        "filled_contracts": snapshot.filled_contracts,
+        "filled_eth_qty": snapshot.filled_eth_qty,
+        "filled_notional_usdt": snapshot.filled_notional_usdt,
+        "avg_fill_price": snapshot.avg_fill_price,
+        "tp_price": snapshot.tp_price,
+        "filled_qty_unit": "contracts_from_okx_accFillSz",
+    }
+
+
 def merge_sidecar_fill_telemetry(
     items: Iterable[SidecarFillTelemetry],
 ) -> SidecarFillTelemetry:

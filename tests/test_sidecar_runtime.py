@@ -1728,3 +1728,215 @@ async def test_monitor_runtime_logs_sidecar_tp_filled(caplog: pytest.LogCaptureF
     assert "filled_eth_qty=0.1" in caplog.text
     # sidecar_open_qty_after must be 0.0 (the only leg is now TP_FILLED)
     assert "sidecar_open_qty_after=0.0" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# Tests: Multi-leg sidecar_open_qty_after correctness
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_pre_core_reconcile_multi_leg_sidecar_open_qty_after(caplog: LogCaptureFixture) -> None:
+    """When multiple sidecar legs exist and only one is FILLED,
+    sidecar_open_qty_after should reflect the remaining OPEN legs only."""
+    import logging
+    caplog.set_level(logging.WARNING, logger="src.position_management.sidecar.pre_core_reconcile")
+
+    state = sidecar_state()
+    state.sidecar_legs = [
+        {
+            "leg_id": "leg-1",
+            "status": "OPEN",
+            "tp_order_id": "tp-1",
+            "qty": 0.1,
+            "contracts": "1",
+            "entry_price": 3000.0,
+            "created_ts_ms": 1,
+            "updated_ts_ms": 1,
+        },
+        {
+            "leg_id": "leg-2",
+            "status": "OPEN",
+            "tp_order_id": "tp-2",
+            "qty": 0.2,
+            "contracts": "2",
+            "entry_price": 3001.0,
+            "created_ts_ms": 2,
+            "updated_ts_ms": 2,
+        },
+    ]
+    refresh_sidecar_state_totals(state)
+    assert sidecar_open_qty(state.sidecar_legs) == pytest.approx(0.3)
+
+    trader = Trader()
+    trader.status_by_order["tp-1"] = "FILLED"
+    trader.status_by_order["tp-2"] = "OPEN"
+    execution = ExecutionState("pos-multi", 1000.0)
+    journal = Journal()
+    store = Store()
+    state_lock = asyncio.Lock()
+
+    strategy = type("S", (), {"state": state})()
+
+    result = await reconcile_sidecar_orders_before_core_view(
+        trader=trader,
+        strategy=strategy,
+        execution_state=execution,
+        journal=journal,
+        state_store=store,
+        trader_symbol="ETH-USDT-SWAP",
+        ts_ms=2,
+        state_lock=state_lock,
+    )
+
+    assert result.changed
+    assert state.sidecar_legs[0]["status"] == "TP_FILLED"
+    assert state.sidecar_legs[1]["status"] == "OPEN"
+
+    # sidecar_open_qty_after should be only leg-2's qty = 0.2
+    assert "SIDECAR_TP_FILLED" in caplog.text
+    assert "sidecar_open_qty_after=0.2" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_monitor_runtime_multi_leg_sidecar_open_qty_after(caplog: LogCaptureFixture) -> None:
+    """monitor_sidecar_orders_once with multiple legs: when one fills,
+    sidecar_open_qty_after should reflect the remaining OPEN legs."""
+    import logging
+    caplog.set_level(logging.WARNING, logger="src.position_management.sidecar.monitor_runtime")
+
+    state = sidecar_state()
+    state.sidecar_legs = [
+        {"leg_id": "leg-1", "status": "OPEN", "tp_order_id": "tp-1", "qty": 0.1, "contracts": "1", "tp_price": 3012.0,
+         "created_ts_ms": 1, "updated_ts_ms": 1},
+        {"leg_id": "leg-2", "status": "OPEN", "tp_order_id": "tp-2", "qty": 0.2, "contracts": "2", "tp_price": 3012.0,
+         "created_ts_ms": 2, "updated_ts_ms": 2},
+    ]
+    refresh_sidecar_state_totals(state)
+    assert sidecar_open_qty(state.sidecar_legs) == pytest.approx(0.3)
+
+    trader = Trader()
+    trader.status_by_order["tp-1"] = "FILLED"
+    trader.status_by_order["tp-2"] = "OPEN"
+    journal = Journal()
+
+    await monitor_sidecar_orders_once(
+        trader=trader,
+        strategy_state=state,
+        execution_state=ExecutionState("pos-multi", 1000.0),
+        journal=journal,
+        state_store=Store(),
+        trader_symbol="ETH-USDT-SWAP",
+        core_position=PositionSnapshot("LONG", Decimal("5"), 3000, 0.5, Decimal("5")),
+        position_id="pos-multi",
+        cash_before_position=1000.0,
+        ts_ms=2,
+    )
+
+    assert state.sidecar_legs[0]["status"] == "TP_FILLED"
+    assert state.sidecar_legs[1]["status"] == "OPEN"
+
+    # sidecar_open_qty_after should be only leg-2's qty = 0.2
+    assert "SIDECAR_TP_FILLED" in caplog.text
+    assert "sidecar_open_qty_after=0.2" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# Tests: Journal SIDECAR_TP_FILLED normalized fields
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_pre_core_reconcile_journal_has_normalized_fields() -> None:
+    """SIDECAR_TP_FILLED journal payload must include:
+    filled_contracts, filled_eth_qty, filled_notional_usdt, filled_qty_unit."""
+    state = sidecar_state()
+    state.sidecar_legs = [
+        {
+            "leg_id": "leg-1",
+            "status": "OPEN",
+            "tp_order_id": "tp-1",
+            "qty": 0.1,
+            "contracts": "1",
+            "entry_price": 3000.0,
+            "tp_price": 3012.0,
+            "created_ts_ms": 1,
+            "updated_ts_ms": 1,
+        }
+    ]
+    refresh_sidecar_state_totals(state)
+
+    trader = Trader()
+    trader.status_by_order["tp-1"] = "FILLED"
+    execution = ExecutionState("pos-journal", 1000.0)
+    journal = Journal()
+    store = Store()
+    state_lock = asyncio.Lock()
+
+    strategy = type("S", (), {"state": state})()
+
+    await reconcile_sidecar_orders_before_core_view(
+        trader=trader,
+        strategy=strategy,
+        execution_state=execution,
+        journal=journal,
+        state_store=store,
+        trader_symbol="ETH-USDT-SWAP",
+        ts_ms=2,
+        state_lock=state_lock,
+    )
+
+    tp_events = [e for e in journal.events if e[0] == "SIDECAR_TP_FILLED"]
+    assert len(tp_events) == 1
+    payload = tp_events[0][1]
+
+    assert "filled_contracts" in payload
+    assert "filled_eth_qty" in payload
+    assert "filled_notional_usdt" in payload
+    assert payload.get("filled_qty_unit") == "contracts_from_okx_accFillSz"
+    # filled_eth_qty should be ~0.1 (leg qty ETH, not contracts)
+    assert payload["filled_eth_qty"] == pytest.approx(0.1)
+    # filled_contracts should be 1.0
+    assert payload["filled_contracts"] == pytest.approx(1.0)
+    # Original status fields are preserved
+    assert "filled_qty" in payload  # original OKX accFillSz
+
+
+@pytest.mark.asyncio
+async def test_monitor_runtime_journal_has_normalized_fields() -> None:
+    """monitor_sidecar_orders_once SIDECAR_TP_FILLED journal payload must include
+    normalized fields."""
+    state = sidecar_state()
+    state.sidecar_legs = [
+        {"leg_id": "leg-1", "status": "OPEN", "tp_order_id": "tp-1", "qty": 0.1, "contracts": "1", "tp_price": 3012.0,
+         "created_ts_ms": 1, "updated_ts_ms": 1}
+    ]
+    refresh_sidecar_state_totals(state)
+    trader = Trader()
+    trader.status_by_order["tp-1"] = "FILLED"
+    journal = Journal()
+
+    await monitor_sidecar_orders_once(
+        trader=trader,
+        strategy_state=state,
+        execution_state=ExecutionState("pos-journal", 1000.0),
+        journal=journal,
+        state_store=Store(),
+        trader_symbol="ETH-USDT-SWAP",
+        core_position=PositionSnapshot("LONG", Decimal("5"), 3000, 0.5, Decimal("5")),
+        position_id="pos-journal",
+        cash_before_position=1000.0,
+        ts_ms=2,
+    )
+
+    tp_events = [e for e in journal.events if e[0] == "SIDECAR_TP_FILLED"]
+    assert len(tp_events) == 1
+    payload = tp_events[0][1]
+
+    assert "filled_contracts" in payload
+    assert "filled_eth_qty" in payload
+    assert "filled_notional_usdt" in payload
+    assert payload.get("filled_qty_unit") == "contracts_from_okx_accFillSz"
+    assert payload["filled_eth_qty"] == pytest.approx(0.1)
+    assert payload["filled_contracts"] == pytest.approx(1.0)
+    assert "filled_qty" in payload  # original OKX accFillSz preserved

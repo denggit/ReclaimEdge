@@ -9,6 +9,7 @@ from src.position_management.sidecar import runtime_state as sidecar_runtime_sta
 from src.position_management.sidecar.fill_telemetry import (
     build_sidecar_fill_telemetry,
     log_sidecar_tp_filled,
+    normalized_sidecar_fill_payload,
 )
 from src.position_management.sidecar.model import SidecarLegStatus, sidecar_open_qty
 from src.position_management.sidecar.reconciler import (
@@ -67,7 +68,19 @@ async def monitor_sidecar_orders_once(
                 fee_buffer_pct=fee_buffer_pct,
             )
             strategy_state.sidecar_legs[index] = mark_sidecar_leg_tp_filled(leg, ts_ms)
-            journal.append("SIDECAR_TP_FILLED", {**dict(leg), **status}, position_id=position_id)
+            _normalized = normalized_sidecar_fill_payload(leg, status)
+            journal.append(
+                "SIDECAR_TP_FILLED",
+                {
+                    **dict(leg),
+                    **status,
+                    "filled_contracts": _normalized["filled_contracts"],
+                    "filled_eth_qty": _normalized["filled_eth_qty"],
+                    "filled_notional_usdt": _normalized["filled_notional_usdt"],
+                    "filled_qty_unit": "contracts_from_okx_accFillSz",
+                },
+                position_id=position_id,
+            )
             changed = True
             # Compute real remaining sidecar open qty after this fill
             _mt_open_qty_after = sidecar_open_qty(strategy_state.sidecar_legs)
