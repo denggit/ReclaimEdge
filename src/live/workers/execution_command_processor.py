@@ -4,11 +4,11 @@ import asyncio
 import copy
 import html
 import os
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from typing import Any
 
-from src.execution.trader import PositionSnapshot, Trader
+from src.execution.trader import LiveTradeResult, PositionSnapshot, Trader
 from src.live import config_helpers as live_config_helpers
 from src.live import runtime_types as live_runtime_types
 from src.live.account_sync import flat_balance as live_flat_balance
@@ -20,7 +20,12 @@ from src.position_management import runner_live_helpers
 from src.position_management import tp_progress as tp_progress_helpers
 from src.position_management.sidecar import entry_runtime as sidecar_entry_runtime
 from src.position_management.sidecar import runtime_state as sidecar_runtime_state
-from src.position_management.sidecar.core_exit_safety import classify_sidecar_core_final_exit_risk, open_sidecar_legs
+from src.position_management.sidecar.reconciler import mark_sidecar_leg_force_closed
+from src.position_management.sidecar.core_exit_safety import (
+    classify_sidecar_core_final_exit_risk,
+    open_sidecar_legs,
+    sidecar_core_exit_client_order_id,
+)
 from src.position_management.sidecar.planner import (
     SidecarExecutionPlan,
     build_combined_entry_intent,
@@ -46,6 +51,7 @@ class ExecutionCommandProcessor:
     state_store: LiveStateStore
     email_sender: EmailSender
     sidecar_skip_first_layer: bool = True
+    _background_tasks: set[asyncio.Task] = field(default_factory=set, init=False)
 
     async def process(self, command: live_runtime_types.TradeCommand) -> Any:
         """Process a single TradeCommand. Returns the LiveTradeResult on success, None if skipped."""
@@ -229,7 +235,9 @@ class ExecutionCommandProcessor:
 
         # ── sidecar core final exit safety guard ─────────────────────────
         if command.intent.intent_type == "UPDATE_TP":
-            await self._align_sidecar_tp_with_unsafe_core_final_exit(command)
+            alignment_result = await self._align_sidecar_tp_with_unsafe_core_final_exit(command)
+            if alignment_result is not None:
+                return alignment_result
 
         # ── execute intent ───────────────────────────────────────────────
         result = await self.trader.execute_intent(command.intent)
@@ -250,16 +258,25 @@ class ExecutionCommandProcessor:
 
     # ── sidecar core final exit safety guard ────────────────────────────
 
-    async def _align_sidecar_tp_with_unsafe_core_final_exit(self, command: TradeCommand) -> None:
-        """Realign sidecar TP orders when core final TP would leave sidecar exposed."""
+    async def _align_sidecar_tp_with_unsafe_core_final_exit(
+        self, command: live_runtime_types.TradeCommand,
+    ) -> LiveTradeResult | None:
+        """Realign sidecar TP orders when core final TP would leave sidecar exposed.
+
+        Returns:
+            None — alignment skipped or succeeded; core UPDATE_TP should proceed.
+            LiveTradeResult — market exit succeeded; core UPDATE_TP must be skipped.
+        Raises:
+            RuntimeError — market exit failed; manual intervention required.
+        """
         # 1. Guard: sidecar not enabled
         if not getattr(self.strategy.state, "sidecar_enabled_for_position", False):
-            return
+            return None
 
         # 2. Guard: no open sidecar legs
         sidecar_legs: list[dict[str, Any]] = list(getattr(self.strategy.state, "sidecar_legs", []) or [])
         if not open_sidecar_legs(sidecar_legs):
-            return
+            return None
 
         # 3. Read core TP params
         side = command.intent.side
@@ -276,7 +293,7 @@ class ExecutionCommandProcessor:
             sidecar_legs=sidecar_legs,
         )
         if not risk.risky:
-            return
+            return None
 
         logger.warning(
             "SIDECAR_CORE_FINAL_EXIT_RISK_DETECTED | risk=%s position_id=%s side=%s core_tp_price=%.4f breakeven_price=%s risky_leg_ids=%s",
@@ -312,8 +329,13 @@ class ExecutionCommandProcessor:
                             f"cancel_sidecar_tp_failed leg_id={leg_id} order_id={old_tp_order_id}"
                         )
 
-                # Place new TP aligned to core final exit
-                client_order_id = f"{leg_id}-COREEXIT"
+                # Place new TP aligned to core final exit with unique clOrdId
+                client_order_id = sidecar_core_exit_client_order_id(
+                    position_id=current_position_id,
+                    leg_id=leg_id,
+                    old_tp_order_id=str(old_tp_order_id) if old_tp_order_id else None,
+                    ts_ms=command.intent.ts_ms,
+                )
                 new_tp_order_id = await self.trader.place_sidecar_fixed_take_profit(
                     side=side,
                     contracts=contracts,
@@ -329,7 +351,7 @@ class ExecutionCommandProcessor:
                 leg["core_exit_alignment_reason"] = risk.reason
 
                 logger.warning(
-                    "SIDECAR_TP_REALIGNED_TO_CORE_EXIT | position_id=%s side=%s core_tp_price=%.4f reason=%s leg_id=%s old_tp_price=%s old_tp_order_id=%s new_tp_order_id=%s",
+                    "SIDECAR_TP_REALIGNED_TO_CORE_EXIT | position_id=%s side=%s core_tp_price=%.4f reason=%s leg_id=%s old_tp_price=%s old_tp_order_id=%s new_tp_order_id=%s client_order_id=%s",
                     current_position_id,
                     side,
                     core_tp_price,
@@ -338,6 +360,7 @@ class ExecutionCommandProcessor:
                     old_tp_price,
                     old_tp_order_id,
                     new_tp_order_id,
+                    client_order_id,
                 )
 
                 self.journal.append(
@@ -350,6 +373,7 @@ class ExecutionCommandProcessor:
                         "old_tp_price": old_tp_price,
                         "old_tp_order_id": old_tp_order_id,
                         "new_tp_order_id": new_tp_order_id,
+                        "client_order_id": client_order_id,
                     },
                     position_id=current_position_id,
                 )
@@ -369,7 +393,7 @@ class ExecutionCommandProcessor:
 
         except Exception as exc:
             logger.error(
-                "SIDECAR_CORE_EXIT_ALIGNMENT_FAILED | position_id=%s side=%s core_tp_price=%.4f reason=%s error=%s market_exit_attempted=true",
+                "SIDECAR_CORE_EXIT_ALIGNMENT_FAILED | position_id=%s side=%s core_tp_price=%.4f reason=%s error=%s delayed_market_exit_armed=true",
                 current_position_id,
                 side,
                 core_tp_price,
@@ -377,44 +401,33 @@ class ExecutionCommandProcessor:
                 exc,
             )
 
-            # Attempt market exit
-            retry_count = int(
-                os.getenv(
-                    "SIDECAR_CORE_EXIT_ALIGNMENT_FAIL_MARKET_EXIT_RETRY_COUNT",
-                    os.getenv("NEAR_TP_SL_FAIL_MARKET_EXIT_RETRY_COUNT", "3"),
-                )
+            # ── arm delayed emergency exit (do NOT market-exit immediately) ──
+            delay_seconds = float(
+                os.getenv("SIDECAR_CORE_EXIT_ALIGNMENT_FAIL_AUTO_EXIT_DELAY_SECONDS", "900")
             )
-            exit_ok, exit_message = await self.trader.market_exit_remaining_position_with_retries(
-                side,
-                retry_count=retry_count,
-            )
+            arm_payload = {
+                "side": side,
+                "core_tp_price": core_tp_price,
+                "risk_reason": risk.reason,
+                "error": str(exc),
+                "delay_seconds": delay_seconds,
+                "manual_intervention_required": delay_seconds < 0,
+            }
 
             async with self.state_lock:
                 self.execution_state.trading_halted = True
-                if exit_ok:
-                    self.execution_state.halt_reason = (
-                        "sidecar_core_exit_alignment_failed_market_exit_waiting_flat"
-                    )
-                    self.strategy.state.sidecar_halt_reason = (
-                        "sidecar_core_exit_alignment_failed_market_exit_waiting_flat"
-                    )
-                else:
-                    self.execution_state.halt_reason = "sidecar_core_exit_alignment_failed"
-                    self.strategy.state.sidecar_halt_reason = "sidecar_core_exit_alignment_failed"
+                self.execution_state.halt_reason = (
+                    "sidecar_core_exit_alignment_failed_delayed_market_exit_armed"
+                )
+                self.execution_state.halt_until_ts_ms = None
                 self.strategy.state.sidecar_dirty = True
+                self.strategy.state.sidecar_halt_reason = (
+                    "sidecar_core_exit_alignment_failed_delayed_market_exit_armed"
+                )
 
             self.journal.append(
-                "SIDECAR_CORE_EXIT_ALIGNMENT_FAILED",
-                {
-                    "side": side,
-                    "core_tp_price": core_tp_price,
-                    "risk_reason": risk.reason,
-                    "error": str(exc),
-                    "exit_ok": exit_ok,
-                    "exit_message": exit_message,
-                    "market_exit_attempted": True,
-                    "manual_intervention_required": not exit_ok,
-                },
+                "SIDECAR_CORE_EXIT_ALIGNMENT_DELAYED_MARKET_EXIT_ARMED",
+                arm_payload,
                 position_id=current_position_id,
             )
 
@@ -427,13 +440,299 @@ class ExecutionCommandProcessor:
                 )
             )
 
-            if exit_ok:
-                raise RuntimeError(
-                    "sidecar_core_exit_alignment_failed_market_exit_waiting_flat"
-                )
-            raise RuntimeError(
-                "sidecar_core_exit_alignment_failed_manual_intervention_required"
+            logger.warning(
+                "SIDECAR_CORE_EXIT_ALIGNMENT_DELAYED_MARKET_EXIT_ARMED | position_id=%s side=%s core_tp_price=%.4f reason=%s delay_seconds=%.0f",
+                current_position_id,
+                side,
+                core_tp_price,
+                risk.reason,
+                delay_seconds,
             )
+
+            # Send CRITICAL arm email
+            arm_subject = "CRITICAL: Sidecar core-exit alignment failed; delayed market exit armed"
+            arm_content = (
+                "<div style='font-family:Arial,Helvetica,sans-serif;line-height:1.55;'>"
+                "<h2>Sidecar Core-Exit Alignment Failed</h2>"
+                "<p>Sidecar TP realignment failed. Trading has been halted.</p>"
+                "<p>A delayed market exit task has been scheduled.</p>"
+                f"<p><b>position_id:</b> {html.escape(str(current_position_id))}</p>"
+                f"<p><b>side:</b> {html.escape(str(side))}</p>"
+                f"<p><b>core_tp_price:</b> {core_tp_price:.4f}</p>"
+                f"<p><b>risk_reason:</b> {html.escape(risk.reason)}</p>"
+                f"<p><b>error:</b> {html.escape(str(exc))}</p>"
+                f"<p><b>delay_seconds:</b> {delay_seconds:.0f}</p>"
+                f"<p><b>action:</b> manual window open</p>"
+                "</div>"
+            )
+            ok = await self.email_sender.send_email_async(arm_subject, arm_content, content_type="html")
+            if not ok:
+                logger.error("Failed to send sidecar core-exit delayed arm email")
+
+            # Schedule background delayed task (non-blocking)
+            if delay_seconds >= 0:
+                self._schedule_background_task(
+                    self._delayed_sidecar_core_exit_market_exit(
+                        delay_seconds=delay_seconds,
+                        side=side,
+                        position_id=current_position_id,
+                        cash_before_position=cash_before_position,
+                        core_tp_price=core_tp_price,
+                        risk_reason=risk.reason,
+                        original_error=str(exc),
+                        ts_ms=command.intent.ts_ms,
+                    )
+                )
+
+            # Return synthetic ok result — skip core UPDATE_TP, avoid failure-handler rollback
+            return LiveTradeResult(
+                ok=True,
+                action="SIDECAR_CORE_EXIT_ALIGNMENT_DELAYED_MARKET_EXIT_ARMED",
+                order_id=None,
+                tp_order_id=None,
+                contracts="0",
+                tp_price=str(core_tp_price),
+                message="sidecar_core_exit_alignment_failed_delayed_market_exit_armed",
+            )
+
+    # ── delayed sidecar core exit helpers ────────────────────────────────
+
+    def _schedule_background_task(self, coro) -> None:
+        task = asyncio.create_task(coro)
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+
+    async def _delayed_sidecar_core_exit_market_exit(
+        self,
+        *,
+        delay_seconds: float,
+        side: str,
+        position_id: str | None,
+        cash_before_position: float | None,
+        core_tp_price: float,
+        risk_reason: str,
+        original_error: str,
+        ts_ms: int,
+    ) -> None:
+        """Background task: wait delay_seconds, then check position and market-exit if needed."""
+        # 1. Wait for the configured delay
+        if delay_seconds > 0:
+            await asyncio.sleep(delay_seconds)
+
+        # 2. Re-check OKX position
+        try:
+            position = await self.trader.fetch_position_snapshot()
+        except Exception:
+            position = None
+
+        # 3. Already flat or wrong side → skip market exit
+        if position is None or not position.has_position or position.side != side:
+            async with self.state_lock:
+                self.execution_state.trading_halted = True
+                self.execution_state.halt_reason = (
+                    "sidecar_core_exit_alignment_failed_waiting_flat"
+                )
+                self.strategy.state.sidecar_halt_reason = (
+                    "sidecar_core_exit_alignment_failed_waiting_flat"
+                )
+                self.strategy.state.sidecar_legs = [
+                    mark_sidecar_leg_force_closed(leg, ts_ms)
+                    if str(leg.get("status") or "") in {"OPEN", "OPEN_UNPROTECTED"}
+                    else leg
+                    for leg in self.strategy.state.sidecar_legs
+                ]
+                for leg in self.strategy.state.sidecar_legs:
+                    if leg.get("status") == "FORCE_CLOSED" and leg.get("updated_ts_ms") == ts_ms:
+                        leg["core_exit_alignment_reason"] = risk_reason
+                        leg["core_exit_market_exit"] = False
+                        leg["core_exit_already_flat"] = True
+                sidecar_runtime_state.refresh_sidecar_state_totals(
+                    self.strategy.state, int(os.getenv("SIDECAR_MAX_LEGS", "10"))
+                )
+
+            self.journal.append(
+                "SIDECAR_CORE_EXIT_DELAYED_MARKET_EXIT_SKIPPED_ALREADY_FLAT",
+                {
+                    "side": side,
+                    "core_tp_price": core_tp_price,
+                    "risk_reason": risk_reason,
+                    "original_error": original_error,
+                    "delay_seconds": delay_seconds,
+                    "reason": "okx_already_flat_or_wrong_side",
+                },
+                position_id=position_id,
+            )
+
+            self.state_store.save(
+                LiveStateStore.from_strategy_state(
+                    position_id=position_id,
+                    symbol=self.trader.symbol,
+                    strategy_state=self.strategy.state,
+                    cash_before_position=cash_before_position,
+                )
+            )
+
+            logger.warning(
+                "SIDECAR_CORE_EXIT_DELAYED_MARKET_EXIT_SKIPPED_ALREADY_FLAT | position_id=%s side=%s delay_seconds=%.0f",
+                position_id,
+                side,
+                delay_seconds,
+            )
+
+            # Send result email
+            skip_subject = "Sidecar core-exit delayed market exit: already flat"
+            skip_content = (
+                "<div style='font-family:Arial,Helvetica,sans-serif;line-height:1.55;'>"
+                "<h2>Delayed Market Exit Skipped — Already Flat</h2>"
+                f"<p><b>position_id:</b> {html.escape(str(position_id))}</p>"
+                f"<p><b>side:</b> {html.escape(str(side))}</p>"
+                f"<p><b>core_tp_price:</b> {core_tp_price:.4f}</p>"
+                f"<p><b>risk_reason:</b> {html.escape(risk_reason)}</p>"
+                f"<p><b>action:</b> market exit skipped (already flat)</p>"
+                "</div>"
+            )
+            ok = await self.email_sender.send_email_async(skip_subject, skip_content, content_type="html")
+            if not ok:
+                logger.error("Failed to send sidecar core-exit delayed skip email")
+            return
+
+        # 4. Still has position: execute market exit
+        retry_count = int(
+            os.getenv(
+                "SIDECAR_CORE_EXIT_ALIGNMENT_FAIL_MARKET_EXIT_RETRY_COUNT",
+                os.getenv("NEAR_TP_SL_FAIL_MARKET_EXIT_RETRY_COUNT", "3"),
+            )
+        )
+        exit_ok, exit_message = await self.trader.market_exit_remaining_position_with_retries(
+            side,
+            retry_count=retry_count,
+        )
+
+        if exit_ok:
+            async with self.state_lock:
+                self.execution_state.trading_halted = True
+                self.execution_state.halt_reason = (
+                    "sidecar_core_exit_delayed_market_exit_waiting_flat"
+                )
+                self.strategy.state.sidecar_halt_reason = (
+                    "sidecar_core_exit_delayed_market_exit_waiting_flat"
+                )
+                self.strategy.state.sidecar_legs = [
+                    mark_sidecar_leg_force_closed(leg, ts_ms)
+                    if str(leg.get("status") or "") in {"OPEN", "OPEN_UNPROTECTED"}
+                    else leg
+                    for leg in self.strategy.state.sidecar_legs
+                ]
+                for leg in self.strategy.state.sidecar_legs:
+                    if leg.get("status") == "FORCE_CLOSED" and leg.get("updated_ts_ms") == ts_ms:
+                        leg["core_exit_alignment_reason"] = risk_reason
+                        leg["core_exit_market_exit"] = True
+                sidecar_runtime_state.refresh_sidecar_state_totals(
+                    self.strategy.state, int(os.getenv("SIDECAR_MAX_LEGS", "10"))
+                )
+
+            self.journal.append(
+                "SIDECAR_CORE_EXIT_DELAYED_MARKET_EXIT_EXECUTED",
+                {
+                    "side": side,
+                    "core_tp_price": core_tp_price,
+                    "risk_reason": risk_reason,
+                    "original_error": original_error,
+                    "delay_seconds": delay_seconds,
+                    "exit_message": exit_message,
+                    "trading_halted": True,
+                },
+                position_id=position_id,
+            )
+
+            self.state_store.save(
+                LiveStateStore.from_strategy_state(
+                    position_id=position_id,
+                    symbol=self.trader.symbol,
+                    strategy_state=self.strategy.state,
+                    cash_before_position=cash_before_position,
+                )
+            )
+
+            logger.warning(
+                "SIDECAR_CORE_EXIT_DELAYED_MARKET_EXIT_EXECUTED | position_id=%s side=%s delay_seconds=%.0f exit_message=%s",
+                position_id,
+                side,
+                delay_seconds,
+                exit_message,
+            )
+
+            exec_subject = "Sidecar core-exit delayed market exit: executed"
+            exec_content = (
+                "<div style='font-family:Arial,Helvetica,sans-serif;line-height:1.55;'>"
+                "<h2>Delayed Market Exit Executed</h2>"
+                f"<p><b>position_id:</b> {html.escape(str(position_id))}</p>"
+                f"<p><b>side:</b> {html.escape(str(side))}</p>"
+                f"<p><b>core_tp_price:</b> {core_tp_price:.4f}</p>"
+                f"<p><b>risk_reason:</b> {html.escape(risk_reason)}</p>"
+                f"<p><b>exit_message:</b> {html.escape(exit_message)}</p>"
+                f"<p><b>action:</b> market exit executed</p>"
+                "</div>"
+            )
+            ok = await self.email_sender.send_email_async(exec_subject, exec_content, content_type="html")
+            if not ok:
+                logger.error("Failed to send sidecar core-exit delayed executed email")
+        else:
+            async with self.state_lock:
+                self.execution_state.trading_halted = True
+                self.execution_state.halt_reason = "sidecar_core_exit_delayed_market_exit_failed"
+                self.strategy.state.sidecar_dirty = True
+                self.strategy.state.sidecar_halt_reason = (
+                    "sidecar_core_exit_delayed_market_exit_failed"
+                )
+
+            self.journal.append(
+                "SIDECAR_CORE_EXIT_DELAYED_MARKET_EXIT_FAILED",
+                {
+                    "side": side,
+                    "core_tp_price": core_tp_price,
+                    "risk_reason": risk_reason,
+                    "original_error": original_error,
+                    "delay_seconds": delay_seconds,
+                    "exit_message": exit_message,
+                    "trading_halted": True,
+                    "manual_intervention_required": True,
+                },
+                position_id=position_id,
+            )
+
+            self.state_store.save(
+                LiveStateStore.from_strategy_state(
+                    position_id=position_id,
+                    symbol=self.trader.symbol,
+                    strategy_state=self.strategy.state,
+                    cash_before_position=cash_before_position,
+                )
+            )
+
+            logger.error(
+                "SIDECAR_CORE_EXIT_DELAYED_MARKET_EXIT_FAILED | position_id=%s side=%s delay_seconds=%.0f exit_message=%s manual_intervention_required=true",
+                position_id,
+                side,
+                delay_seconds,
+                exit_message,
+            )
+
+            fail_subject = "CRITICAL: Sidecar core-exit delayed market exit FAILED"
+            fail_content = (
+                "<div style='font-family:Arial,Helvetica,sans-serif;line-height:1.55;'>"
+                "<h2>Delayed Market Exit FAILED — Manual Intervention Required</h2>"
+                f"<p><b>position_id:</b> {html.escape(str(position_id))}</p>"
+                f"<p><b>side:</b> {html.escape(str(side))}</p>"
+                f"<p><b>core_tp_price:</b> {core_tp_price:.4f}</p>"
+                f"<p><b>risk_reason:</b> {html.escape(risk_reason)}</p>"
+                f"<p><b>exit_message:</b> {html.escape(exit_message)}</p>"
+                f"<p><b>action:</b> market exit failed</p>"
+                "</div>"
+            )
+            ok = await self.email_sender.send_email_async(fail_subject, fail_content, content_type="html")
+            if not ok:
+                logger.error("Failed to send sidecar core-exit delayed failed email")
 
     # ── result application helpers ───────────────────────────────────────
 

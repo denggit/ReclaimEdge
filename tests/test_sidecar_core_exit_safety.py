@@ -7,6 +7,7 @@ from src.position_management.sidecar.core_exit_safety import (
     classify_sidecar_core_final_exit_risk,
     core_tp_is_loss_for_position,
     open_sidecar_legs,
+    sidecar_core_exit_client_order_id,
     sidecar_leg_tp_is_beyond_core_exit,
 )
 from src.position_management.sidecar.model import SidecarLegStatus
@@ -284,3 +285,88 @@ def test_leg_with_invalid_tp_price_treated_as_risky() -> None:
     )
     assert risk.risky is True
     assert "leg-bad" in risk.risky_leg_ids
+
+
+# ── test: sidecar_core_exit_client_order_id ──────────────────────────────
+
+def test_client_order_id_is_within_32_chars() -> None:
+    cid = sidecar_core_exit_client_order_id(
+        position_id="pos-test",
+        leg_id="leg-1",
+        old_tp_order_id="old123",
+        ts_ms=5_000,
+    )
+    assert len(cid) <= 32
+    assert cid.startswith("SCE")
+
+
+def test_different_leg_ids_produce_different_clord_ids() -> None:
+    cid1 = sidecar_core_exit_client_order_id(
+        position_id="pos-test",
+        leg_id="leg-ETHUSDTSWAPSHORT178079055281199a",
+        old_tp_order_id="3633692596170973184",
+        ts_ms=5_000,
+    )
+    cid2 = sidecar_core_exit_client_order_id(
+        position_id="pos-test",
+        leg_id="leg-ETHUSDTSWAPSHORT178079055281199b",
+        old_tp_order_id="3633692596170974000",
+        ts_ms=5_000,
+    )
+    assert cid1 != cid2
+
+
+def test_different_ts_produces_different_clord_ids() -> None:
+    cid1 = sidecar_core_exit_client_order_id(
+        position_id="pos-test",
+        leg_id="leg-1",
+        old_tp_order_id="old123",
+        ts_ms=5_000,
+    )
+    cid2 = sidecar_core_exit_client_order_id(
+        position_id="pos-test",
+        leg_id="leg-1",
+        old_tp_order_id="old123",
+        ts_ms=6_000,
+    )
+    assert cid1 != cid2
+
+
+def test_none_position_id_and_order_id_still_produces_valid_id() -> None:
+    cid = sidecar_core_exit_client_order_id(
+        position_id=None,
+        leg_id="leg-1",
+        old_tp_order_id=None,
+        ts_ms=5_000,
+    )
+    assert len(cid) <= 32
+    assert cid.startswith("SCE")
+
+
+def test_similar_leg_ids_but_different_old_tp_produce_different_ids() -> None:
+    """Regression: two legs whose leg_id has the same long prefix must not collide."""
+    # Simulate the real-world scenario where sanitized leg_ids become identical
+    cid1 = sidecar_core_exit_client_order_id(
+        position_id="pos-1",
+        leg_id="ETHUSDTSWAPSHORT178079055281199f",
+        old_tp_order_id="3633692596170973184",
+        ts_ms=1780790552811,
+    )
+    cid2 = sidecar_core_exit_client_order_id(
+        position_id="pos-1",
+        leg_id="ETHUSDTSWAPSHORT178079055281199f",
+        old_tp_order_id="3633692596170974000",
+        ts_ms=1780790552811,
+    )
+    assert cid1 != cid2
+
+
+def test_client_order_id_only_contains_alphanumeric() -> None:
+    cid = sidecar_core_exit_client_order_id(
+        position_id="pos|test",
+        leg_id="leg-1",
+        old_tp_order_id="old|123",
+        ts_ms=5_000,
+    )
+    assert all(c.isalnum() for c in cid)
+    assert cid.startswith("SCE")

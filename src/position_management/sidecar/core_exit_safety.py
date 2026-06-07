@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from typing import Any
 
-from src.position_management.sidecar.model import SidecarLegStatus
+from src.position_management.sidecar.model import SidecarLegStatus, sanitize_okx_client_order_id
 
 
 @dataclass(frozen=True)
@@ -68,3 +69,16 @@ def classify_sidecar_core_final_exit_risk(
     if risky_leg_ids:
         return SidecarCoreExitRisk(True, "sidecar_tp_beyond_core_final_exit", tuple(risky_leg_ids))
     return SidecarCoreExitRisk(False, "sidecar_tp_reaches_before_or_at_core_exit", ())
+
+
+def sidecar_core_exit_client_order_id(
+    *,
+    position_id: str | None,
+    leg_id: str,
+    old_tp_order_id: str | None,
+    ts_ms: int,
+) -> str:
+    raw_key = f"{position_id or ''}|{leg_id}|{old_tp_order_id or ''}|{int(ts_ms)}"
+    digest = hashlib.sha1(raw_key.encode("utf-8")).hexdigest()[:18]
+    raw = f"SCE{digest}"
+    return sanitize_okx_client_order_id(raw)
