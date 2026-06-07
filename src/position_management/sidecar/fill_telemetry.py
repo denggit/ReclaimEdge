@@ -1,8 +1,13 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from logging import Logger
 from typing import Any, Iterable
+
+from src.position_management.sidecar.fill_normalization import (
+    SidecarFillSnapshot,
+    normalize_sidecar_tp_fill,
+)
 
 
 @dataclass(frozen=True)
@@ -11,12 +16,18 @@ class SidecarFillTelemetry:
 
     Designed to be built from a sidecar leg dict and order status dict,
     and then logged / merged / passed into cash-drift reasoning.
+
+    ``filled_qty`` is filled_eth_qty (ETH, not contracts).
+    ``filled_contracts`` is the raw OKX accFillSz (contracts).
     """
 
     filled_count: int = 0
     filled_leg_ids: tuple[str, ...] = ()
     filled_order_ids: tuple[str, ...] = ()
     filled_qty: float = 0.0
+    filled_contracts: float = 0.0
+    filled_eth_qty: float = 0.0
+    filled_notional_usdt: float | None = None
     realized_notional: float | None = None
     source: str = ""
 
@@ -26,36 +37,35 @@ def empty_sidecar_fill_telemetry(source: str = "") -> SidecarFillTelemetry:
     return SidecarFillTelemetry(source=source)
 
 
+def _telemetry_from_snapshot(
+    source: str,
+    snapshot: SidecarFillSnapshot,
+) -> SidecarFillTelemetry:
+    """Build a SidecarFillTelemetry from a normalized SidecarFillSnapshot."""
+    return SidecarFillTelemetry(
+        filled_count=1,
+        filled_leg_ids=(snapshot.leg_id,),
+        filled_order_ids=(snapshot.order_id,),
+        filled_qty=snapshot.filled_eth_qty,
+        filled_contracts=snapshot.filled_contracts,
+        filled_eth_qty=snapshot.filled_eth_qty,
+        filled_notional_usdt=snapshot.filled_notional_usdt,
+        realized_notional=snapshot.filled_notional_usdt,
+        source=source,
+    )
+
+
 def build_sidecar_fill_telemetry(
     source: str,
     leg: dict[str, Any],
     status: dict[str, Any],
 ) -> SidecarFillTelemetry:
-    """Build a single-fill telemetry payload from one leg and its order status."""
-    filled_qty_val = status.get("filled_qty")
-    filled_qty: float = float(filled_qty_val) if filled_qty_val is not None else 0.0
+    """Build a single-fill telemetry payload from one leg and its order status.
 
-    avg_fill_price_val = status.get("avg_fill_price")
-    avg_fill_price: float | None = float(avg_fill_price_val) if avg_fill_price_val is not None else None
-
-    leg_qty: float = float(leg.get("qty", 0.0))
-    realized_notional: float | None = (
-        round(avg_fill_price * filled_qty, 8)
-        if avg_fill_price is not None and filled_qty > 0
-        else None
-    )
-
-    leg_id = str(leg.get("leg_id", ""))
-    order_id = str(leg.get("tp_order_id", ""))
-
-    return SidecarFillTelemetry(
-        filled_count=1,
-        filled_leg_ids=(leg_id,),
-        filled_order_ids=(order_id,),
-        filled_qty=filled_qty if filled_qty > 0 else leg_qty,
-        realized_notional=realized_notional,
-        source=source,
-    )
+    Uses normalize_sidecar_tp_fill to convert OKX accFillSz (contracts) to ETH.
+    """
+    snapshot = normalize_sidecar_tp_fill(leg=leg, status=status)
+    return _telemetry_from_snapshot(source, snapshot)
 
 
 def merge_sidecar_fill_telemetry(
@@ -66,7 +76,9 @@ def merge_sidecar_fill_telemetry(
     filled_leg_ids: list[str] = []
     filled_order_ids: list[str] = []
     filled_qty = 0.0
-    realized_notional: float | None = None
+    filled_contracts = 0.0
+    filled_eth_qty = 0.0
+    filled_notional_usdt: float | None = None
     source = ""
 
     for t in items:
@@ -76,10 +88,10 @@ def merge_sidecar_fill_telemetry(
         filled_leg_ids.extend(t.filled_leg_ids)
         filled_order_ids.extend(t.filled_order_ids)
         filled_qty += t.filled_qty
-        if t.realized_notional is not None:
-            realized_notional = (
-                (realized_notional or 0.0) + t.realized_notional
-            )
+        filled_contracts += t.filled_contracts
+        filled_eth_qty += t.filled_eth_qty
+        if t.filled_notional_usdt is not None:
+            filled_notional_usdt = (filled_notional_usdt or 0.0) + t.filled_notional_usdt
         if t.source:
             source = t.source
 
@@ -88,7 +100,10 @@ def merge_sidecar_fill_telemetry(
         filled_leg_ids=tuple(filled_leg_ids),
         filled_order_ids=tuple(filled_order_ids),
         filled_qty=filled_qty,
-        realized_notional=realized_notional,
+        filled_contracts=filled_contracts,
+        filled_eth_qty=filled_eth_qty,
+        filled_notional_usdt=filled_notional_usdt,
+        realized_notional=filled_notional_usdt,
         source=source,
     )
 
@@ -100,6 +115,7 @@ def log_sidecar_tp_filled(
     telemetry: SidecarFillTelemetry,
     leg: dict[str, Any] | None = None,
     status: dict[str, Any] | None = None,
+    sidecar_open_qty_after: float | None = None,
     core_position: Any = None,
 ) -> None:
     """Emit a warning-level log for a sidecar TP fill event."""
@@ -112,7 +128,8 @@ def log_sidecar_tp_filled(
         parts.append(f"leg_ids={','.join(telemetry.filled_leg_ids)}")
     if telemetry.filled_order_ids:
         parts.append(f"order_ids={','.join(telemetry.filled_order_ids)}")
-    parts.append(f"filled_qty={telemetry.filled_qty}")
+    parts.append(f"filled_contracts={telemetry.filled_contracts}")
+    parts.append(f"filled_eth_qty={telemetry.filled_eth_qty}")
 
     if status is not None:
         avg_fill_price = status.get("avg_fill_price")
@@ -123,9 +140,10 @@ def log_sidecar_tp_filled(
         tp_price = leg.get("tp_price")
         if tp_price is not None:
             parts.append(f"tp_price={tp_price}")
-        parts.append(f"sidecar_open_qty_after={leg.get('qty', 0.0) * 0}")
 
-    if telemetry.realized_notional is not None:
-        parts.append(f"realized_notional={telemetry.realized_notional}")
+    if telemetry.filled_notional_usdt is not None:
+        parts.append(f"filled_notional_usdt={telemetry.filled_notional_usdt}")
+
+    parts.append(f"sidecar_open_qty_after={sidecar_open_qty_after}")
 
     logger.warning("SIDECAR_TP_FILLED | %s", " ".join(parts))

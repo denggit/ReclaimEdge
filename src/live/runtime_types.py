@@ -37,6 +37,7 @@ class SidecarPreCoreReconcileResult:
     sidecar_tp_filled_leg_ids: tuple[str, ...] = ()
     sidecar_tp_filled_order_ids: tuple[str, ...] = ()
     sidecar_tp_filled_qty: float = 0.0
+    sidecar_tp_filled_contracts: float = 0.0
 
 
 @dataclass

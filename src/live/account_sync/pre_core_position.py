@@ -51,6 +51,7 @@ class AccountSyncPreCorePositionResult:
     sidecar_tp_filled_leg_ids: tuple[str, ...] = ()
     sidecar_tp_filled_order_ids: tuple[str, ...] = ()
     sidecar_tp_filled_qty: float = 0.0
+    sidecar_tp_filled_contracts: float = 0.0
 
 
 async def run_account_sync_pre_core_position_phase(
@@ -118,6 +119,7 @@ async def run_account_sync_pre_core_position_phase(
     _sidecar_tp_filled_leg_ids = _sidecar_pre_core_result.sidecar_tp_filled_leg_ids
     _sidecar_tp_filled_order_ids = _sidecar_pre_core_result.sidecar_tp_filled_order_ids
     _sidecar_tp_filled_qty = _sidecar_pre_core_result.sidecar_tp_filled_qty
+    _sidecar_tp_filled_contracts = _sidecar_pre_core_result.sidecar_tp_filled_contracts
     # ── End pre-core reconciliation ──────────────────────────────
     async with state_lock:
         pending_order_count = execution_state.pending_order_count
@@ -273,7 +275,36 @@ async def run_account_sync_pre_core_position_phase(
                     )
                     last_cash_event_log = now
             elif unsafe_reasons and abs(cash_delta) >= cash_drift_min_delta_usdt:
-                if _sidecar_tp_filled_count > 0:
+                # ── Determine sidecar TP fill context ──────────────────
+                _lookback_s = float(os.getenv("SIDECAR_TP_CASH_DRIFT_LOOKBACK_SECONDS", "120"))
+                _now_ms = live_time_utils.utc_ms()
+
+                # Same-sync: pre-core reconcile detected a fill this cycle
+                _same_sync_fill = _sidecar_tp_filled_count > 0
+
+                # Delayed: a recent TP_FILLED leg in state whose fill was
+                # detected in a prior sync but cash change appears now.
+                _recent_fill_leg_ids: list[str] = []
+                _recent_fill_order_ids: list[str] = []
+                _recent_fill_qty = 0.0
+                _recent_fill_contracts = 0.0
+                if not _same_sync_fill:
+                    for _leg in strategy.state.sidecar_legs:
+                        if _leg.get("status") != SidecarLegStatus.TP_FILLED.value:
+                            continue
+                        _leg_updated = _leg.get("updated_ts_ms", 0)
+                        if _leg_updated > 0 and (_now_ms - _leg_updated) <= (_lookback_s * 1000):
+                            _rid = str(_leg.get("leg_id", ""))
+                            _recent_fill_leg_ids.append(_rid)
+                            _oid = str(_leg.get("tp_order_id", ""))
+                            if _oid:
+                                _recent_fill_order_ids.append(_oid)
+                            _recent_fill_qty += float(_leg.get("qty", 0.0))
+                            _leg_contracts = float(_leg.get("contracts", 0.0) or 0.0)
+                            _recent_fill_contracts += _leg_contracts
+                _has_recent_fill = len(_recent_fill_leg_ids) > 0
+
+                if _same_sync_fill:
                     drift_reason = "position_cash_change:sidecar_tp_filled;unsafe_state:" + ",".join(unsafe_reasons)
                     cash_drift_payload = {
                         "amount": cash_delta,
@@ -286,6 +317,23 @@ async def run_account_sync_pre_core_position_phase(
                         "sidecar_tp_filled_leg_ids": list(_sidecar_tp_filled_leg_ids),
                         "sidecar_tp_filled_order_ids": list(_sidecar_tp_filled_order_ids),
                         "sidecar_tp_filled_qty": _sidecar_tp_filled_qty,
+                        "sidecar_tp_filled_contracts": _sidecar_tp_filled_contracts,
+                    }
+                elif _has_recent_fill:
+                    drift_reason = "position_cash_change:recent_sidecar_tp_filled;unsafe_state:" + ",".join(unsafe_reasons)
+                    cash_drift_payload = {
+                        "amount": cash_delta,
+                        "cash_before": last_logged_cash,
+                        "cash_after": cash,
+                        "equity_before": last_logged_equity,
+                        "equity_after": equity,
+                        "reason": drift_reason,
+                        "sidecar_tp_filled_count": len(_recent_fill_leg_ids),
+                        "sidecar_tp_filled_leg_ids": _recent_fill_leg_ids,
+                        "sidecar_tp_filled_order_ids": _recent_fill_order_ids,
+                        "sidecar_tp_filled_qty": _recent_fill_qty,
+                        "sidecar_tp_filled_contracts": _recent_fill_contracts,
+                        "sidecar_tp_cash_drift_recent_window_seconds": _lookback_s,
                     }
                 else:
                     drift_reason = "unsafe_state:" + ",".join(unsafe_reasons)
@@ -344,4 +392,5 @@ async def run_account_sync_pre_core_position_phase(
         sidecar_tp_filled_leg_ids=_sidecar_tp_filled_leg_ids,
         sidecar_tp_filled_order_ids=_sidecar_tp_filled_order_ids,
         sidecar_tp_filled_qty=_sidecar_tp_filled_qty,
+        sidecar_tp_filled_contracts=_sidecar_tp_filled_contracts,
     )

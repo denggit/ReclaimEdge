@@ -147,9 +147,12 @@ def record_sidecar_tp_fill_exit(
         *,
         fee_buffer_pct: float = DEFAULT_NET_REMAINING_FEE_BUFFER_PCT,
 ) -> None:
-    filled_qty = _coerce_positive_float(status.get("filled_qty")) or _coerce_positive_float(leg.get("qty"))
-    fill_price = _coerce_positive_float(status.get("avg_fill_price")) or _coerce_positive_float(leg.get("tp_price"))
-    if filled_qty is None or fill_price is None:
+    from src.position_management.sidecar.fill_normalization import normalize_sidecar_tp_fill
+
+    snapshot = normalize_sidecar_tp_fill(leg=leg, status=status)
+    filled_qty = snapshot.filled_eth_qty
+    fill_price = snapshot.avg_fill_price or snapshot.tp_price
+    if filled_qty is None or filled_qty <= 0 or fill_price is None or fill_price <= 0:
         return
     record_remaining_exit_notional(
         strategy_state,

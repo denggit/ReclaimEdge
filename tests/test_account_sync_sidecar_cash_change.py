@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from decimal import Decimal
 
 import pytest
 
 from src.execution.trader import PositionSnapshot
 from src.live import runtime_types as live_runtime_types
+from src.live import time_utils as live_time_utils
 from src.live.account_sync.pre_core_position import run_account_sync_pre_core_position_phase
 from src.position_management.sidecar.model import SidecarLegStatus
 from src.position_management.sidecar.runtime_state import refresh_sidecar_state_totals
@@ -75,6 +77,7 @@ async def test_cash_drift_includes_sidecar_tp_filled_when_detected_in_same_sync(
     """When a sidecar TP fill is detected in pre-core reconcile and cash drift
     triggers in the same sync cycle, the drift reason must include
     'position_cash_change:sidecar_tp_filled' AND retain 'unsafe_state:'.
+    filled_qty in status is contracts (1.0 → 0.1 ETH with multiplier 0.1).
     """
     # ── strategy state with OPEN sidecar leg ──
     state = StrategyPositionState(
@@ -101,13 +104,13 @@ async def test_cash_drift_includes_sidecar_tp_filled_when_detected_in_same_sync(
     )
     refresh_sidecar_state_totals(state)
 
-    # ── trader: OKX has position + sidecar TP filled + cash/equity changed ──
+    # ── trader: OKX has position + sidecar TP filled (contracts=1.0 → 0.1 ETH) + cash/equity changed ──
     trader = FakeTrader(
         position=PositionSnapshot("LONG", Decimal("4"), 3000.0, 0.4, Decimal("4")),
         usdt_equity=681.6438,
         cash_balance=584.8172,
         sidecar_order_status="FILLED",
-        sidecar_order_filled_qty=0.1,
+        sidecar_order_filled_qty=1.0,  # contracts, not ETH
         sidecar_order_avg_fill_price=3012.0,
     )
 
@@ -173,6 +176,9 @@ async def test_cash_drift_includes_sidecar_tp_filled_when_detected_in_same_sync(
     assert result.cash_drift_payload["sidecar_tp_filled_count"] == 1
     assert "leg-1" in result.cash_drift_payload["sidecar_tp_filled_leg_ids"]
 
+    # ── filled_qty in payload is ETH, not contracts ──
+    assert result.cash_drift_payload["sidecar_tp_filled_qty"] == pytest.approx(0.1)
+
     # ── assert cash_transfer_payload is None (NOT CASH_TRANSFER) ──
     assert result.cash_transfer_payload is None, (
         "cash_transfer_payload must be None — sidecar TP cash change is drift, not transfer"
@@ -185,6 +191,8 @@ async def test_cash_drift_includes_sidecar_tp_filled_when_detected_in_same_sync(
     assert result.sidecar_tp_filled_count == 1
     assert "leg-1" in result.sidecar_tp_filled_leg_ids
     assert "tp-1" in result.sidecar_tp_filled_order_ids
+    # sidecar_tp_filled_qty is ETH
+    assert result.sidecar_tp_filled_qty == pytest.approx(0.1)
 
 
 @pytest.mark.asyncio
@@ -262,3 +270,196 @@ async def test_cash_drift_no_sidecar_tp_uses_original_unsafe_state_reason() -> N
     assert reason.startswith("unsafe_state:")
 
     assert result.sidecar_tp_filled_count == 0
+
+
+@pytest.mark.asyncio
+async def test_cash_drift_detects_recent_sidecar_tp_filled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Delayed cash drift: sidecar TP was filled in a prior sync cycle
+    (56 seconds ago, within default 120s lookback). The drift reason must
+    contain 'position_cash_change:recent_sidecar_tp_filled'."""
+    monkeypatch.setenv("SIDECAR_TP_CASH_DRIFT_LOOKBACK_SECONDS", "120")
+    _now_ms = live_time_utils.utc_ms()
+
+    # ── strategy state: sidecar leg already TP_FILLED 56 s ago, no OPEN legs ──
+    state = StrategyPositionState(
+        side="LONG",
+        layers=1,
+        total_entry_qty=0.5,
+        avg_entry_price=3000.0,
+        sidecar_enabled_for_position=True,
+        sidecar_legs=[
+            {
+                "leg_id": "leg-filled-1",
+                "status": SidecarLegStatus.TP_FILLED.value,
+                "tp_order_id": "tp-1",
+                "qty": 0.1,
+                "contracts": "1",
+                "tp_price": 3012.0,
+                "created_ts_ms": _now_ms - 60_000,
+                "updated_ts_ms": _now_ms - 56_000,  # 56 seconds ago
+            }
+        ],
+    )
+    refresh_sidecar_state_totals(state)
+
+    # No OPEN sidecar leg → pre_core_reconcile won't trigger a new fill
+    trader = FakeTrader(
+        position=PositionSnapshot("LONG", Decimal("4"), 3000.0, 0.4, Decimal("4")),
+        usdt_equity=681.6438,
+        cash_balance=584.8172,
+        sidecar_order_status="OPEN",
+    )
+
+    strategy = BollCvdShockReclaimStrategy(
+        config=type("C", (), {"breakeven_fee_buffer_pct": 0.001})(),  # type: ignore[arg-type]
+        sizer=SimplePositionSizer(SimplePositionSizerConfig()),
+    )
+    strategy.state = state
+
+    sizer = SimplePositionSizer(SimplePositionSizerConfig())
+
+    execution_state = live_runtime_types.ExecutionState(
+        current_position_id="pos-recent",
+        cash_before_position=568.3372,
+    )
+
+    account_snapshot = live_runtime_types.AccountSnapshot(
+        position=PositionSnapshot("LONG", Decimal("5"), 3000.0, 0.5, Decimal("5")),
+        cash=568.3372,
+        equity=681.6438,
+        updated_monotonic=0.0,
+        updated_ts_ms=0,
+    )
+
+    journal = FakeJournal()
+    store = FakeStateStore()
+    state_lock = asyncio.Lock()
+
+    result = await run_account_sync_pre_core_position_phase(
+        state_lock=state_lock,
+        account_snapshot=account_snapshot,
+        execution_state=execution_state,
+        trader=trader,  # type: ignore[arg-type]
+        sizer=sizer,
+        strategy=strategy,
+        journal=journal,  # type: ignore[arg-type]
+        state_store=store,  # type: ignore[arg-type]
+        now=100.0,
+        last_account_sync=-1000.0,
+        account_sync_seconds=999,
+        cash_transfer_detect_enabled=True,
+        cash_transfer_min_delta_usdt=0.5,
+        cash_transfer_settle_seconds=120,
+        cash_transfer_after_flat_cooldown_seconds=180,
+        cash_drift_min_delta_usdt=0.5,
+        cash_event_log_interval_seconds=60,
+        cash_log_min_delta_usdt=0.5,
+        last_logged_cash=568.3372,
+        last_logged_equity=568.3372,
+        last_cash_event_log=0.0,
+        last_flat_detected_monotonic=0.0,
+    )
+
+    assert result.cash_drift_payload is not None
+    reason = result.cash_drift_payload["reason"]
+    assert "position_cash_change:recent_sidecar_tp_filled" in reason, (
+        f"reason must contain 'position_cash_change:recent_sidecar_tp_filled', got: {reason}"
+    )
+    assert "unsafe_state:" in reason
+    assert "leg-filled-1" in result.cash_drift_payload["sidecar_tp_filled_leg_ids"]
+
+    # Not CASH_TRANSFER
+    assert result.cash_transfer_payload is None
+
+
+@pytest.mark.asyncio
+async def test_cash_drift_expired_sidecar_tp_filled_uses_original_reason(monkeypatch: pytest.MonkeyPatch) -> None:
+    """TP_FILLED leg with updated_ts_ms older than lookback (10 min ago,
+    default 120s lookback) must NOT be classified as sidecar TP cash drift."""
+    monkeypatch.setenv("SIDECAR_TP_CASH_DRIFT_LOOKBACK_SECONDS", "120")
+    _now_ms = live_time_utils.utc_ms()
+
+    state = StrategyPositionState(
+        side="LONG",
+        layers=1,
+        total_entry_qty=0.5,
+        avg_entry_price=3000.0,
+        sidecar_enabled_for_position=True,
+        sidecar_legs=[
+            {
+                "leg_id": "leg-old",
+                "status": SidecarLegStatus.TP_FILLED.value,
+                "tp_order_id": "tp-old",
+                "qty": 0.1,
+                "contracts": "1",
+                "tp_price": 3012.0,
+                "created_ts_ms": _now_ms - 700_000,
+                "updated_ts_ms": _now_ms - 600_000,  # 10 minutes ago
+            }
+        ],
+    )
+    refresh_sidecar_state_totals(state)
+
+    trader = FakeTrader(
+        position=PositionSnapshot("LONG", Decimal("4"), 3000.0, 0.4, Decimal("4")),
+        usdt_equity=681.6438,
+        cash_balance=584.8172,
+        sidecar_order_status="OPEN",
+    )
+
+    strategy = BollCvdShockReclaimStrategy(
+        config=type("C", (), {"breakeven_fee_buffer_pct": 0.001})(),  # type: ignore[arg-type]
+        sizer=SimplePositionSizer(SimplePositionSizerConfig()),
+    )
+    strategy.state = state
+
+    sizer = SimplePositionSizer(SimplePositionSizerConfig())
+
+    execution_state = live_runtime_types.ExecutionState(
+        current_position_id="pos-expired",
+        cash_before_position=568.3372,
+    )
+
+    account_snapshot = live_runtime_types.AccountSnapshot(
+        position=PositionSnapshot("LONG", Decimal("5"), 3000.0, 0.5, Decimal("5")),
+        cash=568.3372,
+        equity=681.6438,
+        updated_monotonic=0.0,
+        updated_ts_ms=0,
+    )
+
+    journal = FakeJournal()
+    store = FakeStateStore()
+    state_lock = asyncio.Lock()
+
+    result = await run_account_sync_pre_core_position_phase(
+        state_lock=state_lock,
+        account_snapshot=account_snapshot,
+        execution_state=execution_state,
+        trader=trader,  # type: ignore[arg-type]
+        sizer=sizer,
+        strategy=strategy,
+        journal=journal,  # type: ignore[arg-type]
+        state_store=store,  # type: ignore[arg-type]
+        now=100.0,
+        last_account_sync=-1000.0,
+        account_sync_seconds=999,
+        cash_transfer_detect_enabled=True,
+        cash_transfer_min_delta_usdt=0.5,
+        cash_transfer_settle_seconds=120,
+        cash_transfer_after_flat_cooldown_seconds=180,
+        cash_drift_min_delta_usdt=0.5,
+        cash_event_log_interval_seconds=60,
+        cash_log_min_delta_usdt=0.5,
+        last_logged_cash=568.3372,
+        last_logged_equity=568.3372,
+        last_cash_event_log=0.0,
+        last_flat_detected_monotonic=0.0,
+    )
+
+    assert result.cash_drift_payload is not None
+    reason = result.cash_drift_payload["reason"]
+    assert "sidecar_tp_filled" not in reason, (
+        f"expired TP_FILLED must not trigger sidecar_tp_filled reason, got: {reason}"
+    )
+    assert reason.startswith("unsafe_state:")

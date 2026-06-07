@@ -14,7 +14,7 @@ from src.position_management.sidecar.fill_telemetry import (
     log_sidecar_tp_filled,
     merge_sidecar_fill_telemetry,
 )
-from src.position_management.sidecar.model import SidecarLegStatus
+from src.position_management.sidecar.model import SidecarLegStatus, sidecar_open_qty
 from src.position_management.sidecar.reconciler import (
     is_sidecar_dirty_missing_tp_order,
     mark_sidecar_leg_tp_filled,
@@ -144,6 +144,9 @@ async def reconcile_sidecar_orders_before_core_view(
                     journal.append("SIDECAR_TP_FILLED", {**dict(leg), **status_dict}, position_id=position_id)
                 changed = True
 
+                # Compute real remaining sidecar open qty after this fill
+                _open_qty_after = sidecar_open_qty(strategy.state.sidecar_legs)
+
                 # Build and accumulate fill telemetry
                 _tp_telemetry = build_sidecar_fill_telemetry(
                     source="pre_core_reconcile",
@@ -157,6 +160,7 @@ async def reconcile_sidecar_orders_before_core_view(
                     telemetry=_tp_telemetry,
                     leg=leg,
                     status=status_dict,
+                    sidecar_open_qty_after=_open_qty_after,
                 )
 
                 # Sidecar TP reduces OKX net position → existing global SL orders
@@ -239,5 +243,6 @@ async def reconcile_sidecar_orders_before_core_view(
         sidecar_tp_filled_count=_merged.filled_count,
         sidecar_tp_filled_leg_ids=_merged.filled_leg_ids,
         sidecar_tp_filled_order_ids=_merged.filled_order_ids,
-        sidecar_tp_filled_qty=_merged.filled_qty,
+        sidecar_tp_filled_qty=_merged.filled_eth_qty,
+        sidecar_tp_filled_contracts=_merged.filled_contracts,
     )

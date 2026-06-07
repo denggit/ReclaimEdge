@@ -84,21 +84,26 @@ def test_record_core_position_reduction_exit_uses_expected_remaining_qty_branch(
 
 
 def test_record_sidecar_tp_fill_exit_uses_status_fill_values() -> None:
+    """status filled_qty is OKX accFillSz (contracts), not ETH.
+    contract_multiplier=0.1 → filled_eth_qty = 5.0 * 0.1 = 0.5 ETH."""
     state = StrategyPositionState(
         side="LONG",
         position_cost_entry_notional=200.0,
         position_cost_remaining_qty=2.0,
     )
-    leg = {"qty": 0.5, "tp_price": 120.0, "status": SidecarLegStatus.OPEN.value}
-    status = {"filled_qty": "0.4", "avg_fill_price": "115"}
+    # leg: 0.5 ETH → 5 contracts (0.5 / 0.1 = 5)
+    leg = {"qty": 0.5, "contracts": "5", "tp_price": 120.0, "status": SidecarLegStatus.OPEN.value}
+    status = {"filled_qty": "5", "avg_fill_price": "115"}
 
     record_sidecar_tp_fill_exit(state, leg, status)
 
-    assert state.position_cost_exit_notional == pytest.approx(46.0)
-    assert state.position_cost_remaining_qty == pytest.approx(1.6)
+    # filled_eth_qty = 5 * 0.1 = 0.5 ETH, exit_notional = 0.5 * 115 = 57.5
+    assert state.position_cost_exit_notional == pytest.approx(57.5)
+    assert state.position_cost_remaining_qty == pytest.approx(1.5)
 
 
 def test_record_sidecar_tp_fill_exit_falls_back_to_leg_qty_and_tp_price() -> None:
+    """When status has no filled_qty/avg_fill_price, falls back to leg qty (ETH) and tp_price."""
     state = StrategyPositionState(
         side="LONG",
         position_cost_entry_notional=200.0,
@@ -109,6 +114,7 @@ def test_record_sidecar_tp_fill_exit_falls_back_to_leg_qty_and_tp_price() -> Non
 
     record_sidecar_tp_fill_exit(state, leg, status)
 
+    # filled_eth_qty falls back to leg qty = 0.5, exit_notional = 0.5 * 120 = 60.0
     assert state.position_cost_exit_notional == pytest.approx(60.0)
     assert state.position_cost_remaining_qty == pytest.approx(1.5)
 
@@ -464,3 +470,73 @@ def test_three_stage_tp1_payload_is_json_serializable() -> None:
     }
     result2 = json.dumps(global_sl_payload)
     assert isinstance(result2, str)
+
+
+# ── fill_normalization tests ──────────────────────────────────────────────
+
+
+def test_normalize_sidecar_tp_fill_converts_contracts_to_eth() -> None:
+    """status filled_qty (OKX accFillSz) is contracts, not ETH.
+    contract_multiplier=0.1: 0.95 contracts → 0.095 ETH."""
+    from src.position_management.sidecar.fill_normalization import normalize_sidecar_tp_fill
+
+    leg = {"leg_id": "leg-1", "qty": 0.095, "contracts": "0.95", "tp_price": 1627.34, "tp_order_id": "tp-1"}
+    status = {"filled_qty": 0.95, "avg_fill_price": 1627.34}
+
+    snap = normalize_sidecar_tp_fill(leg=leg, status=status)
+
+    assert snap.filled_contracts == 0.95
+    assert snap.filled_eth_qty == pytest.approx(0.095)
+    assert snap.filled_notional_usdt == pytest.approx(0.095 * 1627.34, rel=1e-8)
+    assert snap.avg_fill_price == 1627.34
+    assert snap.tp_price == 1627.34
+
+
+def test_normalize_sidecar_tp_fill_falls_back_to_leg_qty_when_status_missing() -> None:
+    """When status has no filled_qty, falls back to leg qty (ETH)."""
+    from src.position_management.sidecar.fill_normalization import normalize_sidecar_tp_fill
+
+    leg = {"leg_id": "leg-1", "qty": 0.095, "contracts": "0.95", "tp_price": 1627.34, "tp_order_id": "tp-1"}
+    status: dict = {}
+
+    snap = normalize_sidecar_tp_fill(leg=leg, status=status)
+
+    assert snap.filled_eth_qty == pytest.approx(0.095)
+    assert snap.filled_contracts == pytest.approx(0.95)
+
+
+def test_normalize_sidecar_tp_fill_handles_none_safely() -> None:
+    """None / empty strings must not raise."""
+    from src.position_management.sidecar.fill_normalization import normalize_sidecar_tp_fill
+
+    leg = {"leg_id": "leg-1", "qty": None, "tp_order_id": None}
+    status = {"filled_qty": None, "avg_fill_price": ""}
+
+    snap = normalize_sidecar_tp_fill(leg=leg, status=status)
+
+    assert snap.filled_eth_qty == 0.0
+    assert snap.filled_contracts == 0.0
+    assert snap.filled_notional_usdt is None
+
+
+# ── record_sidecar_tp_fill_exit: contracts → ETH ──────────────────────────
+
+
+def test_record_sidecar_tp_fill_exit_contracts_not_treated_as_eth() -> None:
+    """status filled_qty=0.95 (contracts) + leg qty=0.095 (ETH):
+    filled_eth_qty must be 0.095, not 0.95.
+    exit_notional must be 0.095 * avg_fill_price."""
+    state = StrategyPositionState(
+        side="LONG",
+        position_cost_entry_notional=200.0,
+        position_cost_remaining_qty=2.0,
+    )
+    leg = {"qty": 0.095, "contracts": "0.95", "tp_price": 1627.34, "status": SidecarLegStatus.OPEN.value}
+    status = {"filled_qty": 0.95, "avg_fill_price": 1627.34}
+
+    record_sidecar_tp_fill_exit(state, leg, status)
+
+    expected_exit_notional = 0.095 * 1627.34  # ≈ 154.5973
+    assert state.position_cost_exit_notional == pytest.approx(expected_exit_notional, rel=1e-6)
+    # remaining_qty reduced by 0.095 (ETH), not 0.95
+    assert state.position_cost_remaining_qty == pytest.approx(2.0 - 0.095, rel=1e-6)

@@ -1673,6 +1673,9 @@ async def test_pre_core_reconcile_logs_sidecar_tp_filled_and_returns_fill_summar
     assert result.sidecar_tp_filled_count == 1
     assert "leg-1" in result.sidecar_tp_filled_leg_ids
     assert "tp-1" in result.sidecar_tp_filled_order_ids
+    # filled_qty is ETH (not contracts): leg qty=0.1, contracts=1 → ETH=0.1
+    assert result.sidecar_tp_filled_qty == pytest.approx(0.1)
+    assert result.sidecar_tp_filled_contracts == pytest.approx(1.0)
 
     assert state.sidecar_legs[0]["status"] == "TP_FILLED"
 
@@ -1681,6 +1684,10 @@ async def test_pre_core_reconcile_logs_sidecar_tp_filled_and_returns_fill_summar
 
     assert "SIDECAR_TP_FILLED" in caplog.text
     assert "source=pre_core_reconcile" in caplog.text
+    assert "filled_contracts=1.0" in caplog.text
+    assert "filled_eth_qty=0.1" in caplog.text
+    # sidecar_open_qty_after must not be the fake 0.0 literal
+    assert "sidecar_open_qty_after=0.0" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -1717,3 +1724,7 @@ async def test_monitor_runtime_logs_sidecar_tp_filled(caplog: pytest.LogCaptureF
 
     assert "SIDECAR_TP_FILLED" in caplog.text
     assert "source=monitor_runtime" in caplog.text
+    assert "filled_contracts=1.0" in caplog.text
+    assert "filled_eth_qty=0.1" in caplog.text
+    # sidecar_open_qty_after must be 0.0 (the only leg is now TP_FILLED)
+    assert "sidecar_open_qty_after=0.0" in caplog.text

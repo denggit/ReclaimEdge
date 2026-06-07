@@ -10,7 +10,7 @@ from src.position_management.sidecar.fill_telemetry import (
     build_sidecar_fill_telemetry,
     log_sidecar_tp_filled,
 )
-from src.position_management.sidecar.model import SidecarLegStatus
+from src.position_management.sidecar.model import SidecarLegStatus, sidecar_open_qty
 from src.position_management.sidecar.reconciler import (
     is_sidecar_dirty_missing_tp_order,
     mark_sidecar_leg_tp_filled,
@@ -69,6 +69,8 @@ async def monitor_sidecar_orders_once(
             strategy_state.sidecar_legs[index] = mark_sidecar_leg_tp_filled(leg, ts_ms)
             journal.append("SIDECAR_TP_FILLED", {**dict(leg), **status}, position_id=position_id)
             changed = True
+            # Compute real remaining sidecar open qty after this fill
+            _mt_open_qty_after = sidecar_open_qty(strategy_state.sidecar_legs)
             # Log sidecar TP fill in main log for observability
             _mt_telemetry = build_sidecar_fill_telemetry(
                 source="monitor_runtime",
@@ -81,6 +83,7 @@ async def monitor_sidecar_orders_once(
                 telemetry=_mt_telemetry,
                 leg=leg,
                 status=status,
+                sidecar_open_qty_after=_mt_open_qty_after,
             )
             # Sidecar TP filled reduces OKX net position → existing global SL orders
             # may now exceed current net position. Must halt for manual reconciliation.
