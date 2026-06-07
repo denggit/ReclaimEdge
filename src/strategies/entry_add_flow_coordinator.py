@@ -51,8 +51,8 @@ class EntryAddFlowCoordinator:
     ) -> TradeIntent | None:
         strategy = self.strategy
         if strategy.state.side is None:
-            return self.open_position("LONG", "OPEN_LONG", price, ts_ms, boll, cvd,
-                                       "下轨出轨深度达标 + 低点附近快速CVD回流/跌不动")
+            return strategy._open_position("LONG", "OPEN_LONG", price, ts_ms, boll, cvd,
+                                           "下轨出轨深度达标 + 低点附近快速CVD回流/跌不动")
         if strategy.state.side != "LONG":
             return None
         if strategy.state.near_tp_add_disabled:
@@ -124,7 +124,7 @@ class EntryAddFlowCoordinator:
             improvement_pct,
             strategy.config.add_min_avg_improvement_pct,
         )
-        return self.open_position(
+        return strategy._open_position(
             "LONG",
             "ADD_LONG",
             price,
@@ -147,8 +147,8 @@ class EntryAddFlowCoordinator:
     ) -> TradeIntent | None:
         strategy = self.strategy
         if strategy.state.side is None:
-            return self.open_position("SHORT", "OPEN_SHORT", price, ts_ms, boll, cvd,
-                                       "上轨出轨深度达标 + 高点附近快速CVD转弱/涨不动")
+            return strategy._open_position("SHORT", "OPEN_SHORT", price, ts_ms, boll, cvd,
+                                           "上轨出轨深度达标 + 高点附近快速CVD转弱/涨不动")
         if strategy.state.side != "SHORT":
             return None
         if strategy.state.near_tp_add_disabled:
@@ -220,7 +220,7 @@ class EntryAddFlowCoordinator:
             improvement_pct,
             strategy.config.add_min_avg_improvement_pct,
         )
-        return self.open_position(
+        return strategy._open_position(
             "SHORT",
             "ADD_SHORT",
             price,

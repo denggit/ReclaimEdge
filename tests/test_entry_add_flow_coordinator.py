@@ -494,5 +494,111 @@ class EntryAddFlowCoordinatorOpenPositionPlanTest(unittest.TestCase):
         self.assertIn("phase=initial", output)
 
 
+# ── Base strategy behaviour preservation ───────────────────────────────────
+
+class EntryAddFlowCoordinatorBaseStrategyPreservationTest(unittest.TestCase):
+    """Verify that the fix (calling strategy._open_position from coordinator)
+    does NOT break BollCvdReclaimStrategy (base class) behaviour."""
+
+    def test_base_strategy_maybe_open_or_add_short_still_opens(self) -> None:
+        """Base strategy _maybe_open_or_add_short → coordinator →
+        strategy._open_position → base._open_position → coordinator.open_position.
+        Must return valid OPEN_SHORT intent without recursion."""
+        strat = _strategy()
+        boll = _boll()
+        cvd = _cvd()
+        # Ensure OPEN path
+        strat.state.side = None
+        intent = strat._maybe_open_or_add_short(2100.0, 1000, boll, cvd)
+        self.assertIsNotNone(intent)
+        self.assertEqual(intent.intent_type, "OPEN_SHORT")
+        self.assertEqual(strat.state.side, "SHORT")
+        self.assertEqual(strat.state.layers, 1)
+
+    def test_base_strategy_maybe_open_or_add_long_still_opens(self) -> None:
+        """Base strategy _maybe_open_or_add_long must still work."""
+        strat = _strategy()
+        boll = _boll()
+        cvd = _cvd()
+        strat.state.side = None
+        intent = strat._maybe_open_or_add_long(1900.0, 1000, boll, cvd)
+        self.assertIsNotNone(intent)
+        self.assertEqual(intent.intent_type, "OPEN_LONG")
+        self.assertEqual(strat.state.side, "LONG")
+        self.assertEqual(strat.state.layers, 1)
+
+    def test_base_strategy_add_long_still_works(self) -> None:
+        """Base strategy successful add via coordinator path still works."""
+        strat = _strategy(
+            add_layer_gap_pct=0.001,
+            add_min_avg_improvement_pct=0.0,
+            first_add_block_seconds=0,
+            add_min_interval_seconds=0,
+        )
+        boll = _boll()
+        cvd = _cvd()
+        # Open first
+        strat._maybe_open_or_add_long(1900.0, 1000, boll, cvd)
+        self.assertEqual(strat.state.layers, 1)
+        # Add second
+        intent = strat._maybe_open_or_add_long(1800.0, 2000, boll, cvd)
+        self.assertIsNotNone(intent)
+        self.assertEqual(intent.intent_type, "ADD_LONG")
+        self.assertEqual(strat.state.layers, 2)
+
+
+# ── Anti-recursion guard ───────────────────────────────────────────────────
+
+class EntryAddFlowCoordinatorNoRecursionTest(unittest.TestCase):
+    """Verify that the fix does not introduce infinite recursion."""
+
+    def test_no_recursion_via_maybe_open_or_add_short(self) -> None:
+        """Call OPEN_SHORT via coordinator path on base strategy — must not recurse."""
+        strat = _strategy()
+        boll = _boll()
+        cvd = _cvd()
+        strat.state.side = None
+        import sys
+        old_limit = sys.getrecursionlimit()
+        try:
+            sys.setrecursionlimit(100)
+            intent = strat._maybe_open_or_add_short(2100.0, 1000, boll, cvd)
+            self.assertIsNotNone(intent)
+            self.assertEqual(intent.intent_type, "OPEN_SHORT")
+        finally:
+            sys.setrecursionlimit(old_limit)
+
+    def test_no_recursion_via_maybe_open_or_add_long(self) -> None:
+        """Call OPEN_LONG via coordinator path on base strategy — must not recurse."""
+        strat = _strategy()
+        boll = _boll()
+        cvd = _cvd()
+        strat.state.side = None
+        import sys
+        old_limit = sys.getrecursionlimit()
+        try:
+            sys.setrecursionlimit(100)
+            intent = strat._maybe_open_or_add_long(1900.0, 1000, boll, cvd)
+            self.assertIsNotNone(intent)
+            self.assertEqual(intent.intent_type, "OPEN_LONG")
+        finally:
+            sys.setrecursionlimit(old_limit)
+
+    def test_open_position_via_strategy_still_works_no_recursion(self) -> None:
+        """Direct strategy._open_position call works without recursion."""
+        strat = _strategy()
+        boll = _boll()
+        cvd = _cvd()
+        import sys
+        old_limit = sys.getrecursionlimit()
+        try:
+            sys.setrecursionlimit(100)
+            intent = strat._open_position("LONG", "OPEN_LONG", 1900.0, 1000, boll, cvd, "test")
+            self.assertIsNotNone(intent)
+            self.assertEqual(intent.intent_type, "OPEN_LONG")
+        finally:
+            sys.setrecursionlimit(old_limit)
+
+
 if __name__ == "__main__":
     unittest.main()
