@@ -330,6 +330,23 @@ class CoreTakeProfitManager:
 
     def _build_take_profit_order_specs(self, intent: TradeIntent) -> list[tuple[str, Decimal, float]]:
         t = self.trader
+
+        # ── Middle Bucket Split input ─────────────────────────────────
+        split_active = bool(getattr(intent, "middle_bucket_split_active", False))
+        middle_bucket_split_input = None
+        if split_active:
+            middle_bucket_split_input = order_specs.MiddleBucketSplitOrderInput(
+                active=True,
+                fast_price=getattr(intent, "middle_bucket_split_fast_price", None),
+                slow_price=getattr(intent, "middle_bucket_split_slow_price", None),
+                effective_price=getattr(intent, "middle_bucket_split_effective_price", None),
+                middle_bucket_ratio=Decimal(str(getattr(intent, "middle_bucket_split_middle_bucket_ratio", 0.0))),
+                fast_ratio_of_bucket=Decimal(str(getattr(intent, "middle_bucket_split_fast_ratio_of_bucket", 0.0))),
+                slow_ratio_of_bucket=Decimal(str(getattr(intent, "middle_bucket_split_slow_ratio_of_bucket", 0.0))),
+                fast_total_ratio=Decimal(str(getattr(intent, "middle_bucket_split_fast_total_ratio", 0.0))),
+                slow_total_ratio=Decimal(str(getattr(intent, "middle_bucket_split_slow_total_ratio", 0.0))),
+            )
+
         decision = order_specs.build_take_profit_order_specs(
             position_contracts=t.position_contracts,
             min_contracts=t.min_contracts,
@@ -347,6 +364,7 @@ class CoreTakeProfitManager:
             three_stage_tp1_consumed=bool(getattr(intent, "three_stage_tp1_consumed", False)),
             three_stage_tp2_consumed=bool(getattr(intent, "three_stage_tp2_consumed", False)),
             three_stage_runner_ratio=Decimal(str(getattr(intent, "three_stage_runner_ratio", 0.0))),
+            middle_bucket_split=middle_bucket_split_input,
         )
         reason = decision.fallback_reason
         ctx = decision.fallback_context

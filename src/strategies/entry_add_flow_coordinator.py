@@ -58,6 +58,10 @@ class EntryAddFlowCoordinator:
         if strategy.state.near_tp_add_disabled:
             strategy._log_add_skip_once_per_window(reason="near_tp_protected", side="LONG", price=price, ts_ms=ts_ms)
             return None
+        if getattr(strategy.state, "middle_bucket_split_add_disabled", False):
+            strategy._log_add_skip_once_per_window(reason="middle_bucket_fast_consumed", side="LONG", price=price,
+                                                   ts_ms=ts_ms)
+            return None
         if strategy.state.trend_runner_active:
             strategy._log_add_skip_once_per_window(reason="trend_runner_active", side="LONG", price=price, ts_ms=ts_ms)
             return None
@@ -153,6 +157,10 @@ class EntryAddFlowCoordinator:
             return None
         if strategy.state.near_tp_add_disabled:
             strategy._log_add_skip_once_per_window(reason="near_tp_protected", side="SHORT", price=price, ts_ms=ts_ms)
+            return None
+        if getattr(strategy.state, "middle_bucket_split_add_disabled", False):
+            strategy._log_add_skip_once_per_window(reason="middle_bucket_fast_consumed", side="SHORT", price=price,
+                                                   ts_ms=ts_ms)
             return None
         if strategy.state.trend_runner_active:
             strategy._log_add_skip_once_per_window(reason="trend_runner_active", side="SHORT", price=price, ts_ms=ts_ms)

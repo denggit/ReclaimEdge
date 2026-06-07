@@ -137,6 +137,28 @@ class StrategyIntentFactory:
             protected_order_ids=self.protected_order_ids(),
             managed_core_contracts=self.managed_core_contracts_for_intent(intent_type),
             managed_core_eth_qty=self.managed_core_eth_qty_for_intent(intent_type),
+            # ── Middle Bucket Split fields ────────────────────────────
+            middle_bucket_split_active=bool(getattr(state, "middle_bucket_split_active", False)),
+            middle_bucket_split_fast_consumed=bool(getattr(state, "middle_bucket_split_fast_consumed", False)),
+            middle_bucket_split_slow_consumed=bool(getattr(state, "middle_bucket_split_slow_consumed", False)),
+            middle_bucket_split_fast_price=getattr(state, "middle_bucket_split_fast_price", None),
+            middle_bucket_split_slow_price=getattr(state, "middle_bucket_split_slow_price", None),
+            middle_bucket_split_effective_price=getattr(state, "middle_bucket_split_effective_price", None),
+            middle_bucket_split_middle_bucket_ratio=float(
+                getattr(state, "middle_bucket_split_middle_bucket_ratio", 0.0) or 0.0),
+            middle_bucket_split_fast_ratio_of_bucket=float(
+                getattr(state, "middle_bucket_split_fast_ratio_of_bucket", 0.0) or 0.0),
+            middle_bucket_split_slow_ratio_of_bucket=float(
+                getattr(state, "middle_bucket_split_slow_ratio_of_bucket", 0.0) or 0.0),
+            middle_bucket_split_fast_total_ratio=float(
+                getattr(state, "middle_bucket_split_fast_total_ratio", 0.0) or 0.0),
+            middle_bucket_split_slow_total_ratio=float(
+                getattr(state, "middle_bucket_split_slow_total_ratio", 0.0) or 0.0),
+            middle_bucket_split_reason=getattr(state, "middle_bucket_split_reason", None),
+            middle_bucket_split_fast_sl_price=getattr(state, "middle_bucket_split_fast_sl_price", None),
+            middle_bucket_split_fast_sl_order_id=getattr(state, "middle_bucket_split_fast_sl_order_id", None),
+            middle_bucket_split_fast_sl_protected=bool(
+                getattr(state, "middle_bucket_split_fast_sl_protected", False)),
         )
 
     def build_near_tp_reduce_intent(

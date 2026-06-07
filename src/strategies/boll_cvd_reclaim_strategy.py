@@ -129,6 +129,14 @@ class BollCvdReclaimStrategyConfig:
     tp_boll_enabled: bool = True
     tp_boll_window: int = 15
 
+    # ── Middle Bucket Split ────────────────────────────────────────────
+    middle_bucket_split_enabled: bool = False
+    middle_bucket_split_fast_ratio: float = 0.70
+    middle_bucket_split_fast_sl_fee_buffer_pct: float = 0.001
+    middle_bucket_split_fast_sl_enabled: bool = True
+    middle_bucket_split_fast_sl_invalid_action: str = "MARKET_EXIT"
+    middle_bucket_split_fast_sl_fail_action: str = "MARKET_EXIT"
+
     def __post_init__(self) -> None:
         if (
                 self.three_stage_pre_tp1_degrade_enabled
@@ -138,6 +146,13 @@ class BollCvdReclaimStrategyConfig:
                 "THREE_STAGE_PRE_TP1_SINGLE_AFTER_SECONDS must be greater than "
                 "THREE_STAGE_PRE_TP1_MIDDLE_RUNNER_AFTER_SECONDS"
             )
+        if self.middle_bucket_split_enabled:
+            _fr = self.middle_bucket_split_fast_ratio
+            if not (0.05 <= _fr <= 0.95):
+                raise RuntimeError(
+                    f"MIDDLE_BUCKET_SPLIT_FAST_RATIO={_fr} is out of range [0.05, 0.95]; "
+                    f"this is a live position ratio — refusing to proceed with dangerous value"
+                )
 
     @classmethod
     def from_env(cls) -> "BollCvdReclaimStrategyConfig":
@@ -239,6 +254,15 @@ class BollCvdReclaimStrategyConfig:
                 os.getenv("THREE_STAGE_PRE_TP1_SINGLE_AFTER_SECONDS", "21600")),
             tp_boll_enabled=_env_bool("TP_BOLL_ENABLED", True),
             tp_boll_window=int(os.getenv("TP_BOLL_WINDOW", "15")),
+            middle_bucket_split_enabled=_env_bool("MIDDLE_BUCKET_SPLIT_ENABLED", False),
+            middle_bucket_split_fast_ratio=float(os.getenv("MIDDLE_BUCKET_SPLIT_FAST_RATIO", "0.70")),
+            middle_bucket_split_fast_sl_fee_buffer_pct=float(
+                os.getenv("MIDDLE_BUCKET_SPLIT_FAST_SL_FEE_BUFFER_PCT", "0.001")),
+            middle_bucket_split_fast_sl_enabled=_env_bool("MIDDLE_BUCKET_SPLIT_FAST_SL_ENABLED", True),
+            middle_bucket_split_fast_sl_invalid_action=os.getenv(
+                "MIDDLE_BUCKET_SPLIT_FAST_SL_INVALID_ACTION", "MARKET_EXIT").strip().upper(),
+            middle_bucket_split_fast_sl_fail_action=os.getenv(
+                "MIDDLE_BUCKET_FAST_SL_FAIL_ACTION", "MARKET_EXIT").strip().upper(),
         )
 
 
@@ -306,6 +330,26 @@ class TradeIntent:
     protected_order_ids: tuple[str, ...] = ()
     managed_core_contracts: str | None = None
     managed_core_eth_qty: float = 0.0
+
+    # ── Middle Bucket Split fields ────────────────────────────────────
+    middle_bucket_split_active: bool = False
+    middle_bucket_split_fast_consumed: bool = False
+    middle_bucket_split_slow_consumed: bool = False
+
+    middle_bucket_split_fast_price: float | None = None
+    middle_bucket_split_slow_price: float | None = None
+    middle_bucket_split_effective_price: float | None = None
+
+    middle_bucket_split_middle_bucket_ratio: float = 0.0
+    middle_bucket_split_fast_ratio_of_bucket: float = 0.0
+    middle_bucket_split_slow_ratio_of_bucket: float = 0.0
+    middle_bucket_split_fast_total_ratio: float = 0.0
+    middle_bucket_split_slow_total_ratio: float = 0.0
+
+    middle_bucket_split_reason: str | None = None
+    middle_bucket_split_fast_sl_price: float | None = None
+    middle_bucket_split_fast_sl_order_id: str | None = None
+    middle_bucket_split_fast_sl_protected: bool = False
 
 
 @dataclass(frozen=True)
@@ -439,6 +483,30 @@ class StrategyPositionState:
     tp_order_id: str | None = None
     tp_order_ids: list[str] = field(default_factory=list)
     startup_force_tp_reconcile: bool = False
+
+    # ── Middle Bucket Split state ─────────────────────────────────────
+    middle_bucket_split_active: bool = False
+    middle_bucket_split_fast_consumed: bool = False
+    middle_bucket_split_slow_consumed: bool = False
+
+    middle_bucket_split_fast_price: float | None = None
+    middle_bucket_split_slow_price: float | None = None
+    middle_bucket_split_effective_price: float | None = None
+
+    middle_bucket_split_middle_bucket_ratio: float = 0.0
+    middle_bucket_split_fast_ratio_of_bucket: float = 0.0
+    middle_bucket_split_slow_ratio_of_bucket: float = 0.0
+    middle_bucket_split_fast_total_ratio: float = 0.0
+    middle_bucket_split_slow_total_ratio: float = 0.0
+
+    middle_bucket_split_reason: str | None = None
+
+    middle_bucket_split_fast_sl_price: float | None = None
+    middle_bucket_split_fast_sl_order_id: str | None = None
+    middle_bucket_split_fast_sl_protected: bool = False
+    middle_bucket_split_fast_sl_invalid_action_taken: str | None = None
+
+    middle_bucket_split_add_disabled: bool = False
 
 
 def _env_bool(name: str, default: bool) -> bool:

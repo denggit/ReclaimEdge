@@ -132,6 +132,13 @@ async def prepare_account_sync_flat_settlement_phase(
         except Exception:
             logger.warning("TREND_RUNNER_CANCELLED | reason=flat_sl_cancel_failed algoId=%s",
                            trend_runner_sl_order_id)
+    middle_bucket_fast_sl_order_id = pending_flat_payload.get("middle_bucket_split_fast_sl_order_id")
+    if middle_bucket_fast_sl_order_id:
+        try:
+            await trader.cancel_algo_order(middle_bucket_fast_sl_order_id)
+        except Exception:
+            logger.warning("MIDDLE_BUCKET_FAST_SL_CANCELLED | reason=flat_sl_cancel_failed algoId=%s",
+                           middle_bucket_fast_sl_order_id)
 
     async with state_lock:
         result_flat_previous_halt_reason = execution_state.halt_reason if execution_state.trading_halted else None

@@ -29,6 +29,8 @@ class AccountSyncTpProgressResult:
     three_stage_post_tp1_sl_payload: dict[str, Any] | None
     three_stage_post_tp1_cancel_payload: dict[str, Any] | None
     three_stage_event_payload: dict[str, Any] | None
+    middle_bucket_split_event_payload: dict[str, Any] | None
+    middle_bucket_split_fast_protection_payload: dict[str, Any] | None
     last_logged_position_key: Any
 
 
@@ -61,6 +63,8 @@ def run_account_sync_tp_progress_phase(
     three_stage_event = tp_progress_helpers.mark_three_stage_progress_if_position_reduced(strategy, core_position,
                                                                                           live_time_utils.utc_ms())
     tp_progress_helpers.mark_partial_tp_consumed_if_position_reduced(strategy, core_position)
+    middle_bucket_split_event = tp_progress_helpers.mark_middle_bucket_split_progress_if_position_reduced(
+        strategy, core_position)
     position_cost_runtime.sync_strategy_cost_from_position(
         strategy,
         core_position,
@@ -316,6 +320,51 @@ def run_account_sync_tp_progress_phase(
             "keep_ratio": getattr(strategy.state, "middle_runner_keep_ratio", 0.0),
             "reason": "partial_size_mismatch_degraded",
         }
+
+    # ── Middle Bucket Split event & journal ────────────────────────
+    middle_bucket_split_event_payload: dict[str, Any] | None = None
+    middle_bucket_split_fast_protection_payload: dict[str, Any] | None = None
+    if middle_bucket_split_event is not None:
+        middle_bucket_split_event_payload = {
+            "event": middle_bucket_split_event,
+            "position_id": execution_state.current_position_id,
+            "side": core_position.side,
+            "layers": strategy.state.layers,
+            "avg_entry_price": strategy.state.avg_entry_price,
+            "tp_plan": getattr(strategy.state, "tp_plan", "SINGLE"),
+            "middle_bucket_ratio": getattr(strategy.state, "middle_bucket_split_middle_bucket_ratio", 0.0),
+            "fast_ratio_of_bucket": getattr(strategy.state, "middle_bucket_split_fast_ratio_of_bucket", 0.0),
+            "slow_ratio_of_bucket": getattr(strategy.state, "middle_bucket_split_slow_ratio_of_bucket", 0.0),
+            "fast_total_ratio": getattr(strategy.state, "middle_bucket_split_fast_total_ratio", 0.0),
+            "slow_total_ratio": getattr(strategy.state, "middle_bucket_split_slow_total_ratio", 0.0),
+            "fast_price": getattr(strategy.state, "middle_bucket_split_fast_price", None),
+            "slow_price": getattr(strategy.state, "middle_bucket_split_slow_price", None),
+            "effective_price": getattr(strategy.state, "middle_bucket_split_effective_price", None),
+            "fast_sl_price": getattr(strategy.state, "middle_bucket_split_fast_sl_price", None),
+            "fast_consumed": getattr(strategy.state, "middle_bucket_split_fast_consumed", False),
+            "slow_consumed": getattr(strategy.state, "middle_bucket_split_slow_consumed", False),
+            "add_disabled": getattr(strategy.state, "middle_bucket_split_add_disabled", False),
+        }
+        if hasattr(journal, "append"):
+            tp_progress_helpers.append_middle_bucket_split_journal_events(
+                journal, middle_bucket_split_event_payload)
+        # Fast fill → trigger protection
+        if middle_bucket_split_event == "MIDDLE_BUCKET_FAST":
+            fast_sl_price = getattr(strategy.state, "middle_bucket_split_fast_sl_price", None)
+            current_price = float(position.avg_entry_price or 0.0) if hasattr(position, "avg_entry_price") else 0.0
+            middle_bucket_split_fast_protection_payload = {
+                "position_id": execution_state.current_position_id,
+                "side": core_position.side,
+                "avg_entry_price": float(strategy.state.avg_entry_price or 0.0),
+                "fast_sl_price": fast_sl_price,
+                "current_price": current_price,
+                "core_contracts": core_position.contracts,
+                "net_contracts": position.contracts if position.has_position else 0,
+                "invalid_action": getattr(strategy.config, "middle_bucket_split_fast_sl_invalid_action", "MARKET_EXIT"),
+                "enabled": bool(getattr(strategy.config, "middle_bucket_split_fast_sl_enabled", True)),
+                "old_sl_order_id": getattr(strategy.state, "middle_bucket_split_fast_sl_order_id", None),
+            }
+
     if (
             execution_state.trading_halted
             and execution_state.halt_reason == "near_tp_protected_sync_failed"
@@ -349,5 +398,7 @@ def run_account_sync_tp_progress_phase(
         three_stage_post_tp1_sl_payload=three_stage_post_tp1_sl_payload,
         three_stage_post_tp1_cancel_payload=three_stage_post_tp1_cancel_payload,
         three_stage_event_payload=three_stage_event_payload,
+        middle_bucket_split_event_payload=middle_bucket_split_event_payload,
+        middle_bucket_split_fast_protection_payload=middle_bucket_split_fast_protection_payload,
         last_logged_position_key=last_logged_position_key,
     )

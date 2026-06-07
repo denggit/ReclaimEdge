@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from src.strategies import middle_bucket_split as _mbs
 from src.utils.log import get_logger
 
 if TYPE_CHECKING:
@@ -524,6 +525,20 @@ class TpUpdateCoordinator:
 
         tp_price, _tp_src = s._select_valid_tp_outer_with_profit_fallback(s.state.side, boll)
         tp_mode: TpMode = "UPPER" if s.state.side == "LONG" else "LOWER"
+
+        # ── Middle Bucket Split for Middle Runner ─────────────────────
+        if s.config.middle_bucket_split_enabled and not s.state.middle_runner_active:
+            split_applied = self._apply_middle_bucket_split_for_middle_runner(boll)
+            if split_applied:
+                partial_tp_price = s.state.partial_tp_price
+                partial_tp_ratio = s.state.middle_runner_first_close_ratio or min(
+                    max(s.config.middle_runner_first_close_ratio, 0.1), 0.95)
+                tp_plan = "MIDDLE_RUNNER"
+                s.state.middle_runner_first_tp_price = partial_tp_price
+                s.state.middle_runner_final_tp_price = tp_price
+                s.state.middle_runner_pending = True
+                return tp_price, tp_mode, partial_tp_price, partial_tp_ratio, tp_plan, reason_override
+
         partial_tp_price, _ptp_src = s._select_valid_tp_middle_with_profit_fallback(s.state.side, boll)
 
         if partial_tp_price is None:
@@ -572,6 +587,20 @@ class TpUpdateCoordinator:
 
         tp_price, _tp_src = s._select_valid_tp_outer_with_profit_fallback(s.state.side, boll)
         tp_mode: TpMode = "UPPER" if s.state.side == "LONG" else "LOWER"
+
+        # ── Middle Bucket Split for Three-Stage ──────────────────────
+        if (
+            s.config.middle_bucket_split_enabled
+            and not s.state.three_stage_tp1_consumed
+            and not s.state.trend_runner_active
+        ):
+            split_applied = self._apply_middle_bucket_split_for_three_stage(boll)
+            if split_applied:
+                tp1_ratio = s.state.three_stage_tp1_ratio
+                partial_tp_ratio = tp1_ratio
+                tp_plan = "THREE_STAGE_RUNNER"
+                return tp_price, tp_mode, s.state.three_stage_tp1_price, partial_tp_ratio, tp_plan, reason_override
+
         partial_tp_price, _ptp_src = s._select_valid_tp_middle_with_profit_fallback(s.state.side, boll)
         updated = partial_tp_price is not None and s._update_three_stage_dynamic_targets_without_reset(
             s.state.side, boll)
@@ -735,6 +764,9 @@ class TpUpdateCoordinator:
         s.state.partial_tp_ratio = partial_tp_ratio
         s.state.tp_plan = tp_plan
 
+        # Clear middle bucket split state if the selected plan does not use it
+        self._clear_middle_bucket_split_if_not_active(tp_plan)
+
         if tp_plan == "MIDDLE_RUNNER":
             s._set_middle_runner_planned(partial_tp_price, tp_price)
         if tp_plan == "THREE_STAGE_RUNNER":
@@ -767,8 +799,20 @@ class TpUpdateCoordinator:
                 else f"新15m K线更新止盈到{tp_mode}轨"
             )
 
+        split_active = bool(getattr(s.state, "middle_bucket_split_active", False))
+        split_fields = ""
+        if split_active:
+            split_fields = (
+                f" middle_split_active=true"
+                f" middle_split_fast_price={getattr(s.state, 'middle_bucket_split_fast_price', None)}"
+                f" middle_split_slow_price={getattr(s.state, 'middle_bucket_split_slow_price', None)}"
+                f" middle_split_effective_price={getattr(s.state, 'middle_bucket_split_effective_price', None)}"
+                f" middle_split_fast_total_ratio={getattr(s.state, 'middle_bucket_split_fast_total_ratio', 0.0):.4f}"
+                f" middle_split_slow_total_ratio={getattr(s.state, 'middle_bucket_split_slow_total_ratio', 0.0):.4f}"
+                f" middle_split_reason={getattr(s.state, 'middle_bucket_split_reason', None)}"
+            )
         logger.warning(
-            "TP_SELECTED | reason=%s side=%s mode=%s plan=%s partial_tp=%s partial_ratio=%.2f avg_entry=%.4f breakeven=%.4f candle_ts=%s middle=%.4f upper=%.4f lower=%.4f final_tp=%.4f force_reconcile=%s",
+            "TP_SELECTED | reason=%s side=%s mode=%s plan=%s partial_tp=%s partial_ratio=%.2f avg_entry=%.4f breakeven=%.4f candle_ts=%s middle=%.4f upper=%.4f lower=%.4f final_tp=%.4f force_reconcile=%s%s",
             reason_text,
             s.state.side,
             tp_mode,
@@ -783,6 +827,7 @@ class TpUpdateCoordinator:
             boll.lower,
             tp_price,
             force_reconcile,
+            split_fields,
         )
         s._log_tp_boll_price_selected(
             phase="waiting_tp2" if s._three_stage_waiting_tp2() else "update",
@@ -800,3 +845,218 @@ class TpUpdateCoordinator:
             "UPDATE_TP", s.state.side, price, s.state.layers,
             tp_price, reason_text, size, boll, cvd, ts_ms,
         )
+
+    # ------------------------------------------------------------------
+    # Middle Bucket Split helpers
+    # ------------------------------------------------------------------
+
+    def _reset_middle_bucket_split_state(self) -> None:
+        """Clear all middle-bucket-split state fields."""
+        s = self.strategy
+        s.state.middle_bucket_split_active = False
+        s.state.middle_bucket_split_fast_consumed = False
+        s.state.middle_bucket_split_slow_consumed = False
+        s.state.middle_bucket_split_fast_price = None
+        s.state.middle_bucket_split_slow_price = None
+        s.state.middle_bucket_split_effective_price = None
+        s.state.middle_bucket_split_middle_bucket_ratio = 0.0
+        s.state.middle_bucket_split_fast_ratio_of_bucket = 0.0
+        s.state.middle_bucket_split_slow_ratio_of_bucket = 0.0
+        s.state.middle_bucket_split_fast_total_ratio = 0.0
+        s.state.middle_bucket_split_slow_total_ratio = 0.0
+        s.state.middle_bucket_split_reason = None
+        s.state.middle_bucket_split_fast_sl_price = None
+        s.state.middle_bucket_split_fast_sl_order_id = None
+        s.state.middle_bucket_split_fast_sl_protected = False
+        s.state.middle_bucket_split_fast_sl_invalid_action_taken = None
+        s.state.middle_bucket_split_add_disabled = False
+
+    def _apply_middle_bucket_split_for_three_stage(
+        self,
+        boll: BollSnapshot,
+    ) -> bool:
+        """Try to enable middle bucket split for the Three-Stage branch.
+
+        Returns True when split was applied and state was mutated.
+        Returns False when split was not applicable — caller should proceed
+        with the existing non-split logic.
+        """
+        s = self.strategy
+        if not s.config.middle_bucket_split_enabled:
+            return False
+        if s.state.side is None:
+            return False
+
+        middle_bucket_ratio = float(s.state.three_stage_tp1_ratio or 0.0)
+        fast_middle_price = getattr(boll, "tp_middle", None)
+        slow_middle_price = float(boll.middle) if boll.middle else None
+        effective_be = s._effective_breakeven_for_tp_selection(s.state.side)
+        fast_ratio_of_bucket = float(s.config.middle_bucket_split_fast_ratio)
+
+        decision = _mbs.build_middle_bucket_split_decision(
+            enabled=True,
+            side=s.state.side,
+            middle_bucket_ratio=middle_bucket_ratio,
+            fast_ratio_of_bucket=fast_ratio_of_bucket,
+            fast_middle_price=fast_middle_price,
+            slow_middle_price=slow_middle_price,
+            effective_breakeven=effective_be,
+            min_net_profit_pct=s.config.tp_min_net_profit_pct,
+        )
+
+        if decision.reason == "split_enabled":
+            s.state.middle_bucket_split_active = True
+            s.state.middle_bucket_split_fast_consumed = False
+            s.state.middle_bucket_split_slow_consumed = False
+            s.state.middle_bucket_split_fast_price = decision.fast_price
+            s.state.middle_bucket_split_slow_price = decision.slow_price
+            s.state.middle_bucket_split_effective_price = decision.effective_price
+            s.state.middle_bucket_split_middle_bucket_ratio = decision.middle_bucket_ratio
+            s.state.middle_bucket_split_fast_ratio_of_bucket = decision.fast_ratio_of_bucket
+            s.state.middle_bucket_split_slow_ratio_of_bucket = decision.slow_ratio_of_bucket
+            s.state.middle_bucket_split_fast_total_ratio = decision.fast_total_ratio
+            s.state.middle_bucket_split_slow_total_ratio = decision.slow_total_ratio
+            s.state.middle_bucket_split_reason = decision.reason
+            s.state.three_stage_tp1_price = decision.effective_price
+            candle_ts = getattr(boll, "candle_ts_ms", 0)
+            logger.warning(
+                "MIDDLE_BUCKET_SPLIT_SELECTED | "
+                "plan=THREE_STAGE_RUNNER side=%s middle_bucket_ratio=%.4f "
+                "fast_ratio_of_bucket=%.4f slow_ratio_of_bucket=%.4f "
+                "fast_total_ratio=%.4f slow_total_ratio=%.4f "
+                "fast_price=%.4f slow_price=%.4f effective_price=%.4f "
+                "reason=%s candle_ts=%s",
+                s.state.side,
+                decision.middle_bucket_ratio,
+                decision.fast_ratio_of_bucket,
+                decision.slow_ratio_of_bucket,
+                decision.fast_total_ratio,
+                decision.slow_total_ratio,
+                float(decision.fast_price or 0.0),
+                float(decision.slow_price or 0.0),
+                float(decision.effective_price or 0.0),
+                decision.reason,
+                candle_ts,
+            )
+            return True
+
+        if decision.reason == "fast_middle_profit_insufficient_slow_middle_ok":
+            self._reset_middle_bucket_split_state()
+            s.state.three_stage_tp1_price = slow_middle_price
+            candle_ts = getattr(boll, "candle_ts_ms", 0)
+            logger.warning(
+                "MIDDLE_BUCKET_SPLIT_SKIPPED | "
+                "plan=THREE_STAGE_RUNNER side=%s reason=%s "
+                "fast_price=%s slow_price=%.4f required_price=%.4f "
+                "using_full_middle_bucket_at_20 candle_ts=%s",
+                s.state.side,
+                decision.reason,
+                f"{float(decision.fast_price or 0.0):.4f}" if decision.fast_price is not None else "-",
+                float(decision.slow_price or 0.0),
+                float(decision.required_price or 0.0),
+                candle_ts,
+            )
+            return False
+
+        # middle_profit_insufficient or slow_middle_profit_insufficient
+        self._reset_middle_bucket_split_state()
+        return False
+
+    def _apply_middle_bucket_split_for_middle_runner(
+        self,
+        boll: BollSnapshot,
+    ) -> bool:
+        """Try to enable middle bucket split for the Middle Runner branch."""
+        s = self.strategy
+        if not s.config.middle_bucket_split_enabled:
+            return False
+        if s.state.side is None:
+            return False
+
+        middle_bucket_ratio = float(s.state.middle_runner_first_close_ratio or 0.0)
+        if middle_bucket_ratio <= 0.0:
+            middle_bucket_ratio = min(max(float(s.config.middle_runner_first_close_ratio), 0.1), 0.95)
+        fast_middle_price = getattr(boll, "tp_middle", None)
+        slow_middle_price = float(boll.middle) if boll.middle else None
+        effective_be = s._effective_breakeven_for_tp_selection(s.state.side)
+        fast_ratio_of_bucket = float(s.config.middle_bucket_split_fast_ratio)
+
+        decision = _mbs.build_middle_bucket_split_decision(
+            enabled=True,
+            side=s.state.side,
+            middle_bucket_ratio=middle_bucket_ratio,
+            fast_ratio_of_bucket=fast_ratio_of_bucket,
+            fast_middle_price=fast_middle_price,
+            slow_middle_price=slow_middle_price,
+            effective_breakeven=effective_be,
+            min_net_profit_pct=s.config.tp_min_net_profit_pct,
+        )
+
+        if decision.reason == "split_enabled":
+            s.state.middle_bucket_split_active = True
+            s.state.middle_bucket_split_fast_consumed = False
+            s.state.middle_bucket_split_slow_consumed = False
+            s.state.middle_bucket_split_fast_price = decision.fast_price
+            s.state.middle_bucket_split_slow_price = decision.slow_price
+            s.state.middle_bucket_split_effective_price = decision.effective_price
+            s.state.middle_bucket_split_middle_bucket_ratio = decision.middle_bucket_ratio
+            s.state.middle_bucket_split_fast_ratio_of_bucket = decision.fast_ratio_of_bucket
+            s.state.middle_bucket_split_slow_ratio_of_bucket = decision.slow_ratio_of_bucket
+            s.state.middle_bucket_split_fast_total_ratio = decision.fast_total_ratio
+            s.state.middle_bucket_split_slow_total_ratio = decision.slow_total_ratio
+            s.state.middle_bucket_split_reason = decision.reason
+            s.state.middle_runner_first_tp_price = decision.effective_price
+            s.state.partial_tp_price = decision.effective_price
+            candle_ts = getattr(boll, "candle_ts_ms", 0)
+            logger.warning(
+                "MIDDLE_BUCKET_SPLIT_SELECTED | "
+                "plan=MIDDLE_RUNNER side=%s middle_bucket_ratio=%.4f "
+                "fast_ratio_of_bucket=%.4f slow_ratio_of_bucket=%.4f "
+                "fast_total_ratio=%.4f slow_total_ratio=%.4f "
+                "fast_price=%.4f slow_price=%.4f effective_price=%.4f "
+                "reason=%s candle_ts=%s",
+                s.state.side,
+                decision.middle_bucket_ratio,
+                decision.fast_ratio_of_bucket,
+                decision.slow_ratio_of_bucket,
+                decision.fast_total_ratio,
+                decision.slow_total_ratio,
+                float(decision.fast_price or 0.0),
+                float(decision.slow_price or 0.0),
+                float(decision.effective_price or 0.0),
+                decision.reason,
+                candle_ts,
+            )
+            return True
+
+        if decision.reason == "fast_middle_profit_insufficient_slow_middle_ok":
+            self._reset_middle_bucket_split_state()
+            s.state.middle_runner_first_tp_price = slow_middle_price
+            s.state.partial_tp_price = slow_middle_price
+            candle_ts = getattr(boll, "candle_ts_ms", 0)
+            logger.warning(
+                "MIDDLE_BUCKET_SPLIT_SKIPPED | "
+                "plan=MIDDLE_RUNNER side=%s reason=%s "
+                "fast_price=%s slow_price=%.4f required_price=%.4f "
+                "using_full_middle_bucket_at_20 candle_ts=%s",
+                s.state.side,
+                decision.reason,
+                f"{float(decision.fast_price or 0.0):.4f}" if decision.fast_price is not None else "-",
+                float(decision.slow_price or 0.0),
+                float(decision.required_price or 0.0),
+                candle_ts,
+            )
+            return False
+
+        self._reset_middle_bucket_split_state()
+        return False
+
+    def _clear_middle_bucket_split_if_not_active(self, tp_plan: str) -> None:
+        """If the current TP plan is not using split, clear any stale split state."""
+        s = self.strategy
+        if not s.config.middle_bucket_split_enabled:
+            self._reset_middle_bucket_split_state()
+            return
+        if tp_plan not in ("THREE_STAGE_RUNNER", "MIDDLE_RUNNER"):
+            if s.state.middle_bucket_split_active:
+                self._reset_middle_bucket_split_state()

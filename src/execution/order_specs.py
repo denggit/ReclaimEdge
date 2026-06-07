@@ -21,6 +21,20 @@ class TakeProfitSpecsDecision:
     fallback_context: dict[str, Any] | None = None
 
 
+@dataclass(frozen=True)
+class MiddleBucketSplitOrderInput:
+    """Input for middle bucket split order generation (pure data, no logic)."""
+    active: bool
+    fast_price: float | None
+    slow_price: float | None
+    effective_price: float | None
+    middle_bucket_ratio: Decimal
+    fast_ratio_of_bucket: Decimal
+    slow_ratio_of_bucket: Decimal
+    fast_total_ratio: Decimal
+    slow_total_ratio: Decimal
+
+
 # ---------------------------------------------------------------------------
 # Side helpers
 # ---------------------------------------------------------------------------
@@ -213,6 +227,7 @@ def build_take_profit_order_specs(
         three_stage_tp1_consumed: bool,
         three_stage_tp2_consumed: bool,
         three_stage_runner_ratio: Decimal,
+        middle_bucket_split: MiddleBucketSplitOrderInput | None = None,
 ) -> TakeProfitSpecsDecision:
     _rnd = lambda c: round_contracts_down(contracts=c, contract_precision=contract_precision)
 
@@ -267,16 +282,54 @@ def build_take_profit_order_specs(
             return TakeProfitSpecsDecision(
                 specs=(TakeProfitOrderSpec(label="final", contracts=position_contracts, price=final_tp_price),),
             )
-        tp1_contracts = _rnd(position_contracts * three_stage_tp1_ratio)
+        tp1_total_contracts = _rnd(position_contracts * three_stage_tp1_ratio)
         tp2_contracts = _rnd(position_contracts * three_stage_tp2_ratio)
-        runner_contracts = position_contracts - tp1_contracts - tp2_contracts
-        if tp1_contracts < min_contracts or tp2_contracts < min_contracts or runner_contracts < min_contracts:
+        runner_contracts = position_contracts - tp1_total_contracts - tp2_contracts
+
+        # ── Middle Bucket Split for Three-Stage ──────────────────────
+        if (
+            middle_bucket_split is not None
+            and middle_bucket_split.active
+            and middle_bucket_split.fast_price is not None
+            and middle_bucket_split.slow_price is not None
+        ):
+            fast_ratio = float(middle_bucket_split.fast_ratio_of_bucket)
+            fast_contracts = _rnd(tp1_total_contracts * Decimal(str(fast_ratio)))
+            slow_contracts = tp1_total_contracts - fast_contracts
+            if fast_contracts >= min_contracts and slow_contracts >= min_contracts:
+                if tp2_contracts < min_contracts or runner_contracts < min_contracts:
+                    return TakeProfitSpecsDecision(
+                        specs=(TakeProfitOrderSpec(label="final", contracts=position_contracts, price=final_tp_price),),
+                        fallback_reason="THREE_STAGE_TP_SPLIT_FALLBACK_SINGLE_SIZE_TOO_SMALL",
+                        fallback_context={
+                            "total_contracts": position_contracts,
+                            "tp1_total_contracts": tp1_total_contracts,
+                            "fast_contracts": fast_contracts,
+                            "slow_contracts": slow_contracts,
+                            "tp2_contracts": tp2_contracts,
+                            "runner_contracts": runner_contracts,
+                            "min_contracts": min_contracts,
+                        },
+                    )
+                return TakeProfitSpecsDecision(
+                    specs=(
+                        TakeProfitOrderSpec(label="tp1_middle_fast", contracts=fast_contracts,
+                                           price=float(middle_bucket_split.fast_price)),
+                        TakeProfitOrderSpec(label="tp1_middle_slow", contracts=slow_contracts,
+                                           price=float(middle_bucket_split.slow_price)),
+                        TakeProfitOrderSpec(label="tp2_outer", contracts=tp2_contracts,
+                                           price=float(three_stage_tp2_price)),
+                    ),
+                )
+            # Fall through to unsplit if either sub-leg too small
+
+        if tp1_total_contracts < min_contracts or tp2_contracts < min_contracts or runner_contracts < min_contracts:
             return TakeProfitSpecsDecision(
                 specs=(TakeProfitOrderSpec(label="final", contracts=position_contracts, price=final_tp_price),),
                 fallback_reason="THREE_STAGE_TP_FALLBACK_SINGLE_SIZE_TOO_SMALL",
                 fallback_context={
                     "total_contracts": position_contracts,
-                    "tp1_contracts": tp1_contracts,
+                    "tp1_contracts": tp1_total_contracts,
                     "tp2_contracts": tp2_contracts,
                     "runner_contracts": runner_contracts,
                     "min_contracts": min_contracts,
@@ -284,7 +337,7 @@ def build_take_profit_order_specs(
             )
         return TakeProfitSpecsDecision(
             specs=(
-                TakeProfitOrderSpec(label="tp1_middle", contracts=tp1_contracts, price=float(three_stage_tp1_price)),
+                TakeProfitOrderSpec(label="tp1_middle", contracts=tp1_total_contracts, price=float(three_stage_tp1_price)),
                 TakeProfitOrderSpec(label="tp2_outer", contracts=tp2_contracts, price=float(three_stage_tp2_price)),
             ),
         )
@@ -314,6 +367,41 @@ def build_take_profit_order_specs(
             },
         )
     if tp_plan == "MIDDLE_RUNNER":
+        # ── Middle Bucket Split for Middle Runner ────────────────────
+        if (
+            middle_bucket_split is not None
+            and middle_bucket_split.active
+            and middle_bucket_split.fast_price is not None
+            and middle_bucket_split.slow_price is not None
+        ):
+            fast_ratio = float(middle_bucket_split.fast_ratio_of_bucket)
+            middle_total_contracts = partial_contracts
+            fast_contracts = _rnd(middle_total_contracts * Decimal(str(fast_ratio)))
+            slow_contracts = middle_total_contracts - fast_contracts
+            if fast_contracts >= min_contracts and slow_contracts >= min_contracts:
+                if final_contracts < min_contracts:
+                    return TakeProfitSpecsDecision(
+                        specs=(TakeProfitOrderSpec(label="final", contracts=position_contracts, price=final_tp_price),),
+                        fallback_reason="MIDDLE_RUNNER_SPLIT_FALLBACK_RUNNER_TOO_SMALL",
+                        fallback_context={
+                            "total_contracts": position_contracts,
+                            "middle_total_contracts": middle_total_contracts,
+                            "fast_contracts": fast_contracts,
+                            "slow_contracts": slow_contracts,
+                            "runner_contracts": final_contracts,
+                            "min_contracts": min_contracts,
+                        },
+                    )
+                return TakeProfitSpecsDecision(
+                    specs=(
+                        TakeProfitOrderSpec(label="middle_fast", contracts=fast_contracts,
+                                           price=float(middle_bucket_split.fast_price)),
+                        TakeProfitOrderSpec(label="middle_slow", contracts=slow_contracts,
+                                           price=float(middle_bucket_split.slow_price)),
+                        TakeProfitOrderSpec(label="runner", contracts=final_contracts, price=final_tp_price),
+                    ),
+                )
+            # Fall through to unsplit if either sub-leg too small
         return TakeProfitSpecsDecision(
             specs=(
                 TakeProfitOrderSpec(label="middle", contracts=partial_contracts, price=float(partial_tp_price)),

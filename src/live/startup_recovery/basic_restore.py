@@ -167,6 +167,30 @@ def restore_strategy_from_saved_state(
         core_contracts=getattr(saved_state, "core_contracts", None),
         core_eth_qty=getattr(saved_state, "core_eth_qty", 0.0),
         startup_force_tp_reconcile=bool(getattr(saved_state, "startup_force_tp_reconcile", False)),
+        # ── Middle Bucket Split fields ────────────────────────────────
+        middle_bucket_split_active=bool(getattr(saved_state, "middle_bucket_split_active", False)),
+        middle_bucket_split_fast_consumed=bool(getattr(saved_state, "middle_bucket_split_fast_consumed", False)),
+        middle_bucket_split_slow_consumed=bool(getattr(saved_state, "middle_bucket_split_slow_consumed", False)),
+        middle_bucket_split_fast_price=getattr(saved_state, "middle_bucket_split_fast_price", None),
+        middle_bucket_split_slow_price=getattr(saved_state, "middle_bucket_split_slow_price", None),
+        middle_bucket_split_effective_price=getattr(saved_state, "middle_bucket_split_effective_price", None),
+        middle_bucket_split_middle_bucket_ratio=float(
+            getattr(saved_state, "middle_bucket_split_middle_bucket_ratio", 0.0) or 0.0),
+        middle_bucket_split_fast_ratio_of_bucket=float(
+            getattr(saved_state, "middle_bucket_split_fast_ratio_of_bucket", 0.0) or 0.0),
+        middle_bucket_split_slow_ratio_of_bucket=float(
+            getattr(saved_state, "middle_bucket_split_slow_ratio_of_bucket", 0.0) or 0.0),
+        middle_bucket_split_fast_total_ratio=float(
+            getattr(saved_state, "middle_bucket_split_fast_total_ratio", 0.0) or 0.0),
+        middle_bucket_split_slow_total_ratio=float(
+            getattr(saved_state, "middle_bucket_split_slow_total_ratio", 0.0) or 0.0),
+        middle_bucket_split_reason=getattr(saved_state, "middle_bucket_split_reason", None),
+        middle_bucket_split_fast_sl_price=getattr(saved_state, "middle_bucket_split_fast_sl_price", None),
+        middle_bucket_split_fast_sl_order_id=getattr(saved_state, "middle_bucket_split_fast_sl_order_id", None),
+        middle_bucket_split_fast_sl_protected=bool(getattr(saved_state, "middle_bucket_split_fast_sl_protected", False)),
+        middle_bucket_split_fast_sl_invalid_action_taken=getattr(
+            saved_state, "middle_bucket_split_fast_sl_invalid_action_taken", None),
+        middle_bucket_split_add_disabled=bool(getattr(saved_state, "middle_bucket_split_add_disabled", False)),
     )
     logger.warning(
         "Recovered strategy state from local disk | position_id=%s side=%s layers=%s avg_entry=%.4f tp=%s partial_tp=%s tp_plan=%s partial_tp_consumed=%s",

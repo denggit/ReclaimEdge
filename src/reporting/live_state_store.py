@@ -120,6 +120,24 @@ class LivePositionState:
     startup_force_tp_reconcile: bool = False
     cash_before_position: float | None = None
     updated_at: str = ""
+    # ── Middle Bucket Split fields ────────────────────────────────────
+    middle_bucket_split_active: bool = False
+    middle_bucket_split_fast_consumed: bool = False
+    middle_bucket_split_slow_consumed: bool = False
+    middle_bucket_split_fast_price: float | None = None
+    middle_bucket_split_slow_price: float | None = None
+    middle_bucket_split_effective_price: float | None = None
+    middle_bucket_split_middle_bucket_ratio: float = 0.0
+    middle_bucket_split_fast_ratio_of_bucket: float = 0.0
+    middle_bucket_split_slow_ratio_of_bucket: float = 0.0
+    middle_bucket_split_fast_total_ratio: float = 0.0
+    middle_bucket_split_slow_total_ratio: float = 0.0
+    middle_bucket_split_reason: str | None = None
+    middle_bucket_split_fast_sl_price: float | None = None
+    middle_bucket_split_fast_sl_order_id: str | None = None
+    middle_bucket_split_fast_sl_protected: bool = False
+    middle_bucket_split_fast_sl_invalid_action_taken: str | None = None
+    middle_bucket_split_add_disabled: bool = False
 
 
 class LiveStateStore:
@@ -286,6 +304,32 @@ class LiveStateStore:
             core_eth_qty=float(getattr(strategy_state, "core_eth_qty", 0.0) or 0.0),
             startup_force_tp_reconcile=bool(getattr(strategy_state, "startup_force_tp_reconcile", False)),
             cash_before_position=cash_before_position,
+            # ── Middle Bucket Split fields ────────────────────────────
+            middle_bucket_split_active=bool(getattr(strategy_state, "middle_bucket_split_active", False)),
+            middle_bucket_split_fast_consumed=bool(getattr(strategy_state, "middle_bucket_split_fast_consumed", False)),
+            middle_bucket_split_slow_consumed=bool(getattr(strategy_state, "middle_bucket_split_slow_consumed", False)),
+            middle_bucket_split_fast_price=getattr(strategy_state, "middle_bucket_split_fast_price", None),
+            middle_bucket_split_slow_price=getattr(strategy_state, "middle_bucket_split_slow_price", None),
+            middle_bucket_split_effective_price=getattr(strategy_state, "middle_bucket_split_effective_price", None),
+            middle_bucket_split_middle_bucket_ratio=float(
+                getattr(strategy_state, "middle_bucket_split_middle_bucket_ratio", 0.0) or 0.0),
+            middle_bucket_split_fast_ratio_of_bucket=float(
+                getattr(strategy_state, "middle_bucket_split_fast_ratio_of_bucket", 0.0) or 0.0),
+            middle_bucket_split_slow_ratio_of_bucket=float(
+                getattr(strategy_state, "middle_bucket_split_slow_ratio_of_bucket", 0.0) or 0.0),
+            middle_bucket_split_fast_total_ratio=float(
+                getattr(strategy_state, "middle_bucket_split_fast_total_ratio", 0.0) or 0.0),
+            middle_bucket_split_slow_total_ratio=float(
+                getattr(strategy_state, "middle_bucket_split_slow_total_ratio", 0.0) or 0.0),
+            middle_bucket_split_reason=getattr(strategy_state, "middle_bucket_split_reason", None),
+            middle_bucket_split_fast_sl_price=getattr(strategy_state, "middle_bucket_split_fast_sl_price", None),
+            middle_bucket_split_fast_sl_order_id=getattr(strategy_state, "middle_bucket_split_fast_sl_order_id", None),
+            middle_bucket_split_fast_sl_protected=bool(
+                getattr(strategy_state, "middle_bucket_split_fast_sl_protected", False)),
+            middle_bucket_split_fast_sl_invalid_action_taken=getattr(
+                strategy_state, "middle_bucket_split_fast_sl_invalid_action_taken", None),
+            middle_bucket_split_add_disabled=bool(
+                getattr(strategy_state, "middle_bucket_split_add_disabled", False)),
         )
 
 
