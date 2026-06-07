@@ -1333,3 +1333,182 @@ class TestOuterProfitFallback:
         assert s.state.middle_runner_final_tp_price == 110.0, (
             "Final TP must fall back to BOLL20 upper when TP_BOLL15 upper insufficient"
         )
+
+    def test_waiting_tp2_update_falls_back_to_structure_outer_when_tp_boll_outer_lacks_profit(self):
+        """Waiting TP2: new TP2 via _maybe_update_tp uses BOLL20 upper when TP_BOLL15 insufficient."""
+        s = _strategy(
+            three_stage_runner_enabled=True,
+            tp_min_net_profit_pct=0.005,
+            three_stage_post_tp1_protective_sl_enabled=False,
+        )
+        b = _boll_with_tp(
+            middle=106.5, tp_middle=106.5,
+            upper=110.0, tp_upper=105.0,
+        )
+        _setup_position_state(s, "LONG", 104.5)
+        s.state.side = "LONG"
+        s.state.three_stage_runner_enabled_for_position = True
+        s.state.three_stage_tp1_consumed = True
+        s.state.three_stage_tp2_consumed = False
+        s.state.trend_runner_active = False
+        s.state.tp_plan = "THREE_STAGE_RUNNER"
+        s.state.tp_mode = "UPPER"
+        s.state.three_stage_tp1_price = 106.5
+        s.state.three_stage_tp2_price = 105.0
+        s.state.tp_price = 105.0
+        s.state.last_tp_update_candle_ts_ms = 0
+        s.state.partial_tp_consumed = True
+        # effective_be ~ 104.5, required_outer = 104.5 * 1.005 = 105.0225
+        # tp_upper=105.0 < 105.0225 → insufficient
+        # upper=110.0 >= 105.0225 → fallback
+
+        intent = s._maybe_update_tp(105.0, 2000, b, _cvd())
+        assert intent is not None, "waiting TP2 should produce UPDATE_TP intent"
+        assert intent.tp_price == 110.0, (
+            "UPDATE_TP intent tp_price must be BOLL20 upper (110.0)"
+        )
+        assert s.state.three_stage_tp2_price == 110.0, (
+            "three_stage_tp2_price must fall back to BOLL20 upper (110.0)"
+        )
+        assert s.state.tp_price == 110.0
+
+    def test_middle_runner_active_final_tp_falls_back_to_structure_outer_when_tp_boll_outer_lacks_profit(self):
+        """Middle Runner active: final TP update uses BOLL20 upper when TP_BOLL15 insufficient."""
+        s = _strategy(middle_runner_enabled=True, tp_min_net_profit_pct=0.005)
+        b = _boll_with_tp(
+            middle=106.5, tp_middle=106.5,
+            upper=110.0, tp_upper=105.0,
+        )
+        _setup_position_state(s, "LONG", 104.5)
+        s.state.side = "LONG"
+        s.state.middle_runner_active = True
+        s.state.tp_plan = "MIDDLE_RUNNER"
+        s.state.tp_mode = "UPPER"
+        s.state.tp_price = 105.0
+        s.state.middle_runner_first_tp_price = 106.5
+        s.state.middle_runner_final_tp_price = 105.0
+        s.state.last_tp_update_candle_ts_ms = 0
+        s.state.partial_tp_consumed = True
+        s.state.middle_runner_enabled_for_position = True
+        s.state.first_entry_ts_ms = 1000
+        s.state.last_order_ts_ms = 1000
+        # effective_be ~ 104.5, required_outer = 105.0225
+        # tp_upper=105.0 < 105.0225 → insufficient
+        # upper=110.0 >= 105.0225 → fallback
+
+        intent = s._maybe_update_tp(105.0, 2000, b, _cvd())
+        assert intent is not None, "middle_runner_active should produce UPDATE_TP intent"
+        assert intent.tp_price == 110.0
+        assert s.state.middle_runner_final_tp_price == 110.0, (
+            "Final TP must fall back to BOLL20 upper (110.0)"
+        )
+        assert s.state.tp_price == 110.0
+
+    def test_split_fallback_uses_valid_outer_when_tp_boll_outer_lacks_profit(self):
+        """SPLIT_PARTIAL_FINAL fallback: outer uses BOLL20 upper when TP_BOLL15 insufficient."""
+        s = _strategy(tp_min_net_profit_pct=0.005)
+        b = _boll_with_tp(
+            middle=106.5, tp_middle=106.5,
+            upper=110.0, tp_upper=105.0,
+        )
+        _setup_position_state(s, "LONG", 106.5)
+        s.state.side = "LONG"
+        s.state.tp_plan = "SPLIT_PARTIAL_FINAL"
+        s.state.partial_tp_consumed = False
+        s.state.tp_price = 105.0
+        s.state.tp_mode = "UPPER"
+        s.state.partial_tp_price = 106.5
+        s.state.partial_tp_ratio = 0.5
+        s.state.last_tp_update_candle_ts_ms = 0
+        s.state.middle_runner_active = False
+        s.state.trend_runner_active = False
+        s.state.three_stage_tp1_consumed = False
+        s.state.three_stage_tp2_consumed = False
+        # effective_be ~ 106.5, required_middle = 106.5 * 1.005 = 107.0325
+        # tp_middle=106.5 < 107.0325 → insufficient middle
+        # middle=106.5 < 107.0325 → insufficient middle
+        # → tp_mode becomes UPPER
+        # → enters 'if tp_mode != "MIDDLE"' block
+        # required_outer = 107.0325
+        # tp_upper=105.0 < 107.0325 → insufficient
+        # upper=110.0 >= 107.0325 → fallback
+
+        intent = s._maybe_update_tp(106.5, 2000, b, _cvd())
+        assert intent is not None
+        assert intent.tp_price == 110.0, (
+            "SPLIT fallback outer must use BOLL20 upper (110.0)"
+        )
+        assert s.state.tp_plan == "SINGLE"
+        assert s.state.tp_price == 110.0
+        assert s.state.tp_mode == "UPPER"
+
+    def test_generic_complex_fallback_uses_valid_outer_when_tp_boll_outer_lacks_profit(self):
+        """Generic complex plan fallback uses BOLL20 upper when TP_BOLL15 insufficient."""
+        s = _strategy(tp_min_net_profit_pct=0.005)
+        b = _boll_with_tp(
+            middle=106.5, tp_middle=106.5,
+            upper=110.0, tp_upper=105.0,
+        )
+        _setup_position_state(s, "LONG", 106.5)
+        s.state.side = "LONG"
+        # Use a non-SINGLE, non-SPLIT, non-THREE_STAGE plan to hit the generic branch
+        s.state.tp_plan = "MIDDLE_RUNNER"
+        s.state.middle_runner_pending = False
+        s.state.middle_runner_active = False
+        s.state.middle_runner_enabled_for_position = False
+        s.state.trend_runner_active = False
+        s.state.three_stage_tp1_consumed = False
+        s.state.three_stage_tp2_consumed = False
+        s.state.three_stage_runner_enabled_for_position = False
+        s.state.tp_price = 105.0
+        s.state.tp_mode = "UPPER"
+        s.state.last_tp_update_candle_ts_ms = 0
+        s.state.partial_tp_price = None
+        s.state.partial_tp_consumed = False
+        # Both middles insufficient → tp_mode becomes UPPER
+        # Enters 'if tp_mode != "MIDDLE"' → generic "any other complex plan" branch
+
+        intent = s._maybe_update_tp(106.5, 2000, b, _cvd())
+        assert intent is not None
+        assert intent.tp_price == 110.0, (
+            "COMPLEX fallback outer must use BOLL20 upper (110.0)"
+        )
+        assert s.state.tp_plan == "SINGLE"
+        assert s.state.tp_price == 110.0
+
+    def test_tp_boll_log_source_reports_structure_outer_profit_fallback(self):
+        """_select_valid_tp_outer_with_profit_fallback(log_warning=False) reports correct source."""
+        s = _strategy(tp_min_net_profit_pct=0.005)
+        b = _boll_with_tp(
+            middle=106.5, tp_middle=106.5,
+            upper=110.0, tp_upper=105.0,
+        )
+        _setup_position_state(s, "LONG", 104.5)
+        # effective_be ~ 104.5, required_outer = 105.0225
+        # tp_upper=105.0 < 105.0225 → insufficient
+        # upper=110.0 >= 105.0225 → fallback to BOLL20
+
+        outer_price, outer_src = s._select_valid_tp_outer_with_profit_fallback(
+            "LONG", b, log_warning=False)
+        assert outer_price == 110.0
+        assert outer_src == "STRUCTURE_BOLL_OUTER_PROFIT_FALLBACK", (
+            f"Log source must report STRUCTURE_BOLL_OUTER_PROFIT_FALLBACK, got {outer_src}"
+        )
+
+    def test_valid_outer_with_log_warning_true_still_logs(self):
+        """log_warning=True on TP_OUTER_PROFIT_INSUFFICIENT_FALLBACK still emits warning."""
+        s = _strategy(tp_min_net_profit_pct=0.005)
+        b = _boll_with_tp(
+            middle=107.5, tp_middle=107.6,
+            upper=108.0, tp_upper=107.0,
+        )
+        _setup_position_state(s, "LONG", 107.5)
+        # effective_be ~ 107.5, required_outer = 107.5 * 1.005 = 108.0375
+        # tp_upper=107.0 < 108.0375 → insufficient
+        # upper=108.0 < 108.0375 → insufficient
+        # → TP_OUTER_PROFIT_INSUFFICIENT_FALLBACK with WARNING
+
+        outer_price, outer_src = s._select_valid_tp_outer_with_profit_fallback(
+            "LONG", b, log_warning=True)
+        assert outer_price == 108.0
+        assert outer_src == "TP_OUTER_PROFIT_INSUFFICIENT_FALLBACK"

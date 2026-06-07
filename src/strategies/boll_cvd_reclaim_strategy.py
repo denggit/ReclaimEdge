@@ -1101,7 +1101,7 @@ class BollCvdReclaimStrategy:
         if self._three_stage_waiting_tp2():
             old_post_tp1_sl = self.state.three_stage_post_tp1_protective_sl_price
             old_tp2_price = self.state.three_stage_tp2_price
-            new_tp2_price, _tp2_src = self._select_tp_outer(self.state.side, boll)
+            new_tp2_price, _tp2_src = self._select_valid_tp_outer_with_profit_fallback(self.state.side, boll)
             if self.config.three_stage_post_tp1_protective_sl_enabled:
                 self._advance_runner_sl_time_tighten_candle_count(
                     target="three_stage_post_tp1",
@@ -1181,7 +1181,7 @@ class BollCvdReclaimStrategy:
             ):
                 old_tp1 = self.state.three_stage_tp1_price
                 old_tp2 = self.state.three_stage_tp2_price
-                outer, outer_src = self._select_tp_outer(self.state.side, boll)
+                outer, outer_src = self._select_valid_tp_outer_with_profit_fallback(self.state.side, boll)
                 logger.warning(
                     "THREE_STAGE_MIDDLE_PROFIT_INSUFFICIENT_SINGLE_OUTER | "
                     "side=%s effective_breakeven=%.4f required_middle=%.4f "
@@ -1212,7 +1212,7 @@ class BollCvdReclaimStrategy:
 
             # Middle Runner pending (first close NOT done): reset
             elif self.state.middle_runner_pending and not self.state.middle_runner_active:
-                outer, outer_src = self._select_tp_outer(self.state.side, boll)
+                outer, outer_src = self._select_valid_tp_outer_with_profit_fallback(self.state.side, boll)
                 logger.warning(
                     "MIDDLE_RUNNER_MIDDLE_PROFIT_INSUFFICIENT_SINGLE_OUTER | "
                     "side=%s effective_breakeven=%.4f required_middle=%.4f "
@@ -1240,17 +1240,18 @@ class BollCvdReclaimStrategy:
 
             # SPLIT partial NOT consumed: fall back to SINGLE outer
             elif self.state.tp_plan == "SPLIT_PARTIAL_FINAL" and not self.state.partial_tp_consumed:
-                outer, _outer_src = self._select_tp_outer(self.state.side, boll)
+                outer, _outer_src = self._select_valid_tp_outer_with_profit_fallback(self.state.side, boll)
                 outer_mode: TpMode = "UPPER" if self.state.side == "LONG" else "LOWER"
                 logger.warning(
                     "SPLIT_TP_DISABLED_MIDDLE_PROFIT_INSUFFICIENT | "
                     "side=%s effective_breakeven=%.4f middle=%.4f required_middle=%.4f "
-                    "outer=%.4f candle_ts=%s",
+                    "outer=%.4f outer_source=%s candle_ts=%s",
                     self.state.side,
                     effective_be,
                     boll.middle,
                     required_middle,
                     outer,
+                    _outer_src,
                     boll.candle_ts_ms,
                 )
                 tp_price = outer
@@ -1268,17 +1269,18 @@ class BollCvdReclaimStrategy:
                     and not self.state.three_stage_tp1_consumed
                     and not self.state.three_stage_tp2_consumed
             ):
-                outer, _outer_src = self._select_tp_outer(self.state.side, boll)
+                outer, _outer_src = self._select_valid_tp_outer_with_profit_fallback(self.state.side, boll)
                 outer_mode: TpMode = "UPPER" if self.state.side == "LONG" else "LOWER"
                 logger.warning(
                     "COMPLEX_TP_DISABLED_MIDDLE_PROFIT_INSUFFICIENT | "
                     "side=%s effective_breakeven=%.4f middle=%.4f required_middle=%.4f "
-                    "outer=%.4f old_plan=%s candle_ts=%s",
+                    "outer=%.4f outer_source=%s old_plan=%s candle_ts=%s",
                     self.state.side,
                     effective_be,
                     boll.middle,
                     required_middle,
                     outer,
+                    _outer_src,
                     self.state.tp_plan,
                     boll.candle_ts_ms,
                 )
@@ -1297,7 +1299,7 @@ class BollCvdReclaimStrategy:
             reason_override = "three_stage_pre_tp1_degraded_to_single"
         elif degrade_target == "MIDDLE_RUNNER":
             self._degrade_three_stage_pre_tp1_to_middle_runner(ts_ms, boll)
-            tp_price = self.state.tp_price or self._select_tp_outer(self.state.side, boll)[0]
+            tp_price = self.state.tp_price or self._select_valid_tp_outer_with_profit_fallback(self.state.side, boll)[0]
             tp_mode = self.state.tp_mode
             partial_tp_price = self.state.partial_tp_price
             partial_tp_ratio = self.state.partial_tp_ratio
@@ -1334,7 +1336,7 @@ class BollCvdReclaimStrategy:
             else:
                 tp_price = self.state.trend_runner_tp_price or tp_price
         elif self.state.middle_runner_active:
-            tp_price, _tp_src = self._select_tp_outer(self.state.side, boll)
+            tp_price, _tp_src = self._select_valid_tp_outer_with_profit_fallback(self.state.side, boll)
             tp_mode = "UPPER" if self.state.side == "LONG" else "LOWER"
             partial_tp_price, partial_tp_ratio, tp_plan = None, 0.0, "SINGLE"
             self._advance_runner_sl_time_tighten_candle_count(
@@ -1353,7 +1355,7 @@ class BollCvdReclaimStrategy:
             if partial_tp_price is None:
                 effective_be = self._effective_breakeven_for_tp_selection(self.state.side)
                 required_middle = self._required_middle_for_profit(self.state.side, effective_be)
-                outer, outer_src = self._select_tp_outer(self.state.side, boll)
+                outer, outer_src = self._select_valid_tp_outer_with_profit_fallback(self.state.side, boll)
                 logger.warning(
                     "MIDDLE_RUNNER_MIDDLE_PROFIT_INSUFFICIENT_SINGLE_OUTER | "
                     "side=%s effective_breakeven=%.4f required_middle=%.4f "
@@ -1392,7 +1394,7 @@ class BollCvdReclaimStrategy:
                 old_tp2 = self.state.three_stage_tp2_price
                 effective_be = self._effective_breakeven_for_tp_selection(self.state.side)
                 required_middle = self._required_middle_for_profit(self.state.side, effective_be)
-                outer, outer_src = self._select_tp_outer(self.state.side, boll)
+                outer, outer_src = self._select_valid_tp_outer_with_profit_fallback(self.state.side, boll)
                 logger.warning(
                     "THREE_STAGE_MIDDLE_PROFIT_INSUFFICIENT_SINGLE_OUTER | "
                     "side=%s effective_breakeven=%.4f required_middle=%.4f "
@@ -2861,12 +2863,15 @@ class BollCvdReclaimStrategy:
             self,
             side: PositionSide,
             boll: BollSnapshot,
+            *,
+            log_warning: bool = True,
     ) -> tuple[float, str]:
         """Return (outer_price, source) with profit-distance fallback.
 
         1) TP_BOLL15 outer first.
         2) Structure BOLL20 outer if TP_BOLL15 outer profit is insufficient.
-        3) Farther outer as last resort (logs TP_OUTER_PROFIT_INSUFFICIENT_FALLBACK).
+        3) Farther outer as last resort (logs TP_OUTER_PROFIT_INSUFFICIENT_FALLBACK
+           only when log_warning=True).
         """
         effective_be = self._effective_breakeven_for_tp_selection(side)
         tp_band = self._tp_band_snapshot(boll)
@@ -2877,7 +2882,7 @@ class BollCvdReclaimStrategy:
             tp_band=tp_band,
             tp_boll_enabled=self.config.tp_boll_enabled,
         )
-        if sel.source == "TP_OUTER_PROFIT_INSUFFICIENT_FALLBACK":
+        if log_warning and sel.source == "TP_OUTER_PROFIT_INSUFFICIENT_FALLBACK":
             effective_be_val = self._effective_breakeven_for_tp_selection(side)
             required = (
                 effective_be_val * (1 + self.config.tp_min_net_profit_pct)
@@ -2919,7 +2924,8 @@ class BollCvdReclaimStrategy:
         """Log TP_BOLL_PRICE_SELECTED at initial TP gen or 15m UPDATE_TP only."""
         tp_boll_avail = self._tp_boll_available(boll)
         tp_mid, tp_mid_src = self._select_tp_middle(boll)
-        tp_outer, tp_outer_src = self._select_tp_outer(self.state.side or "LONG", boll)
+        tp_outer, tp_outer_src = self._select_valid_tp_outer_with_profit_fallback(
+            self.state.side or "LONG", boll, log_warning=False)
 
         # Determine the effective TP price sources.
         # Auto-detect profit fallback: if the actual TP1/first-tp price equals the
