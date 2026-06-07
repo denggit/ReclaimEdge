@@ -270,11 +270,27 @@ class DailyTradeReporter:
             latest_cash = residual_bucket.cash_end
             equity_points.append(residual_bucket.cash_end)
 
+        # --- account value display: prefer equity-based values when available ---
+        display_start_value = (
+            residual_bucket.period_start_value
+            if residual_bucket.period_start_value is not None
+            else first_cash
+        )
+        display_current_value = (
+            residual_bucket.current_account_value
+            if residual_bucket.current_account_value is not None
+            else latest_cash
+        )
+        period_value_source = getattr(residual_bucket, "period_start_value_source", None) or "cash"
+        current_value_source = residual_bucket.current_account_value_source or "cash"
+
         win_rate = win_count / closed_count * 100 if closed_count else None
         avg_pnl = known_closed_pnl / closed_count if closed_count else None
         profit_factor = gross_profit / gross_loss if gross_loss > 0 else None
         total_return_pct = (
-            (latest_cash - first_cash) / first_cash * 100 if first_cash and latest_cash is not None else None
+            (display_current_value - display_start_value) / display_start_value * 100
+            if display_start_value and display_current_value is not None
+            else None
         )
         max_drawdown_usdt, max_drawdown_pct = max_drawdown(equity_points)
         first_ts = short_ts(events_sorted[0].ts_iso) if events_sorted else "-"
@@ -288,8 +304,8 @@ class DailyTradeReporter:
 
   <h3>账户收益</h3>
   <div style="display:flex;gap:12px;flex-wrap:wrap;margin:12px 0;">
-    {metric_card('初始账户值', fmt(first_cash, 4) + ' USDT')}
-    {metric_card('最新账户值', fmt(latest_cash, 4) + ' USDT')}
+    {metric_card('初始账户值', fmt(display_start_value, 4) + f' USDT ({period_value_source})')}
+    {metric_card('最新账户值', fmt(display_current_value, 4) + f' USDT ({current_value_source})')}
     {metric_card('已记录平仓盈亏', fmt(known_closed_pnl, 4) + ' USDT')}
     {metric_card('未知/不完整汇总盈亏', fmt(residual_bucket.pnl, 4) + ' USDT')}
     {metric_card('累计估算盈亏', fmt(total_pnl, 4) + ' USDT')}

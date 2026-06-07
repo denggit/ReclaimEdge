@@ -259,6 +259,7 @@ class ResidualBucketHtmlTest(unittest.TestCase):
             formula="current_equity - period_start_value (有仓, 优先使用 equity)",
             note="incomplete records are bucketed (有仓, 收益估算基于 equity)",
             period_start_value=614.7787,
+            period_start_value_source="cash",
             current_account_value=675.1616,
             current_account_value_source="equity",
         )
@@ -282,6 +283,7 @@ class ResidualBucketHtmlTest(unittest.TestCase):
             formula="current_cash - period_start_cash",
             note="incomplete records are bucketed",
             period_start_value=100.0,
+            period_start_value_source="cash",
             current_account_value=110.0,
             current_account_value_source="cash",
         )
@@ -300,6 +302,7 @@ class ResidualBucketHtmlTest(unittest.TestCase):
             formula="-",
             note="no incomplete records",
             period_start_value=100.0,
+            period_start_value_source="cash",
             current_account_value=100.0,
             current_account_value_source="cash",
         )
@@ -514,6 +517,49 @@ class OverallSummaryMetricLabelsTest(unittest.TestCase):
         # Updated labels
         self.assertIn("初始账户值", content)
         self.assertIn("最新账户值", content)
+        # value source is shown for flat (cash) context
+        self.assertIn("USDT (cash)", content)
+
+    def test_overall_summary_uses_equity_for_current_account_value_when_position_open(self) -> None:
+        """有仓时顶部"最新账户值"卡片应使用 current_equity 并显示 source=equity。"""
+        reporter = self.reporter()
+        events = [
+            event("ENTRY", {"side": "LONG", "price": 100.0, "layer_index": 1, "reason": "open"}, "pos1",
+                  ts="2026-01-01T00:00:00+00:00"),
+        ]
+        context = ReportRuntimeContext(
+            period_start_cash=614.7787,
+            current_cash=561.9095,
+            current_equity=675.1616,
+            current_has_position=True,
+            current_position_id="pos1",
+        )
+        _, content = reporter.build_overall_summary_report(events, context=context)
+        self.assertIn("最新账户值", content)
+        self.assertIn("675.1616", content)
+        self.assertIn("equity", content)
+        # 不应把 current_cash 当作最新账户值卡片主值
+        self.assertNotIn("561.9095 USDT (equity)", content)
+
+    def test_overall_summary_uses_cash_for_current_account_value_when_flat(self) -> None:
+        """空仓时顶部"最新账户值"卡片应使用 current_cash 并显示 source=cash。"""
+        reporter = self.reporter()
+        events = [
+            event("ENTRY", {"side": "LONG", "price": 100.0, "layer_index": 1, "reason": "open"}, "pos1",
+                  ts="2026-01-01T00:00:00+00:00"),
+            event("FLAT", {"realized_pnl_usdt_est": 10.0, "cash_before_position": 100.0, "cash_after": 110.0}, "pos1",
+                  ts="2026-01-01T01:00:00+00:00"),
+        ]
+        context = ReportRuntimeContext(
+            period_start_cash=100.0,
+            current_cash=110.0,
+            current_equity=999.0,
+            current_has_position=False,
+        )
+        _, content = reporter.build_overall_summary_report(events, context=context)
+        self.assertIn("最新账户值", content)
+        self.assertIn("110.0000", content)
+        self.assertIn("cash", content)
 
 
 if __name__ == "__main__":

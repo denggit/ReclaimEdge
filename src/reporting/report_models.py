@@ -85,6 +85,7 @@ class ResidualPnlBucket:
     note: str
     # --- value-source fields (task 44) ---
     period_start_value: float | None = None
+    period_start_value_source: str = "cash"
     current_account_value: float | None = None
     current_account_value_source: str = "cash"
 
@@ -99,6 +100,7 @@ class ReportPnlMath:
     residual_pnl: float | None
     total_pnl: float | None
     period_start_value: float | None = None
+    period_start_value_source: str = "cash"
     current_account_value: float | None = None
     current_account_value_source: str = "cash"
 

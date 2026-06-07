@@ -47,14 +47,17 @@ def calculate_pnl_math(
     residual_pnl = None
     total_pnl = None
     period_start_value: float | None = None
+    period_start_value_source = "cash"
     current_account_value: float | None = None
     current_account_value_source = "cash"
 
     # --- determine period start value: prefer equity if available ---
     if context is not None and context.period_start_equity is not None:
         period_start_value = context.period_start_equity
+        period_start_value_source = "equity"
     else:
         period_start_value = period_start_cash
+        period_start_value_source = "cash"
 
     # --- determine current account value: prefer equity when holding a position ---
     if (
@@ -82,6 +85,7 @@ def calculate_pnl_math(
         residual_pnl=residual_pnl,
         total_pnl=total_pnl,
         period_start_value=period_start_value,
+        period_start_value_source=period_start_value_source,
         current_account_value=current_account_value,
         current_account_value_source=current_account_value_source,
     )
@@ -117,6 +121,7 @@ def build_residual_bucket(
             formula=formula,
             note="missing cash context; incomplete records hidden but not valued",
             period_start_value=math.period_start_value,
+            period_start_value_source=math.period_start_value_source,
             current_account_value=math.current_account_value,
             current_account_value_source=math.current_account_value_source,
         )
@@ -145,6 +150,7 @@ def build_residual_bucket(
         formula=formula,
         note=note,
         period_start_value=math.period_start_value,
+        period_start_value_source=math.period_start_value_source,
         current_account_value=math.current_account_value,
         current_account_value_source=math.current_account_value_source,
     )
