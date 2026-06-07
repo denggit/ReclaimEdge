@@ -17,6 +17,9 @@ from src.live.workers import strategy_tick_worker as strategy_tick_worker_module
 from src.position_management import core_position_view as core_position_view_helpers
 from src.position_management import cost_runtime as position_cost_runtime
 from src.position_management import runner_live_helpers
+from src.position_management.middle_bucket_split_state import (
+    clear_middle_bucket_split_state,
+)
 from src.position_management import tp_progress as tp_progress_helpers
 from src.position_management.sidecar import entry_runtime as sidecar_entry_runtime
 from src.position_management.sidecar import runtime_state as sidecar_runtime_state
@@ -832,6 +835,43 @@ class ExecutionCommandProcessor:
 
     # ── result application helpers ───────────────────────────────────────
 
+    def _maybe_clear_middle_bucket_split_after_execution_result(
+        self,
+        *,
+        result: Any,
+        current_position_id: str | None,
+    ) -> bool:
+        """Clear strategy split state when the execution result says split was disabled.
+
+        Returns True if state was cleared, False otherwise.
+        Must be called inside ``state_lock``.
+        """
+        split_executed = getattr(result, "middle_bucket_split_executed", None)
+        if split_executed is not False:
+            return False
+
+        reason = getattr(result, "middle_bucket_split_disabled_reason", None) or "unknown"
+        clear_middle_bucket_split_state(self.strategy.state, reason=reason)
+
+        logger.warning(
+            "MIDDLE_BUCKET_SPLIT_STATE_CLEARED_ON_ORDER_BUILD | "
+            "reason=%s actual_orders_unsplit_or_final=true state_order_consistent=true",
+            reason,
+        )
+
+        if hasattr(self.journal, "append"):
+            self.journal.append(
+                "MIDDLE_BUCKET_SPLIT_DISABLED_ON_ORDER_BUILD",
+                {
+                    "reason": reason,
+                    "state_split_active_was": True,
+                    "actual_orders_unsplit_or_final": True,
+                    "state_order_consistent": True,
+                },
+                position_id=current_position_id,
+            )
+        return True
+
     async def _apply_update_tp_result(
         self,
         command: live_runtime_types.TradeCommand,
@@ -861,45 +901,13 @@ class ExecutionCommandProcessor:
                     )
                 self.strategy.state.trend_runner_tp_order_id = result.tp_order_id
             # ── Middle Bucket Split state consistency ──────────────────
-            # When the execution layer disabled split due to subleg too small,
-            # the strategy state MUST be cleared to match the actual orders.
-            split_executed = getattr(result, "middle_bucket_split_executed", None)
-            if split_executed is False:
-                split_disabled_reason = getattr(result, "middle_bucket_split_disabled_reason", None) or "subleg_too_small"
-                self.strategy.state.middle_bucket_split_active = False
-                self.strategy.state.middle_bucket_split_fast_consumed = False
-                self.strategy.state.middle_bucket_split_slow_consumed = False
-                self.strategy.state.middle_bucket_split_fast_price = None
-                self.strategy.state.middle_bucket_split_slow_price = None
-                self.strategy.state.middle_bucket_split_effective_price = None
-                self.strategy.state.middle_bucket_split_middle_bucket_ratio = 0.0
-                self.strategy.state.middle_bucket_split_fast_ratio_of_bucket = 0.0
-                self.strategy.state.middle_bucket_split_slow_ratio_of_bucket = 0.0
-                self.strategy.state.middle_bucket_split_fast_total_ratio = 0.0
-                self.strategy.state.middle_bucket_split_slow_total_ratio = 0.0
-                self.strategy.state.middle_bucket_split_reason = None
-                self.strategy.state.middle_bucket_split_fast_sl_price = None
-                self.strategy.state.middle_bucket_split_fast_sl_order_id = None
-                self.strategy.state.middle_bucket_split_fast_sl_protected = False
-                self.strategy.state.middle_bucket_split_fast_sl_invalid_action_taken = None
-                self.strategy.state.middle_bucket_split_add_disabled = False
-                logger.warning(
-                    "MIDDLE_BUCKET_SPLIT_STATE_CLEARED_ON_ORDER_BUILD | "
-                    "reason=%s state_split_active_was=true "
-                    "actual_orders_unsplit=true state_order_consistent=true",
-                    split_disabled_reason,
-                )
-                if hasattr(self.journal, "append"):
-                    self.journal.append(
-                        "MIDDLE_BUCKET_SPLIT_DISABLED_ON_ORDER_BUILD",
-                        {
-                            "reason": split_disabled_reason,
-                            "state_split_active_was": True,
-                            "actual_orders_unsplit": True,
-                            "state_order_consistent": True,
-                        },
-                        position_id=current_position_id,
-                    )
+            # When the execution layer disabled split (subleg too small,
+            # order placement failed fallback final, etc.), the strategy
+            # state MUST be cleared to match the actual orders.
+            self._maybe_clear_middle_bucket_split_after_execution_result(
+                result=result,
+                current_position_id=current_position_id,
+            )
             self.strategy.state.tp_order_id = result.tp_order_id
             self.strategy.state.tp_order_ids = list(getattr(result, "tp_order_ids", ()) or [])
             if (
@@ -1207,6 +1215,13 @@ class ExecutionCommandProcessor:
             self.execution_state.last_order_ts_ms = command.intent.ts_ms
             self.strategy.state.tp_order_id = result.tp_order_id
             self.strategy.state.tp_order_ids = list(getattr(result, "tp_order_ids", ()) or [])
+            # ── Middle Bucket Split state consistency ──────────────────
+            # Entry paths (OPEN/ADD) also carry split execution status from
+            # replace_take_profit.  Clear state if split was disabled.
+            self._maybe_clear_middle_bucket_split_after_execution_result(
+                result=result,
+                current_position_id=current_position_id,
+            )
             strategy_state_for_save = copy.deepcopy(self.strategy.state)
             equity = self.account_snapshot.equity
         self.journal.record_entry(

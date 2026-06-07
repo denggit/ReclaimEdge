@@ -13,6 +13,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from src.position_management.middle_bucket_split_state import (
+    clear_middle_bucket_split_state,
+)
 from src.strategies import middle_bucket_split as _mbs
 from src.utils.log import get_logger
 
@@ -905,24 +908,7 @@ class TpUpdateCoordinator:
 
     def _reset_middle_bucket_split_state(self) -> None:
         """Clear all middle-bucket-split state fields."""
-        s = self.strategy
-        s.state.middle_bucket_split_active = False
-        s.state.middle_bucket_split_fast_consumed = False
-        s.state.middle_bucket_split_slow_consumed = False
-        s.state.middle_bucket_split_fast_price = None
-        s.state.middle_bucket_split_slow_price = None
-        s.state.middle_bucket_split_effective_price = None
-        s.state.middle_bucket_split_middle_bucket_ratio = 0.0
-        s.state.middle_bucket_split_fast_ratio_of_bucket = 0.0
-        s.state.middle_bucket_split_slow_ratio_of_bucket = 0.0
-        s.state.middle_bucket_split_fast_total_ratio = 0.0
-        s.state.middle_bucket_split_slow_total_ratio = 0.0
-        s.state.middle_bucket_split_reason = None
-        s.state.middle_bucket_split_fast_sl_price = None
-        s.state.middle_bucket_split_fast_sl_order_id = None
-        s.state.middle_bucket_split_fast_sl_protected = False
-        s.state.middle_bucket_split_fast_sl_invalid_action_taken = None
-        s.state.middle_bucket_split_add_disabled = False
+        clear_middle_bucket_split_state(self.strategy.state, reason=None)
 
     def _apply_middle_bucket_split_for_three_stage(
         self,

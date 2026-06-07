@@ -7,6 +7,9 @@ from typing import TYPE_CHECKING
 from src.execution import middle_bucket_split_size as _split_size
 from src.execution import order_specs
 from src.execution.trader import LiveTradeResult
+from src.position_management.middle_bucket_split_state import (
+    MIDDLE_BUCKET_SPLIT_DISABLED_ORDER_PLACEMENT_FAILED_FALLBACK_FINAL,
+)
 from src.utils.log import get_logger
 
 if TYPE_CHECKING:
@@ -88,6 +91,7 @@ class CoreTakeProfitManager:
         await self.trader._cancel_stale_runner_protective_stops_for_degrade(intent)
 
         specs, split_disabled_reason = self._build_take_profit_order_specs(intent)
+        split_was_active = bool(getattr(intent, "middle_bucket_split_active", False))
         placed_order_ids: list[str] = []
         message = "take-profit replaced"
         try:
@@ -95,12 +99,21 @@ class CoreTakeProfitManager:
         except Exception:
             if len(specs) <= 1:
                 raise
-            logger.exception("Failed to place split take-profit orders; falling back to one full-size final TP")
+            if split_was_active:
+                split_disabled_reason = MIDDLE_BUCKET_SPLIT_DISABLED_ORDER_PLACEMENT_FAILED_FALLBACK_FINAL
+            logger.exception(
+                "Failed to place split take-profit orders; falling back to one full-size final TP | "
+                "split_was_active=%s state_must_clear_split=true "
+                "fallback_order_labels=[final] "
+                "reason=%s",
+                split_was_active,
+                split_disabled_reason or "n/a",
+            )
             await self.trader._cancel_existing_take_profit_orders_for_intent(intent)
             fallback_specs = [("final", t.position_contracts, intent.tp_price)]
             placed_order_ids = await self.trader._place_reduce_only_take_profit_orders(intent, fallback_specs)
             specs = fallback_specs
-            message = "split take-profit fallback to single final TP"
+            message = "split take-profit placement failed; fallback to single final TP"
 
         tp_order_id = ",".join(placed_order_ids)
         t.tp_order_id = tp_order_id

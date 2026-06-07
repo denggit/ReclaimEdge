@@ -195,6 +195,8 @@ class Trader:
                     protective_sl_order_id=tp.protective_sl_order_id,
                     protective_sl_price=tp.protective_sl_price,
                     protective_sl_ok=tp.protective_sl_ok,
+                    middle_bucket_split_executed=tp.middle_bucket_split_executed,
+                    middle_bucket_split_disabled_reason=tp.middle_bucket_split_disabled_reason,
                 )
             return LiveTradeResult(
                 ok=True,
@@ -210,6 +212,8 @@ class Trader:
                 protective_sl_order_id=tp.protective_sl_order_id,
                 protective_sl_price=tp.protective_sl_price,
                 protective_sl_ok=tp.protective_sl_ok,
+                middle_bucket_split_executed=tp.middle_bucket_split_executed,
+                middle_bucket_split_disabled_reason=tp.middle_bucket_split_disabled_reason,
             )
         except Exception as exc:
             logger.exception("Entry appears filled, but TP placement raised an exception")
