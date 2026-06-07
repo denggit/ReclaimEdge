@@ -55,6 +55,9 @@ class ReportPnlMath:
     strategy_total_pnl: float | None
     residual_pnl: float | None
     total_pnl: float | None
+    period_start_value: float | None = None
+    current_account_value: float | None = None
+    current_account_value_source: str = "cash"
 
 
 @dataclass(frozen=True)
@@ -395,6 +398,9 @@ class DailyTradeReporter:
   <h3>未知/不完整记录汇总</h3>
   {self._residual_bucket_html(residual_bucket)}
 
+  <h3>💰 账户现金变动说明</h3>
+  {self._cash_events_section_html(events_sorted)}
+
   <h3>程序事件</h3>
   <div style="display:flex;gap:12px;flex-wrap:wrap;margin:12px 0;">
     {self._metric_card('总事件数', str(len(events_sorted)))}
@@ -408,7 +414,7 @@ class DailyTradeReporter:
   </div>
 
   <p style="color:#777;font-size:12px;margin-top:16px;">
-    说明：本报告基于 live_trade_summary.jsonl 的已归档 SUMMARY_SNAPSHOT 与 live_trade_events.jsonl 的活跃账本合并生成。缺少 FLAT 的历史记录不会逐条展示；如果当前总资金和起始资金可用，会把它们聚合为一个未知来源盈亏桶，避免重复累计不完整记录。
+    说明：本报告基于 live_trade_summary.jsonl 的已归档 SUMMARY_SNAPSHOT 与 live_trade_events.jsonl 的活跃账本合并生成。缺少 FLAT 的历史记录不会逐条展示；如果当前总资金和起始资金可用，会把它们聚合为一个未知来源盈亏桶，避免重复累计不完整记录。当前有持仓时优先使用 equity 作为账户价值。
   </p>
 </div>
 """.strip()
@@ -422,7 +428,13 @@ class DailyTradeReporter:
             context: ReportRuntimeContext | None,
     ) -> ResidualPnlBucket:
         math = self.calculate_pnl_math(events, known_closed_pnl, context)
-        formula = "current_cash - period_start_cash - net_transfer - known_closed_pnl"
+        # Show which value source was used for the PnL math
+        if math.current_account_value_source == "equity":
+            value_label = "current_equity"
+            formula = f"current_equity - period_start_value - net_transfer - known_closed_pnl (有仓, 优先使用 equity)"
+        else:
+            value_label = "current_cash"
+            formula = "current_cash - period_start_cash - net_transfer - known_closed_pnl"
         if context is None or context.current_cash is None or context.period_start_cash is None:
             return ResidualPnlBucket(
                 incomplete_count,
@@ -438,9 +450,15 @@ class DailyTradeReporter:
         if incomplete_count <= 0 and math.residual_pnl == 0:
             note = "no incomplete records"
         elif incomplete_count <= 0:
-            note = "no incomplete records; residual shows cash-based unaccounted strategy PnL"
+            if math.current_account_value_source == "equity":
+                note = "no incomplete records; residual shows equity-based unaccounted strategy PnL (有仓, 用 equity 替代 available cash)"
+            else:
+                note = "no incomplete records; residual shows cash-based unaccounted strategy PnL"
         else:
-            note = "incomplete records are bucketed, not displayed per position"
+            if math.current_account_value_source == "equity":
+                note = "incomplete records are bucketed, not displayed per position (有仓, 收益估算基于 equity)"
+            else:
+                note = "incomplete records are bucketed, not displayed per position"
         return ResidualPnlBucket(
             incomplete_count,
             math.residual_pnl,
@@ -465,8 +483,30 @@ class DailyTradeReporter:
         strategy_total_pnl = None
         residual_pnl = None
         total_pnl = None
-        if current_cash is not None and period_start_cash is not None:
-            strategy_total_pnl = current_cash - period_start_cash - net_transfer
+        period_start_value: float | None = None
+        current_account_value: float | None = None
+        current_account_value_source = "cash"
+
+        # --- determine period start value: prefer equity if available ---
+        if context is not None and context.period_start_equity is not None:
+            period_start_value = context.period_start_equity
+        else:
+            period_start_value = period_start_cash
+
+        # --- determine current account value: prefer equity when holding a position ---
+        if (
+                context is not None
+                and context.current_has_position
+                and context.current_equity is not None
+        ):
+            current_account_value = context.current_equity
+            current_account_value_source = "equity"
+        else:
+            current_account_value = current_cash
+            current_account_value_source = "cash"
+
+        if current_account_value is not None and period_start_value is not None:
+            strategy_total_pnl = current_account_value - period_start_value - net_transfer
             residual_pnl = strategy_total_pnl - known_closed_pnl
             total_pnl = strategy_total_pnl
         return ReportPnlMath(
@@ -477,6 +517,9 @@ class DailyTradeReporter:
             strategy_total_pnl=strategy_total_pnl,
             residual_pnl=residual_pnl,
             total_pnl=total_pnl,
+            period_start_value=period_start_value,
+            current_account_value=current_account_value,
+            current_account_value_source=current_account_value_source,
         )
 
     @staticmethod
@@ -490,9 +533,93 @@ class DailyTradeReporter:
                 total += amount
         return total
 
+    @staticmethod
+    def _cash_drift_events(events: list[JournalEvent]) -> list[JournalEvent]:
+        return [event for event in events if event.event_type == "ACCOUNT_CASH_DRIFT"]
+
+    @staticmethod
+    def _cash_transfer_events(events: list[JournalEvent]) -> list[JournalEvent]:
+        return [event for event in events if event.event_type == "CASH_TRANSFER"]
+
+    @staticmethod
+    def _cash_drift_reason_label(reason: str) -> str:
+        """Return a human-readable Chinese label for ACCOUNT_CASH_DRIFT reason strings."""
+        if not reason:
+            return "未知原因"
+        keywords = ["has_position", "strategy_layers", "current_position_id", "order_settle"]
+        if any(kw in reason for kw in keywords):
+            return "持仓/补仓/订单结算期间的可用现金变化，非转账行为"
+        if "flat_settle_cooldown" in reason:
+            return "平仓结算冷却期内的可用现金变化"
+        return "可用现金漂移（非转账）"
+
+    def _cash_events_section_html(self, events: list[JournalEvent]) -> str:
+        """Render a cash events explanation section for reports."""
+        transfer_events = self._cash_transfer_events(events)
+        drift_events = self._cash_drift_events(events)
+
+        if not transfer_events and not drift_events:
+            return "<p style='color:#777;'>本周期无现金变动事件。</p>"
+
+        rows: list[str] = []
+
+        for event in transfer_events:
+            direction = event.payload.get("direction", "-")
+            amount = _to_float(event.payload.get("amount"))
+            cash_before = _to_float(event.payload.get("cash_before"))
+            cash_after = _to_float(event.payload.get("cash_after"))
+            reason = event.payload.get("reason", "-")
+            label = "真实转入" if direction == "DEPOSIT" else "真实转出"
+            rows.append(
+                f"<tr style='background:#e8f5e9;'>"
+                f"<td style='padding:8px;border:1px solid #ddd;'>{short_ts(event.ts_iso)}</td>"
+                f"<td style='padding:8px;border:1px solid #ddd;'>📥 {label}</td>"
+                f"<td style='padding:8px;border:1px solid #ddd;text-align:right;'>{fmt(amount, 4)} USDT</td>"
+                f"<td style='padding:8px;border:1px solid #ddd;text-align:right;'>{fmt(cash_before, 4)} → {fmt(cash_after, 4)}</td>"
+                f"<td style='padding:8px;border:1px solid #ddd;'>{html.escape(str(reason))}</td>"
+                f"</tr>"
+            )
+
+        for event in drift_events:
+            amount = _to_float(event.payload.get("amount"))
+            cash_before = _to_float(event.payload.get("cash_before"))
+            cash_after = _to_float(event.payload.get("cash_after"))
+            reason = event.payload.get("reason", "-")
+            label = self._cash_drift_reason_label(reason)
+            direction_text = "可用现金减少（保证金占用增加/结算漂移）" if (amount or 0) < 0 else "可用现金增加（保证金释放/结算漂移）"
+            rows.append(
+                f"<tr style='background:#fff8e1;'>"
+                f"<td style='padding:8px;border:1px solid #ddd;'>{short_ts(event.ts_iso)}</td>"
+                f"<td style='padding:8px;border:1px solid #ddd;'>⚡ 持仓中现金漂移</td>"
+                f"<td style='padding:8px;border:1px solid #ddd;text-align:right;'>{fmt(amount, 4)} USDT</td>"
+                f"<td style='padding:8px;border:1px solid #ddd;text-align:right;'>{fmt(cash_before, 4)} → {fmt(cash_after, 4)}</td>"
+                f"<td style='padding:8px;border:1px solid #ddd;'>{html.escape(direction_text)}<br><span style='color:#888;font-size:11px;'>{html.escape(label)}</span></td>"
+                f"</tr>"
+            )
+
+        net_transfer = self._net_cash_transfer(events)
+        return f"""
+    <table style="width:100%;border-collapse:collapse;font-size:13px;">
+      <tr style="background:#f0f3f6;">
+        <th style="padding:8px;border:1px solid #ddd;">时间</th>
+        <th style="padding:8px;border:1px solid #ddd;">类型</th>
+        <th style="padding:8px;border:1px solid #ddd;">金额</th>
+        <th style="padding:8px;border:1px solid #ddd;">现金变化</th>
+        <th style="padding:8px;border:1px solid #ddd;">说明</th>
+      </tr>
+      {''.join(rows)}
+    </table>
+    <p style='color:#777;font-size:11px;margin-top:4px;'>
+      📥 真实转入/转出 = 仅统计空仓安全状态下确认的真实转账，共 {len(transfer_events)} 笔，净额 {fmt(net_transfer, 4)} USDT。<br>
+      ⚡ 持仓中现金漂移 = 保证金占用/订单结算/sidecar-core 仓位同步导致的可用现金变化，非转账行为，不计入净转入/转出，共 {len(drift_events)} 笔。
+    </p>
+    """.strip()
+
     def _residual_bucket_html(self, bucket: ResidualPnlBucket) -> str:
         if bucket.incomplete_count <= 0 and bucket.pnl in {None, 0}:
             return "<p style='color:#777;'>无不完整记录。</p>"
+        note_text = html.escape(bucket.note)
+        net_transfer_note = "（仅统计空仓安全状态下确认的真实转账；持仓中的 cash drift 不计入）"
         return f"""
 <table style="width:100%;border-collapse:collapse;font-size:13px;">
   <tr style="background:#fef3c7;">
@@ -510,12 +637,12 @@ class DailyTradeReporter:
     <td style="padding:8px;border:1px solid #ddd;text-align:center;">{bucket.incomplete_count}</td>
     <td style="padding:8px;border:1px solid #ddd;text-align:right;">{fmt(bucket.cash_start, 4)}</td>
     <td style="padding:8px;border:1px solid #ddd;text-align:right;">{fmt(bucket.cash_end, 4)}</td>
-    <td style="padding:8px;border:1px solid #ddd;text-align:right;">{fmt(bucket.net_transfer, 4)}</td>
+    <td style="padding:8px;border:1px solid #ddd;text-align:right;">{fmt(bucket.net_transfer, 4)}{net_transfer_note}</td>
     <td style="padding:8px;border:1px solid #ddd;text-align:right;">{fmt(bucket.strategy_total_pnl, 4)}</td>
     <td style="padding:8px;border:1px solid #ddd;text-align:right;">{fmt(bucket.known_closed_pnl, 4)}</td>
     <td style="padding:8px;border:1px solid #ddd;text-align:right;font-weight:700;">{fmt(bucket.pnl, 4)}</td>
     <td style="padding:8px;border:1px solid #ddd;">{html.escape(bucket.formula)}</td>
-    <td style="padding:8px;border:1px solid #ddd;">{html.escape(bucket.note)}</td>
+    <td style="padding:8px;border:1px solid #ddd;">{note_text}</td>
   </tr>
 </table>
 """.strip()
@@ -761,7 +888,10 @@ class DailyTradeReporter:
   <h3>🧩 未知/不完整记录汇总</h3>
   {self._residual_bucket_html(residual_bucket)}
 
-  <p style="color:#777;font-size:12px;margin-top:16px;">说明：缺少 FLAT 的历史记录不会逐条展示；如果有现金上下文，则统一汇总为 residual PnL。公式：当前现金 - 周期起始现金 - 净转入/转出 - 已记录平仓盈亏。</p>
+  <h3>💰 账户现金变动说明</h3>
+  {self._cash_events_section_html(events)}
+
+  <p style="color:#777;font-size:12px;margin-top:16px;">说明：缺少 FLAT 的历史记录不会逐条展示；如果有现金上下文，则统一汇总为 residual PnL。公式：当前账户价值 - 周期起始价值 - 净转入/转出 - 已记录平仓盈亏。当前有持仓时优先使用 equity 作为账户价值。</p>
 </div>
 """.strip()
 
