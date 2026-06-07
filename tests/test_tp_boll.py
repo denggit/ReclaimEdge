@@ -11,6 +11,7 @@ Verifies:
 from __future__ import annotations
 
 import os
+from dataclasses import replace
 from unittest import mock
 
 from src.monitors.boll_band_breakout_monitor import (
@@ -22,6 +23,7 @@ from src.risk.simple_position_sizer import SimplePositionSizer, SimplePositionSi
 from src.strategies.boll_cvd_reclaim_strategy import (
     BollCvdReclaimStrategy,
     BollCvdReclaimStrategyConfig,
+    StrategyPositionState,
 )
 
 
@@ -930,6 +932,230 @@ class TestTp2OuterStillUsesTpBoll:
         assert tp_outer == 108.0
         assert src == "TP_BOLL"
 
+
+class TestInvalidMiddleProfitSafety:
+    def test_valid_middle_helper_returns_none_when_tp_and_structure_middle_profit_insufficient_short(self):
+        s = _strategy(tp_min_net_profit_pct=0.003)
+        s.state = StrategyPositionState(
+            side="SHORT",
+            layers=1,
+            avg_entry_price=1579.7668,
+            net_remaining_breakeven_price=1578.2440,
+        )
+        b = _boll_with_tp(
+            middle=1576.1145,
+            lower=1556.0,
+            tp_middle=1581.3680,
+            tp_lower=1558.3630,
+        )
+
+        price, source = s._select_valid_tp_middle_with_profit_fallback("SHORT", b)
+
+        assert price is None
+        assert source == "MIDDLE_PROFIT_INSUFFICIENT"
+
+    def test_degrade_to_middle_runner_skipped_when_middle_profit_insufficient_short(self):
+        s = _strategy(
+            three_stage_runner_enabled=True,
+            tp_min_net_profit_pct=0.003,
+        )
+        b = _boll_with_tp(
+            middle=1576.1145,
+            lower=1556.0,
+            tp_middle=1581.3680,
+            tp_lower=1558.3630,
+        )
+        s.state = StrategyPositionState(
+            side="SHORT",
+            layers=1,
+            first_entry_ts_ms=1000,
+            last_order_ts_ms=1000,
+            avg_entry_price=1579.7668,
+            total_entry_qty=1.0,
+            total_entry_notional=1579.7668,
+            net_remaining_breakeven_price=1578.2440,
+            tp_price=1558.3630,
+            tp_mode="LOWER",
+            tp_plan="THREE_STAGE_RUNNER",
+            partial_tp_price=1576.1145,
+            partial_tp_ratio=0.6,
+            three_stage_runner_enabled_for_position=True,
+            three_stage_tp1_price=1576.1145,
+            three_stage_tp2_price=1558.3630,
+            three_stage_tp1_ratio=0.6,
+            three_stage_tp2_ratio=0.2,
+            three_stage_runner_ratio=0.2,
+            three_stage_tp1_consumed=False,
+            three_stage_tp2_consumed=False,
+        )
+
+        s._degrade_three_stage_pre_tp1_to_middle_runner(1000 + 10_801_000, b)
+
+        assert s.state.tp_plan == "SINGLE"
+        assert s.state.tp_price == 1558.3630
+        assert s.state.tp_mode == "LOWER"
+        assert s.state.partial_tp_price is None
+        assert s.state.middle_runner_pending is False
+        assert s.state.middle_runner_active is False
+        assert s.state.three_stage_runner_enabled_for_position is False
+        assert s.state.three_stage_pre_tp1_degrade_stage == "SINGLE"
+        assert s.state.middle_runner_first_tp_price is None
+
+    def test_middle_profit_insufficient_single_lock_prevents_later_middle_runner_degrade(self):
+        s = _strategy(
+            three_stage_runner_enabled=True,
+            tp_min_net_profit_pct=0.003,
+            three_stage_pre_tp1_middle_runner_after_seconds=10_800,
+            three_stage_pre_tp1_single_after_seconds=21_600,
+        )
+        b = _boll_with_tp(
+            middle=1576.1145,
+            lower=1556.0,
+            tp_middle=1581.3680,
+            tp_lower=1558.3630,
+        )
+        first_ts = 1000
+        s.state = StrategyPositionState(
+            side="SHORT",
+            layers=1,
+            first_entry_ts_ms=first_ts,
+            last_order_ts_ms=first_ts,
+            avg_entry_price=1579.7668,
+            total_entry_qty=1.0,
+            total_entry_notional=1579.7668,
+            net_remaining_breakeven_price=1578.2440,
+            tp_price=1558.3630,
+            tp_mode="LOWER",
+            tp_plan="THREE_STAGE_RUNNER",
+            partial_tp_price=1576.1145,
+            partial_tp_ratio=0.6,
+            three_stage_runner_enabled_for_position=True,
+            three_stage_tp1_price=1576.1145,
+            three_stage_tp2_price=1558.3630,
+            three_stage_tp1_ratio=0.6,
+            three_stage_tp2_ratio=0.2,
+            three_stage_runner_ratio=0.2,
+            last_tp_update_candle_ts_ms=0,
+        )
+
+        first = s._maybe_update_tp(1579.0, first_ts + 60_000, b, _cvd())
+        assert first is not None
+        assert s.state.tp_plan == "SINGLE"
+        assert s.state.three_stage_pre_tp1_degrade_stage == "SINGLE"
+        assert s.state.three_stage_runner_enabled_for_position is False
+
+        b2 = replace(b, candle_ts_ms=2_000)
+        s._maybe_update_tp(1579.0, first_ts + 10_901_000, b2, _cvd())
+        assert s.state.tp_plan == "SINGLE"
+        assert s.state.middle_runner_pending is False
+        assert s.state.partial_tp_price is None
+        assert s.state.tp_price == 1558.3630
+
+    def test_middle_runner_pending_invalid_middle_falls_back_single_outer_short(self):
+        s = _strategy(middle_runner_enabled=True, tp_min_net_profit_pct=0.003)
+        b = _boll_with_tp(
+            middle=1576.1145,
+            lower=1556.0,
+            tp_middle=1581.3680,
+            tp_lower=1558.3630,
+        )
+        s.state = StrategyPositionState(
+            side="SHORT",
+            layers=1,
+            avg_entry_price=1579.7668,
+            total_entry_qty=1.0,
+            total_entry_notional=1579.7668,
+            net_remaining_breakeven_price=1578.2440,
+            tp_price=1558.3630,
+            tp_mode="LOWER",
+            tp_plan="MIDDLE_RUNNER",
+            partial_tp_price=1581.3680,
+            partial_tp_ratio=0.8,
+            middle_runner_enabled_for_position=True,
+            middle_runner_pending=True,
+            middle_runner_active=False,
+            middle_runner_first_tp_price=1581.3680,
+            middle_runner_final_tp_price=1558.3630,
+            last_tp_update_candle_ts_ms=0,
+        )
+
+        got = s._maybe_update_tp(1579.0, 2_000, b, _cvd())
+
+        assert got is not None
+        assert s.state.tp_plan == "SINGLE"
+        assert s.state.tp_price == 1558.3630
+        assert s.state.partial_tp_price is None
+        assert s.state.middle_runner_pending is False
+
+    def test_invalid_middle_profit_fallback_long(self):
+        s = _strategy(three_stage_runner_enabled=True, tp_min_net_profit_pct=0.005)
+        b = _boll_with_tp(
+            middle=100.4,
+            upper=110.0,
+            tp_middle=100.3,
+            tp_upper=108.0,
+        )
+        s.state = StrategyPositionState(
+            side="LONG",
+            layers=1,
+            avg_entry_price=100.0,
+            total_entry_qty=1.0,
+            total_entry_notional=100.0,
+            net_remaining_breakeven_price=100.0,
+            tp_price=108.0,
+            tp_mode="UPPER",
+            tp_plan="THREE_STAGE_RUNNER",
+            partial_tp_price=100.4,
+            partial_tp_ratio=0.6,
+            three_stage_runner_enabled_for_position=True,
+            three_stage_tp1_price=100.4,
+            three_stage_tp2_price=108.0,
+            three_stage_tp1_ratio=0.6,
+            three_stage_tp2_ratio=0.2,
+            three_stage_runner_ratio=0.2,
+            last_tp_update_candle_ts_ms=0,
+        )
+
+        got = s._maybe_update_tp(100.0, 2_000, b, _cvd())
+
+        assert got is not None
+        assert s.state.tp_plan == "SINGLE"
+        assert s.state.tp_price == 108.0
+        assert s.state.partial_tp_price is None
+        assert s.state.three_stage_runner_enabled_for_position is False
+
+    def test_valid_tp_boll_middle_still_enables_three_stage(self):
+        s = _strategy(three_stage_runner_enabled=True, tp_min_net_profit_pct=0.005)
+        b = _boll_with_tp(
+            middle=100.8,
+            upper=110.0,
+            tp_middle=101.0,
+            tp_upper=108.0,
+        )
+        _setup_position_state(s, "LONG", 100.0)
+
+        s._set_three_stage_runner_planned("LONG", b)
+
+        assert s.state.three_stage_tp1_price == 101.0
+        assert s.state.three_stage_tp2_price == 108.0
+
+    def test_tp_boll_middle_invalid_but_structure_middle_valid_uses_structure_middle(self):
+        s = _strategy(three_stage_runner_enabled=True, tp_min_net_profit_pct=0.005)
+        b = _boll_with_tp(
+            middle=101.0,
+            upper=110.0,
+            tp_middle=100.3,
+            tp_upper=108.0,
+        )
+        _setup_position_state(s, "LONG", 100.0)
+
+        s._set_three_stage_runner_planned("LONG", b)
+
+        assert s.state.three_stage_tp1_price == 101.0
+        assert s.state.three_stage_tp2_price == 108.0
+
+
+class TestTp2OuterStillUsesTpBollShortAndFinal:
     def test_tp2_still_uses_tp_boll_outer_when_tp1_falls_back_short(self):
         """SHORT: TP1 falls back, TP2 still uses TP_BOLL15 lower."""
         s = _strategy(three_stage_runner_enabled=True, tp_min_net_profit_pct=0.005)

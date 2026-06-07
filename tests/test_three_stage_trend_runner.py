@@ -1367,7 +1367,7 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
         self.assertTrue(strat.state.three_stage_tp1_consumed)
 
     def test_three_stage_middle_profit_fallback_is_locked(self) -> None:
-        """Middle-profit fallback must be SINGLE now, without recording time degrade."""
+        """Middle-profit fallback locks SINGLE and prevents later pre-TP1 degrade."""
         strat = strategy(breakeven_fee_buffer_pct=0.001, tp_min_net_profit_pct=0.002)
         strat.state = StrategyPositionState(
             side="LONG",
@@ -1411,9 +1411,9 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
         self.assertEqual(strat.state.tp_plan, "SINGLE")
         self.assertIsNone(strat.state.partial_tp_price)
         self.assertEqual(strat.state.partial_tp_ratio, 0.0)
-        self.assertIsNone(strat.state.three_stage_pre_tp1_degrade_stage)
+        self.assertEqual(strat.state.three_stage_pre_tp1_degrade_stage, "SINGLE")
 
-    def test_middle_profit_insufficient_before_3h_does_not_permanently_degrade_to_single(self) -> None:
+    def test_middle_profit_insufficient_before_3h_locks_single(self) -> None:
         strat = strategy(breakeven_fee_buffer_pct=0.0, tp_min_net_profit_pct=0.002)
         first_ts = 100_000
         strat.state = three_stage_pre_tp1_state(first_entry_ts_ms=first_ts)
@@ -1429,9 +1429,9 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
         self.assertNotIn("degraded_to_single", got.reason)
         self.assertFalse(strat.state.three_stage_runner_enabled_for_position)
         self.assertFalse(strat.state.middle_runner_pending)
-        self.assertIsNone(strat.state.three_stage_pre_tp1_degrade_stage)
+        self.assertEqual(strat.state.three_stage_pre_tp1_degrade_stage, "SINGLE")
 
-    def test_middle_profit_recovered_before_3h_can_reenter_three_stage(self) -> None:
+    def test_middle_profit_recovered_before_3h_stays_single_after_lock(self) -> None:
         strat = strategy(breakeven_fee_buffer_pct=0.0, tp_min_net_profit_pct=0.002)
         first_ts = 100_000
         strat.state = three_stage_pre_tp1_state(first_entry_ts_ms=first_ts)
@@ -1441,18 +1441,18 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
 
         self.assertIsNotNone(first)
         self.assertEqual(first.tp_plan, "SINGLE")
-        self.assertIsNone(strat.state.three_stage_pre_tp1_degrade_stage)
+        self.assertEqual(strat.state.three_stage_pre_tp1_degrade_stage, "SINGLE")
 
         strat.state.net_remaining_breakeven_price = 95.0
         got = strat._maybe_update_tp(99.0, first_ts + 2 * 60 * 60 * 1000,
                                      boll(middle=101.0, upper=110.0, candle_ts_ms=3_000), cvd())
 
         self.assertIsNotNone(got)
-        self.assertEqual(got.tp_plan, "THREE_STAGE_RUNNER")
-        self.assertTrue(strat.state.three_stage_runner_enabled_for_position)
-        self.assertIsNone(strat.state.three_stage_pre_tp1_degrade_stage)
+        self.assertEqual(got.tp_plan, "SINGLE")
+        self.assertFalse(strat.state.three_stage_runner_enabled_for_position)
+        self.assertEqual(strat.state.three_stage_pre_tp1_degrade_stage, "SINGLE")
 
-    def test_middle_profit_insufficient_after_3h_does_not_skip_future_middle_runner(self) -> None:
+    def test_middle_profit_insufficient_after_3h_prevents_future_middle_runner(self) -> None:
         strat = strategy(breakeven_fee_buffer_pct=0.0, tp_min_net_profit_pct=0.002)
         first_ts = 100_000
         strat.state = three_stage_pre_tp1_state(first_entry_ts_ms=first_ts)
@@ -1463,19 +1463,18 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
         self.assertIsNotNone(first)
         self.assertEqual(first.tp_plan, "SINGLE")
         self.assertFalse(strat.state.middle_runner_pending)
-        self.assertIsNone(strat.state.three_stage_pre_tp1_degrade_stage)
+        self.assertEqual(strat.state.three_stage_pre_tp1_degrade_stage, "SINGLE")
 
         strat.state.net_remaining_breakeven_price = 95.0
         got = strat._maybe_update_tp(99.0, first_ts + 10_901_000, boll(middle=101.0, upper=110.0, candle_ts_ms=3_000),
                                      cvd())
 
         self.assertIsNotNone(got)
-        self.assertEqual(got.tp_plan, "MIDDLE_RUNNER")
-        self.assertEqual(got.reason, "three_stage_pre_tp1_degraded_to_middle_runner")
-        self.assertTrue(strat.state.middle_runner_pending)
-        self.assertEqual(strat.state.three_stage_pre_tp1_degrade_stage, "MIDDLE_RUNNER")
+        self.assertEqual(got.tp_plan, "SINGLE")
+        self.assertFalse(strat.state.middle_runner_pending)
+        self.assertEqual(strat.state.three_stage_pre_tp1_degrade_stage, "SINGLE")
 
-    def test_middle_profit_insufficient_after_middle_runner_degrade_does_not_force_single_stage(self) -> None:
+    def test_middle_profit_insufficient_after_middle_runner_degrade_locks_single(self) -> None:
         strat = strategy(breakeven_fee_buffer_pct=0.0, tp_min_net_profit_pct=0.002)
         first_ts = 100_000
         strat.state = StrategyPositionState(
@@ -1508,16 +1507,16 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
         self.assertIsNotNone(first)
         self.assertEqual(first.tp_plan, "SINGLE")
         self.assertEqual(first.reason, "middle_runner_middle_profit_insufficient_single_outer")
-        self.assertEqual(strat.state.three_stage_pre_tp1_degrade_stage, "MIDDLE_RUNNER")
+        self.assertEqual(strat.state.three_stage_pre_tp1_degrade_stage, "SINGLE")
 
         strat.state.net_remaining_breakeven_price = 95.0
         got = strat._maybe_update_tp(99.0, first_ts + 14_500_000, boll(middle=101.0, upper=110.0, candle_ts_ms=3_000),
                                      cvd())
 
         self.assertIsNotNone(got)
-        self.assertEqual(got.tp_plan, "MIDDLE_RUNNER")
-        self.assertTrue(strat.state.middle_runner_pending)
-        self.assertEqual(strat.state.three_stage_pre_tp1_degrade_stage, "MIDDLE_RUNNER")
+        self.assertEqual(got.tp_plan, "SINGLE")
+        self.assertFalse(strat.state.middle_runner_pending)
+        self.assertEqual(strat.state.three_stage_pre_tp1_degrade_stage, "SINGLE")
 
     def test_three_stage_pre_tp1_degrades_to_middle_runner_after_3h_when_middle_profit_sufficient(self) -> None:
         strat = strategy(breakeven_fee_buffer_pct=0.0, tp_min_net_profit_pct=0.002)
