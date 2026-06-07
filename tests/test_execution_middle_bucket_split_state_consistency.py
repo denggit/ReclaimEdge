@@ -1317,3 +1317,198 @@ class TestEntryResultDegradesToSingle:
 
         journal_calls = [c[0][0] for c in processor.journal.append.call_args_list]
         assert "MIDDLE_BUCKET_SPLIT_DEGRADED_TO_SINGLE_FINAL" in journal_calls
+
+
+# ── Entry journal does NOT write planned events when FINAL_FULL_SIZE ────
+
+class TestEntryJournalSkipsPlannedWhenFinalFullSize:
+    """When actual_order_mode=FINAL_FULL_SIZE, _apply_entry_result must NOT
+    write MIDDLE_RUNNER_PLANNED or THREE_STAGE_RUNNER_PLANNED."""
+
+    @pytest.mark.asyncio
+    async def test_middle_runner_planned_skipped_when_final_full_size(self):
+        from unittest import mock
+        import asyncio
+
+        from src.live.workers.execution_command_processor import (
+            ExecutionCommandProcessor,
+        )
+        from src.live import runtime_types as live_runtime_types
+        from src.strategies.boll_cvd_reclaim_strategy import (
+            BollCvdReclaimStrategy,
+            BollCvdReclaimStrategyConfig,
+            StrategyPositionState,
+        )
+        from src.risk.simple_position_sizer import SimplePositionSizer
+
+        config = BollCvdReclaimStrategyConfig()
+        sizer = SimplePositionSizer(config)
+        strategy = BollCvdReclaimStrategy(config, sizer)
+
+        state = strategy.state
+        state.tp_plan = "MIDDLE_RUNNER"
+        state.middle_runner_pending = True
+        state.middle_bucket_split_active = True
+
+        es = live_runtime_types.ExecutionState(
+            current_position_id="pos-1",
+            cash_before_position=1000.0,
+        )
+        account_snapshot = live_runtime_types.AccountSnapshot(
+            position=None, cash=1000.0, equity=1000.0,
+            updated_monotonic=0, updated_ts_ms=0,
+        )
+
+        processor = ExecutionCommandProcessor.__new__(ExecutionCommandProcessor)
+        processor.state_lock = asyncio.Lock()
+        processor.execution_state = es
+        processor.account_snapshot = account_snapshot
+        processor.strategy = strategy
+        processor.trader = mock.MagicMock()
+        processor.trader.symbol = "ETH-USDT-SWAP"
+        processor.journal = mock.MagicMock()
+        processor.journal.record_entry = mock.MagicMock()
+        processor.journal.append = mock.MagicMock()
+        processor.state_store = mock.MagicMock()
+        processor.email_sender = mock.MagicMock()
+        processor._background_tasks = set()
+
+        from src.strategies.boll_cvd_reclaim_strategy import TradeIntent
+        from src.risk.simple_position_sizer import PositionSize
+
+        intent = TradeIntent(
+            intent_type="OPEN_LONG",
+            side="LONG", price=3000.0, layer_index=1,
+            tp_price=3100.0, reason="test_journal_skip",
+            size=PositionSize(eth_qty=0.1, margin_usdt=300.0, notional_usdt=3000.0,
+                              layer_index=1, layer_multiplier=1.0),
+            fast_cvd=0.0, previous_fast_cvd=0.0,
+            buy_ratio=0.5, sell_ratio=0.5,
+            boll_upper=3200.0, boll_middle=3100.0, boll_lower=3000.0,
+            ts_ms=2000, avg_entry_price=3000.0, breakeven_price=3000.0,
+            tp_mode="MIDDLE", tp_plan="MIDDLE_RUNNER",
+            middle_bucket_split_active=True,
+        )
+
+        snapshot = StrategyPositionState()
+        snapshot.tp_plan = "MIDDLE_RUNNER"
+
+        command = live_runtime_types.TradeCommand(
+            intent=intent, strategy_state_snapshot=snapshot,
+            tick_ts_ms=2000, created_monotonic=0,
+            account_snapshot_updated_ts_ms=0, reason="test_journal_skip",
+        )
+
+        from src.execution.trader import LiveTradeResult
+        result = LiveTradeResult(
+            ok=True, action="OPEN_LONG",
+            order_id="entry-1", tp_order_id="final-order",
+            contracts="10", tp_price="3100.0",
+            message="entry with fallback final",
+            entry_filled=True, tp_ok=True,
+            tp_order_ids=("final-order",),
+            middle_bucket_split_executed=False,
+            middle_bucket_split_disabled_reason="split_fallback_final_order_structure",
+            middle_bucket_split_actual_order_mode="FINAL_FULL_SIZE",
+        )
+
+        await processor._apply_entry_result(command, result, None, None)
+
+        # Verify MIDDLE_RUNNER_PLANNED was NOT written
+        journal_events = [c[0][0] for c in processor.journal.append.call_args_list]
+        assert "MIDDLE_RUNNER_PLANNED" not in journal_events
+
+    @pytest.mark.asyncio
+    async def test_three_stage_runner_planned_skipped_when_final_full_size(self):
+        from unittest import mock
+        import asyncio
+
+        from src.live.workers.execution_command_processor import (
+            ExecutionCommandProcessor,
+        )
+        from src.live import runtime_types as live_runtime_types
+        from src.strategies.boll_cvd_reclaim_strategy import (
+            BollCvdReclaimStrategy,
+            BollCvdReclaimStrategyConfig,
+            StrategyPositionState,
+        )
+        from src.risk.simple_position_sizer import SimplePositionSizer
+
+        config = BollCvdReclaimStrategyConfig()
+        sizer = SimplePositionSizer(config)
+        strategy = BollCvdReclaimStrategy(config, sizer)
+
+        state = strategy.state
+        state.tp_plan = "THREE_STAGE_RUNNER"
+        state.middle_bucket_split_active = True
+
+        es = live_runtime_types.ExecutionState(
+            current_position_id="pos-1",
+            cash_before_position=1000.0,
+        )
+        account_snapshot = live_runtime_types.AccountSnapshot(
+            position=None, cash=1000.0, equity=1000.0,
+            updated_monotonic=0, updated_ts_ms=0,
+        )
+
+        processor = ExecutionCommandProcessor.__new__(ExecutionCommandProcessor)
+        processor.state_lock = asyncio.Lock()
+        processor.execution_state = es
+        processor.account_snapshot = account_snapshot
+        processor.strategy = strategy
+        processor.trader = mock.MagicMock()
+        processor.trader.symbol = "ETH-USDT-SWAP"
+        processor.journal = mock.MagicMock()
+        processor.journal.record_entry = mock.MagicMock()
+        processor.journal.append = mock.MagicMock()
+        processor.state_store = mock.MagicMock()
+        processor.email_sender = mock.MagicMock()
+        processor._background_tasks = set()
+
+        from src.strategies.boll_cvd_reclaim_strategy import TradeIntent
+        from src.risk.simple_position_sizer import PositionSize
+
+        intent = TradeIntent(
+            intent_type="OPEN_LONG",
+            side="LONG", price=3000.0, layer_index=1,
+            tp_price=3100.0, reason="test_journal_skip_3s",
+            size=PositionSize(eth_qty=0.1, margin_usdt=300.0, notional_usdt=3000.0,
+                              layer_index=1, layer_multiplier=1.0),
+            fast_cvd=0.0, previous_fast_cvd=0.0,
+            buy_ratio=0.5, sell_ratio=0.5,
+            boll_upper=3200.0, boll_middle=3100.0, boll_lower=3000.0,
+            ts_ms=2000, avg_entry_price=3000.0, breakeven_price=3000.0,
+            tp_mode="MIDDLE", tp_plan="THREE_STAGE_RUNNER",
+            three_stage_tp1_price=3050.0, three_stage_tp2_price=3200.0,
+            three_stage_tp1_ratio=0.70, three_stage_tp2_ratio=0.20,
+            three_stage_runner_ratio=0.10,
+            middle_bucket_split_active=True,
+        )
+
+        snapshot = StrategyPositionState()
+        snapshot.tp_plan = "THREE_STAGE_RUNNER"
+
+        command = live_runtime_types.TradeCommand(
+            intent=intent, strategy_state_snapshot=snapshot,
+            tick_ts_ms=2000, created_monotonic=0,
+            account_snapshot_updated_ts_ms=0, reason="test_journal_skip_3s",
+        )
+
+        from src.execution.trader import LiveTradeResult
+        result = LiveTradeResult(
+            ok=True, action="OPEN_LONG",
+            order_id="entry-1", tp_order_id="final-order",
+            contracts="10", tp_price="3100.0",
+            message="entry with fallback final",
+            entry_filled=True, tp_ok=True,
+            tp_order_ids=("final-order",),
+            middle_bucket_split_executed=False,
+            middle_bucket_split_disabled_reason="split_fallback_final_order_structure",
+            middle_bucket_split_actual_order_mode="FINAL_FULL_SIZE",
+        )
+
+        await processor._apply_entry_result(command, result, None, None)
+
+        # Verify THREE_STAGE_RUNNER_PLANNED was NOT written
+        journal_events = [c[0][0] for c in processor.journal.append.call_args_list]
+        assert "THREE_STAGE_RUNNER_PLANNED" not in journal_events

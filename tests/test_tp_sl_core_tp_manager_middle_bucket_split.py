@@ -186,10 +186,12 @@ class TestSublegTooSmallReturnsUnsplitMiddleBucket:
             middle_bucket_split_slow_total_ratio=0.24,
         )
 
-        # Build specs with unsplit middle bucket (split_disabled=subleg_too_small)
+        # Build specs with unsplit middle bucket (split_disabled=subleg_too_small).
+        # Real order_specs produces ("middle", partial_contracts, partial_tp_price)
+        # and ("runner", final_contracts, final_tp_price) for Middle Runner unsplit.
         unsplit_specs = [
-            ("tp1_middle", Decimal("8"), 3050.0),
-            ("final", Decimal("2"), 3100.0),
+            ("middle", Decimal("8"), 3050.0),
+            ("runner", Decimal("2"), 3100.0),
         ]
         facade.core_tp._build_take_profit_order_specs = mock.MagicMock(
             return_value=(unsplit_specs, "subleg_too_small")
@@ -401,3 +403,321 @@ class TestNoSplitActiveReturnsNone:
         assert result.ok is True
         assert result.middle_bucket_split_executed is None
         assert result.middle_bucket_split_actual_order_mode is None
+
+
+# ── Label-based classifier direct tests ─────────────────────────────────
+
+class TestClassifierDirect:
+    """Direct tests for _classify_middle_bucket_split_actual_order_mode."""
+
+    def _classify(self, *, split_was_active, labels, reason=None):
+        from src.execution.tp_sl_core_tp_manager import (
+            _classify_middle_bucket_split_actual_order_mode,
+        )
+        from decimal import Decimal
+        specs = [(label, Decimal("1"), 3000.0) for label in labels]
+        return _classify_middle_bucket_split_actual_order_mode(
+            split_was_active=split_was_active,
+            specs=specs,
+            split_disabled_reason=reason,
+        )
+
+    def test_not_active_returns_none(self):
+        executed, reason, mode = self._classify(
+            split_was_active=False, labels=["final"],
+        )
+        assert executed is None
+        assert reason is None
+        assert mode is None
+
+    def test_three_stage_split_labels(self):
+        """tp1_middle_fast + tp1_middle_slow + tp2_outer → SPLIT_FAST_SLOW."""
+        executed, reason, mode = self._classify(
+            split_was_active=True,
+            labels=["tp1_middle_fast", "tp1_middle_slow", "tp2_outer"],
+        )
+        assert executed is True
+        assert reason is None
+        assert mode == "SPLIT_FAST_SLOW"
+
+    def test_middle_runner_split_labels(self):
+        """middle_fast + middle_slow + runner → SPLIT_FAST_SLOW."""
+        executed, reason, mode = self._classify(
+            split_was_active=True,
+            labels=["middle_fast", "middle_slow", "runner"],
+        )
+        assert executed is True
+        assert reason is None
+        assert mode == "SPLIT_FAST_SLOW"
+
+    def test_final_label_produces_final_full_size(self):
+        """Single "final" label → FINAL_FULL_SIZE, even without reason."""
+        executed, reason, mode = self._classify(
+            split_was_active=True, labels=["final"],
+        )
+        assert executed is False
+        assert reason == "split_fallback_final_order_structure"
+        assert mode == "FINAL_FULL_SIZE"
+
+    def test_final_label_preserves_existing_reason(self):
+        """When split_disabled_reason is already set, it is preserved."""
+        executed, reason, mode = self._classify(
+            split_was_active=True, labels=["final"],
+            reason="split_order_placement_failed_fallback_final",
+        )
+        assert executed is False
+        assert reason == "split_order_placement_failed_fallback_final"
+        assert mode == "FINAL_FULL_SIZE"
+
+    def test_three_stage_unsplit_labels(self):
+        """tp1_middle + tp2_outer → UNSPLIT_MIDDLE_BUCKET."""
+        executed, reason, mode = self._classify(
+            split_was_active=True,
+            labels=["tp1_middle", "tp2_outer"],
+        )
+        assert executed is False
+        assert reason == "split_fallback_unsplit_middle_bucket"
+        assert mode == "UNSPLIT_MIDDLE_BUCKET"
+
+    def test_middle_runner_unsplit_labels(self):
+        """middle + runner → UNSPLIT_MIDDLE_BUCKET."""
+        executed, reason, mode = self._classify(
+            split_was_active=True,
+            labels=["middle", "runner"],
+        )
+        assert executed is False
+        assert reason == "split_fallback_unsplit_middle_bucket"
+        assert mode == "UNSPLIT_MIDDLE_BUCKET"
+
+    def test_unknown_labels_fails_safe(self):
+        """Unknown labels → FINAL_FULL_SIZE (never returns executed=True)."""
+        executed, reason, mode = self._classify(
+            split_was_active=True,
+            labels=["weird_label", "another_weird"],
+        )
+        assert executed is False
+        assert reason == "split_unknown_order_structure_fallback_final"
+        assert mode == "FINAL_FULL_SIZE"
+
+    def test_unknown_labels_preserves_existing_reason(self):
+        """Unknown labels with existing reason preserves it."""
+        executed, reason, mode = self._classify(
+            split_was_active=True,
+            labels=["weird_label"],
+            reason="custom_reason",
+        )
+        assert executed is False
+        assert reason == "custom_reason"
+        assert mode == "FINAL_FULL_SIZE"
+
+    def test_three_stage_final_with_size_fallback_reason(self):
+        """THREE_STAGE_TP_SPLIT_FALLBACK_SINGLE_SIZE_TOO_SMALL → FINAL_FULL_SIZE."""
+        executed, reason, mode = self._classify(
+            split_was_active=True, labels=["final"],
+            reason="split_fallback_final_order_structure",
+        )
+        assert executed is False
+        assert reason == "split_fallback_final_order_structure"
+        assert mode == "FINAL_FULL_SIZE"
+
+    def test_only_fast_without_slow_is_not_split(self):
+        """tp1_middle_fast without tp1_middle_slow is NOT classified as SPLIT."""
+        executed, reason, mode = self._classify(
+            split_was_active=True,
+            labels=["tp1_middle_fast", "tp2_outer"],
+        )
+        assert executed is False
+        assert mode != "SPLIT_FAST_SLOW"
+
+
+# ── Integration: Three-Stage TP2/runner too small → FINAL_FULL_SIZE ────
+
+class TestThreeStageTp2TooSmallClassifiesFinalFullSize:
+    """When the pre-check passes but order_specs falls back to single final,
+    the classifier must return FINAL_FULL_SIZE."""
+
+    @pytest.mark.asyncio
+    async def test_three_stage_split_tp2_or_runner_too_small_classifies_final_full_size(self):
+        from src.execution.tp_sl_execution_manager import TpSlExecutionManager
+        from src.execution.trader import PositionSnapshot, Trader
+        from decimal import Decimal
+
+        trader = Trader.__new__(Trader)
+        trader.symbol = "ETH-USDT-SWAP"
+        trader.td_mode = "isolated"
+        trader.leverage = "50"
+        trader.pos_side_mode = "net"
+        trader.live_trading = True
+        trader.contract_multiplier = Decimal("0.1")
+        trader.contract_precision = Decimal("0.01")
+        trader.min_contracts = Decimal("0.01")
+        trader.position_contracts = Decimal("10")
+        trader.tp_order_id = None
+        trader.near_tp_protective_sl_order_id = None
+        trader.middle_runner_protective_sl_order_id = None
+        trader.three_stage_post_tp1_protective_sl_order_id = None
+        trader.trend_runner_sl_order_id = None
+        trader.account_equity_usdt = 0.0
+        trader._protected_reduce_only_order_ids = set()
+        trader._managed_reduce_only_order_ids = set()
+        trader._allow_cancel_unmanaged_reduce_only = True
+        trader.decimal_to_str = lambda d: str(d)
+        trader.price_to_str = lambda p: f"{p:.1f}"
+        trader.round_contracts_down = lambda c: c
+        trader._tp_price_summary = lambda specs: trader.price_to_str(specs[0][2])
+
+        async def fake_fetch():
+            return PositionSnapshot("LONG", Decimal("10"), 3000.0, Decimal("1"), Decimal("10"))
+        trader.fetch_position_snapshot = fake_fetch
+
+        facade = TpSlExecutionManager(trader)
+
+        from src.strategies.boll_cvd_reclaim_strategy import TradeIntent
+        from src.risk.simple_position_sizer import PositionSize
+
+        intent = TradeIntent(
+            intent_type="UPDATE_TP",
+            side="LONG",
+            price=3000.0,
+            layer_index=1,
+            tp_price=3100.0,
+            reason="test_tp2_too_small",
+            size=PositionSize(eth_qty=0.1, margin_usdt=300.0, notional_usdt=3000.0,
+                              layer_index=1, layer_multiplier=1.0),
+            fast_cvd=0.0, previous_fast_cvd=0.0,
+            buy_ratio=0.5, sell_ratio=0.5,
+            boll_upper=3200.0, boll_middle=3100.0, boll_lower=3000.0,
+            ts_ms=1000,
+            avg_entry_price=3000.0, breakeven_price=3000.0,
+            tp_mode="MIDDLE",
+            tp_plan="THREE_STAGE_RUNNER",
+            three_stage_tp1_price=3050.0,
+            three_stage_tp2_price=3200.0,
+            three_stage_tp1_ratio=0.70,
+            three_stage_tp2_ratio=0.20,
+            three_stage_runner_ratio=0.10,
+            middle_bucket_split_active=True,
+            middle_bucket_split_fast_price=3060.0,
+            middle_bucket_split_slow_price=3040.0,
+            middle_bucket_split_effective_price=3054.0,
+            middle_bucket_split_middle_bucket_ratio=0.70,
+            middle_bucket_split_fast_ratio_of_bucket=0.70,
+            middle_bucket_split_slow_ratio_of_bucket=0.30,
+            middle_bucket_split_fast_total_ratio=0.49,
+            middle_bucket_split_slow_total_ratio=0.21,
+        )
+
+        # Simulate order_specs fallback: pre-check passes (split_disabled_reason=None)
+        # but order_specs returns single final due to TP2/runner too small.
+        final_specs = [("final", Decimal("10"), 3100.0)]
+        facade.core_tp._build_take_profit_order_specs = mock.MagicMock(
+            return_value=(final_specs, None)
+        )
+
+        trader._cancel_existing_take_profit_orders_for_intent = mock.AsyncMock()
+        trader._cancel_stale_runner_protective_stops_for_degrade = mock.AsyncMock()
+        trader._place_reduce_only_take_profit_orders = mock.AsyncMock(
+            return_value=["final-order"]
+        )
+
+        result = await facade.replace_take_profit(intent)
+
+        assert result.ok is True
+        # The classifier sees labels={"final"} → FINAL_FULL_SIZE, NOT SPLIT_FAST_SLOW
+        assert result.middle_bucket_split_executed is False
+        assert result.middle_bucket_split_actual_order_mode == "FINAL_FULL_SIZE"
+        assert result.middle_bucket_split_disabled_reason is not None
+
+
+# ── Integration: Middle Runner runner too small → FINAL_FULL_SIZE ───────
+
+class TestMiddleRunnerRunnerTooSmallClassifiesFinalFullSize:
+    """When the pre-check passes but runner is too small for Middle Runner,
+    the classifier must return FINAL_FULL_SIZE."""
+
+    @pytest.mark.asyncio
+    async def test_middle_runner_split_runner_too_small_classifies_final_full_size(self):
+        from src.execution.tp_sl_execution_manager import TpSlExecutionManager
+        from src.execution.trader import PositionSnapshot, Trader
+        from decimal import Decimal
+
+        trader = Trader.__new__(Trader)
+        trader.symbol = "ETH-USDT-SWAP"
+        trader.td_mode = "isolated"
+        trader.leverage = "50"
+        trader.pos_side_mode = "net"
+        trader.live_trading = True
+        trader.contract_multiplier = Decimal("0.1")
+        trader.contract_precision = Decimal("0.01")
+        trader.min_contracts = Decimal("0.01")
+        trader.position_contracts = Decimal("10")
+        trader.tp_order_id = None
+        trader.near_tp_protective_sl_order_id = None
+        trader.middle_runner_protective_sl_order_id = None
+        trader.three_stage_post_tp1_protective_sl_order_id = None
+        trader.trend_runner_sl_order_id = None
+        trader.account_equity_usdt = 0.0
+        trader._protected_reduce_only_order_ids = set()
+        trader._managed_reduce_only_order_ids = set()
+        trader._allow_cancel_unmanaged_reduce_only = True
+        trader.decimal_to_str = lambda d: str(d)
+        trader.price_to_str = lambda p: f"{p:.1f}"
+        trader.round_contracts_down = lambda c: c
+        trader._tp_price_summary = lambda specs: trader.price_to_str(specs[0][2])
+
+        async def fake_fetch():
+            return PositionSnapshot("LONG", Decimal("10"), 3000.0, Decimal("1"), Decimal("10"))
+        trader.fetch_position_snapshot = fake_fetch
+
+        facade = TpSlExecutionManager(trader)
+
+        from src.strategies.boll_cvd_reclaim_strategy import TradeIntent
+        from src.risk.simple_position_sizer import PositionSize
+
+        intent = TradeIntent(
+            intent_type="UPDATE_TP",
+            side="LONG",
+            price=3000.0,
+            layer_index=1,
+            tp_price=3100.0,
+            reason="test_runner_too_small",
+            size=PositionSize(eth_qty=0.1, margin_usdt=300.0, notional_usdt=3000.0,
+                              layer_index=1, layer_multiplier=1.0),
+            fast_cvd=0.0, previous_fast_cvd=0.0,
+            buy_ratio=0.5, sell_ratio=0.5,
+            boll_upper=3200.0, boll_middle=3100.0, boll_lower=3000.0,
+            ts_ms=1000,
+            avg_entry_price=3000.0, breakeven_price=3000.0,
+            tp_mode="MIDDLE",
+            tp_plan="MIDDLE_RUNNER",
+            partial_tp_price=3050.0,
+            partial_tp_ratio=0.80,
+            middle_bucket_split_active=True,
+            middle_bucket_split_fast_price=3060.0,
+            middle_bucket_split_slow_price=3040.0,
+            middle_bucket_split_effective_price=3054.0,
+            middle_bucket_split_middle_bucket_ratio=0.80,
+            middle_bucket_split_fast_ratio_of_bucket=0.70,
+            middle_bucket_split_slow_ratio_of_bucket=0.30,
+            middle_bucket_split_fast_total_ratio=0.56,
+            middle_bucket_split_slow_total_ratio=0.24,
+        )
+
+        # Simulate: pre-check passes but order_specs returns final (runner too small)
+        final_specs = [("final", Decimal("10"), 3100.0)]
+        facade.core_tp._build_take_profit_order_specs = mock.MagicMock(
+            return_value=(final_specs, None)
+        )
+
+        trader._cancel_existing_take_profit_orders_for_intent = mock.AsyncMock()
+        trader._cancel_stale_runner_protective_stops_for_degrade = mock.AsyncMock()
+        trader._place_reduce_only_take_profit_orders = mock.AsyncMock(
+            return_value=["final-order"]
+        )
+
+        result = await facade.replace_take_profit(intent)
+
+        assert result.ok is True
+        assert result.middle_bucket_split_executed is False
+        assert result.middle_bucket_split_actual_order_mode == "FINAL_FULL_SIZE"
+        assert result.middle_bucket_split_disabled_reason is not None

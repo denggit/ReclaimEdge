@@ -19,6 +19,69 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
+# ── Label-based classifier ──────────────────────────────────────────────
+
+
+def _classify_middle_bucket_split_actual_order_mode(
+    *,
+    split_was_active: bool,
+    specs: list[tuple[str, object, object]],
+    split_disabled_reason: str | None,
+) -> tuple[bool | None, str | None, str | None]:
+    """Classify the actual order mode from the final specs labels.
+
+    Returns:
+        middle_bucket_split_executed
+        middle_bucket_split_disabled_reason
+        middle_bucket_split_actual_order_mode
+
+    This classifier uses **labels** as the ground truth — not the
+    ``split_disabled_reason`` string — so that order_specs fallbacks
+    (e.g. TP2/runner too small) that produce a single ``"final"`` are
+    correctly detected as ``FINAL_FULL_SIZE``.
+    """
+    if not split_was_active:
+        return None, None, None
+
+    labels = {label for label, _contracts, _price in specs}
+
+    # ── SPLIT_FAST_SLOW: labels contain real fast/slow sub-labels ──────
+    _three_stage_split_labels = {"tp1_middle_fast", "tp1_middle_slow"}
+    _middle_runner_split_labels = {"middle_fast", "middle_slow"}
+
+    if _three_stage_split_labels.issubset(labels) or _middle_runner_split_labels.issubset(labels):
+        return True, None, "SPLIT_FAST_SLOW"
+
+    # ── FINAL_FULL_SIZE: only a single "final" label ───────────────────
+    if labels == {"final"}:
+        reason = split_disabled_reason or "split_fallback_final_order_structure"
+        return False, reason, "FINAL_FULL_SIZE"
+
+    # ── UNSPLIT_MIDDLE_BUCKET ──────────────────────────────────────────
+    _three_stage_unsplit_labels = {"tp1_middle", "tp2_outer"}
+    # Middle Runner unsplit: "middle" + "runner" (may also have "runner" only)
+    _middle_runner_unsplit_label = "middle"
+
+    if _three_stage_unsplit_labels.issubset(labels):
+        reason = split_disabled_reason or "split_fallback_unsplit_middle_bucket"
+        return False, reason, "UNSPLIT_MIDDLE_BUCKET"
+
+    if _middle_runner_unsplit_label in labels and "runner" in labels:
+        reason = split_disabled_reason or "split_fallback_unsplit_middle_bucket"
+        return False, reason, "UNSPLIT_MIDDLE_BUCKET"
+
+    # ── Unknown / safety fallback ──────────────────────────────────────
+    logger.warning(
+        "MIDDLE_BUCKET_SPLIT_UNKNOWN_ORDER_STRUCTURE | "
+        "split_was_active=true labels=%s fallback_reason=%s "
+        "action=degrade_to_single_final state_order_consistent=true",
+        sorted(labels),
+        split_disabled_reason or "n/a",
+    )
+    reason = split_disabled_reason or "split_unknown_order_structure_fallback_final"
+    return False, reason, "FINAL_FULL_SIZE"
+
+
 class CoreTakeProfitManager:
     def __init__(self, trader: Trader, protective_stops) -> None:
         self.trader = trader
@@ -260,27 +323,15 @@ class CoreTakeProfitManager:
             )
         # ── Middle Bucket Split status ────────────────────────────────
         split_was_active = bool(getattr(intent, "middle_bucket_split_active", False))
-        middle_bucket_split_executed: bool | None = None
-        middle_bucket_split_disabled_reason_val: str | None = None
-        middle_bucket_split_actual_order_mode_val: str | None = None
-        if split_was_active:
-            if split_disabled_reason is not None:
-                middle_bucket_split_executed = False
-                middle_bucket_split_disabled_reason_val = split_disabled_reason
-            else:
-                middle_bucket_split_executed = True
-            # ── Determine actual order mode ──────────────────────────
-            if middle_bucket_split_executed:
-                middle_bucket_split_actual_order_mode_val = "SPLIT_FAST_SLOW"
-            elif middle_bucket_split_disabled_reason_val == "subleg_too_small":
-                middle_bucket_split_actual_order_mode_val = "UNSPLIT_MIDDLE_BUCKET"
-            elif (
-                middle_bucket_split_disabled_reason_val
-                == MIDDLE_BUCKET_SPLIT_DISABLED_ORDER_PLACEMENT_FAILED_FALLBACK_FINAL
-            ):
-                middle_bucket_split_actual_order_mode_val = "FINAL_FULL_SIZE"
-            else:
-                middle_bucket_split_actual_order_mode_val = "FINAL_FULL_SIZE"
+        (
+            middle_bucket_split_executed,
+            middle_bucket_split_disabled_reason_val,
+            middle_bucket_split_actual_order_mode_val,
+        ) = _classify_middle_bucket_split_actual_order_mode(
+            split_was_active=split_was_active,
+            specs=specs,
+            split_disabled_reason=split_disabled_reason,
+        )
 
         return LiveTradeResult(
             True,
@@ -509,6 +560,19 @@ class CoreTakeProfitManager:
                     [s.label for s in decision.specs],
                     ctx.get("total_contracts", "?"),
                 )
+        # ── Map order_specs fallback_reason → split_disabled_reason ────
+        # The pre-check above only catches sub-leg too small.  When the
+        # pre-check passes but order_specs falls back to a single final
+        # (e.g. TP2/runner too small), the reason must still be populated
+        # so the label-based classifier can carry it through.
+        if split_active and split_disabled_reason is None:
+            _fr_map = {
+                "THREE_STAGE_TP_SPLIT_FALLBACK_SINGLE_SIZE_TOO_SMALL",
+                "MIDDLE_RUNNER_SPLIT_FALLBACK_RUNNER_TOO_SMALL",
+            }
+            if reason in _fr_map:
+                split_disabled_reason = "split_fallback_final_order_structure"
+
         specs = [(spec.label, spec.contracts, spec.price) for spec in decision.specs]
         return specs, split_disabled_reason
 

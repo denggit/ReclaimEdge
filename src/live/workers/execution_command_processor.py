@@ -1341,7 +1341,11 @@ class ExecutionCommandProcessor:
                 command.intent.layer_index,
                 self.execution_state.halt_reason,
             )
-        if getattr(command.intent, "tp_plan", "SINGLE") == "MIDDLE_RUNNER" and hasattr(self.journal, "append"):
+        if (
+            getattr(command.intent, "tp_plan", "SINGLE") == "MIDDLE_RUNNER"
+            and hasattr(self.journal, "append")
+            and getattr(result, "middle_bucket_split_actual_order_mode", None) != "FINAL_FULL_SIZE"
+        ):
             self.journal.append(
                 "MIDDLE_RUNNER_PLANNED",
                 {
@@ -1358,7 +1362,11 @@ class ExecutionCommandProcessor:
                 },
                 position_id=current_position_id or new_position_id or "",
             )
-        if getattr(command.intent, "tp_plan", "SINGLE") == "THREE_STAGE_RUNNER" and hasattr(self.journal, "append"):
+        if (
+            getattr(command.intent, "tp_plan", "SINGLE") == "THREE_STAGE_RUNNER"
+            and hasattr(self.journal, "append")
+            and getattr(result, "middle_bucket_split_actual_order_mode", None) != "FINAL_FULL_SIZE"
+        ):
             self.journal.append(
                 "THREE_STAGE_RUNNER_PLANNED",
                 {
