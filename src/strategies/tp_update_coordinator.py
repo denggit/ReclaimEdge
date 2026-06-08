@@ -206,8 +206,7 @@ class TpUpdateCoordinator:
 
         old_post_tp1_sl = s.state.three_stage_post_tp1_protective_sl_price
         old_tp2_price = s.state.three_stage_tp2_price
-        new_tp2_price, _tp2_src = s._select_valid_tp_outer_with_profit_fallback(s.state.side, boll)
-
+        new_tp2_price, _tp2_src = s._select_three_stage_tp2_outer(s.state.side, boll)
         if s.config.three_stage_post_tp1_protective_sl_enabled:
             s._advance_runner_sl_time_tighten_candle_count(
                 target="three_stage_post_tp1",
@@ -311,7 +310,7 @@ class TpUpdateCoordinator:
         ):
             old_tp1 = s.state.three_stage_tp1_price
             old_tp2 = s.state.three_stage_tp2_price
-            outer, outer_src = s._select_valid_tp_outer_with_profit_fallback(s.state.side, boll)
+            outer, outer_src = s._select_three_stage_tp2_outer(s.state.side, boll)
             logger.warning(
                 "THREE_STAGE_MIDDLE_PROFIT_INSUFFICIENT_SINGLE_OUTER | "
                 "side=%s effective_breakeven=%.4f required_middle=%.4f "
@@ -617,7 +616,7 @@ class TpUpdateCoordinator:
         """Three-Stage enabled branch."""
         s = self.strategy
 
-        tp_price, _tp_src = s._select_valid_tp_outer_with_profit_fallback(s.state.side, boll)
+        tp_price, _tp_src = s._select_three_stage_tp2_outer(s.state.side, boll)
         tp_mode: TpMode = "UPPER" if s.state.side == "LONG" else "LOWER"
 
         # ── Middle Bucket Split for Three-Stage ──────────────────────
@@ -658,7 +657,7 @@ class TpUpdateCoordinator:
             old_tp2 = s.state.three_stage_tp2_price
             effective_be = s._effective_breakeven_for_tp_selection(s.state.side)
             required_middle = s._required_middle_for_profit(s.state.side, effective_be)
-            outer, outer_src = s._select_valid_tp_outer_with_profit_fallback(s.state.side, boll)
+            outer, outer_src = s._select_three_stage_tp2_outer(s.state.side, boll)
             logger.warning(
                 "THREE_STAGE_MIDDLE_PROFIT_INSUFFICIENT_SINGLE_OUTER | "
                 "side=%s effective_breakeven=%.4f required_middle=%.4f "
@@ -709,7 +708,7 @@ class TpUpdateCoordinator:
         if tp_plan == "MIDDLE_RUNNER":
             tp_price, _tp_src = s._select_valid_tp_outer_with_profit_fallback(s.state.side, boll)
         if tp_plan == "THREE_STAGE_RUNNER":
-            tp_price, _tp_src = s._select_valid_tp_outer_with_profit_fallback(s.state.side, boll)
+            tp_price, _tp_src = s._select_three_stage_tp2_outer(s.state.side, boll)
 
         if tp_plan == "MIDDLE_RUNNER":
             s._set_middle_runner_planned(partial_tp_price, tp_price)
@@ -823,7 +822,7 @@ class TpUpdateCoordinator:
             # overwrite it with plain BOLL15 middle.
             if getattr(s.state, "middle_bucket_split_active", False):
                 # Only update TP2 (outer); keep split effective TP1 unchanged
-                tp2_price, _tp2_src = s._select_valid_tp_outer_with_profit_fallback(s.state.side, boll)
+                tp2_price, _tp2_src = s._select_three_stage_tp2_outer(s.state.side, boll)
                 s.state.three_stage_tp2_price = tp2_price
                 s.state.tp_price = tp2_price
             elif not s._update_three_stage_dynamic_targets_without_reset(s.state.side, boll):

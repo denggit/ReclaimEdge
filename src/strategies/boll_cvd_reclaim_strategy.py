@@ -137,6 +137,9 @@ class BollCvdReclaimStrategyConfig:
     middle_bucket_split_fast_sl_invalid_action: str = "MARKET_EXIT"
     middle_bucket_split_fast_sl_fail_action: str = "MARKET_EXIT"
 
+    # ── Three-Stage TP2 structure BOLL ─────────────────────────────────
+    three_stage_tp2_use_structure_boll: bool = True
+
     def __post_init__(self) -> None:
         if (
                 self.three_stage_pre_tp1_degrade_enabled
@@ -263,6 +266,7 @@ class BollCvdReclaimStrategyConfig:
                 "MIDDLE_BUCKET_SPLIT_FAST_SL_INVALID_ACTION", "MARKET_EXIT").strip().upper(),
             middle_bucket_split_fast_sl_fail_action=os.getenv(
                 "MIDDLE_BUCKET_FAST_SL_FAIL_ACTION", "MARKET_EXIT").strip().upper(),
+            three_stage_tp2_use_structure_boll=_env_bool("THREE_STAGE_TP2_USE_STRUCTURE_BOLL", True),
         )
 
 
@@ -1551,7 +1555,7 @@ class BollCvdReclaimStrategy:
     def _set_three_stage_runner_planned(self, side: PositionSide, boll: BollSnapshot) -> None:
         tp1_ratio, tp2_ratio, runner_ratio = self._normalized_three_stage_ratios()
         tp_mid, _tp_mid_src = self._select_valid_tp_middle_with_profit_fallback(side, boll)
-        tp_outer, tp_outer_src = self._select_valid_tp_outer_with_profit_fallback(side, boll)
+        tp_outer, tp_outer_src = self._select_three_stage_tp2_outer(side, boll)
         if tp_mid is None:
             effective_be = self._effective_breakeven_for_tp_selection(side)
             required_middle = self._required_middle_for_profit(side, effective_be)
@@ -1595,7 +1599,7 @@ class BollCvdReclaimStrategy:
         tp_mid, _tp_mid_src = self._select_valid_tp_middle_with_profit_fallback(side, boll)
         if tp_mid is None:
             return False
-        tp_outer, _tp_outer_src = self._select_valid_tp_outer_with_profit_fallback(side, boll)
+        tp_outer, _tp_outer_src = self._select_three_stage_tp2_outer(side, boll)
         ratios = three_stage_helpers.ThreeStageRatios(
             tp1_ratio=tp1_ratio,
             tp2_ratio=tp2_ratio,
@@ -2221,6 +2225,110 @@ class BollCvdReclaimStrategy:
             )
         return sel.price, sel.source
 
+    def _select_three_stage_tp2_outer(
+        self,
+        side: PositionSide,
+        boll: BollSnapshot,
+        *,
+        log_warning: bool = True,
+    ) -> tuple[float, str]:
+        """Select TP2 outer price for Three-Stage Runner.
+
+        Default semantics (THREE_STAGE_TP2_USE_STRUCTURE_BOLL=true):
+          LONG  => structure BOLL20 upper
+          SHORT => structure BOLL20 lower
+
+        TP2 is the structural confirmation gate before Trend Runner.
+        Trend Runner itself uses structure BOLL20 upper/lower/middle,
+        so TP2 must be aligned with the same structure.
+
+        If structure BOLL20 outer does not satisfy min net profit,
+        choose the farther direction-correct outer between structure BOLL20
+        and TP_BOLL outer if available, and log a warning.
+
+        When THREE_STAGE_TP2_USE_STRUCTURE_BOLL=false, delegate to
+        _select_valid_tp_outer_with_profit_fallback() to preserve old behavior.
+        """
+        if not self.config.three_stage_tp2_use_structure_boll:
+            return self._select_valid_tp_outer_with_profit_fallback(
+                side,
+                boll,
+                log_warning=log_warning,
+            )
+
+        effective_be = self._effective_breakeven_for_tp_selection(side)
+        min_net_profit = abs(float(self.config.tp_min_net_profit_pct))
+
+        if side == "LONG":
+            structure_outer = float(boll.upper)
+        else:
+            structure_outer = float(boll.lower)
+
+        # Determine if TP_BOLL15 outer is available
+        tp_boll_avail = self._tp_boll_available(boll)
+        tp_boll_outer: float | None = None
+        if tp_boll_avail:
+            if side == "LONG":
+                tp_boll_outer = float(boll.tp_upper) if boll.tp_upper is not None else None
+            else:
+                tp_boll_outer = float(boll.tp_lower) if boll.tp_lower is not None else None
+
+        # Without a valid effective breakeven, default to structure outer
+        if effective_be <= 0:
+            return structure_outer, "STRUCTURE_BOLL_THREE_STAGE_TP2"
+
+        if side == "LONG":
+            required = effective_be * (1 + min_net_profit)
+            if structure_outer >= required:
+                return structure_outer, "STRUCTURE_BOLL_THREE_STAGE_TP2"
+
+            fallback_candidates = [structure_outer]
+            if tp_boll_outer is not None:
+                fallback_candidates.append(tp_boll_outer)
+            fallback = max(fallback_candidates)
+
+            if log_warning:
+                tp_boll_str = f"{tp_boll_outer:.4f}" if tp_boll_outer is not None else "-"
+                logger.warning(
+                    "THREE_STAGE_TP2_STRUCTURE_OUTER_PROFIT_INSUFFICIENT_FALLBACK | "
+                    "side=%s effective_breakeven=%.4f required=%.4f "
+                    "structure_outer=%.4f tp_boll_outer=%s fallback=%.4f candle_ts=%s",
+                    side,
+                    effective_be,
+                    required,
+                    structure_outer,
+                    tp_boll_str,
+                    fallback,
+                    boll.candle_ts_ms,
+                )
+            return fallback, "THREE_STAGE_TP2_PROFIT_FALLBACK"
+
+        # SHORT
+        required = effective_be * (1 - min_net_profit)
+        if structure_outer <= required:
+            return structure_outer, "STRUCTURE_BOLL_THREE_STAGE_TP2"
+
+        fallback_candidates = [structure_outer]
+        if tp_boll_outer is not None:
+            fallback_candidates.append(tp_boll_outer)
+        fallback = min(fallback_candidates)
+
+        if log_warning:
+            tp_boll_str = f"{tp_boll_outer:.4f}" if tp_boll_outer is not None else "-"
+            logger.warning(
+                "THREE_STAGE_TP2_STRUCTURE_OUTER_PROFIT_INSUFFICIENT_FALLBACK | "
+                "side=%s effective_breakeven=%.4f required=%.4f "
+                "structure_outer=%.4f tp_boll_outer=%s fallback=%.4f candle_ts=%s",
+                side,
+                effective_be,
+                required,
+                structure_outer,
+                tp_boll_str,
+                fallback,
+                boll.candle_ts_ms,
+            )
+        return fallback, "THREE_STAGE_TP2_PROFIT_FALLBACK"
+
     def _log_tp_boll_price_selected(
             self,
             *,
@@ -2240,8 +2348,14 @@ class BollCvdReclaimStrategy:
         """Log TP_BOLL_PRICE_SELECTED at initial TP gen or 15m UPDATE_TP only."""
         tp_boll_avail = self._tp_boll_available(boll)
         tp_mid, tp_mid_src = self._select_tp_middle(boll)
-        tp_outer, tp_outer_src = self._select_valid_tp_outer_with_profit_fallback(
-            self.state.side or "LONG", boll, log_warning=False)
+        # Use Three-Stage TP2 selector when plan is THREE_STAGE_RUNNER
+        # so the fallback outer_source aligns with the actual TP2 selection.
+        if tp_plan == "THREE_STAGE_RUNNER":
+            tp_outer, tp_outer_src = self._select_three_stage_tp2_outer(
+                self.state.side or "LONG", boll, log_warning=False)
+        else:
+            tp_outer, tp_outer_src = self._select_valid_tp_outer_with_profit_fallback(
+                self.state.side or "LONG", boll, log_warning=False)
 
         # Determine the effective TP price sources.
         # Auto-detect profit fallback: if the actual TP1/first-tp price equals the

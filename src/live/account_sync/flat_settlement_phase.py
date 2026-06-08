@@ -183,6 +183,10 @@ async def prepare_account_sync_flat_settlement_phase(
             "middle_bucket_fast_sl_invalid_delayed_market_exit_armed",
             "near_tp_protective_sl_failed_delayed_market_exit_armed",
             "core_tp_place_failed_delayed_market_exit_armed",
+            # DME market exit failed: position flat clears halt.
+            "order_failure_delayed_market_exit_failed",
+            # DME armed state that must clear on flat.
+            "near_tp_final_tp_failed_delayed_market_exit_armed",
         }
         preserve_critical_halt = (
                 rolling_loss_guard is not None
