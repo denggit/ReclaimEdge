@@ -360,6 +360,95 @@ class TestThreeStageEntrySplitSublegTooSmall(unittest.TestCase):
         self.assertGreater(intent.middle_bucket_split_slow_total_ratio, 0.0)
 
 
+# ── Three-Stage TP2 uses structure BOLL20 outer ────────────────────────
+
+class TestThreeStageEntryTp2StructureBoll(unittest.TestCase):
+    """Three-Stage initial entry: tp_price must use structure BOLL20 outer,
+    NOT TP_BOLL15 outer, even when TP_BOLL is enabled."""
+
+    def _make_strategy(self) -> BollCvdReclaimStrategy:
+        config = BollCvdReclaimStrategyConfig(
+            three_stage_runner_enabled=True,
+            middle_bucket_split_enabled=False,
+            tp_boll_enabled=True,
+            tp_min_net_profit_pct=0.002,
+            split_tp_enabled=False,
+            three_stage_tp2_use_structure_boll=True,
+        )
+        sizer = _sizer()
+        return BollCvdReclaimStrategy(config, sizer)
+
+    def test_long_entry_tp_price_is_structure_boll20_outer(self):
+        """LONG: TP_BOLL15 outer differs from structure BOLL20 outer.
+        intent.tp_price must equal structure BOLL20 upper, NOT TP_BOLL15 upper."""
+        strategy = self._make_strategy()
+        # BOLL20: upper=2100, middle=2000, lower=1900
+        # TP_BOLL15: tp_upper=2080 (different from 2100), tp_middle=2010, tp_lower=1920
+        boll = _boll(middle=2000.0, upper=2100.0, lower=1900.0, tp_middle=2010.0)
+        # Set tp_upper to a value that differs from structure upper
+        boll = BollSnapshot(
+            inst_id="ETH-USDT-SWAP",
+            candle_ts_ms=1000,
+            close=2000.0,
+            middle=2000.0,
+            upper=2100.0,
+            lower=1900.0,
+            upper_distance_pct=0.05,
+            lower_distance_pct=0.05,
+            alert_switch_on=True,
+            live_mode=True,
+            tp_middle=2010.0,
+            tp_upper=2080.0,
+            tp_lower=1920.0,
+        )
+        cvd = _cvd()
+        coord = _coordinator(strategy)
+
+        intent = coord.open_position("LONG", "OPEN_LONG", 1900.0, 1000, boll, cvd, "base")
+
+        self.assertEqual(intent.tp_plan, "THREE_STAGE_RUNNER")
+        # tp_price must be structure BOLL20 upper = 2100
+        self.assertAlmostEqual(intent.tp_price, 2100.0, places=4)
+        # three_stage_tp2_price must also be structure BOLL20 upper
+        self.assertAlmostEqual(intent.three_stage_tp2_price, 2100.0, places=4)
+        # Must NOT be TP_BOLL15 upper (2080)
+        self.assertNotAlmostEqual(intent.tp_price, 2080.0, places=4)
+
+    def test_short_entry_tp_price_is_structure_boll20_outer(self):
+        """SHORT: TP_BOLL15 outer differs from structure BOLL20 outer.
+        intent.tp_price must equal structure BOLL20 lower, NOT TP_BOLL15 lower."""
+        strategy = self._make_strategy()
+        # BOLL20: upper=2150, middle=2090, lower=2050
+        # TP_BOLL15: tp_lower=2070 (different from 2050), tp_middle=2080
+        boll = BollSnapshot(
+            inst_id="ETH-USDT-SWAP",
+            candle_ts_ms=1000,
+            close=2090.0,
+            middle=2090.0,
+            upper=2150.0,
+            lower=2050.0,
+            upper_distance_pct=0.05,
+            lower_distance_pct=0.05,
+            alert_switch_on=True,
+            live_mode=True,
+            tp_middle=2080.0,
+            tp_upper=2130.0,
+            tp_lower=2070.0,
+        )
+        cvd = _cvd()
+        coord = _coordinator(strategy)
+
+        intent = coord.open_position("SHORT", "OPEN_SHORT", 2100.0, 1000, boll, cvd, "base")
+
+        self.assertEqual(intent.tp_plan, "THREE_STAGE_RUNNER")
+        # tp_price must be structure BOLL20 lower = 2050
+        self.assertAlmostEqual(intent.tp_price, 2050.0, places=4)
+        # three_stage_tp2_price must also be structure BOLL20 lower
+        self.assertAlmostEqual(intent.three_stage_tp2_price, 2050.0, places=4)
+        # Must NOT be TP_BOLL15 lower (2070)
+        self.assertNotAlmostEqual(intent.tp_price, 2070.0, places=4)
+
+
 # ── Middle Runner initial entry with middle bucket split: SHORT ────────
 
 class TestMiddleRunnerEntrySplitShort(unittest.TestCase):

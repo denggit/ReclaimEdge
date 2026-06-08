@@ -301,7 +301,7 @@ class EntryAddFlowCoordinator:
         if tp_plan == "MIDDLE_RUNNER":
             tp_price, _tp_src = strategy._select_valid_tp_outer_with_profit_fallback(side, boll)
         if tp_plan == "THREE_STAGE_RUNNER":
-            tp_price, _tp_src = strategy._select_valid_tp_outer_with_profit_fallback(side, boll)
+            tp_price, _tp_src = strategy._select_three_stage_tp2_outer(side, boll)
         if tp_mode != "MIDDLE":
             reason = f"{reason} + 中轨净利润不足阈值，TP切换到{tp_mode}"
         if tp_plan == "SPLIT_PARTIAL_FINAL":
