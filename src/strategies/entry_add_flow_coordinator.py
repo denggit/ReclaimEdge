@@ -317,6 +317,27 @@ class EntryAddFlowCoordinator:
             strategy._set_middle_runner_planned(partial_tp_price, tp_price)
         if tp_plan == "THREE_STAGE_RUNNER":
             strategy._set_three_stage_runner_planned(side, boll)
+
+        # ── Middle Bucket Split on initial entry ────────────────────────────
+        if tp_plan == "THREE_STAGE_RUNNER" and strategy.config.middle_bucket_split_enabled:
+            from src.strategies.middle_bucket_split_apply import (
+                apply_three_stage_middle_bucket_split,
+            )
+            split_result = apply_three_stage_middle_bucket_split(
+                strategy=strategy, boll=boll,
+            )
+            if split_result.action == "SPLIT":
+                partial_tp_price = split_result.partial_tp_price
+                partial_tp_ratio = split_result.partial_tp_ratio
+                strategy.state.partial_tp_price = partial_tp_price
+                strategy.state.partial_tp_ratio = partial_tp_ratio
+            elif split_result.action == "UNSPLIT_SLOW_MIDDLE":
+                partial_tp_price = split_result.partial_tp_price
+                partial_tp_ratio = split_result.partial_tp_ratio
+                strategy.state.partial_tp_price = partial_tp_price
+                strategy.state.partial_tp_ratio = partial_tp_ratio
+            # FALLBACK_OUTER / INVALID / DISABLED — keep existing behaviour
+
         strategy.state.last_order_ts_ms = ts_ms
         strategy.state.last_tp_update_ts_ms = ts_ms
         strategy.state.last_tp_update_candle_ts_ms = boll.candle_ts_ms
