@@ -784,8 +784,8 @@ class TestExecutionCommandProcessor(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(journal.near_tp_reduces), 1)
         self.assertGreaterEqual(len(state_store.saved), 1)
 
-    async def test_near_tp_reduce_exit_all_halts(self) -> None:
-        """NEAR_TP_REDUCE with near_tp_exit_all halts trading."""
+    async def test_near_tp_reduce_exit_all_arms_delayed_exit(self) -> None:
+        """NEAR_TP_REDUCE with near_tp_exit_all arms delayed market exit (no immediate exit)."""
         strategy = BollCvdShockReclaimStrategy(
             BollCvdReclaimStrategyConfig(),
             SimplePositionSizer(SimplePositionSizerConfig()),
@@ -829,10 +829,11 @@ class TestExecutionCommandProcessor(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNotNone(result)
         self.assertTrue(execution_state.trading_halted)
-        self.assertEqual(execution_state.halt_reason, "near_tp_exit_all_waiting_flat")
+        # Delayed market exit armed, not market exit success
+        self.assertTrue(getattr(strategy.state, "delayed_market_exit_armed", False))
 
     async def test_near_tp_market_exit_on_sl_fail(self) -> None:
-        """NEAR_TP_REDUCE with protective_sl_ok=False and near_tp_exit_all triggers MARKET_EXIT email."""
+        """NEAR_TP_REDUCE with protective_sl_ok=False arms delayed market exit email."""
         strategy = BollCvdShockReclaimStrategy(
             BollCvdReclaimStrategyConfig(),
             SimplePositionSizer(SimplePositionSizerConfig()),
@@ -874,8 +875,10 @@ class TestExecutionCommandProcessor(unittest.IsolatedAsyncioTestCase):
         result = await processor.process(command)
 
         self.assertIsNotNone(result)
+        # Delayed market exit should be armed
+        self.assertTrue(getattr(strategy.state, "delayed_market_exit_armed", False))
         self.assertEqual(len(email_sender.sent), 1)
-        self.assertIn("market-exited", email_sender.sent[0][0].lower())
+        self.assertIn("delayed market exit", email_sender.sent[0][0].lower())
 
     # ── MARKET_EXIT_RUNNER ───────────────────────────────────────────────
 

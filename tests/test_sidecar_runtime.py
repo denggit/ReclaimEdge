@@ -1418,16 +1418,20 @@ async def test_sidecar_tp_failure_appends_open_unprotected_and_market_exits() ->
 
     assert not ok
     assert execution.trading_halted
-    assert execution.halt_reason == "sidecar_tp_place_failed_market_exit_waiting_flat"
+    # Delayed market exit armed, not market-exited waiting flat
+    assert "delayed_market_exit_armed" in (execution.halt_reason or "")
     assert state.sidecar_dirty
-    assert state.sidecar_halt_reason == "sidecar_tp_place_failed_market_exit_waiting_flat"
+    assert "delayed_market_exit_armed" in (state.sidecar_halt_reason or "")
+    # Delayed market exit should be armed in state
+    assert state.delayed_market_exit_armed is True
 
     # The leg must be OPEN_UNPROTECTED, not OPEN/UNKNOWN_HALTED, because exposure exists in OKX net.
     assert len(state.sidecar_legs) == 1
     assert state.sidecar_legs[0]["status"] == SidecarLegStatus.OPEN_UNPROTECTED.value
     assert state.sidecar_legs[0]["warning_recorded"] is True
     assert sidecar_open_qty(state.sidecar_legs) > 0
-    assert trader.market_exits == [("LONG", 3, "sidecar_tp_place_failed", 0.5)]
+    # No immediate market exit
+    assert len(trader.market_exits) == 0
     assert store.saved
 
     # No OPEN leg should exist with tp_order_id=None

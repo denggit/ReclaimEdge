@@ -8,7 +8,10 @@ from typing import Any
 
 from typing import Any
 
+import time
+
 from src.execution.trader import Trader
+from src.live import delayed_market_exit as dme
 from src.live import runtime_types as live_runtime_types
 from src.live.alerts.halt_alerts import (
     HaltAlertDeduper,
@@ -231,27 +234,27 @@ async def run_account_sync_protective_orders_phase(
                 sl_order_id,
             )
         else:
-            # ── Risk control: protective SL failed → immediate full market exit ──
+            # ── Risk control: protective SL failed → delayed market exit (NO immediate exit) ──
             side = three_stage_post_tp1_sl_payload.get("side")
-            exit_ok, exit_message = (False, "side_missing")
-            if side is not None:
-                exit_ok, exit_message = await trader.market_exit_remaining_position_with_retries(
-                    side,
-                    retry_count=int(os.getenv("NEAR_TP_SL_FAIL_MARKET_EXIT_RETRY_COUNT", "3")),
-                    context="post_tp1_invalid_sl",
-                    retry_interval_seconds=float(os.getenv("NEAR_TP_SL_FAIL_MARKET_EXIT_RETRY_INTERVAL_SECONDS", "0.5")),
-                )
             core_contracts = three_stage_post_tp1_sl_payload.get("core_contracts")
             net_contracts = three_stage_post_tp1_sl_payload.get("net_contracts")
             sl_contracts = three_stage_post_tp1_sl_payload.get("contracts")
-            manual_intervention_required = not exit_ok
-            if exit_ok:
-                halt_reason = "three_stage_post_tp1_sl_failed_market_exit_waiting_flat"
-            else:
-                halt_reason = "three_stage_post_tp1_protective_sl_failure"
+            halt_reason = "three_stage_post_tp1_sl_failed_delayed_market_exit_armed"
+            position_id = three_stage_post_tp1_sl_payload.get("position_id")
+
             async with state_lock:
-                execution_state.trading_halted = True
-                execution_state.halt_reason = halt_reason
+                arm_payload = dme.arm_delayed_market_exit(
+                    strategy_state=strategy.state,
+                    execution_state=execution_state,
+                    position_id=position_id,
+                    side=side or "UNKNOWN",
+                    reason=halt_reason,
+                    context="three_stage_post_tp1_protective_sl_failed",
+                    source_event="THREE_STAGE_POST_TP1_PROTECTIVE_SL_FAILED",
+                    now_ms=int(time.time() * 1000),
+                    error=sl_message,
+                )
+
             state_store.save(
                 LiveStateStore.from_strategy_state(
                     position_id=execution_state.current_position_id,
@@ -264,46 +267,46 @@ async def run_account_sync_protective_orders_phase(
                 journal.append(
                     "THREE_STAGE_POST_TP1_PROTECTIVE_SL_FAILED",
                     {
-                        "position_id": three_stage_post_tp1_sl_payload.get("position_id"),
+                        "position_id": position_id,
                         "side": side,
                         "protective_sl_price": sl_price,
                         "reason": sl_message,
                         "trading_halted": True,
                         "halt_reason": halt_reason,
                         "retry_config": "NEAR_TP_PROTECTIVE_SL_RETRY_COUNT/NEAR_TP_PROTECTIVE_SL_RETRY_INTERVAL_SECONDS",
-                        "market_exit_attempted": True,
-                        "market_exit_ok": exit_ok,
-                        "market_exit_message": exit_message,
+                        "market_exit_attempted": False,
+                        "delayed_market_exit_armed": True,
                         "core_contracts": str(core_contracts) if core_contracts is not None else None,
                         "net_contracts": str(net_contracts) if net_contracts is not None else None,
                         "sl_contracts": str(sl_contracts) if sl_contracts is not None else None,
-                        "manual_intervention_required": manual_intervention_required,
+                        "manual_intervention_required": True,
+                        **arm_payload,
                     },
-                    position_id=three_stage_post_tp1_sl_payload.get("position_id"),
+                    position_id=position_id,
                 )
             logger.error(
-                "THREE_STAGE_POST_TP1_PROTECTIVE_SL_FAILED | position_id=%s side=%s sl_price=%s sl_message=%s market_exit_attempted=true market_exit_ok=%s market_exit_message=%s core_contracts=%s net_contracts=%s sl_contracts=%s manual_intervention_required=%s",
-                three_stage_post_tp1_sl_payload.get("position_id"),
+                "THREE_STAGE_POST_TP1_PROTECTIVE_SL_FAILED | position_id=%s side=%s sl_price=%s sl_message=%s delayed_market_exit_armed=true core_contracts=%s net_contracts=%s sl_contracts=%s manual_intervention_required=true",
+                position_id,
                 side,
                 sl_price,
                 sl_message,
-                exit_ok,
-                exit_message,
                 core_contracts,
                 net_contracts,
                 sl_contracts,
-                manual_intervention_required,
             )
             await _send_protective_orders_halt_alert(
                 email_sender=email_sender,
                 halt_alert_deduper=halt_alert_deduper,
                 symbol=trader.symbol,
-                position_id=three_stage_post_tp1_sl_payload.get("position_id"),
+                position_id=position_id,
                 halt_reason=halt_reason,
                 side=side,
-                manual_intervention_required=manual_intervention_required,
-                message=f"Three-stage post-TP1 protective SL failed: {sl_message}. market_exit_ok={exit_ok}.",
-                extra={"sl_price": str(sl_price), "exit_ok": exit_ok, "exit_message": exit_message},
+                manual_intervention_required=True,
+                message=(
+                    f"Three-stage post-TP1 protective SL failed: {sl_message}. "
+                    f"Delayed market exit armed (30 min countdown). NO immediate market exit."
+                ),
+                extra={"sl_price": str(sl_price), "delayed_market_exit_armed": True},
             )
     middle_runner_activation_recorded = False
     if middle_runner_sl_payload is not None:
@@ -379,45 +382,54 @@ async def run_account_sync_protective_orders_phase(
             )
         else:
             side = middle_runner_sl_payload.get("side")
-            exit_ok, exit_message = (False, "side_missing")
-            if side is not None:
-                exit_ok, exit_message = await trader.market_exit_remaining_position_with_retries(
-                    side,
-                    retry_count=int(os.getenv("NEAR_TP_SL_FAIL_MARKET_EXIT_RETRY_COUNT", "3")),
-                    context="middle_runner_invalid_sl",
-                    retry_interval_seconds=float(os.getenv("NEAR_TP_SL_FAIL_MARKET_EXIT_RETRY_INTERVAL_SECONDS", "0.5")),
-                )
+            halt_reason = "middle_runner_sl_failed_delayed_market_exit_armed"
+            position_id = middle_runner_sl_payload.get("position_id")
+
             async with state_lock:
-                execution_state.trading_halted = True
-                execution_state.halt_reason = "middle_runner_protective_sl_failure"
+                arm_payload = dme.arm_delayed_market_exit(
+                    strategy_state=strategy.state,
+                    execution_state=execution_state,
+                    position_id=position_id,
+                    side=side or "UNKNOWN",
+                    reason=halt_reason,
+                    context="middle_runner_protective_sl_failed",
+                    source_event="MIDDLE_RUNNER_ORDER_WARNING",
+                    now_ms=int(time.time() * 1000),
+                    error=sl_message,
+                )
             if hasattr(journal, "append"):
                 journal.append(
                     "MIDDLE_RUNNER_ORDER_WARNING",
                     {
                         "side": side,
                         "protective_sl_price": sl_price,
-                        "reason": f"protective_sl_failed:{sl_message};market_exit_ok={exit_ok};{exit_message}",
+                        "reason": f"protective_sl_failed:{sl_message}",
+                        "delayed_market_exit_armed": True,
+                        "halt_reason": halt_reason,
+                        **arm_payload,
                     },
-                    position_id=middle_runner_sl_payload.get("position_id"),
+                    position_id=position_id,
                 )
             logger.error(
-                "MIDDLE_RUNNER_ORDER_WARNING | reason=protective_sl_failed side=%s sl_price=%s sl_message=%s market_exit_ok=%s market_exit_message=%s",
+                "MIDDLE_RUNNER_ORDER_WARNING | reason=protective_sl_failed side=%s sl_price=%s sl_message=%s delayed_market_exit_armed=true halt_reason=%s",
                 side,
                 sl_price,
                 sl_message,
-                exit_ok,
-                exit_message,
+                halt_reason,
             )
             await _send_protective_orders_halt_alert(
                 email_sender=email_sender,
                 halt_alert_deduper=halt_alert_deduper,
                 symbol=trader.symbol,
-                position_id=middle_runner_sl_payload.get("position_id"),
-                halt_reason="middle_runner_protective_sl_failure",
+                position_id=position_id,
+                halt_reason=halt_reason,
                 side=side,
-                manual_intervention_required=not exit_ok,
-                message=f"Middle runner protective SL failed: {sl_message}. market_exit_ok={exit_ok}.",
-                extra={"sl_price": str(sl_price), "exit_ok": exit_ok, "exit_message": exit_message},
+                manual_intervention_required=True,
+                message=(
+                    f"Middle runner protective SL failed: {sl_message}. "
+                    f"Delayed market exit armed (30 min countdown). NO immediate market exit."
+                ),
+                extra={"sl_price": str(sl_price), "delayed_market_exit_armed": True},
             )
     if (
             middle_runner_activation_payload is not None
@@ -511,81 +523,86 @@ async def run_account_sync_protective_orders_phase(
                     current_price,
                 )
             else:
-                # SL placement failed → market exit
-                exit_ok, exit_message = (False, "side_missing")
-                if side is not None:
-                    exit_ok, exit_message = await trader.market_exit_remaining_position_with_retries(
-                        side,
-                        retry_count=int(os.getenv("NEAR_TP_SL_FAIL_MARKET_EXIT_RETRY_COUNT", "3")),
-                        context="middle_bucket_fast_sl_failed",
-                        retry_interval_seconds=float(os.getenv("NEAR_TP_SL_FAIL_MARKET_EXIT_RETRY_INTERVAL_SECONDS", "0.5")),
-                    )
-                halt_reason = (
-                    "middle_bucket_fast_sl_failed_market_exit_waiting_flat" if exit_ok
-                    else "middle_bucket_fast_sl_failed_market_exit_failed"
-                )
+                # SL placement failed → delayed market exit (NO immediate exit)
+                halt_reason = "middle_bucket_fast_sl_failed_delayed_market_exit_armed"
+                position_id = middle_bucket_split_fast_protection_payload.get("position_id")
+
                 async with state_lock:
-                    execution_state.trading_halted = True
-                    execution_state.halt_reason = halt_reason
-                    strategy.state.middle_bucket_split_fast_sl_invalid_action_taken = "MARKET_EXIT"
+                    arm_payload = dme.arm_delayed_market_exit(
+                        strategy_state=strategy.state,
+                        execution_state=execution_state,
+                        position_id=position_id,
+                        side=side or "UNKNOWN",
+                        reason=halt_reason,
+                        context="middle_bucket_fast_sl_failed",
+                        source_event="MIDDLE_BUCKET_FAST_PROTECTIVE_SL_FAILED",
+                        now_ms=int(time.time() * 1000),
+                        error=sl_message,
+                    )
+                    strategy.state.middle_bucket_split_fast_sl_invalid_action_taken = "DELAYED_MARKET_EXIT"
                 if hasattr(journal, "append"):
                     journal.append(
                         "MIDDLE_BUCKET_FAST_PROTECTIVE_SL_FAILED",
                         {
-                            "position_id": middle_bucket_split_fast_protection_payload.get("position_id"),
+                            "position_id": position_id,
                             "side": side,
                             "fast_sl_price": decision.sl_price,
                             "reason": sl_message,
                             "trading_halted": True,
                             "halt_reason": halt_reason,
-                            "market_exit_attempted": True,
-                            "market_exit_ok": exit_ok,
-                            "market_exit_message": exit_message,
-                            "manual_intervention_required": not exit_ok,
+                            "market_exit_attempted": False,
+                            "delayed_market_exit_armed": True,
+                            "manual_intervention_required": True,
+                            **arm_payload,
                         },
-                        position_id=middle_bucket_split_fast_protection_payload.get("position_id"),
+                        position_id=position_id,
                     )
                 logger.error(
-                    "MIDDLE_BUCKET_FAST_PROTECTIVE_SL_FAILED | position_id=%s side=%s sl_price=%s sl_message=%s market_exit_ok=%s halt_reason=%s",
-                    middle_bucket_split_fast_protection_payload.get("position_id"),
+                    "MIDDLE_BUCKET_FAST_PROTECTIVE_SL_FAILED | position_id=%s side=%s sl_price=%s sl_message=%s delayed_market_exit_armed=true halt_reason=%s",
+                    position_id,
                     side,
                     decision.sl_price,
                     sl_message,
-                    exit_ok,
                     halt_reason,
                 )
                 await _send_protective_orders_halt_alert(
                     email_sender=email_sender,
                     halt_alert_deduper=halt_alert_deduper,
                     symbol=trader.symbol,
-                    position_id=middle_bucket_split_fast_protection_payload.get("position_id"),
+                    position_id=position_id,
                     halt_reason=halt_reason,
                     side=side,
-                    manual_intervention_required=not exit_ok,
-                    message=f"Middle bucket fast protective SL failed: {sl_message}. market_exit_ok={exit_ok}.",
-                    extra={"sl_price": str(decision.sl_price), "exit_ok": exit_ok},
+                    manual_intervention_required=True,
+                    message=(
+                        f"Middle bucket fast protective SL failed: {sl_message}. "
+                        f"Delayed market exit armed (30 min countdown). NO immediate market exit."
+                    ),
+                    extra={"sl_price": str(decision.sl_price), "delayed_market_exit_armed": True},
                 )
 
         elif decision.action == "MARKET_EXIT" and side is not None:
-            exit_ok, exit_message = await trader.market_exit_remaining_position_with_retries(
-                side,
-                retry_count=int(os.getenv("NEAR_TP_SL_FAIL_MARKET_EXIT_RETRY_COUNT", "3")),
-                context="middle_bucket_fast_sl_invalid_market_exit",
-                retry_interval_seconds=float(os.getenv("NEAR_TP_SL_FAIL_MARKET_EXIT_RETRY_INTERVAL_SECONDS", "0.5")),
-            )
-            halt_reason = (
-                "middle_bucket_fast_sl_invalid_market_exit_waiting_flat" if exit_ok
-                else "middle_bucket_fast_sl_invalid_market_exit_failed"
-            )
+            # ── Delayed market exit (NO immediate exit) ──────────────────
+            halt_reason = "middle_bucket_fast_sl_invalid_delayed_market_exit_armed"
+            position_id = middle_bucket_split_fast_protection_payload.get("position_id")
+
             async with state_lock:
-                execution_state.trading_halted = True
-                execution_state.halt_reason = halt_reason
-                strategy.state.middle_bucket_split_fast_sl_invalid_action_taken = "MARKET_EXIT"
+                arm_payload = dme.arm_delayed_market_exit(
+                    strategy_state=strategy.state,
+                    execution_state=execution_state,
+                    position_id=position_id,
+                    side=side,
+                    reason=halt_reason,
+                    context="middle_bucket_fast_sl_invalid_market_exit",
+                    source_event="MIDDLE_BUCKET_FAST_PROTECTIVE_SL_INVALID_MARKET_EXIT",
+                    now_ms=int(time.time() * 1000),
+                    error=decision.reason,
+                )
+                strategy.state.middle_bucket_split_fast_sl_invalid_action_taken = "DELAYED_MARKET_EXIT"
             if hasattr(journal, "append"):
                 journal.append(
                     "MIDDLE_BUCKET_FAST_PROTECTIVE_SL_INVALID_MARKET_EXIT",
                     {
-                        "position_id": middle_bucket_split_fast_protection_payload.get("position_id"),
+                        "position_id": position_id,
                         "side": side,
                         "fast_sl_price": decision.sl_price,
                         "current_price": current_price,
@@ -593,31 +610,34 @@ async def run_account_sync_protective_orders_phase(
                         "reason": decision.reason,
                         "trading_halted": True,
                         "halt_reason": halt_reason,
-                        "market_exit_ok": exit_ok,
-                        "market_exit_message": exit_message,
-                        "manual_intervention_required": not exit_ok,
+                        "market_exit_attempted": False,
+                        "delayed_market_exit_armed": True,
+                        "manual_intervention_required": True,
+                        **arm_payload,
                     },
-                    position_id=middle_bucket_split_fast_protection_payload.get("position_id"),
+                    position_id=position_id,
                 )
             logger.error(
-                "MIDDLE_BUCKET_FAST_PROTECTIVE_SL_INVALID_MARKET_EXIT | position_id=%s side=%s sl_price=%.4f current_price=%.4f market_exit_ok=%s halt_reason=%s",
-                middle_bucket_split_fast_protection_payload.get("position_id"),
+                "MIDDLE_BUCKET_FAST_PROTECTIVE_SL_INVALID_MARKET_EXIT | position_id=%s side=%s sl_price=%.4f current_price=%.4f delayed_market_exit_armed=true halt_reason=%s",
+                position_id,
                 side,
                 decision.sl_price,
                 current_price,
-                exit_ok,
                 halt_reason,
             )
             await _send_protective_orders_halt_alert(
                 email_sender=email_sender,
                 halt_alert_deduper=halt_alert_deduper,
                 symbol=trader.symbol,
-                position_id=middle_bucket_split_fast_protection_payload.get("position_id"),
+                position_id=position_id,
                 halt_reason=halt_reason,
                 side=side,
-                manual_intervention_required=not exit_ok,
-                message=f"Middle bucket fast SL invalid → MARKET_EXIT triggered. market_exit_ok={exit_ok}.",
-                extra={"sl_price": str(decision.sl_price), "current_price": str(current_price), "exit_ok": exit_ok},
+                manual_intervention_required=True,
+                message=(
+                    f"Middle bucket fast SL invalid → delayed market exit armed (30 min countdown). "
+                    f"NO immediate market exit."
+                ),
+                extra={"sl_price": str(decision.sl_price), "current_price": str(current_price), "delayed_market_exit_armed": True},
             )
 
         elif decision.action == "HALT_ONLY":

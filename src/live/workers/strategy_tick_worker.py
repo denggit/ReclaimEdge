@@ -12,6 +12,7 @@ from src.live.halt_modes import (
     FULL_HALT,
     ENTRY_HALT_POSITION_MANAGEMENT_ALLOWED,
     SIDECAR_DIRTY_HALT,
+    allowed_intents_for_halt_mode,
     allows_core_position_management,
     resolve_halt_mode,
 )
@@ -22,7 +23,7 @@ from src.utils.log import get_logger
 
 logger = get_logger(__name__)
 
-# Intents that manage the existing position without opening new risk.
+# Retained for backward-compat references from other modules.
 POSITION_MANAGEMENT_INTENTS = {"UPDATE_TP", "NEAR_TP_REDUCE", "MARKET_EXIT_RUNNER"}
 
 # Intents that open or add to a position.
@@ -33,23 +34,14 @@ def _halt_filter_intents(
     intents: list,
     halt_mode: str,
 ) -> list:
-    """Filter intents based on halt_mode.
+    """Filter intents based on halt_mode using the unified halt_modes helper.
 
     - FULL_HALT: drop everything.
-    - ENTRY_HALT_POSITION_MANAGEMENT_ALLOWED: keep only position management.
-    - SIDECAR_DIRTY_HALT: keep only core position management (no entry, no sidecar).
+    - ENTRY_HALT_POSITION_MANAGEMENT_ALLOWED: keep POSITION_MANAGEMENT_INTENTS.
+    - SIDECAR_DIRTY_HALT: keep only CORE_POSITION_MANAGEMENT_INTENTS (UPDATE_TP, MARKET_EXIT_RUNNER).
     """
-    if halt_mode == FULL_HALT:
-        return []
-
-    if halt_mode == ENTRY_HALT_POSITION_MANAGEMENT_ALLOWED:
-        return [intent for intent in intents if intent.intent_type in POSITION_MANAGEMENT_INTENTS]
-
-    if halt_mode == SIDECAR_DIRTY_HALT:
-        return [intent for intent in intents if intent.intent_type in POSITION_MANAGEMENT_INTENTS]
-
-    # Unknown mode — conservative: drop entry intents, keep position management.
-    return [intent for intent in intents if intent.intent_type in POSITION_MANAGEMENT_INTENTS]
+    allowed = allowed_intents_for_halt_mode(halt_mode)
+    return [intent for intent in intents if intent.intent_type in allowed]
 
 
 async def strategy_tick_worker(

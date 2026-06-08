@@ -178,50 +178,35 @@ class NearTpExecutionManager:
                 **base_result_kwargs,
             )
 
-        fail_action = os.getenv("NEAR_TP_SL_FAIL_ACTION", "MARKET_EXIT").strip().upper()
+        # ── Protective SL failed → NO immediate market exit ─────────────
+        # The caller (execution command processor) is responsible for arming
+        # the delayed market exit.  We return a result that clearly indicates
+        # the SL failure without triggering an immediate position liquidation.
+        fail_action = os.getenv("NEAR_TP_SL_FAIL_ACTION", "HALT_ONLY").strip().upper()
         if fail_action == "MARKET_EXIT":
-            logger.error("NEAR_TP_PROTECTIVE_SL_FAILED_MARKET_EXIT | side=%s message=%s", intent.side, sl_message)
-            exit_ok, exit_message = await self.trader.market_exit_remaining_position_with_retries(
+            logger.error(
+                "NEAR_TP_PROTECTIVE_SL_FAILED_DELAYED_EXIT_ARM | side=%s message=%s "
+                "delayed_market_exit_armed_by_caller=true no_immediate_market_exit=true",
                 intent.side,
-                retry_count=int(os.getenv("NEAR_TP_SL_FAIL_MARKET_EXIT_RETRY_COUNT", "3")),
-                context="near_tp_sl_failed",
-                retry_interval_seconds=float(os.getenv("NEAR_TP_SL_FAIL_MARKET_EXIT_RETRY_INTERVAL_SECONDS", "0.5")),
+                sl_message,
             )
-            if exit_ok:
-                return LiveTradeResult(
-                    True,
-                    action,
-                    tp_order_id=tp_order_id,
-                    message=f"{message_prefix}protective_sl_failed_market_exit_success: {sl_message}; {exit_message}",
-                    tp_ok=tp_ok,
-                    tp_order_ids=tp_order_ids,
-                    protective_sl_price=t.price_to_str(float(protective_sl_price)),
-                    protective_sl_ok=False,
-                    near_tp_exit_all=True,
-                    contracts_after="0",
-                    **{k: v for k, v in base_result_kwargs.items() if k != "contracts_after"},
-                )
-            return LiveTradeResult(
-                False,
-                action,
-                tp_order_id=tp_order_id,
-                message=f"{message_prefix}protective_sl_failed_and_market_exit_failed: {sl_message}; {exit_message}",
-                tp_ok=tp_ok,
-                tp_order_ids=tp_order_ids,
-                protective_sl_price=t.price_to_str(float(protective_sl_price)),
-                protective_sl_ok=False,
-                **base_result_kwargs,
+        else:
+            logger.error(
+                "NEAR_TP_PROTECTIVE_SL_FAILED_HALT_ONLY | side=%s message=%s",
+                intent.side,
+                sl_message,
             )
 
         return LiveTradeResult(
             False,
             action,
             tp_order_id=tp_order_id,
-            message=f"{message_prefix}protective_sl_failed_halt_only: {sl_message}",
+            message=f"{message_prefix}protective_sl_failed: {sl_message}",
             tp_ok=tp_ok,
             tp_order_ids=tp_order_ids,
             protective_sl_price=t.price_to_str(float(protective_sl_price)),
             protective_sl_ok=False,
+            near_tp_exit_all=False,
             **base_result_kwargs,
         )
 

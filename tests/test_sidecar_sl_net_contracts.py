@@ -467,32 +467,26 @@ class SidecarSLNetContractsTest(unittest.IsolatedAsyncioTestCase):
         execution_state = ExecutionState("pos-1", 1000.0)
 
         await self.run_account_sync_until(
-            lambda: len(trader.market_exits) >= 1,
+            lambda: execution_state.trading_halted,
             account_snapshot=account_snapshot, execution_state=execution_state,
             trader=trader, strategy=strategy, journal=journal, state_store=state_store,
         )
 
-        # market_exit_remaining_position_with_retries must have been called once
-        self.assertEqual(len(trader.market_exits), 1)
-        self.assertEqual(trader.market_exits[0][0], "LONG")
-        # retry_count should come from env var NEAR_TP_SL_FAIL_MARKET_EXIT_RETRY_COUNT (default 3)
-        self.assertEqual(trader.market_exits[0][1], 3)
+        # No immediate market exit — delayed exit armed instead
+        self.assertEqual(len(trader.market_exits), 0)
 
-        # trading must be halted
+        # trading must be halted with delayed exit armed
         self.assertTrue(execution_state.trading_halted)
         self.assertIn(
             execution_state.halt_reason,
-            {
-                "three_stage_post_tp1_sl_failed_market_exit_waiting_flat",
-                "three_stage_post_tp1_protective_sl_failure",
-            },
+            {"three_stage_post_tp1_sl_failed_delayed_market_exit_armed"},
         )
 
         # journal must record the event
         failed_events = [e for e in journal.events if e[0] == "THREE_STAGE_POST_TP1_PROTECTIVE_SL_FAILED"]
         self.assertEqual(len(failed_events), 1)
         pp = failed_events[0][1]
-        self.assertTrue(pp.get("market_exit_attempted"))
+        self.assertTrue(pp.get("delayed_market_exit_armed"))
         self.assertIn("core_contracts", pp)
         self.assertIn("net_contracts", pp)
         self.assertIn("sl_contracts", pp)
@@ -545,18 +539,17 @@ class SidecarSLNetContractsTest(unittest.IsolatedAsyncioTestCase):
             trader=trader, strategy=strategy, journal=journal, state_store=state_store,
         )
 
-        # Market exit IS called because side is present in payload
-        self.assertEqual(len(trader.market_exits), 1)
-        self.assertEqual(trader.market_exits[0][0], "LONG")
+        # No immediate market exit — delayed exit armed instead
+        self.assertEqual(len(trader.market_exits), 0)
 
         # Must be halted
         self.assertTrue(execution_state.trading_halted)
 
-        # Journal must record the event
+        # Journal must record the event with delayed exit armed
         failed_events = [e for e in journal.events if e[0] == "THREE_STAGE_POST_TP1_PROTECTIVE_SL_FAILED"]
         self.assertEqual(len(failed_events), 1)
         pp = failed_events[0][1]
-        self.assertTrue(pp.get("market_exit_attempted"))
+        self.assertTrue(pp.get("delayed_market_exit_armed"))
         self.assertIn("core_contracts", pp)
         self.assertIn("net_contracts", pp)
         self.assertIn("sl_contracts", pp)

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from src.execution.trader import PositionSnapshot, Trader
+from src.live import delayed_market_exit as dme
 from src.live import runtime_types as live_runtime_types
 from src.live import time_utils as live_time_utils
 from src.live.account_sync import flat_balance as live_flat_balance
@@ -98,6 +99,9 @@ async def prepare_account_sync_flat_settlement_phase(
         **pending_flat_payload,
         "cash_after": settled.cash,
         "equity_after": settled.equity,
+        "delayed_market_exit_was_armed": getattr(strategy.state, "delayed_market_exit_armed", False),
+        "delayed_market_exit_reason": getattr(strategy.state, "delayed_market_exit_reason", None),
+        "delayed_market_exit_cleared": True,
     }
     result_cash = settled.cash
     result_equity = settled.equity
@@ -159,8 +163,23 @@ async def prepare_account_sync_flat_settlement_phase(
             "trend_runner_market_exit_waiting_flat",
             "three_stage_post_tp1_sl_failed_market_exit_waiting_flat",
             "sidecar_tp_place_failed_market_exit_waiting_flat",
+            "sidecar_tp_rate_limited_market_exit_waiting_flat",
+            "sidecar_core_exit_delayed_market_exit_waiting_flat",
+            "order_failure_delayed_market_exit_waiting_flat",
+            "delayed_market_exit_waiting_flat",
             "rolling_loss_soft_halt",
             "rolling_loss_hard_halt",
+            # Delayed market exit armed reasons are clearable on flat
+            # because the position no longer exists.
+            "sidecar_tp_place_failed_delayed_market_exit_armed",
+            "sidecar_tp_place_rate_limited_delayed_market_exit_armed",
+            "sidecar_core_exit_alignment_failed_delayed_market_exit_armed",
+            "three_stage_post_tp1_sl_failed_delayed_market_exit_armed",
+            "middle_runner_sl_failed_delayed_market_exit_armed",
+            "middle_bucket_fast_sl_failed_delayed_market_exit_armed",
+            "middle_bucket_fast_sl_invalid_delayed_market_exit_armed",
+            "near_tp_protective_sl_failed_delayed_market_exit_armed",
+            "core_tp_place_failed_delayed_market_exit_armed",
         }
         preserve_critical_halt = (
                 rolling_loss_guard is not None
@@ -232,6 +251,10 @@ async def finalize_account_sync_flat_settlement_phase(
                         "near_tp_protected_sync_failed",
                         "trend_runner_market_exit_waiting_flat",
                         "sidecar_tp_place_failed_market_exit_waiting_flat",
+                        "sidecar_tp_rate_limited_market_exit_waiting_flat",
+                        "sidecar_core_exit_delayed_market_exit_waiting_flat",
+                        "order_failure_delayed_market_exit_waiting_flat",
+                        "delayed_market_exit_waiting_flat",
                         "rolling_loss_soft_halt",
                         "rolling_loss_hard_halt",
                     }

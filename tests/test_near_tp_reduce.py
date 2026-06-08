@@ -484,23 +484,23 @@ class NearTpTraderTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("final_tp_failed", result.message)
         self.assertIn("near_tp_reduce_done_final_tp_and_protective_sl_placed", result.message)
 
-    async def test_reduce_filled_final_tp_replace_fails_and_sl_fails_market_exits(self) -> None:
+    async def test_reduce_filled_final_tp_replace_fails_and_sl_fails_no_market_exit(self) -> None:
+        """Final TP replace fails and protective SL fails → no immediate market exit."""
         trader = RecordingTrader()
         trader.fail_replace_take_profit = True
         trader.fail_algo_attempts = 3
         trader.fail_fallback_attempts = 3
         trader.positions.append(PositionSnapshot("LONG", Decimal("0.5"), 100.0, 0.05, Decimal("0.5")))
-        trader.positions.append(flat_position())
 
         with patch.dict(os.environ, {"NEAR_TP_PROTECTIVE_SL_RETRY_INTERVAL_SECONDS": "0"}):
             result = await trader.execute_near_tp_reduce(intent())
 
-        self.assertTrue(result.ok)
+        self.assertFalse(result.ok)
         self.assertFalse(result.tp_ok)
         self.assertFalse(result.protective_sl_ok)
-        self.assertTrue(result.near_tp_exit_all)
+        self.assertFalse(getattr(result, "near_tp_exit_all", True))
         self.assertIn("final_tp_failed", result.message)
-        self.assertIn("protective_sl_failed_market_exit_success", result.message)
+        self.assertIn("protective_sl_failed", result.message)
 
     async def test_protective_sl_api_success_but_verify_missing_retries(self) -> None:
         trader = RecordingTrader()
@@ -633,22 +633,24 @@ class NearTpTraderTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(trader.cancel_reduce_only_calls, 1)
         self.assertEqual(trader.cancel_protective_calls, 1)
 
-    async def test_protective_sl_all_retries_fail_market_exit_success(self) -> None:
+    async def test_protective_sl_all_retries_fail_no_market_exit(self) -> None:
+        """Protective SL failure now returns result.ok=False without immediate market exit."""
         trader = RecordingTrader()
         trader.fail_algo_attempts = 3
         trader.fail_fallback_attempts = 3
         trader.positions.append(PositionSnapshot("LONG", Decimal("0.5"), 100.0, 0.05, Decimal("0.5")))
-        trader.positions.append(flat_position())
 
         with patch.dict(os.environ, {"NEAR_TP_PROTECTIVE_SL_RETRY_INTERVAL_SECONDS": "0"}):
             result = await trader.execute_near_tp_reduce(intent())
 
-        self.assertTrue(result.ok)
+        self.assertFalse(result.ok)
         self.assertFalse(result.protective_sl_ok)
-        self.assertTrue(result.near_tp_exit_all)
-        self.assertIn("protective_sl_failed_market_exit_success", result.message)
+        self.assertFalse(getattr(result, "near_tp_exit_all", True))
+        self.assertIn("protective_sl_failed", result.message)
+        # No near_tp_exit_all means no market exit was attempted by the trader
 
-    async def test_protective_sl_and_market_exit_fail_returns_error(self) -> None:
+    async def test_protective_sl_fail_returns_error_without_market_exit(self) -> None:
+        """Protective SL failure returns error without attempting market exit."""
         trader = RecordingTrader()
         trader.fail_algo_attempts = 3
         trader.fail_fallback_attempts = 3
@@ -659,7 +661,6 @@ class NearTpTraderTest(unittest.IsolatedAsyncioTestCase):
                 os.environ,
                 {
                     "NEAR_TP_PROTECTIVE_SL_RETRY_INTERVAL_SECONDS": "0",
-                    "NEAR_TP_SL_FAIL_MARKET_EXIT_RETRY_COUNT": "3",
                 },
         ):
             result = await trader.execute_near_tp_reduce(intent())
@@ -667,7 +668,7 @@ class NearTpTraderTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result.ok)
         self.assertTrue(result.reduce_filled)
         self.assertFalse(result.protective_sl_ok)
-        self.assertIn("protective_sl_failed_and_market_exit_failed", result.message)
+        self.assertIn("protective_sl_failed", result.message)
 
 
 class FakeJournal:
@@ -846,7 +847,8 @@ class NearTpRunnerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(strat_state.near_tp_protective_sl_order_id, "algo-1")
         self.assertEqual(len(state_store.saved_states), 1)
 
-    async def test_near_tp_exit_all_temporarily_halts_until_account_sync(self) -> None:
+    async def test_near_tp_exit_all_arms_delayed_market_exit(self) -> None:
+        """Near-TP protective SL failure arms delayed market exit, not immediate exit."""
         strat_state = seeded_long_state()
         journal = FakeJournal()
         state_store = RecordingStateStore()
@@ -858,7 +860,7 @@ class NearTpRunnerTest(unittest.IsolatedAsyncioTestCase):
             "tp-1",
             "0.5",
             "110.00",
-            "protective_sl_failed_market_exit_success",
+            "protective_sl_failed",
             tp_ok=True,
             protective_sl_ok=False,
             contracts_before="1",
@@ -879,9 +881,9 @@ class NearTpRunnerTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertTrue(execution_state.trading_halted)
-        self.assertEqual(state_store.saved_states, [])
-        self.assertEqual(journal.near_tp_reduces[0]["protective_sl_fail_action"], "MARKET_EXIT")
-        self.assertIn("Near-TP protective SL failed; market-exited remaining position", email_sender.subjects)
+        self.assertTrue(getattr(strat_state, "delayed_market_exit_armed", False))
+        # Email should mention delayed market exit (not market-exited success)
+        self.assertTrue(any("delayed market exit" in s.lower() or "Near-TP protective SL failed" in s for s in email_sender.subjects))
 
         cleared = asyncio.Event()
 

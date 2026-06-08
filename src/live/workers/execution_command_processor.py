@@ -17,13 +17,15 @@ from src.live.alerts.halt_alerts import (
     HaltAlertPayload,
     send_halt_alert_once,
 )
+from src.live import delayed_market_exit as dme
 from src.live.halt_modes import (
     FULL_HALT,
     SIDECAR_DIRTY_HALT,
+    allowed_intents_for_halt_mode,
+    is_intent_allowed_during_halt,
     resolve_halt_mode,
 )
 from src.live.startup_recovery import basic_restore as startup_basic_restore
-from src.live.workers import strategy_tick_worker as strategy_tick_worker_module
 from src.position_management import core_position_view as core_position_view_helpers
 from src.position_management import cost_runtime as position_cost_runtime
 from src.position_management import runner_live_helpers
@@ -46,7 +48,6 @@ from src.position_management.sidecar.planner import (
 )
 from src.reporting.live_state_store import LiveStateStore
 from src.reporting.trade_journal import LiveTradeJournal
-from src.risk.rolling_loss_guard import ROLLING_LOSS_HALT_REASONS
 from src.strategies.boll_cvd_shock_reclaim_strategy import BollCvdShockReclaimStrategy
 from src.utils.email_sender import EmailSender
 from src.utils.log import get_logger
@@ -139,21 +140,23 @@ class ExecutionCommandProcessor:
             )
             return None
 
-        # ── trading halted guard ─────────────────────────────────────────
+        # ── trading halted guard (unified halt mode) ──────────────────────
+        halt_mode: str | None = None
         async with self.state_lock:
-            rolling_management_allowed = (
-                self.execution_state.trading_halted
-                and self.execution_state.halt_reason in ROLLING_LOSS_HALT_REASONS
-                and command.intent.intent_type in strategy_tick_worker_module.POSITION_MANAGEMENT_INTENTS
-            )
-            if self.execution_state.trading_halted and not rolling_management_allowed:
-                logger.warning(
-                    "EXECUTION_SKIPPED | reason=trading_halted intent_type=%s side=%s tick_ts_ms=%s",
-                    command.intent.intent_type,
-                    command.intent.side,
-                    command.tick_ts_ms,
-                )
-                return None
+            if self.execution_state.trading_halted:
+                halt_mode = resolve_halt_mode(self.execution_state.halt_reason)
+                allowed_intents = allowed_intents_for_halt_mode(halt_mode)
+                if command.intent.intent_type not in allowed_intents:
+                    logger.warning(
+                        "EXECUTION_SKIPPED | reason=trading_halted halt_reason=%s halt_mode=%s intent_type=%s allowed_intents=%s side=%s tick_ts_ms=%s",
+                        self.execution_state.halt_reason,
+                        halt_mode,
+                        command.intent.intent_type,
+                        sorted(allowed_intents),
+                        command.intent.side,
+                        command.tick_ts_ms,
+                    )
+                    return None
             current_position_id = self.execution_state.current_position_id
             cash_before_position = self.execution_state.cash_before_position
 
@@ -301,6 +304,130 @@ class ExecutionCommandProcessor:
         # ── execute intent ───────────────────────────────────────────────
         result = await self.trader.execute_intent(command.intent)
         if not result.ok:
+            # ── Near-TP reduce: protective SL failed ────────────────────
+            if (
+                command.intent.intent_type == "NEAR_TP_REDUCE"
+                and not getattr(result, "protective_sl_ok", True)
+                and not getattr(result, "near_tp_exit_all", False)
+            ):
+                logger.error(
+                    "NEAR_TP_PROTECTIVE_SL_FAILED | position_id=%s side=%s message=%s delayed_market_exit_armed=true",
+                    current_position_id,
+                    command.intent.side,
+                    getattr(result, "message", ""),
+                )
+                async with self.state_lock:
+                    arm_payload = dme.arm_delayed_market_exit(
+                        strategy_state=self.strategy.state,
+                        execution_state=self.execution_state,
+                        position_id=current_position_id,
+                        side=command.intent.side,
+                        reason="near_tp_protective_sl_failed_delayed_market_exit_armed",
+                        context="near_tp_protective_sl_failed",
+                        source_event="NEAR_TP_PROTECTIVE_SL_FAILED",
+                        now_ms=command.intent.ts_ms,
+                        error=getattr(result, "message", str(result)),
+                    )
+                if hasattr(self.journal, "append"):
+                    self.journal.append(
+                        "NEAR_TP_PROTECTIVE_SL_FAILED",
+                        {
+                            "position_id": current_position_id,
+                            "side": command.intent.side,
+                            "message": getattr(result, "message", ""),
+                            "delayed_market_exit_armed": True,
+                            "halt_reason": "near_tp_protective_sl_failed_delayed_market_exit_armed",
+                            **arm_payload,
+                        },
+                        position_id=current_position_id,
+                    )
+                self.state_store.save(
+                    LiveStateStore.from_strategy_state(
+                        position_id=current_position_id,
+                        symbol=self.trader.symbol,
+                        strategy_state=self.strategy.state,
+                        cash_before_position=cash_before_position,
+                    )
+                )
+                await self._send_halt_alert(
+                    halt_reason="near_tp_protective_sl_failed_delayed_market_exit_armed",
+                    side=command.intent.side,
+                    layer=command.intent.layer_index,
+                    manual_intervention_required=True,
+                    message=(
+                        "Near-TP protective SL failed. "
+                        "Delayed market exit armed (30 min countdown). NO immediate market exit."
+                    ),
+                    extra={
+                        "protective_sl_ok": False,
+                        "delayed_market_exit_armed": True,
+                        "error": getattr(result, "message", str(result)),
+                    },
+                )
+                return result
+
+            # ── Core entry filled but TP/SL placement failed ────────────
+            entry_filled = getattr(result, "entry_filled", False)
+            tp_ok = getattr(result, "tp_ok", True)
+            if entry_filled and not tp_ok:
+                logger.error(
+                    "CORE_TP_PLACE_FAILED_AFTER_ENTRY | position_id=%s side=%s intent_type=%s message=%s delayed_market_exit_armed=true",
+                    current_position_id,
+                    command.intent.side,
+                    command.intent.intent_type,
+                    getattr(result, "message", ""),
+                )
+                async with self.state_lock:
+                    arm_payload = dme.arm_delayed_market_exit(
+                        strategy_state=self.strategy.state,
+                        execution_state=self.execution_state,
+                        position_id=current_position_id,
+                        side=command.intent.side,
+                        reason="core_tp_place_failed_delayed_market_exit_armed",
+                        context="core_tp_place_failed_after_entry_filled",
+                        source_event="CORE_TP_PLACE_FAILED",
+                        now_ms=command.intent.ts_ms,
+                        error=getattr(result, "message", str(result)),
+                    )
+                if hasattr(self.journal, "append"):
+                    self.journal.append(
+                        "CORE_TP_PLACE_FAILED",
+                        {
+                            "position_id": current_position_id,
+                            "side": command.intent.side,
+                            "intent_type": command.intent.intent_type,
+                            "message": getattr(result, "message", ""),
+                            "delayed_market_exit_armed": True,
+                            "halt_reason": "core_tp_place_failed_delayed_market_exit_armed",
+                            **arm_payload,
+                        },
+                        position_id=current_position_id,
+                    )
+                self.state_store.save(
+                    LiveStateStore.from_strategy_state(
+                        position_id=current_position_id,
+                        symbol=self.trader.symbol,
+                        strategy_state=self.strategy.state,
+                        cash_before_position=cash_before_position,
+                    )
+                )
+                # Send CRITICAL email
+                await self._send_halt_alert(
+                    halt_reason="core_tp_place_failed_delayed_market_exit_armed",
+                    side=command.intent.side,
+                    layer=command.intent.layer_index,
+                    manual_intervention_required=True,
+                    message=(
+                        "Core TP placement failed after entry filled. "
+                        "Delayed market exit armed (30 min countdown). NO immediate market exit."
+                    ),
+                    extra={
+                        "entry_filled": True,
+                        "tp_ok": False,
+                        "delayed_market_exit_armed": True,
+                        "error": getattr(result, "message", str(result)),
+                    },
+                )
             return result
 
         # ── apply result ─────────────────────────────────────────────────
@@ -462,16 +589,8 @@ class ExecutionCommandProcessor:
 
             # ── arm delayed emergency exit (do NOT market-exit immediately) ──
             delay_seconds = float(
-                os.getenv("SIDECAR_CORE_EXIT_ALIGNMENT_FAIL_AUTO_EXIT_DELAY_SECONDS", "900")
+                os.getenv("SIDECAR_CORE_EXIT_ALIGNMENT_FAIL_AUTO_EXIT_DELAY_SECONDS", "1800")
             )
-            arm_payload = {
-                "side": side,
-                "core_tp_price": core_tp_price,
-                "risk_reason": risk.reason,
-                "error": str(exc),
-                "delay_seconds": delay_seconds,
-                "manual_intervention_required": delay_seconds < 0,
-            }
 
             async with self.state_lock:
                 self.execution_state.trading_halted = True
@@ -483,10 +602,31 @@ class ExecutionCommandProcessor:
                 self.strategy.state.sidecar_halt_reason = (
                     "sidecar_core_exit_alignment_failed_delayed_market_exit_armed"
                 )
+                # ── Persist via unified delayed market exit state ────────
+                dme.arm_delayed_market_exit(
+                    strategy_state=self.strategy.state,
+                    execution_state=self.execution_state,
+                    position_id=current_position_id,
+                    side=side,
+                    reason="sidecar_core_exit_alignment_failed_delayed_market_exit_armed",
+                    context="sidecar_core_exit_alignment_failed",
+                    source_event="SIDECAR_CORE_EXIT_ALIGNMENT_FAILED",
+                    now_ms=command.intent.ts_ms,
+                    delay_seconds=delay_seconds,
+                    error=str(exc),
+                )
 
             self.journal.append(
                 "SIDECAR_CORE_EXIT_ALIGNMENT_DELAYED_MARKET_EXIT_ARMED",
-                arm_payload,
+                {
+                    "side": side,
+                    "core_tp_price": core_tp_price,
+                    "risk_reason": risk.reason,
+                    "error": str(exc),
+                    "delay_seconds": delay_seconds,
+                    "manual_intervention_required": True,
+                    **dme.delayed_market_exit_payload(self.strategy.state),
+                },
                 position_id=current_position_id,
             )
 
@@ -1272,18 +1412,32 @@ class ExecutionCommandProcessor:
                 if not ok:
                     logger.error("Failed to send Near-TP protected sync failure email")
         if fail_action == "MARKET_EXIT":
-            subject = "Near-TP protective SL failed; market-exited remaining position"
+            # ── Protective SL failed → arm delayed market exit ──────────
+            async with self.state_lock:
+                arm_payload = dme.arm_delayed_market_exit(
+                    strategy_state=self.strategy.state,
+                    execution_state=self.execution_state,
+                    position_id=current_position_id,
+                    side=command.intent.side,
+                    reason="near_tp_protective_sl_failed_delayed_market_exit_armed",
+                    context="near_tp_protective_sl_failed",
+                    source_event="NEAR_TP_PROTECTIVE_SL_FAILED",
+                    now_ms=command.intent.ts_ms,
+                    error=result.message,
+                )
+            subject = "Near-TP protective SL failed; delayed market exit armed"
             content = (
                 "<div style='font-family:Arial,Helvetica,sans-serif;line-height:1.55;'>"
                 "<h2>Near-TP protective SL failed</h2>"
-                f"<p>Remaining position was market-exited successfully. Trading is temporarily halted until account sync records FLAT.</p>"
+                "<p>Delayed market exit armed (30 min countdown). NO immediate market exit.</p>"
+                "<p>Please check OKX position and decide whether to manually exit.</p>"
                 f"<p><b>position_id:</b> {html.escape(str(current_position_id))}</p>"
                 f"<p><b>message:</b> {html.escape(result.message)}</p>"
                 "</div>"
             )
             ok = await self.email_sender.send_email_async(subject, content, content_type="html")
             if not ok:
-                logger.error("Failed to send Near-TP market-exit success email")
+                logger.error("Failed to send Near-TP delayed market exit arm email")
         logger.warning(
             "LIVE Near-TP reduce success | side=%s layer=%s price=%.4f contracts_before=%s contracts_reduced=%s contracts_after=%s tp_order_id=%s protective_sl_ok=%s protective_sl_order_id=%s near_tp_exit_all=%s equity=%.4f",
             command.intent.side,

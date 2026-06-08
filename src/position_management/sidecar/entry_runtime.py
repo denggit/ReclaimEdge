@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 from typing import Any
 
 from src.execution.trader import Trader
+from src.live import delayed_market_exit as dme
 from src.live import runtime_types as live_runtime_types
 from src.live.alerts.halt_alerts import (
     HaltAlertDeduper,
@@ -240,56 +242,63 @@ async def attach_sidecar_after_combined_entry(
                                                cash_before_position=execution_state.cash_before_position))
 
         if fail_action == "MARKET_EXIT":
-            exit_ok, exit_message = await trader.market_exit_remaining_position_with_retries(
-                intent.side,
-                retry_count=int(os.getenv("SIDECAR_TP_FAIL_MARKET_EXIT_RETRY_COUNT",
-                                          os.getenv("NEAR_TP_SL_FAIL_MARKET_EXIT_RETRY_COUNT", "3"))),
+            # ── Delayed market exit (NO immediate market exit) ──────────
+            arm_reason = "sidecar_tp_place_rate_limited_delayed_market_exit_armed"
+            arm_payload = dme.arm_delayed_market_exit(
+                strategy_state=strategy_state,
+                execution_state=execution_state,
+                position_id=position_id,
+                side=intent.side,
+                reason=arm_reason,
                 context="sidecar_tp_place_rate_limited",
-                retry_interval_seconds=float(os.getenv("SIDECAR_TP_FAIL_MARKET_EXIT_RETRY_INTERVAL_SECONDS", "0.5")),
+                source_event="SIDECAR_TP_PLACE_RATE_LIMITED",
+                now_ms=int(time.time() * 1000),
+                error=tp_error,
             )
-            if exit_ok:
-                execution_state.halt_reason = "sidecar_tp_rate_limited_market_exit_waiting_flat"
-                strategy_state.sidecar_halt_reason = "sidecar_tp_rate_limited_market_exit_waiting_flat"
-            manual_intervention_required = not exit_ok
+            strategy_state.sidecar_halt_reason = arm_reason
+            execution_state.halt_reason = arm_reason
+            manual_intervention_required = True
             journal.append(
                 "SIDECAR_TP_PLACE_RATE_LIMITED",
                 {
                     **dict(leg),
                     "error": tp_error,
                     "error_type": "rate_limit",
-                    "market_exit_attempted": True,
-                    "market_exit_ok": exit_ok,
-                    "market_exit_message": exit_message,
+                    "market_exit_attempted": False,
+                    "delayed_market_exit_armed": True,
                     "sidecar_contracts": str(sidecar_plan.sidecar_contracts),
                     "sidecar_qty": sidecar_plan.sidecar_qty,
                     "core_contracts": str(sidecar_plan.core_contracts),
                     "net_contracts": str(sidecar_plan.total_contracts),
                     "total_contracts": str(sidecar_plan.total_contracts),
                     "sidecar_status": SidecarLegStatus.OPEN_UNPROTECTED.value,
-                    "manual_intervention_required": manual_intervention_required,
+                    "manual_intervention_required": True,
+                    **arm_payload,
                 },
                 position_id=position_id,
             )
             logger.error(
-                "SIDECAR_TP_PLACE_RATE_LIMITED | position_id=%s leg_id=%s error=%s fail_action=MARKET_EXIT market_exit_ok=%s manual_intervention_required=%s",
+                "SIDECAR_TP_PLACE_RATE_LIMITED | position_id=%s leg_id=%s error=%s fail_action=MARKET_EXIT delayed_market_exit_armed=true halt_reason=%s manual_intervention_required=true",
                 position_id,
                 leg.get("leg_id"),
                 tp_error,
-                exit_ok,
-                manual_intervention_required,
+                arm_reason,
             )
             await _send_sidecar_failure_halt_alert(
                 email_sender=email_sender,
                 halt_alert_deduper=halt_alert_deduper,
                 trader_symbol=trader_symbol,
                 position_id=position_id,
-                halt_reason=execution_state.halt_reason or "sidecar_tp_place_rate_limited_unprotected",
+                halt_reason=arm_reason,
                 side=intent.side,
                 layer=intent.layer_index,
                 sidecar_dirty=True,
-                manual_intervention_required=manual_intervention_required,
-                message=f"Sidecar TP rate-limited; MARKET_EXIT attempted. exit_ok={exit_ok}.",
-                extra={"tp_error": tp_error, "fail_action": "MARKET_EXIT", "exit_ok": exit_ok, "exit_message": exit_message},
+                manual_intervention_required=True,
+                message=(
+                    f"Sidecar TP rate-limited; delayed market exit armed (30 min countdown). "
+                    f"NO immediate market exit. Manual intervention recommended."
+                ),
+                extra={"tp_error": tp_error, "fail_action": "MARKET_EXIT", "delayed_market_exit_armed": True},
             )
         else:
             # HALT_ONLY (default)
@@ -338,63 +347,70 @@ async def attach_sidecar_after_combined_entry(
     strategy_state.sidecar_legs.append(leg)
     execution_state.trading_halted = True
     strategy_state.sidecar_dirty = True
-    exit_ok, exit_message = await trader.market_exit_remaining_position_with_retries(
-        intent.side,
-        retry_count=int(os.getenv("SIDECAR_TP_FAIL_MARKET_EXIT_RETRY_COUNT",
-                                  os.getenv("NEAR_TP_SL_FAIL_MARKET_EXIT_RETRY_COUNT", "3"))),
+
+    # ── Delayed market exit (NO immediate market exit) ──────────────────
+    arm_reason = "sidecar_tp_place_failed_delayed_market_exit_armed"
+    arm_payload = dme.arm_delayed_market_exit(
+        strategy_state=strategy_state,
+        execution_state=execution_state,
+        position_id=position_id,
+        side=intent.side,
+        reason=arm_reason,
         context="sidecar_tp_place_failed",
-        retry_interval_seconds=float(os.getenv("SIDECAR_TP_FAIL_MARKET_EXIT_RETRY_INTERVAL_SECONDS", "0.5")),
+        source_event="SIDECAR_TP_PLACE_FAILED",
+        now_ms=int(time.time() * 1000),
+        error=tp_error,
     )
-    if exit_ok:
-        execution_state.halt_reason = "sidecar_tp_place_failed_market_exit_waiting_flat"
-        strategy_state.sidecar_halt_reason = "sidecar_tp_place_failed_market_exit_waiting_flat"
-    else:
-        execution_state.halt_reason = "sidecar_tp_place_failed"
-        strategy_state.sidecar_halt_reason = "sidecar_tp_place_failed"
+    strategy_state.sidecar_halt_reason = arm_reason
+    execution_state.halt_reason = arm_reason
+
     sidecar_runtime_state.refresh_sidecar_state_totals(strategy_state, int(os.getenv("SIDECAR_MAX_LEGS", "10")))
     state_store.save(LiveStateStore.from_strategy_state(position_id=position_id, symbol=trader_symbol,
                                                         strategy_state=strategy_state,
                                                         cash_before_position=execution_state.cash_before_position))
-    manual_intervention_required = not exit_ok
+    manual_intervention_required = True
     journal.append(
         "SIDECAR_TP_PLACE_FAILED",
         {
             **dict(leg),
             "error": tp_error,
             "error_type": "irrecoverable",
-            "market_exit_attempted": True,
-            "market_exit_ok": exit_ok,
-            "market_exit_message": exit_message,
+            "market_exit_attempted": False,
+            "delayed_market_exit_armed": True,
             "sidecar_contracts": str(sidecar_plan.sidecar_contracts),
             "sidecar_qty": sidecar_plan.sidecar_qty,
             "core_contracts": str(sidecar_plan.core_contracts),
             "net_contracts": str(sidecar_plan.total_contracts),
             "total_contracts": str(sidecar_plan.total_contracts),
             "sidecar_status": SidecarLegStatus.OPEN_UNPROTECTED.value,
-            "manual_intervention_required": manual_intervention_required,
+            "manual_intervention_required": True,
+            **arm_payload,
         },
         position_id=position_id,
     )
     logger.error(
-        "SIDECAR_TP_PLACE_FAILED | position_id=%s leg_id=%s error=%s error_type=irrecoverable market_exit_attempted=true market_exit_ok=%s manual_intervention_required=%s",
+        "SIDECAR_TP_PLACE_FAILED | position_id=%s leg_id=%s error=%s error_type=irrecoverable delayed_market_exit_armed=true halt_reason=%s manual_intervention_required=true",
         position_id,
         leg.get("leg_id"),
         tp_error,
-        exit_ok,
-        manual_intervention_required,
+        arm_reason,
     )
     await _send_sidecar_failure_halt_alert(
         email_sender=email_sender,
         halt_alert_deduper=halt_alert_deduper,
         trader_symbol=trader_symbol,
         position_id=position_id,
-        halt_reason=execution_state.halt_reason or "sidecar_tp_place_failed",
+        halt_reason=arm_reason,
         side=intent.side,
         layer=intent.layer_index,
         sidecar_dirty=True,
-        manual_intervention_required=manual_intervention_required,
-        message="Sidecar TP placement failed (irrecoverable error); market exit attempted. Core entry may remain open.",
-        extra={"tp_error": tp_error, "exit_ok": exit_ok, "exit_message": exit_message},
+        manual_intervention_required=True,
+        message=(
+            "Sidecar TP placement failed (irrecoverable error); "
+            "delayed market exit armed (30 min countdown). "
+            "NO immediate market exit. Manual intervention recommended."
+        ),
+        extra={"tp_error": tp_error, "delayed_market_exit_armed": True},
     )
     return False
 

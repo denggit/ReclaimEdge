@@ -244,7 +244,7 @@ async def test_sidecar_tp_rate_limit_all_fail_halt_only() -> None:
 
 @pytest.mark.asyncio
 async def test_sidecar_tp_rate_limit_all_fail_market_exit() -> None:
-    """All retries fail with 50011, MARKET_EXIT → market exit called with proper context."""
+    """All retries fail with 50011, MARKET_EXIT → delayed market exit armed (no immediate exit)."""
     trader = FakeTrader()
     trader._tp_failures = [
         RuntimeError("50011: Rate limit reached"),
@@ -264,7 +264,6 @@ async def test_sidecar_tp_rate_limit_all_fail_market_exit() -> None:
         "SIDECAR_TP_PLACE_RETRY_INTERVAL_SECONDS": "0.01",
         "SIDECAR_TP_PLACE_RETRY_BACKOFF_MULTIPLIER": "1.0",
         "SIDECAR_TP_RATE_LIMIT_FAIL_ACTION": "MARKET_EXIT",
-        "SIDECAR_TP_FAIL_MARKET_EXIT_RETRY_INTERVAL_SECONDS": "0.3",
     }):
         ok = await attach_sidecar_after_combined_entry(
             trader=trader,
@@ -279,15 +278,16 @@ async def test_sidecar_tp_rate_limit_all_fail_market_exit() -> None:
 
     assert ok is False
     assert exec_state.trading_halted is True
-    assert len(trader.market_exits) == 1
-    exit_call = trader.market_exits[0]
-    assert exit_call["context"] == "sidecar_tp_place_rate_limited"
-    assert exit_call["retry_interval_seconds"] == 0.3
+    # No immediate market exit
+    assert len(trader.market_exits) == 0
+    # Delayed market exit should be armed
+    assert state.delayed_market_exit_armed is True
+    assert "delayed_market_exit_armed" in exec_state.halt_reason or exec_state.halt_reason == "sidecar_tp_place_rate_limited_delayed_market_exit_armed"
 
 
 @pytest.mark.asyncio
 async def test_sidecar_tp_irrecoverable_error_market_exit() -> None:
-    """Non-rate-limit error → immediate market exit with context=sidecar_tp_place_failed."""
+    """Non-rate-limit error → delayed market exit armed (no immediate market exit)."""
     trader = FakeTrader()
     trader._tp_failures = [RuntimeError("Invalid order parameters")]
 
@@ -300,7 +300,6 @@ async def test_sidecar_tp_irrecoverable_error_market_exit() -> None:
 
     with mock.patch.dict(os.environ, {
         "SIDECAR_TP_PLACE_RETRY_COUNT": "1",
-        "SIDECAR_TP_FAIL_MARKET_EXIT_RETRY_INTERVAL_SECONDS": "0.5",
     }):
         ok = await attach_sidecar_after_combined_entry(
             trader=trader,
@@ -314,11 +313,13 @@ async def test_sidecar_tp_irrecoverable_error_market_exit() -> None:
         )
 
     assert ok is False
-    assert len(trader.market_exits) == 1
-    exit_call = trader.market_exits[0]
-    assert exit_call["context"] == "sidecar_tp_place_failed"
-    assert exit_call["retry_interval_seconds"] == 0.5
+    # No immediate market exit
+    assert len(trader.market_exits) == 0
+    # Delayed market exit should be armed
+    assert state.delayed_market_exit_armed is True
+    assert "delayed_market_exit_armed" in exec_state.halt_reason
     # Journal should contain SIDECAR_TP_PLACE_FAILED (not RATE_LIMITED)
     failed_events = [e for e in journal.events if e[0] == "SIDECAR_TP_PLACE_FAILED"]
     assert len(failed_events) == 1
     assert failed_events[0][1]["error_type"] == "irrecoverable"
+    assert failed_events[0][1].get("delayed_market_exit_armed") is True

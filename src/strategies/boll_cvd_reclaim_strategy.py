@@ -508,6 +508,18 @@ class StrategyPositionState:
 
     middle_bucket_split_add_disabled: bool = False
 
+    # ── Delayed market exit state (persisted, survives restart) ────────
+    delayed_market_exit_armed: bool = False
+    delayed_market_exit_reason: str | None = None
+    delayed_market_exit_context: str | None = None
+    delayed_market_exit_side: str | None = None
+    delayed_market_exit_position_id: str | None = None
+    delayed_market_exit_source_event: str | None = None
+    delayed_market_exit_armed_ts_ms: int | None = None
+    delayed_market_exit_deadline_ts_ms: int | None = None
+    delayed_market_exit_manual_intervention_required: bool = False
+    delayed_market_exit_last_error: str | None = None
+
 
 def _env_bool(name: str, default: bool) -> bool:
     value = os.getenv(name)

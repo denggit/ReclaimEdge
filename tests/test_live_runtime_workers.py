@@ -2961,12 +2961,13 @@ class LiveRuntimeWorkerTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(execution_state.trading_halted)
         self.assertIn(
             execution_state.halt_reason,
-            ("three_stage_post_tp1_sl_failed_market_exit_waiting_flat", "three_stage_post_tp1_protective_sl_failure"),
-            f"Expected SL failure halt reason, got: {execution_state.halt_reason}",
+            ("three_stage_post_tp1_sl_failed_delayed_market_exit_armed",),
+            f"Expected delayed market exit armed halt reason, got: {execution_state.halt_reason}",
         )
-        self.assertGreater(
+        # No immediate market exit
+        self.assertEqual(
             len(trader.market_exits), 0,
-            "market_exit_remaining_position_with_retries must be called on SL failure",
+            "market_exit_remaining_position_with_retries must NOT be called on SL failure (delayed exit armed instead)",
         )
         failed_events = [e for e in journal.events if e[0] == "THREE_STAGE_POST_TP1_PROTECTIVE_SL_FAILED"]
         self.assertEqual(len(failed_events), 1,
@@ -3005,9 +3006,10 @@ class LiveRuntimeWorkerTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertTrue(execution_state.trading_halted)
-        self.assertGreater(
+        # No immediate market exit on SL failure
+        self.assertEqual(
             len(trader.market_exits), 0,
-            "market_exit_remaining_position_with_retries must be called on SL failure",
+            "market_exit_remaining_position_with_retries must NOT be called (delayed exit armed instead)",
         )
         warning_events = [e for e in journal.events if e[0] == "MIDDLE_RUNNER_ORDER_WARNING"]
         self.assertEqual(len(warning_events), 1, "MIDDLE_RUNNER_ORDER_WARNING journal event must be logged")
