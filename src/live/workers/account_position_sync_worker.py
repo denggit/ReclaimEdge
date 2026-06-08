@@ -9,6 +9,8 @@ from src.execution.trader import Trader
 from src.live.alerts.halt_alerts import HaltAlertDeduper
 from src.live import runtime_types as live_runtime_types
 from src.live import time_utils as live_time_utils
+from src.live.account_sync import delayed_market_exit_phase as account_sync_delayed_market_exit_phase
+from src.live.account_sync.delayed_market_exit_phase import DelayedMarketExitPhaseResult
 from src.live.account_sync import flat_settlement_phase as account_sync_flat_settlement_phase
 from src.live.account_sync import pre_core_position as account_sync_pre_core_position
 from src.live.account_sync import protective_orders_phase as account_sync_protective_orders_phase
@@ -155,6 +157,35 @@ async def account_position_sync_worker(
                 middle_bucket_split_event_payload = tp_progress_result.middle_bucket_split_event_payload
                 middle_bucket_split_fast_protection_payload = tp_progress_result.middle_bucket_split_fast_protection_payload
                 last_logged_position_key = tp_progress_result.last_logged_position_key
+
+            # ── Delayed Market Exit phase ──────────────────────────────────
+            # Must run AFTER pre_core position refresh but BEFORE protective
+            # orders.  If the countdown has expired and a market exit was
+            # executed (or failed), we skip remaining protective order work
+            # for this sync cycle.
+            dme_result = DelayedMarketExitPhaseResult(status="not_armed")
+            if pending_flat_payload is None and core_position.has_position:
+                dme_result = await account_sync_delayed_market_exit_phase.run_delayed_market_exit_phase(
+                    state_lock=state_lock,
+                    execution_state=execution_state,
+                    account_snapshot=account_snapshot,
+                    trader=trader,
+                    strategy=strategy,
+                    journal=journal,
+                    state_store=state_store,
+                    email_sender=email_sender,
+                    halt_alert_deduper=halt_alert_deduper,
+                )
+
+            # ── Skip protective orders when DME executed/failed ────────────
+            # After a delayed market exit has executed (or failed), we must
+            # NOT place new protective orders in this sync cycle.  The position
+            # has been market-exited (or attempted) and protective orders would
+            # be stale or conflicting.
+            if dme_result.should_skip_remaining_account_sync:
+                three_stage_post_tp1_sl_payload = None
+                middle_runner_sl_payload = None
+                middle_bucket_split_fast_protection_payload = None
 
             if force_close_sidecar:
                 await sidecar_force_close_runtime.force_close_sidecar_after_core_flat(

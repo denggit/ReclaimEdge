@@ -9,14 +9,17 @@ Design rules:
 2. State is persisted in StrategyPositionState (survives restart).
 3. Background tasks are NOT the sole mechanism — this phase is the authority.
 4. Email failure does not affect execution.
+5. Short-lock pattern: read under lock, release, execute OKX/email, lock to write.
 """
 
 from __future__ import annotations
 
 import asyncio
+import copy
 import html
 import os
 import time
+from dataclasses import dataclass
 from typing import Any
 
 from src.execution.trader import Trader
@@ -39,6 +42,15 @@ logger = get_logger(__name__)
 # Low-frequency logging: only log "still waiting" every N seconds.
 _DME_WAITING_LOG_INTERVAL_SECONDS = 300  # 5 minutes
 _last_dme_waiting_log_ts: float = 0.0
+
+
+@dataclass(frozen=True)
+class DelayedMarketExitPhaseResult:
+    """Result of a delayed market exit phase run."""
+    status: str  # "not_armed" | "waiting" | "cleared_already_flat" | "executed" | "failed"
+    executed: bool = False
+    exit_ok: bool | None = None
+    should_skip_remaining_account_sync: bool = False
 
 
 async def _send_delayed_market_exit_alert(
@@ -89,48 +101,72 @@ async def run_delayed_market_exit_phase(
     state_store: LiveStateStore,
     email_sender: EmailSender | None,
     halt_alert_deduper: HaltAlertDeduper | None,
-) -> None:
+) -> DelayedMarketExitPhaseResult:
     """Check and execute delayed market exit if countdown has expired.
 
-    Must be called inside state_lock or the caller must hold state_lock.
-    This phase is designed to be called from the account sync worker after
-    the position snapshot has been refreshed.
+    Uses a short-lock pattern:
+    1. Short lock to read state snapshot
+    2. Release lock, execute OKX/email
+    3. Short lock to write back results
+
+    This is called from the account sync worker after the position snapshot
+    has been refreshed by pre_core_position phase.
     """
     global _last_dme_waiting_log_ts
 
-    if not getattr(strategy.state, "delayed_market_exit_armed", False):
-        return
+    # ── Phase 1: Short lock to read state snapshot ──────────────────────
+    async with state_lock:
+        armed = getattr(strategy.state, "delayed_market_exit_armed", False)
+        if not armed:
+            return DelayedMarketExitPhaseResult(status="not_armed")
+
+        # Snapshot all delayed exit fields under lock
+        dme_snapshot: dict[str, Any] = {
+            "armed": armed,
+            "reason": strategy.state.delayed_market_exit_reason,
+            "context": strategy.state.delayed_market_exit_context,
+            "side": strategy.state.delayed_market_exit_side,
+            "position_id": strategy.state.delayed_market_exit_position_id,
+            "source_event": strategy.state.delayed_market_exit_source_event,
+            "armed_ts_ms": strategy.state.delayed_market_exit_armed_ts_ms,
+            "deadline_ts_ms": strategy.state.delayed_market_exit_deadline_ts_ms,
+            "manual_intervention_required": strategy.state.delayed_market_exit_manual_intervention_required,
+            "last_error": strategy.state.delayed_market_exit_last_error,
+        }
+        current_halt_reason = execution_state.halt_reason
+        current_position_id = execution_state.current_position_id
+        cash_before_position = execution_state.cash_before_position
 
     now_ms = int(time.time() * 1000)
 
-    # ── Countdown not yet expired ───────────────────────────────────────
+    # ── Phase 2: Check due (no lock needed) ─────────────────────────────
     if not dme.delayed_market_exit_due(strategy.state, now_ms):
         now_mono = time.monotonic()
         if now_mono - _last_dme_waiting_log_ts >= _DME_WAITING_LOG_INTERVAL_SECONDS:
             _last_dme_waiting_log_ts = now_mono
-            deadline = strategy.state.delayed_market_exit_deadline_ts_ms
+            deadline = dme_snapshot["deadline_ts_ms"]
             remaining_s = max(0, (deadline - now_ms) / 1000) if deadline else 0
             logger.info(
                 "DELAYED_MARKET_EXIT_WAITING | position_id=%s side=%s reason=%s deadline_ts_ms=%s remaining_seconds=%.0f armed_ts_ms=%s",
-                strategy.state.delayed_market_exit_position_id,
-                strategy.state.delayed_market_exit_side,
-                strategy.state.delayed_market_exit_reason,
+                dme_snapshot["position_id"],
+                dme_snapshot["side"],
+                dme_snapshot["reason"],
                 deadline,
                 remaining_s,
-                strategy.state.delayed_market_exit_armed_ts_ms,
+                dme_snapshot["armed_ts_ms"],
             )
-        return
+        return DelayedMarketExitPhaseResult(status="waiting")
 
-    # ── Countdown expired — check position ──────────────────────────────
-    side = strategy.state.delayed_market_exit_side
-    position_id = strategy.state.delayed_market_exit_position_id
-    reason = strategy.state.delayed_market_exit_reason
-    context = strategy.state.delayed_market_exit_context
+    # ── Phase 3: Countdown expired — read position (no lock) ────────────
+    side = dme_snapshot["side"]
+    position_id = dme_snapshot["position_id"]
+    reason = dme_snapshot["reason"]
+    context = dme_snapshot["context"]
+    source_event = dme_snapshot["source_event"]
 
-    # Use the current account snapshot position (already refreshed by account sync).
     position = account_snapshot.position
 
-    # ── Already flat or wrong side — clear delayed exit ─────────────────
+    # ── Phase 3a: Already flat or wrong side ────────────────────────────
     if position is None or not position.has_position or (side and position.side != side):
         logger.warning(
             "DELAYED_MARKET_EXIT_SKIPPED_ALREADY_FLAT | position_id=%s side=%s reason=%s has_position=%s position_side=%s",
@@ -141,22 +177,24 @@ async def run_delayed_market_exit_phase(
             position.side if position else None,
         )
 
-        dme_payload = dme.delayed_market_exit_payload(strategy.state)
-        dme.clear_delayed_market_exit(strategy.state)
-
-        # Allow clearing halt if the halt reason is a delayed-exit related one.
-        current_halt_reason = execution_state.halt_reason
-        clearable_prefixes = (
-            "_delayed_market_exit_armed",
-            "_waiting_flat",
-            "_delayed_market_exit_failed",
-        )
-        if current_halt_reason and any(
-            current_halt_reason.endswith(p) for p in clearable_prefixes
-        ):
-            execution_state.trading_halted = False
-            execution_state.halt_reason = None
-            execution_state.halt_until_ts_ms = None
+        async with state_lock:
+            dme_payload = dme.delayed_market_exit_payload(strategy.state)
+            dme.clear_delayed_market_exit(strategy.state)
+            # Clear halt if delayed-exit related
+            clearable_suffixes = (
+                "_delayed_market_exit_armed",
+                "_waiting_flat",
+                "_delayed_market_exit_failed",
+            )
+            if execution_state.halt_reason and any(
+                execution_state.halt_reason.endswith(p) for p in clearable_suffixes
+            ):
+                execution_state.trading_halted = False
+                execution_state.halt_reason = None
+                execution_state.halt_until_ts_ms = None
+            current_position_id = execution_state.current_position_id
+            cash_before_position = execution_state.cash_before_position
+            state_for_save = copy.deepcopy(strategy.state)
 
         if hasattr(journal, "append"):
             journal.append(
@@ -172,14 +210,13 @@ async def run_delayed_market_exit_phase(
 
         state_store.save(
             LiveStateStore.from_strategy_state(
-                position_id=execution_state.current_position_id,
+                position_id=current_position_id,
                 symbol=trader.symbol,
-                strategy_state=strategy.state,
-                cash_before_position=execution_state.cash_before_position,
+                strategy_state=state_for_save,
+                cash_before_position=cash_before_position,
             )
         )
 
-        # Notify via email
         await _send_delayed_market_exit_alert(
             email_sender=email_sender,
             halt_alert_deduper=halt_alert_deduper,
@@ -191,9 +228,9 @@ async def run_delayed_market_exit_phase(
             message="Delayed market exit skipped: position already flat or wrong side.",
             extra={"delayed_market_exit_was_armed": True, "already_flat": True},
         )
-        return
+        return DelayedMarketExitPhaseResult(status="cleared_already_flat")
 
-    # ── Position still exists — execute market exit ─────────────────────
+    # ── Phase 4: Position exists — execute market exit (NO lock) ────────
     retry_count = int(os.getenv("ORDER_FAILURE_MARKET_EXIT_RETRY_COUNT", "3"))
     retry_interval = float(os.getenv("ORDER_FAILURE_MARKET_EXIT_RETRY_INTERVAL_SECONDS", "0.5"))
 
@@ -213,10 +250,14 @@ async def run_delayed_market_exit_phase(
         retry_interval_seconds=retry_interval,
     )
 
+    # ── Phase 5: Short lock to write results ────────────────────────────
     if exit_ok:
-        # ── Market exit succeeded ───────────────────────────────────────
-        execution_state.trading_halted = True
-        execution_state.halt_reason = "order_failure_delayed_market_exit_waiting_flat"
+        async with state_lock:
+            execution_state.trading_halted = True
+            execution_state.halt_reason = "order_failure_delayed_market_exit_waiting_flat"
+            current_position_id = execution_state.current_position_id
+            cash_before_position = execution_state.cash_before_position
+            state_for_save = copy.deepcopy(strategy.state)
 
         if hasattr(journal, "append"):
             journal.append(
@@ -233,10 +274,10 @@ async def run_delayed_market_exit_phase(
 
         state_store.save(
             LiveStateStore.from_strategy_state(
-                position_id=execution_state.current_position_id,
+                position_id=current_position_id,
                 symbol=trader.symbol,
-                strategy_state=strategy.state,
-                cash_before_position=execution_state.cash_before_position,
+                strategy_state=state_for_save,
+                cash_before_position=cash_before_position,
             )
         )
 
@@ -259,16 +300,23 @@ async def run_delayed_market_exit_phase(
             message=f"Delayed market exit executed successfully. exit_message={exit_message}.",
             extra={"exit_ok": True, "exit_message": exit_message},
         )
+        return DelayedMarketExitPhaseResult(
+            status="executed",
+            executed=True,
+            exit_ok=True,
+            should_skip_remaining_account_sync=True,
+        )
     else:
-        # ── Market exit failed ──────────────────────────────────────────
-        execution_state.trading_halted = True
-        execution_state.halt_reason = "order_failure_delayed_market_exit_failed"
-        strategy.state.delayed_market_exit_manual_intervention_required = True
-        strategy.state.delayed_market_exit_last_error = exit_message
-
-        # Keep sidecar_dirty if this was a sidecar-related failure.
-        if reason and "sidecar" in reason:
-            strategy.state.sidecar_dirty = True
+        async with state_lock:
+            execution_state.trading_halted = True
+            execution_state.halt_reason = "order_failure_delayed_market_exit_failed"
+            strategy.state.delayed_market_exit_manual_intervention_required = True
+            strategy.state.delayed_market_exit_last_error = exit_message
+            if reason and "sidecar" in reason:
+                strategy.state.sidecar_dirty = True
+            current_position_id = execution_state.current_position_id
+            cash_before_position = execution_state.cash_before_position
+            state_for_save = copy.deepcopy(strategy.state)
 
         if hasattr(journal, "append"):
             journal.append(
@@ -286,10 +334,10 @@ async def run_delayed_market_exit_phase(
 
         state_store.save(
             LiveStateStore.from_strategy_state(
-                position_id=execution_state.current_position_id,
+                position_id=current_position_id,
                 symbol=trader.symbol,
-                strategy_state=strategy.state,
-                cash_before_position=execution_state.cash_before_position,
+                strategy_state=state_for_save,
+                cash_before_position=cash_before_position,
             )
         )
 
@@ -301,7 +349,6 @@ async def run_delayed_market_exit_phase(
             exit_message,
         )
 
-        # Send CRITICAL email
         fail_subject = (
             f"[ReclaimEdge][CRITICAL] ORDER FAILURE - DELAYED MARKET EXIT FAILED "
             f"{trader.symbol} {reason}"
@@ -325,3 +372,10 @@ async def run_delayed_market_exit_phase(
                     logger.error("Failed to send delayed market exit failed email")
             except Exception:
                 logger.exception("DME_FAILED_EMAIL_EXCEPTION")
+
+        return DelayedMarketExitPhaseResult(
+            status="failed",
+            executed=True,
+            exit_ok=False,
+            should_skip_remaining_account_sync=True,
+        )

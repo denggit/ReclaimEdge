@@ -304,6 +304,77 @@ class ExecutionCommandProcessor:
         # ── execute intent ───────────────────────────────────────────────
         result = await self.trader.execute_intent(command.intent)
         if not result.ok:
+            # ── UPDATE_TP failure: arm delayed market exit ──────────────
+            if command.intent.intent_type == "UPDATE_TP":
+                # Only arm if not already armed for the same reason (avoid resetting countdown).
+                already_armed_same = (
+                    getattr(self.strategy.state, "delayed_market_exit_armed", False)
+                    and getattr(self.strategy.state, "delayed_market_exit_reason", None) == "core_tp_place_failed_delayed_market_exit_armed"
+                )
+                if not already_armed_same:
+                    logger.error(
+                        "UPDATE_TP_FAILED | position_id=%s side=%s message=%s delayed_market_exit_armed=true",
+                        current_position_id,
+                        command.intent.side,
+                        getattr(result, "message", ""),
+                    )
+                    async with self.state_lock:
+                        arm_payload = dme.arm_delayed_market_exit(
+                            strategy_state=self.strategy.state,
+                            execution_state=self.execution_state,
+                            position_id=current_position_id,
+                            side=command.intent.side,
+                            reason="core_tp_place_failed_delayed_market_exit_armed",
+                            context="update_tp_replace_take_profit_failed",
+                            source_event="UPDATE_TP_FAILED",
+                            now_ms=command.intent.ts_ms,
+                            error=getattr(result, "message", str(result)),
+                        )
+                    if hasattr(self.journal, "append"):
+                        self.journal.append(
+                            "UPDATE_TP_FAILED_DELAYED_MARKET_EXIT_ARMED",
+                            {
+                                "position_id": current_position_id,
+                                "side": command.intent.side,
+                                "intent_type": "UPDATE_TP",
+                                "message": getattr(result, "message", ""),
+                                "delayed_market_exit_armed": True,
+                                "halt_reason": "core_tp_place_failed_delayed_market_exit_armed",
+                                **arm_payload,
+                            },
+                            position_id=current_position_id,
+                        )
+                    self.state_store.save(
+                        LiveStateStore.from_strategy_state(
+                            position_id=current_position_id,
+                            symbol=self.trader.symbol,
+                            strategy_state=self.strategy.state,
+                            cash_before_position=cash_before_position,
+                        )
+                    )
+                    await self._send_halt_alert(
+                        halt_reason="core_tp_place_failed_delayed_market_exit_armed",
+                        side=command.intent.side,
+                        layer=command.intent.layer_index,
+                        manual_intervention_required=True,
+                        message=(
+                            "UPDATE_TP / replace_take_profit failed. "
+                            "Delayed market exit armed (30 min countdown). NO immediate market exit."
+                        ),
+                        extra={
+                            "intent_type": "UPDATE_TP",
+                            "delayed_market_exit_armed": True,
+                            "error": getattr(result, "message", str(result)),
+                        },
+                    )
+                else:
+                    logger.warning(
+                        "UPDATE_TP_FAILED_ALREADY_ARMED | position_id=%s side=%s — delayed exit already armed, skipping re-arm",
+                        current_position_id,
+                        command.intent.side,
+                    )
+                return result
+
             # ── Near-TP reduce: protective SL failed ────────────────────
             if (
                 command.intent.intent_type == "NEAR_TP_REDUCE"
@@ -668,20 +739,12 @@ class ExecutionCommandProcessor:
             if not ok:
                 logger.error("Failed to send sidecar core-exit delayed arm email")
 
-            # Schedule background delayed task (non-blocking)
-            if delay_seconds >= 0:
-                self._schedule_background_task(
-                    self._delayed_sidecar_core_exit_market_exit(
-                        delay_seconds=delay_seconds,
-                        side=side,
-                        position_id=current_position_id,
-                        cash_before_position=cash_before_position,
-                        core_tp_price=core_tp_price,
-                        risk_reason=risk.reason,
-                        original_error=str(exc),
-                        ts_ms=command.intent.ts_ms,
-                    )
-                )
+            # ── Delayed market exit is now managed by the unified DME phase ──
+            # The account sync worker calls run_delayed_market_exit_phase()
+            # which checks persisted delayed_market_exit_* state.  No background
+            # task is needed — the persisted state survives restarts and the
+            # account sync phase is the authoritative executor.
+            # (Old _delayed_sidecar_core_exit_market_exit background task removed.)
 
             # Return synthetic ok result — skip core UPDATE_TP, avoid failure-handler rollback
             return LiveTradeResult(
@@ -694,342 +757,23 @@ class ExecutionCommandProcessor:
                 message="sidecar_core_exit_alignment_failed_delayed_market_exit_armed",
             )
 
-    # ── delayed sidecar core exit helpers ────────────────────────────────
+    # ── DEPRECATED: old background task methods ────────────────────────────
+    # These methods are no longer called.  The unified DME phase
+    # (src/live/account_sync/delayed_market_exit_phase.py) now handles all
+    # delayed market exit execution via persisted state.  Kept only for
+    # reference; will be removed in a future cleanup.
 
     def _schedule_background_task(self, coro) -> None:
-        task = asyncio.create_task(coro)
-        self._background_tasks.add(task)
-        task.add_done_callback(self._background_tasks.discard)
+        """DEPRECATED: unused.  DME phase handles delayed exits now."""
+        raise RuntimeError("_schedule_background_task is deprecated and must not be called")
 
-    async def _delayed_sidecar_core_exit_market_exit(
-        self,
-        *,
-        delay_seconds: float,
-        side: str,
-        position_id: str | None,
-        cash_before_position: float | None,
-        core_tp_price: float,
-        risk_reason: str,
-        original_error: str,
-        ts_ms: int,
-    ) -> None:
-        """Background task: wait delay_seconds, then check position and market-exit if needed."""
-        try:
-            await self._delayed_sidecar_core_exit_market_exit_impl(
-                delay_seconds=delay_seconds,
-                side=side,
-                position_id=position_id,
-                cash_before_position=cash_before_position,
-                core_tp_price=core_tp_price,
-                risk_reason=risk_reason,
-                original_error=original_error,
-                ts_ms=ts_ms,
-            )
-        except Exception as exc:
-            logger.exception(
-                "SIDECAR_CORE_EXIT_DELAYED_MARKET_EXIT_TASK_FAILED | position_id=%s side=%s error=%s",
-                position_id,
-                side,
-                exc,
-            )
-            async with self.state_lock:
-                self.execution_state.trading_halted = True
-                self.execution_state.halt_reason = "sidecar_core_exit_delayed_market_exit_task_failed"
-                self.execution_state.halt_until_ts_ms = None
-                self.strategy.state.sidecar_dirty = True
-                self.strategy.state.sidecar_halt_reason = "sidecar_core_exit_delayed_market_exit_task_failed"
+    async def _delayed_sidecar_core_exit_market_exit(self, **kwargs) -> None:
+        """DEPRECATED: unused.  DME phase handles delayed exits now."""
+        raise RuntimeError("_delayed_sidecar_core_exit_market_exit is deprecated and must not be called")
 
-            self.journal.append(
-                "SIDECAR_CORE_EXIT_DELAYED_MARKET_EXIT_TASK_FAILED",
-                {
-                    "side": side,
-                    "core_tp_price": core_tp_price,
-                    "risk_reason": risk_reason,
-                    "original_error": original_error,
-                    "delay_seconds": delay_seconds,
-                    "error": str(exc),
-                    "trading_halted": True,
-                    "manual_intervention_required": True,
-                },
-                position_id=position_id,
-            )
-
-            self.state_store.save(
-                LiveStateStore.from_strategy_state(
-                    position_id=position_id,
-                    symbol=self.trader.symbol,
-                    strategy_state=self.strategy.state,
-                    cash_before_position=cash_before_position,
-                )
-            )
-
-            task_fail_subject = "CRITICAL: Sidecar core-exit delayed market exit TASK FAILED"
-            task_fail_content = (
-                "<div style='font-family:Arial,Helvetica,sans-serif;line-height:1.55;'>"
-                "<h2>Delayed Market Exit Task Crashed — Manual Intervention Required</h2>"
-                f"<p><b>position_id:</b> {html.escape(str(position_id))}</p>"
-                f"<p><b>side:</b> {html.escape(str(side))}</p>"
-                f"<p><b>core_tp_price:</b> {core_tp_price:.4f}</p>"
-                f"<p><b>risk_reason:</b> {html.escape(risk_reason)}</p>"
-                f"<p><b>error:</b> {html.escape(str(exc))}</p>"
-                f"<p><b>action:</b> task crashed</p>"
-                "</div>"
-            )
-            ok = await self.email_sender.send_email_async(task_fail_subject, task_fail_content, content_type="html")
-            if not ok:
-                logger.error("Failed to send sidecar core-exit delayed task failed email")
-
-    async def _delayed_sidecar_core_exit_market_exit_impl(
-        self,
-        *,
-        delay_seconds: float,
-        side: str,
-        position_id: str | None,
-        cash_before_position: float | None,
-        core_tp_price: float,
-        risk_reason: str,
-        original_error: str,
-        ts_ms: int,
-    ) -> None:
-        """Implementation: wait delay, check position, and market-exit if needed."""
-        # 1. Wait for the configured delay
-        if delay_seconds > 0:
-            await asyncio.sleep(delay_seconds)
-
-        # 2. Re-check OKX position — fetch failure does NOT mean flat
-        position = None
-        position_fetch_error: Exception | None = None
-        try:
-            position = await self.trader.fetch_position_snapshot()
-        except Exception as exc:
-            position_fetch_error = exc
-            logger.warning(
-                "SIDECAR_CORE_EXIT_DELAYED_MARKET_EXIT_POSITION_FETCH_FAILED | position_id=%s side=%s error=%s will_attempt_market_exit=true",
-                position_id,
-                side,
-                exc,
-            )
-
-        # 3. Only skip market exit when fetch succeeded AND position is truly flat/wrong-side
-        if position_fetch_error is None and position is not None and (
-            not position.has_position or position.side != side
-        ):
-            async with self.state_lock:
-                self.execution_state.trading_halted = True
-                self.execution_state.halt_reason = (
-                    "sidecar_core_exit_alignment_failed_waiting_flat"
-                )
-                self.strategy.state.sidecar_halt_reason = (
-                    "sidecar_core_exit_alignment_failed_waiting_flat"
-                )
-                self.strategy.state.sidecar_legs = [
-                    mark_sidecar_leg_force_closed(leg, ts_ms)
-                    if str(leg.get("status") or "") in {"OPEN", "OPEN_UNPROTECTED"}
-                    else leg
-                    for leg in self.strategy.state.sidecar_legs
-                ]
-                for leg in self.strategy.state.sidecar_legs:
-                    if leg.get("status") == "FORCE_CLOSED" and leg.get("updated_ts_ms") == ts_ms:
-                        leg["core_exit_alignment_reason"] = risk_reason
-                        leg["core_exit_market_exit"] = False
-                        leg["core_exit_already_flat"] = True
-                sidecar_runtime_state.refresh_sidecar_state_totals(
-                    self.strategy.state, int(os.getenv("SIDECAR_MAX_LEGS", "10"))
-                )
-
-            self.journal.append(
-                "SIDECAR_CORE_EXIT_DELAYED_MARKET_EXIT_SKIPPED_ALREADY_FLAT",
-                {
-                    "side": side,
-                    "core_tp_price": core_tp_price,
-                    "risk_reason": risk_reason,
-                    "original_error": original_error,
-                    "delay_seconds": delay_seconds,
-                    "reason": "okx_already_flat_or_wrong_side",
-                    "position_fetch_error": None,
-                },
-                position_id=position_id,
-            )
-
-            self.state_store.save(
-                LiveStateStore.from_strategy_state(
-                    position_id=position_id,
-                    symbol=self.trader.symbol,
-                    strategy_state=self.strategy.state,
-                    cash_before_position=cash_before_position,
-                )
-            )
-
-            logger.warning(
-                "SIDECAR_CORE_EXIT_DELAYED_MARKET_EXIT_SKIPPED_ALREADY_FLAT | position_id=%s side=%s delay_seconds=%.0f",
-                position_id,
-                side,
-                delay_seconds,
-            )
-
-            skip_subject = "Sidecar core-exit delayed market exit: already flat"
-            skip_content = (
-                "<div style='font-family:Arial,Helvetica,sans-serif;line-height:1.55;'>"
-                "<h2>Delayed Market Exit Skipped — Already Flat</h2>"
-                f"<p><b>position_id:</b> {html.escape(str(position_id))}</p>"
-                f"<p><b>side:</b> {html.escape(str(side))}</p>"
-                f"<p><b>core_tp_price:</b> {core_tp_price:.4f}</p>"
-                f"<p><b>risk_reason:</b> {html.escape(risk_reason)}</p>"
-                f"<p><b>action:</b> market exit skipped (already flat)</p>"
-                "</div>"
-            )
-            ok = await self.email_sender.send_email_async(skip_subject, skip_content, content_type="html")
-            if not ok:
-                logger.error("Failed to send sidecar core-exit delayed skip email")
-            return
-
-        # 4. Position fetch failed OR position still exists: execute market exit
-        retry_count = int(
-            os.getenv(
-                "SIDECAR_CORE_EXIT_ALIGNMENT_FAIL_MARKET_EXIT_RETRY_COUNT",
-                os.getenv("NEAR_TP_SL_FAIL_MARKET_EXIT_RETRY_COUNT", "3"),
-            )
-        )
-        exit_ok, exit_message = await self.trader.market_exit_remaining_position_with_retries(
-            side,
-            retry_count=retry_count,
-            context="sidecar_core_exit_delayed_market_exit",
-            retry_interval_seconds=float(os.getenv("SIDECAR_CORE_EXIT_MARKET_EXIT_RETRY_INTERVAL_SECONDS", "0.5")),
-        )
-
-        position_fetch_error_str = str(position_fetch_error) if position_fetch_error else None
-
-        if exit_ok:
-            async with self.state_lock:
-                self.execution_state.trading_halted = True
-                self.execution_state.halt_reason = (
-                    "sidecar_core_exit_delayed_market_exit_waiting_flat"
-                )
-                self.strategy.state.sidecar_halt_reason = (
-                    "sidecar_core_exit_delayed_market_exit_waiting_flat"
-                )
-                self.strategy.state.sidecar_legs = [
-                    mark_sidecar_leg_force_closed(leg, ts_ms)
-                    if str(leg.get("status") or "") in {"OPEN", "OPEN_UNPROTECTED"}
-                    else leg
-                    for leg in self.strategy.state.sidecar_legs
-                ]
-                for leg in self.strategy.state.sidecar_legs:
-                    if leg.get("status") == "FORCE_CLOSED" and leg.get("updated_ts_ms") == ts_ms:
-                        leg["core_exit_alignment_reason"] = risk_reason
-                        leg["core_exit_market_exit"] = True
-                sidecar_runtime_state.refresh_sidecar_state_totals(
-                    self.strategy.state, int(os.getenv("SIDECAR_MAX_LEGS", "10"))
-                )
-
-            self.journal.append(
-                "SIDECAR_CORE_EXIT_DELAYED_MARKET_EXIT_EXECUTED",
-                {
-                    "side": side,
-                    "core_tp_price": core_tp_price,
-                    "risk_reason": risk_reason,
-                    "original_error": original_error,
-                    "delay_seconds": delay_seconds,
-                    "exit_message": exit_message,
-                    "trading_halted": True,
-                    "position_fetch_error": position_fetch_error_str,
-                },
-                position_id=position_id,
-            )
-
-            self.state_store.save(
-                LiveStateStore.from_strategy_state(
-                    position_id=position_id,
-                    symbol=self.trader.symbol,
-                    strategy_state=self.strategy.state,
-                    cash_before_position=cash_before_position,
-                )
-            )
-
-            logger.warning(
-                "SIDECAR_CORE_EXIT_DELAYED_MARKET_EXIT_EXECUTED | position_id=%s side=%s delay_seconds=%.0f exit_message=%s position_fetch_error=%s",
-                position_id,
-                side,
-                delay_seconds,
-                exit_message,
-                position_fetch_error_str,
-            )
-
-            exec_subject = "Sidecar core-exit delayed market exit: executed"
-            exec_content = (
-                "<div style='font-family:Arial,Helvetica,sans-serif;line-height:1.55;'>"
-                "<h2>Delayed Market Exit Executed</h2>"
-                f"<p><b>position_id:</b> {html.escape(str(position_id))}</p>"
-                f"<p><b>side:</b> {html.escape(str(side))}</p>"
-                f"<p><b>core_tp_price:</b> {core_tp_price:.4f}</p>"
-                f"<p><b>risk_reason:</b> {html.escape(risk_reason)}</p>"
-                f"<p><b>exit_message:</b> {html.escape(exit_message)}</p>"
-                + (f"<p><b>position_fetch_error:</b> {html.escape(position_fetch_error_str)}</p>" if position_fetch_error_str else "")
-                + f"<p><b>action:</b> market exit executed</p>"
-                "</div>"
-            )
-            ok = await self.email_sender.send_email_async(exec_subject, exec_content, content_type="html")
-            if not ok:
-                logger.error("Failed to send sidecar core-exit delayed executed email")
-        else:
-            async with self.state_lock:
-                self.execution_state.trading_halted = True
-                self.execution_state.halt_reason = "sidecar_core_exit_delayed_market_exit_failed"
-                self.strategy.state.sidecar_dirty = True
-                self.strategy.state.sidecar_halt_reason = (
-                    "sidecar_core_exit_delayed_market_exit_failed"
-                )
-
-            self.journal.append(
-                "SIDECAR_CORE_EXIT_DELAYED_MARKET_EXIT_FAILED",
-                {
-                    "side": side,
-                    "core_tp_price": core_tp_price,
-                    "risk_reason": risk_reason,
-                    "original_error": original_error,
-                    "delay_seconds": delay_seconds,
-                    "exit_message": exit_message,
-                    "trading_halted": True,
-                    "manual_intervention_required": True,
-                    "position_fetch_error": position_fetch_error_str,
-                },
-                position_id=position_id,
-            )
-
-            self.state_store.save(
-                LiveStateStore.from_strategy_state(
-                    position_id=position_id,
-                    symbol=self.trader.symbol,
-                    strategy_state=self.strategy.state,
-                    cash_before_position=cash_before_position,
-                )
-            )
-
-            logger.error(
-                "SIDECAR_CORE_EXIT_DELAYED_MARKET_EXIT_FAILED | position_id=%s side=%s delay_seconds=%.0f exit_message=%s position_fetch_error=%s manual_intervention_required=true",
-                position_id,
-                side,
-                delay_seconds,
-                exit_message,
-                position_fetch_error_str,
-            )
-
-            fail_subject = "CRITICAL: Sidecar core-exit delayed market exit FAILED"
-            fail_content = (
-                "<div style='font-family:Arial,Helvetica,sans-serif;line-height:1.55;'>"
-                "<h2>Delayed Market Exit FAILED — Manual Intervention Required</h2>"
-                f"<p><b>position_id:</b> {html.escape(str(position_id))}</p>"
-                f"<p><b>side:</b> {html.escape(str(side))}</p>"
-                f"<p><b>core_tp_price:</b> {core_tp_price:.4f}</p>"
-                f"<p><b>risk_reason:</b> {html.escape(risk_reason)}</p>"
-                f"<p><b>exit_message:</b> {html.escape(exit_message)}</p>"
-                + (f"<p><b>position_fetch_error:</b> {html.escape(position_fetch_error_str)}</p>" if position_fetch_error_str else "")
-                + f"<p><b>action:</b> market exit failed</p>"
-                "</div>"
-            )
-            ok = await self.email_sender.send_email_async(fail_subject, fail_content, content_type="html")
-            if not ok:
-                logger.error("Failed to send sidecar core-exit delayed failed email")
+    async def _delayed_sidecar_core_exit_market_exit_impl(self, **kwargs) -> None:
+        """DEPRECATED: unused.  DME phase handles delayed exits now."""
+        raise RuntimeError("_delayed_sidecar_core_exit_market_exit_impl is deprecated and must not be called")
 
     # ── result application helpers ───────────────────────────────────────
 
@@ -1411,6 +1155,73 @@ class ExecutionCommandProcessor:
                 ok = await self.email_sender.send_email_async(subject, content, content_type="html")
                 if not ok:
                     logger.error("Failed to send Near-TP protected sync failure email")
+        # ── Near-TP final TP placement failed but protective SL ok ─────
+        # The position is protected by SL, but final TP is missing.
+        # This is still a TP placement failure → arm delayed exit.
+        near_tp_tp_failed = (
+            getattr(result, "reduce_filled", False)
+            and not getattr(result, "tp_ok", True)
+            and getattr(result, "protective_sl_ok", False)
+            and not getattr(result, "near_tp_exit_all", False)
+        )
+        if near_tp_tp_failed:
+            async with self.state_lock:
+                already_armed = getattr(self.strategy.state, "delayed_market_exit_armed", False)
+                if not already_armed:
+                    arm_payload = dme.arm_delayed_market_exit(
+                        strategy_state=self.strategy.state,
+                        execution_state=self.execution_state,
+                        position_id=current_position_id,
+                        side=command.intent.side,
+                        reason="core_tp_place_failed_delayed_market_exit_armed",
+                        context="near_tp_final_tp_replacement_failed",
+                        source_event="NEAR_TP_FINAL_TP_REPLACE_FAILED",
+                        now_ms=command.intent.ts_ms,
+                        error=getattr(result, "message", ""),
+                    )
+                current_position_id = self.execution_state.current_position_id
+                cash_before_position = self.execution_state.cash_before_position
+            if not already_armed:
+                if hasattr(self.journal, "append"):
+                    self.journal.append(
+                        "NEAR_TP_FINAL_TP_REPLACE_FAILED",
+                        {
+                            "position_id": current_position_id,
+                            "side": command.intent.side,
+                            "reduce_filled": True,
+                            "tp_ok": False,
+                            "protective_sl_ok": True,
+                            "delayed_market_exit_armed": True,
+                            "halt_reason": "core_tp_place_failed_delayed_market_exit_armed",
+                            **arm_payload,
+                        },
+                        position_id=current_position_id,
+                    )
+                self.state_store.save(
+                    LiveStateStore.from_strategy_state(
+                        position_id=current_position_id,
+                        symbol=self.trader.symbol,
+                        strategy_state=self.strategy.state,
+                        cash_before_position=cash_before_position,
+                    )
+                )
+                await self._send_halt_alert(
+                    halt_reason="core_tp_place_failed_delayed_market_exit_armed",
+                    side=command.intent.side,
+                    layer=command.intent.layer_index,
+                    manual_intervention_required=True,
+                    message=(
+                        "Near-TP final TP replacement failed (protective SL is OK). "
+                        "Delayed market exit armed (30 min countdown). NO immediate market exit."
+                    ),
+                    extra={
+                        "reduce_filled": True,
+                        "tp_ok": False,
+                        "protective_sl_ok": True,
+                        "delayed_market_exit_armed": True,
+                    },
+                )
+
         if fail_action == "MARKET_EXIT":
             # ── Protective SL failed → arm delayed market exit ──────────
             async with self.state_lock:

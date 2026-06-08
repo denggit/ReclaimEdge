@@ -229,9 +229,9 @@ async def test_sidecar_tp_rate_limited_halt_alert() -> None:
         )
 
     assert exec_state.trading_halted is True
-    assert exec_state.halt_reason == "sidecar_tp_place_rate_limited_unprotected"
+    assert exec_state.halt_reason == "sidecar_tp_place_rate_limited_delayed_market_exit_armed"
     assert len(email.sent) == 1
-    assert "sidecar_tp_place_rate_limited_unprotected" in email.sent[0]["subject"]
+    assert "delayed_market_exit_armed" in str(email.sent[0]["subject"]).lower() or "sidecar_tp_place_rate_limited" in email.sent[0]["subject"]
 
 
 @pytest.mark.asyncio

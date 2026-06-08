@@ -233,13 +233,16 @@ async def test_sidecar_tp_rate_limit_all_fail_halt_only() -> None:
 
     assert ok is False
     assert exec_state.trading_halted is True
-    assert exec_state.halt_reason == "sidecar_tp_place_rate_limited_unprotected"
-    assert len(trader.market_exits) == 0  # HALT_ONLY: no market exit
+    # HALT_ONLY now also arms delayed market exit
+    assert exec_state.halt_reason == "sidecar_tp_place_rate_limited_delayed_market_exit_armed"
+    assert len(trader.market_exits) == 0  # No immediate market exit
     assert state.sidecar_dirty is True
-    # Journal should contain SIDECAR_TP_PLACE_RATE_LIMITED
+    assert state.delayed_market_exit_armed is True
+    # Journal should contain SIDECAR_TP_PLACE_RATE_LIMITED with delayed exit armed
     rate_limited_events = [e for e in journal.events if e[0] == "SIDECAR_TP_PLACE_RATE_LIMITED"]
     assert len(rate_limited_events) == 1
     assert rate_limited_events[0][1]["fail_action"] == "HALT_ONLY"
+    assert rate_limited_events[0][1].get("delayed_market_exit_armed") is True
 
 
 @pytest.mark.asyncio

@@ -1474,8 +1474,9 @@ class TestExecutionCommandProcessorWithSidecar(unittest.IsolatedAsyncioTestCase)
         arm_events = [e for e in journal.events if e[0] == "SIDECAR_CORE_EXIT_ALIGNMENT_DELAYED_MARKET_EXIT_ARMED"]
         self.assertEqual(len(arm_events), 1)
 
-    async def test_realign_failure_delay_zero_schedules_market_exit(self) -> None:
-        """delay=0: background task executes market exit immediately after process returns."""
+    async def test_realign_failure_arms_delayed_exit_no_background_task(self) -> None:
+        """Alignment failure arms DME state.  Background task is deprecated;
+        the account sync DME phase handles execution."""
         strategy = BollCvdShockReclaimStrategy(
             BollCvdReclaimStrategyConfig(),
             SimplePositionSizer(SimplePositionSizerConfig()),
@@ -1508,7 +1509,6 @@ class TestExecutionCommandProcessorWithSidecar(unittest.IsolatedAsyncioTestCase)
         execution_state = ExecutionState("pos-delay0", 1000.0)
         trader = self._sidecar_trader()
         trader._cancel_sidecar_tp_returns = False  # simulate cancel failure
-        # Set position to LONG so delayed task doesn't skip as flat
         trader.set_position(long_position())
         journal = FakeJournal()
         state_store = FakeStateStore()
@@ -1526,11 +1526,11 @@ class TestExecutionCommandProcessorWithSidecar(unittest.IsolatedAsyncioTestCase)
             command = self._unsafe_update_tp_command(ts_ms=5_000, core_tp_price=105.0)
             result = await processor.process(command)
 
-        # process returns synthetic result
+        # process returns synthetic ok result
         self.assertIsNotNone(result)
         self.assertTrue(result.ok)  # type: ignore[union-attr]
 
-        # market exit NOT called during process
+        # NO immediate market exit
         self.assertEqual(len(trader.market_exits), 0)
         self.assertEqual(len(trader.executed), 0)
 
@@ -1538,17 +1538,17 @@ class TestExecutionCommandProcessorWithSidecar(unittest.IsolatedAsyncioTestCase)
         arm_events = [e for e in journal.events if e[0] == "SIDECAR_CORE_EXIT_ALIGNMENT_DELAYED_MARKET_EXIT_ARMED"]
         self.assertEqual(len(arm_events), 1)
 
-        # Let the background task run (delay=0, no actual sleep)
-        await asyncio.sleep(0)
-
-        # Now market_exit should have been called by the background task
-        self.assertGreaterEqual(len(trader.market_exits), 1)
-        # Journal should include EXECUTED
+        # DME state armed (no background task — DME phase handles execution)
+        self.assertTrue(getattr(strategy.state, "delayed_market_exit_armed", False))
+        self.assertEqual(
+            execution_state.halt_reason,
+            "sidecar_core_exit_alignment_failed_delayed_market_exit_armed",
+        )
         all_event_names = [e[0] for e in journal.events]
-        self.assertIn("SIDECAR_CORE_EXIT_DELAYED_MARKET_EXIT_EXECUTED", all_event_names)
+        self.assertIn("SIDECAR_CORE_EXIT_ALIGNMENT_DELAYED_MARKET_EXIT_ARMED", all_event_names)
 
-    async def test_delayed_exit_skips_if_already_flat(self) -> None:
-        """delay=0 but position already flat: market exit skipped, legs marked FORCE_CLOSED."""
+    async def test_delayed_exit_arms_unified_dme_state(self) -> None:
+        """Alignment failure arms unified DME state (no background task)."""
         strategy = BollCvdShockReclaimStrategy(
             BollCvdReclaimStrategyConfig(),
             SimplePositionSizer(SimplePositionSizerConfig()),
@@ -1581,7 +1581,6 @@ class TestExecutionCommandProcessorWithSidecar(unittest.IsolatedAsyncioTestCase)
         execution_state = ExecutionState("pos-flat", 1000.0)
         trader = self._sidecar_trader()
         trader._cancel_sidecar_tp_returns = False  # simulate cancel failure
-        # Set position to flat BEFORE running
         trader.set_position(flat_position())
         journal = FakeJournal()
         state_store = FakeStateStore()
@@ -1602,18 +1601,19 @@ class TestExecutionCommandProcessorWithSidecar(unittest.IsolatedAsyncioTestCase)
         self.assertIsNotNone(result)
         self.assertTrue(result.ok)  # type: ignore[union-attr]
 
-        # Drain event loop
-        await asyncio.sleep(0)
-
-        # market exit NOT called (already flat)
+        # NO immediate market exit
         self.assertEqual(len(trader.market_exits), 0)
-        # Legs marked FORCE_CLOSED
-        leg = strategy.state.sidecar_legs[0]
-        self.assertEqual(leg["status"], "FORCE_CLOSED")
-        self.assertTrue(leg.get("core_exit_already_flat"))
-        # Journal SKIPPED_ALREADY_FLAT
-        all_event_names = [e[0] for e in journal.events]
-        self.assertIn("SIDECAR_CORE_EXIT_DELAYED_MARKET_EXIT_SKIPPED_ALREADY_FLAT", all_event_names)
+
+        # DME state armed via unified arm_delayed_market_exit
+        self.assertTrue(getattr(strategy.state, "delayed_market_exit_armed", False))
+        self.assertEqual(
+            execution_state.halt_reason,
+            "sidecar_core_exit_alignment_failed_delayed_market_exit_armed",
+        )
+
+        # Journal ARMED event present
+        arm_events = [e for e in journal.events if e[0] == "SIDECAR_CORE_EXIT_ALIGNMENT_DELAYED_MARKET_EXIT_ARMED"]
+        self.assertEqual(len(arm_events), 1)
 
     async def test_realign_failure_negative_delay_disables_auto_exit(self) -> None:
         """delay < 0: no background task scheduled, manual intervention required."""
@@ -1854,8 +1854,8 @@ class TestExecutionCommandProcessorWithSidecar(unittest.IsolatedAsyncioTestCase)
 
     # ── delayed exit position fetch failure tests ──────────────────────
 
-    async def test_delayed_exit_fetch_position_failure_attempts_market_exit(self) -> None:
-        """fetch_position_snapshot raises → still attempts market exit, not skipped as flat."""
+    async def test_delayed_exit_arms_unified_dme_fetch_failure(self) -> None:
+        """Alignment failure with fetch failure → DME state armed (no background task)."""
         strategy = BollCvdShockReclaimStrategy(
             BollCvdReclaimStrategyConfig(),
             SimplePositionSizer(SimplePositionSizerConfig()),
@@ -1887,7 +1887,7 @@ class TestExecutionCommandProcessorWithSidecar(unittest.IsolatedAsyncioTestCase)
         )
         execution_state = ExecutionState("pos-fetch-fail", 1000.0)
         trader = self._sidecar_trader()
-        trader._cancel_sidecar_tp_returns = False  # simulate cancel failure
+        trader._cancel_sidecar_tp_returns = False
         trader._fetch_position_raises = RuntimeError("fetch failed")
         journal = FakeJournal()
         state_store = FakeStateStore()
@@ -1908,26 +1908,22 @@ class TestExecutionCommandProcessorWithSidecar(unittest.IsolatedAsyncioTestCase)
         self.assertIsNotNone(result)
         self.assertTrue(result.ok)  # type: ignore[union-attr]
 
-        # Drain event loop — background task should run
-        await asyncio.sleep(0)
+        # NO immediate market exit (DME phase handles it later)
+        self.assertEqual(len(trader.market_exits), 0)
 
-        # market exit WAS called (fetch failure does NOT skip)
-        self.assertGreaterEqual(len(trader.market_exits), 1)
-        # EXECUTED journal present
-        all_event_names = [e[0] for e in journal.events]
-        self.assertIn("SIDECAR_CORE_EXIT_DELAYED_MARKET_EXIT_EXECUTED", all_event_names)
-        # SKIPPED_ALREADY_FLAT NOT present
-        self.assertNotIn("SIDECAR_CORE_EXIT_DELAYED_MARKET_EXIT_SKIPPED_ALREADY_FLAT", all_event_names)
-        # position_fetch_error in payload
-        executed_events = [e for e in journal.events if e[0] == "SIDECAR_CORE_EXIT_DELAYED_MARKET_EXIT_EXECUTED"]
-        self.assertEqual(len(executed_events), 1)
-        self.assertIn("fetch failed", str(executed_events[0][1].get("position_fetch_error", "")))
-        # sidecar legs marked FORCE_CLOSED
-        leg = strategy.state.sidecar_legs[0]
-        self.assertEqual(leg["status"], "FORCE_CLOSED")
+        # DME state armed
+        self.assertTrue(getattr(strategy.state, "delayed_market_exit_armed", False))
+        self.assertEqual(
+            execution_state.halt_reason,
+            "sidecar_core_exit_alignment_failed_delayed_market_exit_armed",
+        )
 
-    async def test_delayed_exit_fetch_position_failure_and_market_exit_fails(self) -> None:
-        """fetch_position_snapshot raises AND market exit fails → halt + manual intervention."""
+        # ARM journal present
+        arm_events = [e for e in journal.events if e[0] == "SIDECAR_CORE_EXIT_ALIGNMENT_DELAYED_MARKET_EXIT_ARMED"]
+        self.assertEqual(len(arm_events), 1)
+
+    async def test_delayed_exit_arms_unified_dme_market_exit_fails(self) -> None:
+        """Alignment failure → DME state armed.  Background task is deprecated."""
         strategy = BollCvdShockReclaimStrategy(
             BollCvdReclaimStrategyConfig(),
             SimplePositionSizer(SimplePositionSizerConfig()),
@@ -1979,26 +1975,25 @@ class TestExecutionCommandProcessorWithSidecar(unittest.IsolatedAsyncioTestCase)
             result = await processor.process(command)
 
         self.assertIsNotNone(result)
-        await asyncio.sleep(0)
 
-        # market exit attempted
-        self.assertGreaterEqual(len(trader.market_exits), 1)
-        # trading halted
+        # NO immediate market exit
+        self.assertEqual(len(trader.market_exits), 0)
+
+        # DME state armed
+        self.assertTrue(getattr(strategy.state, "delayed_market_exit_armed", False))
         self.assertTrue(execution_state.trading_halted)
         self.assertEqual(
             execution_state.halt_reason,
-            "sidecar_core_exit_delayed_market_exit_failed",
+            "sidecar_core_exit_alignment_failed_delayed_market_exit_armed",
         )
-        # FAILED journal present
+        # ARM journal present (background task deprecated — DME phase handles execution)
         all_event_names = [e[0] for e in journal.events]
-        self.assertIn("SIDECAR_CORE_EXIT_DELAYED_MARKET_EXIT_FAILED", all_event_names)
-        failed_events = [e for e in journal.events if e[0] == "SIDECAR_CORE_EXIT_DELAYED_MARKET_EXIT_FAILED"]
-        self.assertEqual(len(failed_events), 1)
-        self.assertTrue(failed_events[0][1]["manual_intervention_required"])
-        self.assertIn("fetch failed", str(failed_events[0][1].get("position_fetch_error", "")))
+        self.assertIn("SIDECAR_CORE_EXIT_ALIGNMENT_DELAYED_MARKET_EXIT_ARMED", all_event_names)
+        arm_events = [e for e in journal.events if e[0] == "SIDECAR_CORE_EXIT_ALIGNMENT_DELAYED_MARKET_EXIT_ARMED"]
+        self.assertEqual(len(arm_events), 1)
 
-    async def test_delayed_exit_unhandled_exception_guard_records_task_failed(self) -> None:
-        """market_exit raises unhandled exception → top-level guard catches and journals TASK_FAILED."""
+    async def test_delayed_exit_arms_unified_dme_unhandled_exception(self) -> None:
+        """Alignment failure → DME state armed (background task deprecated)."""
         strategy = BollCvdShockReclaimStrategy(
             BollCvdReclaimStrategyConfig(),
             SimplePositionSizer(SimplePositionSizerConfig()),
@@ -2031,9 +2026,7 @@ class TestExecutionCommandProcessorWithSidecar(unittest.IsolatedAsyncioTestCase)
         execution_state = ExecutionState("pos-boom", 1000.0)
         trader = self._sidecar_trader()
         trader._cancel_sidecar_tp_returns = False
-        # Set position to LONG so it doesn't skip as flat
         trader.set_position(long_position())
-        # market_exit raises unhandled exception (not just returns False)
         trader._market_exit_raises = RuntimeError("unhandled market exit crash")
         journal = FakeJournal()
         state_store = FakeStateStore()
@@ -2052,17 +2045,18 @@ class TestExecutionCommandProcessorWithSidecar(unittest.IsolatedAsyncioTestCase)
             result = await processor.process(command)
 
         self.assertIsNotNone(result)
-        await asyncio.sleep(0)
 
-        # No test-level unhandled task exception — caught by guard
-        # TASK_FAILED journal present
-        all_event_names = [e[0] for e in journal.events]
-        self.assertIn("SIDECAR_CORE_EXIT_DELAYED_MARKET_EXIT_TASK_FAILED", all_event_names)
-        # trading halted with task_failed reason
+        # No background task — DME phase handles execution
+        # ARM journal present
+        arm_events = [e for e in journal.events if e[0] == "SIDECAR_CORE_EXIT_ALIGNMENT_DELAYED_MARKET_EXIT_ARMED"]
+        self.assertEqual(len(arm_events), 1)
+
+        # DME state armed with unified state
+        self.assertTrue(getattr(strategy.state, "delayed_market_exit_armed", False))
         self.assertTrue(execution_state.trading_halted)
         self.assertEqual(
             execution_state.halt_reason,
-            "sidecar_core_exit_delayed_market_exit_task_failed",
+            "sidecar_core_exit_alignment_failed_delayed_market_exit_armed",
         )
 
 

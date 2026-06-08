@@ -232,8 +232,6 @@ async def attach_sidecar_after_combined_entry(
         strategy_state.sidecar_legs.append(leg)
         strategy_state.sidecar_dirty = True
         execution_state.trading_halted = True
-        execution_state.halt_reason = "sidecar_tp_place_rate_limited_unprotected"
-        strategy_state.sidecar_halt_reason = "sidecar_tp_place_rate_limited_unprotected"
 
         sidecar_runtime_state.refresh_sidecar_state_totals(strategy_state, int(os.getenv("SIDECAR_MAX_LEGS", "10")))
         state_store.save(
@@ -301,7 +299,22 @@ async def attach_sidecar_after_combined_entry(
                 extra={"tp_error": tp_error, "fail_action": "MARKET_EXIT", "delayed_market_exit_armed": True},
             )
         else:
-            # HALT_ONLY (default)
+            # HALT_ONLY (default) — still arm delayed market exit
+            # All order placement failures must have a 30-min manual window.
+            arm_reason = "sidecar_tp_place_rate_limited_delayed_market_exit_armed"
+            arm_payload = dme.arm_delayed_market_exit(
+                strategy_state=strategy_state,
+                execution_state=execution_state,
+                position_id=position_id,
+                side=intent.side,
+                reason=arm_reason,
+                context="sidecar_tp_place_rate_limited",
+                source_event="SIDECAR_TP_PLACE_RATE_LIMITED",
+                now_ms=int(time.time() * 1000),
+                error=tp_error,
+            )
+            strategy_state.sidecar_halt_reason = arm_reason
+            execution_state.halt_reason = arm_reason
             manual_intervention_required = True
             journal.append(
                 "SIDECAR_TP_PLACE_RATE_LIMITED",
@@ -310,6 +323,7 @@ async def attach_sidecar_after_combined_entry(
                     "error": tp_error,
                     "error_type": "rate_limit",
                     "market_exit_attempted": False,
+                    "delayed_market_exit_armed": True,
                     "sidecar_contracts": str(sidecar_plan.sidecar_contracts),
                     "sidecar_qty": sidecar_plan.sidecar_qty,
                     "core_contracts": str(sidecar_plan.core_contracts),
@@ -318,27 +332,33 @@ async def attach_sidecar_after_combined_entry(
                     "sidecar_status": SidecarLegStatus.OPEN_UNPROTECTED.value,
                     "manual_intervention_required": True,
                     "fail_action": "HALT_ONLY",
+                    **arm_payload,
                 },
                 position_id=position_id,
             )
             logger.error(
-                "SIDECAR_TP_PLACE_RATE_LIMITED | position_id=%s leg_id=%s error=%s fail_action=HALT_ONLY trading_halted=true halt_reason=sidecar_tp_place_rate_limited_unprotected manual_intervention_required=true",
+                "SIDECAR_TP_PLACE_RATE_LIMITED | position_id=%s leg_id=%s error=%s fail_action=HALT_ONLY delayed_market_exit_armed=true halt_reason=%s manual_intervention_required=true",
                 position_id,
                 leg.get("leg_id"),
                 tp_error,
+                arm_reason,
             )
             await _send_sidecar_failure_halt_alert(
                 email_sender=email_sender,
                 halt_alert_deduper=halt_alert_deduper,
                 trader_symbol=trader_symbol,
                 position_id=position_id,
-                halt_reason=execution_state.halt_reason or "sidecar_tp_place_rate_limited_unprotected",
+                halt_reason=arm_reason,
                 side=intent.side,
                 layer=intent.layer_index,
                 sidecar_dirty=True,
                 manual_intervention_required=True,
-                message="Sidecar TP rate-limited after all retries; HALT_ONLY. Core position may be unprotected.",
-                extra={"tp_error": tp_error, "fail_action": "HALT_ONLY"},
+                message=(
+                    "Sidecar TP rate-limited after all retries; "
+                    "delayed market exit armed (30 min countdown). "
+                    "NO immediate market exit. Manual intervention recommended."
+                ),
+                extra={"tp_error": tp_error, "fail_action": "HALT_ONLY", "delayed_market_exit_armed": True},
             )
         return False
 
