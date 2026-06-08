@@ -184,6 +184,8 @@ class NearTpExecutionManager:
             exit_ok, exit_message = await self.trader.market_exit_remaining_position_with_retries(
                 intent.side,
                 retry_count=int(os.getenv("NEAR_TP_SL_FAIL_MARKET_EXIT_RETRY_COUNT", "3")),
+                context="near_tp_sl_failed",
+                retry_interval_seconds=float(os.getenv("NEAR_TP_SL_FAIL_MARKET_EXIT_RETRY_INTERVAL_SECONDS", "0.5")),
             )
             if exit_ok:
                 return LiveTradeResult(
@@ -231,11 +233,11 @@ class NearTpExecutionManager:
             t.trend_runner_sl_order_id = restored_trend_runner_sl_order_id
         position = await t.fetch_position_snapshot()
         if not position.has_position:
-            await self.trader._cleanup_after_near_tp_market_exit()
+            await self.trader._cleanup_after_market_exit()
             return LiveTradeResult(True, action, None, None, "0", t.price_to_str(intent.tp_price),
                                    "runner_already_flat", near_tp_exit_all=True)
         if position.side != intent.side:
-            await self.trader._cleanup_after_near_tp_market_exit()
+            await self.trader._cleanup_after_market_exit()
             return LiveTradeResult(True, action, None, None, "0", t.price_to_str(intent.tp_price),
                                    "runner_side_absent", near_tp_exit_all=True)
 
@@ -243,6 +245,8 @@ class NearTpExecutionManager:
         ok, message = await self.trader.market_exit_remaining_position_with_retries(
             intent.side,
             retry_count=int(os.getenv("NEAR_TP_SL_FAIL_MARKET_EXIT_RETRY_COUNT", "3")),
+            context="near_tp_market_exit_runner",
+            retry_interval_seconds=float(os.getenv("NEAR_TP_SL_FAIL_MARKET_EXIT_RETRY_INTERVAL_SECONDS", "0.5")),
         )
         refreshed = await t.fetch_position_snapshot()
         contracts_after = refreshed.contracts if refreshed.has_position and refreshed.side == intent.side else Decimal(

@@ -6,6 +6,7 @@ import time
 from typing import Any
 
 from src.execution.trader import Trader
+from src.live.alerts.halt_alerts import HaltAlertDeduper
 from src.live import runtime_types as live_runtime_types
 from src.live import time_utils as live_time_utils
 from src.live.account_sync import flat_settlement_phase as account_sync_flat_settlement_phase
@@ -53,6 +54,7 @@ async def account_position_sync_worker(
         if account_snapshot.position is not None
         else ("FLAT", "0", 0.0)
     )
+    halt_alert_deduper = HaltAlertDeduper()
     consecutive_failures = 0
     first_failure_monotonic = 0.0
     last_failure_log = 0.0
@@ -252,6 +254,8 @@ async def account_position_sync_worker(
                 middle_runner_activation_payload=middle_runner_activation_payload,
                 middle_bucket_split_event_payload=middle_bucket_split_event_payload,
                 middle_bucket_split_fast_protection_payload=middle_bucket_split_fast_protection_payload,
+                email_sender=email_sender,
+                halt_alert_deduper=halt_alert_deduper,
             )
             save_state_payload = protective_result.save_state_payload
             await account_sync_flat_settlement_phase.finalize_account_sync_flat_settlement_phase(

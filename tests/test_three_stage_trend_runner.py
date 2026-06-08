@@ -1750,7 +1750,7 @@ class RecordingTrader(Trader):
         self.cancel_reduce_only_calls += 1
         return None
 
-    async def market_exit_remaining_position_with_retries(self, side, retry_count):  # type: ignore[no-untyped-def]
+    async def market_exit_remaining_position_with_retries(self, side, retry_count, *, context="generic", retry_interval_seconds=None):  # type: ignore[no-untyped-def]
         self.position_contracts = Decimal("0")
         await self._cleanup_after_near_tp_market_exit()
         return True, "market_exit_order_id=runner-exit"

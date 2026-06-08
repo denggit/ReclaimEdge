@@ -292,8 +292,8 @@ class FakeTrader:
         self.cancelled_middle_runner_stop_ids.append(order_id)
         return self.cancel_middle_runner_ok
 
-    async def market_exit_remaining_position_with_retries(self, side, retry_count):  # type: ignore[no-untyped-def]
-        self.market_exits.append((side, retry_count))
+    async def market_exit_remaining_position_with_retries(self, side, retry_count, *, context="generic", retry_interval_seconds=None):  # type: ignore[no-untyped-def]
+        self.market_exits.append((side, retry_count, context, retry_interval_seconds))
         return self.market_exit_ok, self.market_exit_message
 
 
@@ -325,8 +325,8 @@ class SidecarWorkerTrader(FakeTrader):
         self.sidecar_tps.append((side, contracts, tp_price, client_order_id))
         return "sidecar-tp"
 
-    async def market_exit_remaining_position_with_retries(self, side, retry_count):  # type: ignore[no-untyped-def]
-        self.market_exits.append((side, retry_count))
+    async def market_exit_remaining_position_with_retries(self, side, retry_count, *, context="generic", retry_interval_seconds=None):  # type: ignore[no-untyped-def]
+        self.market_exits.append((side, retry_count, context, retry_interval_seconds))
         return True, "ok"
 
 

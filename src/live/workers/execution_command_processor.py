@@ -12,6 +12,16 @@ from src.execution.trader import LiveTradeResult, PositionSnapshot, Trader
 from src.live import config_helpers as live_config_helpers
 from src.live import runtime_types as live_runtime_types
 from src.live.account_sync import flat_balance as live_flat_balance
+from src.live.alerts.halt_alerts import (
+    HaltAlertDeduper,
+    HaltAlertPayload,
+    send_halt_alert_once,
+)
+from src.live.halt_modes import (
+    FULL_HALT,
+    SIDECAR_DIRTY_HALT,
+    resolve_halt_mode,
+)
 from src.live.startup_recovery import basic_restore as startup_basic_restore
 from src.live.workers import strategy_tick_worker as strategy_tick_worker_module
 from src.position_management import core_position_view as core_position_view_helpers
@@ -54,8 +64,45 @@ class ExecutionCommandProcessor:
     journal: LiveTradeJournal
     state_store: LiveStateStore
     email_sender: EmailSender
+    halt_alert_deduper: HaltAlertDeduper = field(default_factory=HaltAlertDeduper)
     sidecar_skip_first_layer: bool = True
     _background_tasks: set[asyncio.Task] = field(default_factory=set, init=False)
+
+    async def _send_halt_alert(
+        self,
+        *,
+        halt_reason: str,
+        side: str | None = None,
+        layer: int | None = None,
+        has_position: bool = True,
+        sidecar_dirty: bool = False,
+        manual_intervention_required: bool = True,
+        message: str = "",
+        extra: dict | None = None,
+    ) -> None:
+        """Send a rate-limited halt alert email.  Never raises."""
+        if self.email_sender is None:
+            return
+        try:
+            await send_halt_alert_once(
+                email_sender=self.email_sender,
+                deduper=self.halt_alert_deduper,
+                payload=HaltAlertPayload(
+                    symbol=self.trader.symbol,
+                    position_id=self.execution_state.current_position_id,
+                    halt_reason=halt_reason,
+                    halt_mode=resolve_halt_mode(halt_reason),
+                    side=side,
+                    layer=layer,
+                    has_position=has_position,
+                    sidecar_dirty=sidecar_dirty,
+                    manual_intervention_required=manual_intervention_required,
+                    message=message,
+                    extra=extra or {},
+                ),
+            )
+        except Exception:
+            logger.exception("PROCESSOR_HALT_ALERT_EXCEPTION | halt_reason=%s", halt_reason)
 
     async def process(self, command: live_runtime_types.TradeCommand) -> Any:
         """Process a single TradeCommand. Returns the LiveTradeResult on success, None if skipped."""
@@ -205,6 +252,14 @@ class ExecutionCommandProcessor:
                     strategy_state=self.strategy.state,
                     cash_before_position=cash_before_position,
                 )
+            )
+            await self._send_halt_alert(
+                halt_reason="sidecar_blocks_near_tp_reduce",
+                side=command.intent.side,
+                layer=command.intent.layer_index,
+                sidecar_dirty=True,
+                manual_intervention_required=True,
+                message="Sidecar is enabled; NEAR_TP_REDUCE blocked to avoid sidecar portion reduction.",
             )
             return None
 
@@ -698,6 +753,8 @@ class ExecutionCommandProcessor:
         exit_ok, exit_message = await self.trader.market_exit_remaining_position_with_retries(
             side,
             retry_count=retry_count,
+            context="sidecar_core_exit_delayed_market_exit",
+            retry_interval_seconds=float(os.getenv("SIDECAR_CORE_EXIT_MARKET_EXIT_RETRY_INTERVAL_SECONDS", "0.5")),
         )
 
         position_fetch_error_str = str(position_fetch_error) if position_fetch_error else None
@@ -1309,15 +1366,8 @@ class ExecutionCommandProcessor:
             )
             strategy_state_for_save = copy.deepcopy(self.strategy.state)
             equity = self.account_snapshot.equity
-        self.journal.record_entry(
-            position_id=current_position_id or new_position_id or "",
-            intent=command.intent,
-            result=result,
-            cash_before_position=cash_before_position,
-            equity=equity,
-            extra={"symbol": self.trader.symbol},
-        )
         sidecar_ok = True
+        sidecar_halt_reason: str | None = None
         if sidecar_plan is not None:
             sidecar_ok = await sidecar_entry_runtime.attach_sidecar_after_combined_entry(
                 trader=self.trader,
@@ -1329,17 +1379,37 @@ class ExecutionCommandProcessor:
                 state_store=self.state_store,
                 trader_symbol=self.trader.symbol,
                 fee_buffer_pct=self.strategy.config.breakeven_fee_buffer_pct,
+                email_sender=self.email_sender,
+                halt_alert_deduper=self.halt_alert_deduper,
             )
+            if not sidecar_ok:
+                sidecar_halt_reason = self.execution_state.halt_reason
+
+        entry_status = "CORE_FILLED_SIDECAR_OK" if sidecar_ok else "CORE_FILLED_SIDECAR_FAILED"
+        self.journal.record_entry(
+            position_id=current_position_id or new_position_id or "",
+            intent=command.intent,
+            result=result,
+            cash_before_position=cash_before_position,
+            equity=equity,
+            extra={
+                "symbol": self.trader.symbol,
+                "sidecar_ok": sidecar_ok,
+                "sidecar_halt_reason": sidecar_halt_reason,
+                "entry_status": entry_status,
+            },
+        )
         async with self.state_lock:
             strategy_state_for_save = copy.deepcopy(self.strategy.state)
         if not sidecar_ok:
             logger.error(
-                "LIVE sidecar failed after core entry | position_id=%s intent_type=%s side=%s layer=%s trading_halted=true halt_reason=%s",
+                "LIVE core entry success but sidecar failed | position_id=%s intent_type=%s side=%s layer=%s trading_halted=true halt_reason=%s entry_status=%s",
                 current_position_id or new_position_id,
                 command.intent.intent_type,
                 command.intent.side,
                 command.intent.layer_index,
-                self.execution_state.halt_reason,
+                sidecar_halt_reason,
+                entry_status,
             )
         if (
             getattr(command.intent, "tp_plan", "SINGLE") == "MIDDLE_RUNNER"
@@ -1396,19 +1466,40 @@ class ExecutionCommandProcessor:
                 cash_before_position=cash_before_position,
             )
         )
-        logger.warning(
-            "LIVE entry success | intent_type=%s side=%s layer=%s price=%.4f contracts=%s tp_price=%s tp_mode=%s tp_plan=%s partial_tp=%s avg_entry=%.4f breakeven=%.4f order_id=%s tp_order_id=%s",
-            command.intent.intent_type,
-            command.intent.side,
-            command.intent.layer_index,
-            command.intent.price,
-            result.contracts,
-            result.tp_price,
-            command.intent.tp_mode,
-            getattr(command.intent, "tp_plan", "SINGLE"),
-            getattr(command.intent, "partial_tp_price", None),
-            command.intent.avg_entry_price,
-            command.intent.breakeven_price,
-            result.order_id,
-            result.tp_order_id,
-        )
+        if sidecar_ok:
+            logger.warning(
+                "LIVE entry success | intent_type=%s side=%s layer=%s price=%.4f contracts=%s tp_price=%s tp_mode=%s tp_plan=%s partial_tp=%s avg_entry=%.4f breakeven=%.4f order_id=%s tp_order_id=%s entry_status=%s",
+                command.intent.intent_type,
+                command.intent.side,
+                command.intent.layer_index,
+                command.intent.price,
+                result.contracts,
+                result.tp_price,
+                command.intent.tp_mode,
+                getattr(command.intent, "tp_plan", "SINGLE"),
+                getattr(command.intent, "partial_tp_price", None),
+                command.intent.avg_entry_price,
+                command.intent.breakeven_price,
+                result.order_id,
+                result.tp_order_id,
+                entry_status,
+            )
+        else:
+            logger.error(
+                "LIVE core entry success but sidecar failed | intent_type=%s side=%s layer=%s price=%.4f contracts=%s tp_price=%s tp_mode=%s tp_plan=%s partial_tp=%s avg_entry=%.4f breakeven=%.4f order_id=%s tp_order_id=%s entry_status=%s trading_halted=true halt_reason=%s",
+                command.intent.intent_type,
+                command.intent.side,
+                command.intent.layer_index,
+                command.intent.price,
+                result.contracts,
+                result.tp_price,
+                command.intent.tp_mode,
+                getattr(command.intent, "tp_plan", "SINGLE"),
+                getattr(command.intent, "partial_tp_price", None),
+                command.intent.avg_entry_price,
+                command.intent.breakeven_price,
+                result.order_id,
+                result.tp_order_id,
+                entry_status,
+                sidecar_halt_reason,
+            )

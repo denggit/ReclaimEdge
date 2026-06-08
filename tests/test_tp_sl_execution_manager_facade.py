@@ -352,7 +352,7 @@ class TpSlExecutionManagerFacadeAsyncTest(unittest.IsolatedAsyncioTestCase):
         ok, msg = await facade.market_exit_remaining_position_with_retries("LONG", 3)
         self.assertTrue(ok)
         self.assertIn("exit-1", msg)
-        facade.market_exit.market_exit_remaining_position_with_retries.assert_awaited_once_with("LONG", 3)
+        facade.market_exit.market_exit_remaining_position_with_retries.assert_awaited_once_with("LONG", 3, context="generic", retry_interval_seconds=None)
 
     async def test_cleanup_after_near_tp_market_exit_delegates_to_market_exit(self) -> None:
         trader = make_trader()

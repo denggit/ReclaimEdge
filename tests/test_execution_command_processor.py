@@ -175,9 +175,9 @@ class FakeTrader:
         return f"sidecar-tp-{len(self.sidecar_tps)}"
 
     async def market_exit_remaining_position_with_retries(
-        self, side: str, retry_count: int
+        self, side: str, retry_count: int, *, context: str = "generic", retry_interval_seconds: float | None = None,
     ) -> tuple[bool, str]:
-        self.market_exits.append((side, retry_count))
+        self.market_exits.append((side, retry_count, context, retry_interval_seconds))
         if self._market_exit_raises is not None:
             raise self._market_exit_raises
         return self._market_exit_returns

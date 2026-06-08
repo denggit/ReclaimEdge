@@ -158,10 +158,22 @@ class TpSlExecutionManager:
     # market exit
     # ------------------------------------------------------------------
 
-    async def market_exit_remaining_position_with_retries(self, side: PositionSide, retry_count: int) -> tuple[
-        bool, str]:
-        return await self.market_exit.market_exit_remaining_position_with_retries(side, retry_count)
+    async def market_exit_remaining_position_with_retries(
+        self,
+        side: PositionSide,
+        retry_count: int,
+        *,
+        context: str = "generic",
+        retry_interval_seconds: float | None = None,
+    ) -> tuple[bool, str]:
+        return await self.market_exit.market_exit_remaining_position_with_retries(
+            side, retry_count, context=context, retry_interval_seconds=retry_interval_seconds,
+        )
 
+    async def _cleanup_after_market_exit(self) -> None:
+        return await self.market_exit._cleanup_after_market_exit()
+
+    # Backward-compat alias
     async def _cleanup_after_near_tp_market_exit(self) -> None:
         return await self.market_exit._cleanup_after_near_tp_market_exit()
 

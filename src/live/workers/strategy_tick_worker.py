@@ -8,15 +8,48 @@ import time
 from src.indicators.cvd_tracker import CvdTracker
 from src.live import queue_helpers as live_queue_helpers
 from src.live import runtime_types as live_runtime_types
+from src.live.halt_modes import (
+    FULL_HALT,
+    ENTRY_HALT_POSITION_MANAGEMENT_ALLOWED,
+    SIDECAR_DIRTY_HALT,
+    allows_core_position_management,
+    resolve_halt_mode,
+)
 from src.monitors.boll_band_breakout_monitor import MarketTickEvent
 from src.position_management import core_position_view as core_position_view_helpers
-from src.risk.rolling_loss_guard import ROLLING_LOSS_HALT_REASONS
 from src.strategies.boll_cvd_shock_reclaim_strategy import BollCvdShockReclaimStrategy
 from src.utils.log import get_logger
 
 logger = get_logger(__name__)
 
+# Intents that manage the existing position without opening new risk.
 POSITION_MANAGEMENT_INTENTS = {"UPDATE_TP", "NEAR_TP_REDUCE", "MARKET_EXIT_RUNNER"}
+
+# Intents that open or add to a position.
+ENTRY_INTENTS = {"OPEN_LONG", "OPEN_SHORT", "ADD_LONG", "ADD_SHORT"}
+
+
+def _halt_filter_intents(
+    intents: list,
+    halt_mode: str,
+) -> list:
+    """Filter intents based on halt_mode.
+
+    - FULL_HALT: drop everything.
+    - ENTRY_HALT_POSITION_MANAGEMENT_ALLOWED: keep only position management.
+    - SIDECAR_DIRTY_HALT: keep only core position management (no entry, no sidecar).
+    """
+    if halt_mode == FULL_HALT:
+        return []
+
+    if halt_mode == ENTRY_HALT_POSITION_MANAGEMENT_ALLOWED:
+        return [intent for intent in intents if intent.intent_type in POSITION_MANAGEMENT_INTENTS]
+
+    if halt_mode == SIDECAR_DIRTY_HALT:
+        return [intent for intent in intents if intent.intent_type in POSITION_MANAGEMENT_INTENTS]
+
+    # Unknown mode — conservative: drop entry intents, keep position management.
+    return [intent for intent in intents if intent.intent_type in POSITION_MANAGEMENT_INTENTS]
 
 
 async def strategy_tick_worker(
@@ -108,16 +141,18 @@ async def strategy_tick_worker(
                 halt_reason = execution_state.halt_reason
                 pending_order_count = execution_state.pending_order_count
                 has_position = bool(account_snapshot.position and account_snapshot.position.has_position)
-            allow_position_management_only = (
-                    trading_halted
-                    and halt_reason in ROLLING_LOSS_HALT_REASONS
-                    and has_position
-            )
+
+            # ── Resolve halt mode ──────────────────────────────────────────
+            halt_mode = resolve_halt_mode(halt_reason) if trading_halted else None
+
             if pending_order_count > 0:
                 continue
-            if trading_halted and not allow_position_management_only:
+
+            if halt_mode == FULL_HALT:
+                # Complete stop — no on_tick, no intents, no emails.
                 continue
 
+            # ── Run strategy on_tick ───────────────────────────────────────
             backup_state = copy.deepcopy(strategy.state)
             intents = strategy.on_tick(
                 price=event.tick.price,
@@ -125,8 +160,11 @@ async def strategy_tick_worker(
                 boll=event.boll,
                 cvd=cvd_snapshot,
             )
-            if allow_position_management_only:
-                intents = [intent for intent in intents if intent.intent_type in POSITION_MANAGEMENT_INTENTS]
+
+            # ── Filter intents based on halt mode ──────────────────────────
+            if halt_mode is not None:
+                intents = _halt_filter_intents(intents, halt_mode)
+
             for intent in intents:
                 if getattr(strategy.state, "sidecar_enabled_for_position", False):
                     intent = core_position_view_helpers.with_runtime_managed_core(intent, account_snapshot.position)

@@ -150,8 +150,8 @@ class FullProtectiveTrader:
         self.cancelled_sidecar_tps.append(order_id)
         return True
 
-    async def market_exit_remaining_position_with_retries(self, side, retry_count):
-        self.market_exits.append((side, retry_count))
+    async def market_exit_remaining_position_with_retries(self, side, retry_count, *, context="generic", retry_interval_seconds=None):
+        self.market_exits.append((side, retry_count, context, retry_interval_seconds))
         return True, "ok"
 
     async def fetch_pending_orders(self):

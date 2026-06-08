@@ -6,8 +6,16 @@ import os
 from dataclasses import dataclass
 from typing import Any
 
+from typing import Any
+
 from src.execution.trader import Trader
 from src.live import runtime_types as live_runtime_types
+from src.live.alerts.halt_alerts import (
+    HaltAlertDeduper,
+    HaltAlertPayload,
+    send_halt_alert_once,
+)
+from src.live.halt_modes import resolve_halt_mode
 from src.position_management import runner_live_helpers
 from src.reporting.live_state_store import LiveStateStore
 from src.reporting.trade_journal import LiveTradeJournal
@@ -16,6 +24,46 @@ from src.strategies.boll_cvd_shock_reclaim_strategy import BollCvdShockReclaimSt
 from src.utils.log import get_logger
 
 logger = get_logger(__name__)
+
+
+async def _send_protective_orders_halt_alert(
+    *,
+    email_sender: Any,
+    halt_alert_deduper: HaltAlertDeduper | None,
+    symbol: str,
+    position_id: str | None,
+    halt_reason: str,
+    side: str | None = None,
+    layer: int | None = None,
+    has_position: bool = True,
+    sidecar_dirty: bool = False,
+    manual_intervention_required: bool = True,
+    message: str = "",
+    extra: dict | None = None,
+) -> None:
+    """Send a rate-limited halt alert from the protective orders phase."""
+    if email_sender is None or halt_alert_deduper is None:
+        return
+    try:
+        await send_halt_alert_once(
+            email_sender=email_sender,
+            deduper=halt_alert_deduper,
+            payload=HaltAlertPayload(
+                symbol=symbol,
+                position_id=position_id,
+                halt_reason=halt_reason,
+                halt_mode=resolve_halt_mode(halt_reason),
+                side=side,
+                layer=layer,
+                has_position=has_position,
+                sidecar_dirty=sidecar_dirty,
+                manual_intervention_required=manual_intervention_required,
+                message=message,
+                extra=extra or {},
+            ),
+        )
+    except Exception:
+        logger.exception("PROTECTIVE_ORDERS_HALT_ALERT_EXCEPTION | halt_reason=%s", halt_reason)
 
 
 @dataclass(frozen=True)
@@ -38,6 +86,8 @@ async def run_account_sync_protective_orders_phase(
         middle_runner_activation_payload: dict[str, Any] | None,
         middle_bucket_split_event_payload: dict[str, Any] | None = None,
         middle_bucket_split_fast_protection_payload: dict[str, Any] | None = None,
+        email_sender: Any = None,
+        halt_alert_deduper: HaltAlertDeduper | None = None,
 ) -> AccountSyncProtectiveOrdersResult:
     if three_stage_post_tp1_cancel_payload is not None:
         old_order_id = three_stage_post_tp1_cancel_payload.get("protective_sl_order_id")
@@ -188,6 +238,8 @@ async def run_account_sync_protective_orders_phase(
                 exit_ok, exit_message = await trader.market_exit_remaining_position_with_retries(
                     side,
                     retry_count=int(os.getenv("NEAR_TP_SL_FAIL_MARKET_EXIT_RETRY_COUNT", "3")),
+                    context="post_tp1_invalid_sl",
+                    retry_interval_seconds=float(os.getenv("NEAR_TP_SL_FAIL_MARKET_EXIT_RETRY_INTERVAL_SECONDS", "0.5")),
                 )
             core_contracts = three_stage_post_tp1_sl_payload.get("core_contracts")
             net_contracts = three_stage_post_tp1_sl_payload.get("net_contracts")
@@ -241,6 +293,17 @@ async def run_account_sync_protective_orders_phase(
                 net_contracts,
                 sl_contracts,
                 manual_intervention_required,
+            )
+            await _send_protective_orders_halt_alert(
+                email_sender=email_sender,
+                halt_alert_deduper=halt_alert_deduper,
+                symbol=trader.symbol,
+                position_id=three_stage_post_tp1_sl_payload.get("position_id"),
+                halt_reason=halt_reason,
+                side=side,
+                manual_intervention_required=manual_intervention_required,
+                message=f"Three-stage post-TP1 protective SL failed: {sl_message}. market_exit_ok={exit_ok}.",
+                extra={"sl_price": str(sl_price), "exit_ok": exit_ok, "exit_message": exit_message},
             )
     middle_runner_activation_recorded = False
     if middle_runner_sl_payload is not None:
@@ -321,6 +384,8 @@ async def run_account_sync_protective_orders_phase(
                 exit_ok, exit_message = await trader.market_exit_remaining_position_with_retries(
                     side,
                     retry_count=int(os.getenv("NEAR_TP_SL_FAIL_MARKET_EXIT_RETRY_COUNT", "3")),
+                    context="middle_runner_invalid_sl",
+                    retry_interval_seconds=float(os.getenv("NEAR_TP_SL_FAIL_MARKET_EXIT_RETRY_INTERVAL_SECONDS", "0.5")),
                 )
             async with state_lock:
                 execution_state.trading_halted = True
@@ -342,6 +407,17 @@ async def run_account_sync_protective_orders_phase(
                 sl_message,
                 exit_ok,
                 exit_message,
+            )
+            await _send_protective_orders_halt_alert(
+                email_sender=email_sender,
+                halt_alert_deduper=halt_alert_deduper,
+                symbol=trader.symbol,
+                position_id=middle_runner_sl_payload.get("position_id"),
+                halt_reason="middle_runner_protective_sl_failure",
+                side=side,
+                manual_intervention_required=not exit_ok,
+                message=f"Middle runner protective SL failed: {sl_message}. market_exit_ok={exit_ok}.",
+                extra={"sl_price": str(sl_price), "exit_ok": exit_ok, "exit_message": exit_message},
             )
     if (
             middle_runner_activation_payload is not None
@@ -441,6 +517,8 @@ async def run_account_sync_protective_orders_phase(
                     exit_ok, exit_message = await trader.market_exit_remaining_position_with_retries(
                         side,
                         retry_count=int(os.getenv("NEAR_TP_SL_FAIL_MARKET_EXIT_RETRY_COUNT", "3")),
+                        context="middle_bucket_fast_sl_failed",
+                        retry_interval_seconds=float(os.getenv("NEAR_TP_SL_FAIL_MARKET_EXIT_RETRY_INTERVAL_SECONDS", "0.5")),
                     )
                 halt_reason = (
                     "middle_bucket_fast_sl_failed_market_exit_waiting_flat" if exit_ok
@@ -476,11 +554,24 @@ async def run_account_sync_protective_orders_phase(
                     exit_ok,
                     halt_reason,
                 )
+                await _send_protective_orders_halt_alert(
+                    email_sender=email_sender,
+                    halt_alert_deduper=halt_alert_deduper,
+                    symbol=trader.symbol,
+                    position_id=middle_bucket_split_fast_protection_payload.get("position_id"),
+                    halt_reason=halt_reason,
+                    side=side,
+                    manual_intervention_required=not exit_ok,
+                    message=f"Middle bucket fast protective SL failed: {sl_message}. market_exit_ok={exit_ok}.",
+                    extra={"sl_price": str(decision.sl_price), "exit_ok": exit_ok},
+                )
 
         elif decision.action == "MARKET_EXIT" and side is not None:
             exit_ok, exit_message = await trader.market_exit_remaining_position_with_retries(
                 side,
                 retry_count=int(os.getenv("NEAR_TP_SL_FAIL_MARKET_EXIT_RETRY_COUNT", "3")),
+                context="middle_bucket_fast_sl_invalid_market_exit",
+                retry_interval_seconds=float(os.getenv("NEAR_TP_SL_FAIL_MARKET_EXIT_RETRY_INTERVAL_SECONDS", "0.5")),
             )
             halt_reason = (
                 "middle_bucket_fast_sl_invalid_market_exit_waiting_flat" if exit_ok
@@ -517,6 +608,17 @@ async def run_account_sync_protective_orders_phase(
                 exit_ok,
                 halt_reason,
             )
+            await _send_protective_orders_halt_alert(
+                email_sender=email_sender,
+                halt_alert_deduper=halt_alert_deduper,
+                symbol=trader.symbol,
+                position_id=middle_bucket_split_fast_protection_payload.get("position_id"),
+                halt_reason=halt_reason,
+                side=side,
+                manual_intervention_required=not exit_ok,
+                message=f"Middle bucket fast SL invalid → MARKET_EXIT triggered. market_exit_ok={exit_ok}.",
+                extra={"sl_price": str(decision.sl_price), "current_price": str(current_price), "exit_ok": exit_ok},
+            )
 
         elif decision.action == "HALT_ONLY":
             async with state_lock:
@@ -528,6 +630,17 @@ async def run_account_sync_protective_orders_phase(
                 side,
                 decision.sl_price,
                 current_price,
+            )
+            await _send_protective_orders_halt_alert(
+                email_sender=email_sender,
+                halt_alert_deduper=halt_alert_deduper,
+                symbol=trader.symbol,
+                position_id=middle_bucket_split_fast_protection_payload.get("position_id"),
+                halt_reason="middle_bucket_fast_sl_invalid_halt_only",
+                side=side,
+                manual_intervention_required=True,
+                message="Middle bucket fast SL invalid → HALT_ONLY. Manual intervention required.",
+                extra={"sl_price": str(decision.sl_price), "current_price": str(current_price)},
             )
 
         elif decision.action == "KEEP_POSITION":

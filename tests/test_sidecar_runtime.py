@@ -88,6 +88,7 @@ class Trader:
         self.status_by_order = {}
         self.position_snapshot = PositionSnapshot("LONG", Decimal("1"), 3000, 0.1, Decimal("1"))
         self.pending_orders = []
+        self._tp_place_failures: list[Exception] = []
 
     async def place_sidecar_market_order(self, *, side, eth_qty):  # type: ignore[no-untyped-def]
         self.sidecar_market_orders.append((side, eth_qty))
@@ -96,6 +97,8 @@ class Trader:
     async def place_sidecar_fixed_take_profit(self, *, side, contracts, tp_price,
                                               client_order_id=None):  # type: ignore[no-untyped-def]
         self.sidecar_tps.append((side, contracts, tp_price, client_order_id))
+        if self._tp_place_failures:
+            raise self._tp_place_failures.pop(0)
         return "sidecar-tp"
 
     async def fetch_sidecar_order_status(self, order_id: str):  # type: ignore[no-untyped-def]
@@ -112,8 +115,8 @@ class Trader:
         self.cancelled_sidecar_tps.append(order_id)
         return True
 
-    async def market_exit_remaining_position_with_retries(self, side, retry_count):  # type: ignore[no-untyped-def]
-        self.market_exits.append((side, retry_count))
+    async def market_exit_remaining_position_with_retries(self, side, retry_count, *, context="generic", retry_interval_seconds=None):  # type: ignore[no-untyped-def]
+        self.market_exits.append((side, retry_count, context, retry_interval_seconds))
         return True, "ok"
 
 
@@ -1424,7 +1427,7 @@ async def test_sidecar_tp_failure_appends_open_unprotected_and_market_exits() ->
     assert state.sidecar_legs[0]["status"] == SidecarLegStatus.OPEN_UNPROTECTED.value
     assert state.sidecar_legs[0]["warning_recorded"] is True
     assert sidecar_open_qty(state.sidecar_legs) > 0
-    assert trader.market_exits == [("LONG", 3)]
+    assert trader.market_exits == [("LONG", 3, "sidecar_tp_place_failed", 0.5)]
     assert store.saved
 
     # No OPEN leg should exist with tp_order_id=None

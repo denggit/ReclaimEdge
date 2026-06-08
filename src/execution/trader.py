@@ -8,7 +8,7 @@ from typing import Any, Optional
 
 from config.env_loader import OKX_CONFIG
 from src.execution import order_specs
-from src.execution.okx_private_client import OkxPrivateClient, OkxPrivateClientConfig
+from src.execution.okx_private_client import OkxPrivateClient, OkxPrivateClientConfig, PrivateWriteRateLimiter
 from src.strategies.boll_cvd_reclaim_strategy import PositionSide, TradeIntent
 from src.utils.log import get_logger
 
@@ -96,6 +96,7 @@ class Trader:
         self._managed_reduce_only_order_ids: set[str] = set()
         self._allow_cancel_unmanaged_reduce_only = True
         self._timeout_seconds = float(os.getenv("OKX_PRIVATE_REST_TIMEOUT_SECONDS", "10"))
+        self._private_write_limiter = PrivateWriteRateLimiter()
         self._client = OkxPrivateClient(
             OkxPrivateClientConfig(
                 base_url=self.base_url,
@@ -119,6 +120,11 @@ class Trader:
             mgr = TpSlExecutionManager(self)
             object.__setattr__(self, '_tp_sl_manager', mgr)
             return mgr
+        if name == '_private_write_limiter':
+            from src.execution.okx_private_client import PrivateWriteRateLimiter
+            limiter = PrivateWriteRateLimiter()
+            object.__setattr__(self, '_private_write_limiter', limiter)
+            return limiter
         raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
 
     async def start(self) -> None:
@@ -378,12 +384,24 @@ class Trader:
             pos_side_mode=self.pos_side_mode,
         )
 
-    async def market_exit_remaining_position_with_retries(self, side: PositionSide, retry_count: int) -> tuple[
-        bool, str]:
-        return await self._tp_sl_manager.market_exit_remaining_position_with_retries(side, retry_count)
+    async def market_exit_remaining_position_with_retries(
+        self,
+        side: PositionSide,
+        retry_count: int,
+        *,
+        context: str = "generic",
+        retry_interval_seconds: float | None = None,
+    ) -> tuple[bool, str]:
+        return await self._tp_sl_manager.market_exit_remaining_position_with_retries(
+            side, retry_count, context=context, retry_interval_seconds=retry_interval_seconds,
+        )
 
+    async def _cleanup_after_market_exit(self) -> None:
+        return await self._tp_sl_manager._cleanup_after_market_exit()
+
+    # Backward-compat alias
     async def _cleanup_after_near_tp_market_exit(self) -> None:
-        return await self._tp_sl_manager._cleanup_after_near_tp_market_exit()
+        return await self._cleanup_after_market_exit()
 
     def _tp_price_summary(self, specs: list[tuple[str, Decimal, float]]) -> str:
         return self._tp_sl_manager._tp_price_summary(specs)
@@ -535,6 +553,9 @@ class Trader:
             await self.request("POST", "/api/v5/account/set-leverage", body)
 
     async def request(self, method: str, endpoint: str, payload: Any | None = None) -> dict[str, Any]:
+        # Rate-limit all private write (POST) operations
+        if method.upper() == "POST":
+            await self._private_write_limiter.acquire()
         return await self._client.request(method, endpoint, payload)
 
     def headers(self, method: str, endpoint: str, body: str) -> dict[str, str]:

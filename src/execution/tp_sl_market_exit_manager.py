@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
@@ -17,24 +18,37 @@ class MarketExitManager:
     def __init__(self, trader: Trader) -> None:
         self.trader = trader
 
-    async def market_exit_remaining_position_with_retries(self, side: PositionSide, retry_count: int) -> tuple[
-        bool, str]:
+    async def market_exit_remaining_position_with_retries(
+        self,
+        side: PositionSide,
+        retry_count: int,
+        *,
+        context: str = "generic",
+        retry_interval_seconds: float | None = None,
+    ) -> tuple[bool, str]:
         t = self.trader
         retry_count = max(int(retry_count), 1)
         last_error = ""
         for attempt in range(1, retry_count + 1):
+            if attempt > 1 and retry_interval_seconds is not None and retry_interval_seconds > 0:
+                await asyncio.sleep(retry_interval_seconds)
             try:
                 position = await t.fetch_position_snapshot()
                 if not position.has_position or position.contracts <= 0:
                     t.position_contracts = Decimal("0")
-                    await self.trader._cleanup_after_near_tp_market_exit()
-                    logger.warning("NEAR_TP_MARKET_EXIT_SUCCESS | reason=already_flat")
+                    await self.trader._cleanup_after_market_exit()
+                    logger.warning(
+                        "MARKET_EXIT_SUCCESS | context=%s side=%s reason=already_flat",
+                        context,
+                        side,
+                    )
                     return True, "already_flat"
                 if position.side != side:
                     t.position_contracts = Decimal("0")
-                    await self.trader._cleanup_after_near_tp_market_exit()
+                    await self.trader._cleanup_after_market_exit()
                     logger.warning(
-                        "NEAR_TP_MARKET_EXIT_SUCCESS | reason=target_side_absent expected_side=%s actual_side=%s contracts=%s",
+                        "MARKET_EXIT_SUCCESS | context=%s side=%s reason=target_side_absent expected_side=%s actual_side=%s contracts=%s",
+                        context,
                         side,
                         position.side,
                         t.decimal_to_str(position.contracts),
@@ -45,7 +59,12 @@ class MarketExitManager:
                         f"dust_position_below_min_contracts contracts={t.decimal_to_str(position.contracts)} "
                         f"min_contracts={t.decimal_to_str(t.min_contracts)}"
                     )
-                    logger.error("NEAR_TP_MARKET_EXIT_FAILED | reason=%s", last_error)
+                    logger.error(
+                        "MARKET_EXIT_FAILED | context=%s side=%s reason=%s",
+                        context,
+                        side,
+                        last_error,
+                    )
                     return False, last_error
 
                 body = t._reduce_only_market_order_body(side, position.contracts)
@@ -54,24 +73,28 @@ class MarketExitManager:
                 refreshed = await t.fetch_position_snapshot()
                 if not refreshed.has_position or refreshed.contracts <= 0:
                     t.position_contracts = Decimal("0")
-                    await self.trader._cleanup_after_near_tp_market_exit()
+                    await self.trader._cleanup_after_market_exit()
                     logger.warning(
-                        "NEAR_TP_MARKET_EXIT_SUCCESS | side=%s contracts=%s ordId=%s attempt=%s",
+                        "MARKET_EXIT_SUCCESS | context=%s side=%s contracts=%s ordId=%s attempt=%s/%s",
+                        context,
                         side,
                         t.decimal_to_str(position.contracts),
                         order_id,
                         attempt,
+                        retry_count,
                     )
                     return True, f"market_exit_order_id={order_id}"
                 if refreshed.side != side:
                     t.position_contracts = Decimal("0")
-                    await self.trader._cleanup_after_near_tp_market_exit()
+                    await self.trader._cleanup_after_market_exit()
                     logger.warning(
-                        "NEAR_TP_MARKET_EXIT_SUCCESS | reason=target_side_absent_after_order side=%s actual_side=%s ordId=%s attempt=%s",
+                        "MARKET_EXIT_SUCCESS | context=%s side=%s reason=target_side_absent_after_order actual_side=%s ordId=%s attempt=%s/%s",
+                        context,
                         side,
                         refreshed.side,
                         order_id,
                         attempt,
+                        retry_count,
                     )
                     return True, f"market_exit_order_id={order_id};target_side_absent_after_order"
                 if Decimal("0") < refreshed.contracts < t.min_contracts:
@@ -80,7 +103,9 @@ class MarketExitManager:
                         f"min_contracts={t.decimal_to_str(t.min_contracts)}"
                     )
                     logger.error(
-                        "NEAR_TP_MARKET_EXIT_FAILED | reason=%s ordId=%s attempt=%s/%s",
+                        "MARKET_EXIT_FAILED | context=%s side=%s reason=%s ordId=%s attempt=%s/%s",
+                        context,
+                        side,
                         last_error,
                         order_id,
                         attempt,
@@ -91,25 +116,32 @@ class MarketExitManager:
                 t.position_contracts = refreshed.contracts
                 last_error = f"market_exit_not_flat_after_order contracts={t.decimal_to_str(refreshed.contracts)}"
                 logger.error(
-                    "NEAR_TP_MARKET_EXIT_FAILED | reason=not_flat_after_order attempt=%s/%s side=%s remaining_contracts=%s ordId=%s",
+                    "MARKET_EXIT_FAILED | context=%s side=%s reason=not_flat_after_order attempt=%s/%s remaining_contracts=%s ordId=%s",
+                    context,
+                    side,
                     attempt,
                     retry_count,
-                    side,
                     t.decimal_to_str(refreshed.contracts),
                     order_id,
                 )
             except Exception as exc:
                 last_error = str(exc)
-                logger.error("NEAR_TP_MARKET_EXIT_FAILED | attempt=%s/%s side=%s error=%s", attempt, retry_count, side,
-                             exc)
+                logger.error(
+                    "MARKET_EXIT_FAILED | context=%s side=%s attempt=%s/%s error=%s",
+                    context,
+                    side,
+                    attempt,
+                    retry_count,
+                    exc,
+                )
         return False, last_error or "market_exit_failed"
 
-    async def _cleanup_after_near_tp_market_exit(self) -> None:
+    async def _cleanup_after_market_exit(self) -> None:
         t = self.trader
         try:
             await self.trader.cancel_existing_reduce_only_orders()
         except Exception:
-            logger.warning("NEAR_TP_MARKET_EXIT_SUCCESS | cleanup=cancel_reduce_only_tp_failed")
+            logger.warning("MARKET_EXIT_CLEANUP | cleanup=cancel_reduce_only_tp_failed")
         if t.near_tp_protective_sl_order_id:
             await self.trader.cancel_near_tp_protective_stop(t.near_tp_protective_sl_order_id)
         middle_runner_sl_order_id = getattr(t, "middle_runner_protective_sl_order_id", None)
@@ -121,3 +153,6 @@ class MarketExitManager:
         trend_runner_sl_order_id = getattr(t, "trend_runner_sl_order_id", None)
         if trend_runner_sl_order_id:
             await self.trader.cancel_trend_runner_protective_stop(trend_runner_sl_order_id)
+
+    # Backward-compat alias — new code must call _cleanup_after_market_exit
+    _cleanup_after_near_tp_market_exit = _cleanup_after_market_exit
