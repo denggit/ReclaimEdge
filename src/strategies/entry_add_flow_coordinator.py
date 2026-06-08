@@ -12,6 +12,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from src.strategies.middle_bucket_split_apply import (
+    apply_middle_runner_bucket_split,
+    apply_three_stage_middle_bucket_split,
+)
 from src.utils.log import get_logger
 
 if TYPE_CHECKING:
@@ -320,10 +324,23 @@ class EntryAddFlowCoordinator:
 
         # ── Middle Bucket Split on initial entry ────────────────────────────
         if tp_plan == "THREE_STAGE_RUNNER" and strategy.config.middle_bucket_split_enabled:
-            from src.strategies.middle_bucket_split_apply import (
-                apply_three_stage_middle_bucket_split,
-            )
             split_result = apply_three_stage_middle_bucket_split(
+                strategy=strategy, boll=boll,
+            )
+            if split_result.action == "SPLIT":
+                partial_tp_price = split_result.partial_tp_price
+                partial_tp_ratio = split_result.partial_tp_ratio
+                strategy.state.partial_tp_price = partial_tp_price
+                strategy.state.partial_tp_ratio = partial_tp_ratio
+            elif split_result.action == "UNSPLIT_SLOW_MIDDLE":
+                partial_tp_price = split_result.partial_tp_price
+                partial_tp_ratio = split_result.partial_tp_ratio
+                strategy.state.partial_tp_price = partial_tp_price
+                strategy.state.partial_tp_ratio = partial_tp_ratio
+            # FALLBACK_OUTER / INVALID / DISABLED — keep existing behaviour
+
+        if tp_plan == "MIDDLE_RUNNER" and strategy.config.middle_bucket_split_enabled:
+            split_result = apply_middle_runner_bucket_split(
                 strategy=strategy, boll=boll,
             )
             if split_result.action == "SPLIT":
