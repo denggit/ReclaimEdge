@@ -17,15 +17,15 @@ Design rules
 
 from __future__ import annotations
 
-from dataclasses import fields
+from dataclasses import MISSING, fields, is_dataclass
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Mapping, get_type_hints
 
 # ---------------------------------------------------------------------------
 # TOML library – prefer stdlib tomllib (3.11+), fall back to tomli.
-# tomli is already a project dependency; this is a compatibility shim,
-# not a new dependency.
+# tomli is declared as a conditional dependency in requirements.txt:
+#     tomli>=2.0.0; python_version < "3.11"
 # ---------------------------------------------------------------------------
 try:
     import tomllib
@@ -72,10 +72,6 @@ _ALLOWED_SECTIONS: frozenset[str] = frozenset(_SECTION_CLASS_MAP.keys())
 # ---------------------------------------------------------------------------
 # Value conversion
 # ---------------------------------------------------------------------------
-
-# Sentinel for "no default" to distinguish from ``None`` defaults.
-_MISSING: Any = object()
-
 
 def _convert_value(
     field_name: str,
@@ -173,6 +169,11 @@ def _build_dataclass_from_mapping(
     Missing fields fall back to the field's declared default (or
     default_factory result).
     """
+    if not is_dataclass(cls):
+        raise TypeError(
+            f"[{section}]: expected dataclass type, got {cls!r}"
+        )
+
     # Resolve type hints (needed because the project uses
     # ``from __future__ import annotations``, which stringifies all
     # annotations).
@@ -187,9 +188,9 @@ def _build_dataclass_from_mapping(
             )
         else:
             # Use the field's default or default_factory.
-            if f.default is not _MISSING:
+            if f.default is not MISSING:
                 kwargs[f.name] = f.default
-            elif f.default_factory is not _MISSING:  # type: ignore[comparison-overlap]
+            elif f.default_factory is not MISSING:  # type: ignore[comparison-overlap]
                 kwargs[f.name] = f.default_factory()
             else:
                 # Every field in our schema has a default, so this branch

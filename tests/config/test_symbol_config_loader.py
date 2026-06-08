@@ -12,6 +12,7 @@ import pytest
 
 from config.symbol_config import SymbolConfig
 from config.symbol_config_loader import (
+    _build_dataclass_from_mapping,
     build_symbol_config_from_mapping,
     load_symbol_config,
     load_symbol_config_from_dir,
@@ -305,3 +306,18 @@ class TestDecimalFromInt:
         path = _write_toml(tmp_path, "test.toml", toml)
         config = load_symbol_config(path)
         assert config.capital.leverage == Decimal("20")
+
+
+# ===================================================================
+# Internal helper – non-dataclass rejection (regression guard)
+# ===================================================================
+
+
+class TestInternalBuildDataclassRejectsNonDataclass:
+    """The internal ``_build_dataclass_from_mapping`` must reject a non-dataclass
+    type to prevent ``MISSING`` / dataclass-field issues from silently
+    passing."""
+
+    def test_internal_build_dataclass_rejects_non_dataclass(self) -> None:
+        with pytest.raises(TypeError, match="expected dataclass"):
+            _build_dataclass_from_mapping(object, {}, section="test")
