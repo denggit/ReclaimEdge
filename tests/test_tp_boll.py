@@ -3,7 +3,10 @@
 Verifies:
 - BollSnapshot carries both structure BOLL20 and TP BOLL15 fields.
 - TP resolver prefers TP_BOLL15, falls back to structure BOLL20.
-- SINGLE / MIDDLE RUNNER / THREE-STAGE all use TP_BOLL15 for TP prices.
+- SINGLE / MIDDLE RUNNER use TP_BOLL15 for TP prices.
+- Three-Stage TP1 uses TP_BOLL15 middle (with profit fallback to BOLL20 middle).
+- Three-Stage TP2 uses structure BOLL20 outer by default
+  (TP2 is the structural confirmation gate before Trend Runner).
 - Runner and Sidecar are NOT affected.
 - Profit distance / fallback logic is preserved.
 """
@@ -407,27 +410,50 @@ class TestMiddleRunnerTpBoll:
 
 class TestThreeStageTpBoll:
     def test_three_stage_initial_tp1_tp2_use_tp_boll15_long(self):
-        """LONG: TP1=TP_BOLL15 middle, TP2=TP_BOLL15 upper."""
+        """LONG: TP1=TP_BOLL15 middle, TP2=structure BOLL20 upper.
+
+        Three-Stage TP2 changed by design:
+        TP2 is the structural confirmation gate before Trend Runner,
+        therefore it uses structure BOLL20 outer by default.
+        TP_BOLL15 outer remains available only when THREE_STAGE_TP2_USE_STRUCTURE_BOLL=false.
+        """
         s = _strategy(three_stage_runner_enabled=True, tp_min_net_profit_pct=0.005)
         b = _boll_with_tp(middle=100.0, tp_middle=101.0, upper=110.0, tp_upper=108.0)
         _setup_position_state(s, "LONG", 100.0)
 
         s._set_three_stage_runner_planned("LONG", b)
         assert s.state.three_stage_tp1_price == 101.0
-        assert s.state.three_stage_tp2_price == 108.0
+        # TP2 uses structure BOLL20 outer (110.0), not TP_BOLL15 outer (108.0)
+        assert s.state.three_stage_tp2_price == 110.0
+        assert s.state.three_stage_tp2_price != 108.0
 
     def test_three_stage_initial_tp1_tp2_use_tp_boll15_short(self):
-        """SHORT: TP1=TP_BOLL15 middle, TP2=TP_BOLL15 lower."""
+        """SHORT: TP1=TP_BOLL15 middle, TP2=structure BOLL20 lower.
+
+        Three-Stage TP2 changed by design:
+        TP2 is the structural confirmation gate before Trend Runner,
+        therefore it uses structure BOLL20 outer by default.
+        TP_BOLL15 outer remains available only when THREE_STAGE_TP2_USE_STRUCTURE_BOLL=false.
+        """
         s = _strategy(three_stage_runner_enabled=True, tp_min_net_profit_pct=0.005)
         b = _boll_with_tp(middle=100.0, tp_middle=99.0, lower=90.0, tp_lower=92.0)
         _setup_position_state(s, "SHORT", 100.0)
 
         s._set_three_stage_runner_planned("SHORT", b)
         assert s.state.three_stage_tp1_price == 99.0
-        assert s.state.three_stage_tp2_price == 92.0
+        # TP2 uses structure BOLL20 lower (90.0), not TP_BOLL15 lower (92.0)
+        assert s.state.three_stage_tp2_price == 90.0
+        assert s.state.three_stage_tp2_price != 92.0
 
     def test_three_stage_update_tp_uses_tp_boll15(self):
-        """_update_three_stage_dynamic_targets_without_reset uses TP_BOLL15."""
+        """_update_three_stage_dynamic_targets_without_reset keeps TP1 TP_BOLL/profit
+        fallback and uses structure BOLL20 for TP2.
+
+        Three-Stage TP2 changed by design:
+        TP2 is the structural confirmation gate before Trend Runner,
+        therefore it uses structure BOLL20 outer by default.
+        TP_BOLL15 outer remains available only when THREE_STAGE_TP2_USE_STRUCTURE_BOLL=false.
+        """
         s = _strategy(three_stage_runner_enabled=True, tp_min_net_profit_pct=0.005)
         b = _boll_with_tp(middle=100.0, tp_middle=101.0, upper=110.0, tp_upper=108.0)
         _setup_position_state(s, "LONG", 100.0)
@@ -437,7 +463,9 @@ class TestThreeStageTpBoll:
         updated = s._update_three_stage_dynamic_targets_without_reset("LONG", b)
         assert updated is True
         assert s.state.three_stage_tp1_price == 101.0
-        assert s.state.three_stage_tp2_price == 108.0
+        # TP2 uses structure BOLL20 outer (110.0), not TP_BOLL15 outer (108.0)
+        assert s.state.three_stage_tp2_price == 110.0
+        assert s.state.three_stage_tp2_price != 108.0
 
     def test_three_stage_tp_boll_unavailable_fallback_long(self):
         """When TP_BOLL not available, Three-Stage falls back to structure BOLL20."""
@@ -740,10 +768,13 @@ class TestThreeStageTp1ProfitFallback:
             "TP1 must use BOLL20 middle (101.0) when TP_BOLL15 middle (100.3) "
             "fails the profit check"
         )
-        # TP2 still uses TP_BOLL15 outer
-        assert s.state.three_stage_tp2_price == 108.0, (
-            "TP2 should still use TP_BOLL15 outer (108.0)"
+        # TP2 uses structure BOLL20 outer (110.0), not TP_BOLL15 outer (108.0)
+        # Three-Stage TP2 changed by design: TP2 is the structural confirmation
+        # gate before Trend Runner, therefore it uses structure BOLL20 outer.
+        assert s.state.three_stage_tp2_price == 110.0, (
+            "TP2 should use structure BOLL20 outer (110.0)"
         )
+        assert s.state.three_stage_tp2_price != 108.0
 
     def test_tp1_uses_structure_middle_when_tp_boll_middle_profit_too_small_short(self):
         """SHORT: TP_BOLL15 middle=99.7 (> 0.5% profit), BOLL20 middle=99.0 (OK) → TP1=99.0."""
@@ -760,7 +791,9 @@ class TestThreeStageTp1ProfitFallback:
 
         s._set_three_stage_runner_planned("SHORT", b)
         assert s.state.three_stage_tp1_price == 99.0
-        assert s.state.three_stage_tp2_price == 92.0
+        # TP2 uses structure BOLL20 lower (90.0), not TP_BOLL15 lower (92.0)
+        assert s.state.three_stage_tp2_price == 90.0
+        assert s.state.three_stage_tp2_price != 92.0
 
     def test_tp1_uses_tp_boll_when_profit_ok_long(self):
         """LONG: TP_BOLL15 middle=101.0 (>= 0.5% profit) → TP1=101.0 (no fallback)."""
@@ -773,7 +806,9 @@ class TestThreeStageTp1ProfitFallback:
 
         s._set_three_stage_runner_planned("LONG", b)
         assert s.state.three_stage_tp1_price == 101.0, "TP_BOLL15 middle meets profit → use it"
-        assert s.state.three_stage_tp2_price == 108.0
+        # TP2 uses structure BOLL20 outer (110.0), not TP_BOLL15 outer (108.0)
+        assert s.state.three_stage_tp2_price == 110.0
+        assert s.state.three_stage_tp2_price != 108.0
 
     def test_update_dynamic_targets_keeps_profit_fallback(self):
         """_update_three_stage_dynamic_targets_without_reset honours profit fallback."""
@@ -786,7 +821,9 @@ class TestThreeStageTp1ProfitFallback:
 
         s._update_three_stage_dynamic_targets_without_reset("LONG", b)
         assert s.state.three_stage_tp1_price == 101.0, "profit fallback applies to dynamic update"
-        assert s.state.three_stage_tp2_price == 108.0
+        # TP2 uses structure BOLL20 outer (110.0), not TP_BOLL15 outer (108.0)
+        assert s.state.three_stage_tp2_price == 110.0
+        assert s.state.three_stage_tp2_price != 108.0
 
 
 class TestMiddleRunnerFirstTpProfitFallback:
@@ -897,7 +934,9 @@ class TestUpdateTpProfitFallback:
         s._update_three_stage_dynamic_targets_without_reset("LONG", b)
 
         assert s.state.three_stage_tp1_price == 101.0
-        assert s.state.three_stage_tp2_price == 108.0
+        # TP2 uses structure BOLL20 outer (110.0), not TP_BOLL15 outer (108.0)
+        assert s.state.three_stage_tp2_price == 110.0
+        assert s.state.three_stage_tp2_price != 108.0
 
     def test_middle_runner_pending_update_keeps_profit_fallback_for_first_tp(self):
         """_select_valid_tp_middle_with_profit_fallback used in middle_runner_pending path."""
@@ -948,7 +987,15 @@ class TestUpdateTpProfitFallback:
 
 
 class TestTp2OuterStillUsesTpBoll:
-    """Verify TP2/final outer price still uses TP_BOLL15 even when TP1 falls back."""
+    """Verify TP2 outer price selection behaviour.
+
+    Three-Stage TP2 changed by design: TP2 is the structural confirmation
+    gate before Trend Runner, therefore it uses structure BOLL20 outer by default.
+    TP_BOLL15 outer remains available only when THREE_STAGE_TP2_USE_STRUCTURE_BOLL=false.
+
+    These tests verify the _select_tp_outer resolver (which still prefers TP_BOLL15),
+    used by Middle Runner and SINGLE TP paths, separately from Three-Stage TP2 selection.
+    """
 
     def test_tp2_still_uses_tp_boll_outer_when_tp1_falls_back_long(self):
         """TP1 falls back to BOLL20, TP2 still uses TP_BOLL15 outer."""
@@ -1168,7 +1215,9 @@ class TestInvalidMiddleProfitSafety:
         s._set_three_stage_runner_planned("LONG", b)
 
         assert s.state.three_stage_tp1_price == 101.0
-        assert s.state.three_stage_tp2_price == 108.0
+        # TP2 uses structure BOLL20 outer (110.0), not TP_BOLL15 outer (108.0)
+        assert s.state.three_stage_tp2_price == 110.0
+        assert s.state.three_stage_tp2_price != 108.0
 
     def test_tp_boll_middle_invalid_but_structure_middle_valid_uses_structure_middle(self):
         s = _strategy(three_stage_runner_enabled=True, tp_min_net_profit_pct=0.005)
@@ -1183,7 +1232,9 @@ class TestInvalidMiddleProfitSafety:
         s._set_three_stage_runner_planned("LONG", b)
 
         assert s.state.three_stage_tp1_price == 101.0
-        assert s.state.three_stage_tp2_price == 108.0
+        # TP2 uses structure BOLL20 outer (110.0), not TP_BOLL15 outer (108.0)
+        assert s.state.three_stage_tp2_price == 110.0
+        assert s.state.three_stage_tp2_price != 108.0
 
 
 class TestTp2OuterStillUsesTpBollShortAndFinal:

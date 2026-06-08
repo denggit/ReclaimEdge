@@ -349,5 +349,151 @@ class TestRecordFlatPayloadDmeFields:
         assert payload.get("delayed_market_exit_cleared") is True
 
 
+# ── Test: rolling_loss_guard non-empty DME flat settlement clear halt ────
+
+class FakeRollingLossGuard:
+    """Minimal fake to satisfy rolling_loss_guard is not None check.
+
+    The production code only checks ``rolling_loss_guard is not None``,
+    so a bare object instance suffices — no methods or attributes required.
+    """
+    pass
+
+
+class TestDmeFailedClearsOnFlatWithRollingLossGuard:
+    """When rolling_loss_guard is present, clearable DME halt reasons
+    must still clear on flat.
+    """
+
+    async def _call_flat_settlement(
+        self,
+        execution_state: live_runtime_types.ExecutionState,
+        halt_reason: str,
+        *,
+        rolling_loss_guard: object | None,
+    ) -> live_runtime_types.ExecutionState:
+        """Directly call prepare_account_sync_flat_settlement_phase
+        WITHOUT manually clearing execution_state afterward.
+
+        The production code is responsible for setting
+        execution_state.trading_halted / halt_reason inside the function.
+        """
+        strategy = _make_strategy()
+        trader = FakeTrader()
+
+        with mock.patch.object(
+            live_flat_balance,
+            "fetch_settled_flat_balance",
+            return_value=live_runtime_types.SettledFlatBalance(
+                cash=1000.0,
+                equity=1000.0,
+                attempts=1,
+                stable=True,
+                reason="test",
+            ),
+        ):
+            await prepare_account_sync_flat_settlement_phase(
+                state_lock=asyncio.Lock(),
+                account_snapshot=live_runtime_types.AccountSnapshot(
+                    position=PositionSnapshot(None, Decimal("0"), 0.0, 0.0, Decimal("0")),
+                    cash=1000.0,
+                    equity=1000.0,
+                    updated_monotonic=0.0,
+                    updated_ts_ms=0,
+                    version=0,
+                    latest_market_price=None,
+                    latest_market_price_ts_ms=0,
+                ),
+                execution_state=execution_state,
+                trader=trader,
+                sizer=SimplePositionSizer(SimplePositionSizerConfig()),
+                strategy=strategy,
+                rolling_loss_guard=rolling_loss_guard,
+                pending_flat_payload={
+                    "position_id": "pos-1",
+                    "previous_halt_reason": halt_reason,
+                    "delayed_market_exit_was_armed": True,
+                    "delayed_market_exit_status": "FAILED",
+                    "delayed_market_exit_reason": "core_tp_place_failed",
+                    "delayed_market_exit_executed_ts_ms": 0,
+                    "delayed_market_exit_exit_attempt_count": 3,
+                },
+                position=PositionSnapshot(None, Decimal("0"), 0.0, 0.0, Decimal("0")),
+                current_position_key=None,
+                cash=1000.0,
+                equity=1000.0,
+                flat_balance_confirm_attempts=1,
+                flat_balance_confirm_interval_seconds=0.5,
+                flat_balance_stable_delta_usdt=10.0,
+                flat_balance_cash_equity_max_diff_usdt=100.0,
+                last_logged_cash=0.0,
+                last_logged_equity=0.0,
+                last_logged_position_key=None,
+            )
+
+        # Do NOT manually clear execution_state — the production code must do it.
+        return execution_state
+
+    @pytest.mark.asyncio
+    async def test_order_failure_dme_failed_clears_on_flat_with_rolling_loss_guard(self) -> None:
+        """When rolling_loss_guard is not None and
+        halt_reason=order_failure_delayed_market_exit_failed, flat must clear halt.
+        """
+        execution_state = live_runtime_types.ExecutionState("pos-1", 1000.0)
+        execution_state.trading_halted = True
+        execution_state.halt_reason = "order_failure_delayed_market_exit_failed"
+
+        updated_state = await self._call_flat_settlement(
+            execution_state,
+            "order_failure_delayed_market_exit_failed",
+            rolling_loss_guard=FakeRollingLossGuard(),
+        )
+
+        assert updated_state.trading_halted is False, (
+            "DME failed halt must clear on flat even with rolling_loss_guard present"
+        )
+        assert updated_state.halt_reason is None
+
+    @pytest.mark.asyncio
+    async def test_near_tp_final_tp_failed_dme_armed_clears_on_flat_with_rolling_loss_guard(self) -> None:
+        """When rolling_loss_guard is not None and
+        halt_reason=near_tp_final_tp_failed_delayed_market_exit_armed, flat must clear halt.
+        """
+        execution_state = live_runtime_types.ExecutionState("pos-1", 1000.0)
+        execution_state.trading_halted = True
+        execution_state.halt_reason = "near_tp_final_tp_failed_delayed_market_exit_armed"
+
+        updated_state = await self._call_flat_settlement(
+            execution_state,
+            "near_tp_final_tp_failed_delayed_market_exit_armed",
+            rolling_loss_guard=FakeRollingLossGuard(),
+        )
+
+        assert updated_state.trading_halted is False, (
+            "near_tp DME armed halt must clear on flat even with rolling_loss_guard present"
+        )
+        assert updated_state.halt_reason is None
+
+    @pytest.mark.asyncio
+    async def test_rolling_loss_guard_preserves_non_clearable_halt(self) -> None:
+        """When rolling_loss_guard is not None and halt_reason is NOT in
+        flat_clearable_halt_reasons, the halt must be preserved (not cleared).
+        """
+        execution_state = live_runtime_types.ExecutionState("pos-1", 1000.0)
+        execution_state.trading_halted = True
+        execution_state.halt_reason = "some_critical_non_clearable_halt"
+
+        updated_state = await self._call_flat_settlement(
+            execution_state,
+            "some_critical_non_clearable_halt",
+            rolling_loss_guard=FakeRollingLossGuard(),
+        )
+
+        assert updated_state.trading_halted is True, (
+            "Non-clearable halt must be preserved when rolling_loss_guard is present"
+        )
+        assert updated_state.halt_reason == "some_critical_non_clearable_halt"
+
+
 if __name__ == "__main__":
     pytest.main([__file__])
