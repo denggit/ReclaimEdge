@@ -390,3 +390,203 @@ def test_delayed_market_exit_result_dataclass() -> None:
     assert not_armed.executed is False
     assert not_armed.exit_ok is None
     assert not_armed.should_skip_remaining_account_sync is False
+
+
+# ── Idempotency tests ─────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_dme_success_does_not_execute_twice() -> None:
+    """After a successful DME, status=WAITING_FLAT prevents repeat execution."""
+    strategy = BollCvdShockReclaimStrategy(
+        BollCvdReclaimStrategyConfig(),
+        SimplePositionSizer(SimplePositionSizerConfig()),
+    )
+    execution_state = live_runtime_types.ExecutionState("pos-1", 1000.0)
+    trader = FakeTrader()
+    journal = FakeJournal()
+    state_store = FakeStateStore()
+    account_snapshot = FakeAccountSnapshot()
+    account_snapshot.position = PositionSnapshot("LONG", Decimal("10"), 100.0, 1.0, Decimal("10"))
+    halt_deduper = HaltAlertDeduper()
+
+    # Arm with 0 delay
+    now_ms = int(time.time() * 1000) - 1000
+    dme.arm_delayed_market_exit(
+        strategy_state=strategy.state,
+        execution_state=execution_state,
+        position_id="pos-1",
+        side="LONG",
+        reason="core_tp_place_failed_delayed_market_exit_armed",
+        context="test",
+        source_event="TEST",
+        now_ms=now_ms,
+        delay_seconds=0.0,
+    )
+
+    # First run: DME executes
+    result1 = await run_delayed_market_exit_phase(
+        state_lock=asyncio.Lock(),
+        execution_state=execution_state,
+        account_snapshot=account_snapshot,
+        trader=trader,
+        strategy=strategy,
+        journal=journal,
+        state_store=state_store,
+        email_sender=None,
+        halt_alert_deduper=halt_deduper,
+    )
+    assert result1.status == "executed"
+    assert result1.executed is True
+    assert len(trader.market_exits) == 1
+    assert strategy.state.delayed_market_exit_status == "WAITING_FLAT"
+
+    # Second run: must NOT execute again
+    result2 = await run_delayed_market_exit_phase(
+        state_lock=asyncio.Lock(),
+        execution_state=execution_state,
+        account_snapshot=account_snapshot,
+        trader=trader,
+        strategy=strategy,
+        journal=journal,
+        state_store=state_store,
+        email_sender=None,
+        halt_alert_deduper=halt_deduper,
+    )
+    assert result2.status == "waiting_flat"
+    assert result2.executed is False
+    assert result2.should_skip_remaining_account_sync is True
+    # market_exits count unchanged
+    assert len(trader.market_exits) == 1
+
+
+@pytest.mark.asyncio
+async def test_dme_failure_does_not_retry() -> None:
+    """After a failed DME, status=FAILED prevents auto retry."""
+    strategy = BollCvdShockReclaimStrategy(
+        BollCvdReclaimStrategyConfig(),
+        SimplePositionSizer(SimplePositionSizerConfig()),
+    )
+    execution_state = live_runtime_types.ExecutionState("pos-1", 1000.0)
+    trader = FakeTrader()
+    trader.set_market_exit_result(ok=False, message="exit failed")
+    journal = FakeJournal()
+    state_store = FakeStateStore()
+    account_snapshot = FakeAccountSnapshot()
+    account_snapshot.position = PositionSnapshot("LONG", Decimal("10"), 100.0, 1.0, Decimal("10"))
+    halt_deduper = HaltAlertDeduper()
+
+    now_ms = int(time.time() * 1000) - 1000
+    dme.arm_delayed_market_exit(
+        strategy_state=strategy.state,
+        execution_state=execution_state,
+        position_id="pos-1",
+        side="LONG",
+        reason="core_tp_place_failed_delayed_market_exit_armed",
+        context="test",
+        source_event="TEST",
+        now_ms=now_ms,
+        delay_seconds=0.0,
+    )
+
+    # First run: DME fails
+    result1 = await run_delayed_market_exit_phase(
+        state_lock=asyncio.Lock(),
+        execution_state=execution_state,
+        account_snapshot=account_snapshot,
+        trader=trader,
+        strategy=strategy,
+        journal=journal,
+        state_store=state_store,
+        email_sender=None,
+        halt_alert_deduper=halt_deduper,
+    )
+    assert result1.status == "failed"
+    assert result1.executed is True
+    assert len(trader.market_exits) == 1
+    assert strategy.state.delayed_market_exit_status == "FAILED"
+    assert strategy.state.delayed_market_exit_manual_intervention_required is True
+
+    # Second run: must NOT retry
+    result2 = await run_delayed_market_exit_phase(
+        state_lock=asyncio.Lock(),
+        execution_state=execution_state,
+        account_snapshot=account_snapshot,
+        trader=trader,
+        strategy=strategy,
+        journal=journal,
+        state_store=state_store,
+        email_sender=None,
+        halt_alert_deduper=halt_deduper,
+    )
+    assert result2.status == "failed_wait_manual"
+    assert result2.executed is False
+    assert result2.should_skip_remaining_account_sync is True
+    # market_exits count unchanged
+    assert len(trader.market_exits) == 1
+
+
+@pytest.mark.asyncio
+async def test_dme_waiting_flat_then_position_flat_clears() -> None:
+    """status=WAITING_FLAT + position becomes flat → DME cleared + halt cleared."""
+    strategy = BollCvdShockReclaimStrategy(
+        BollCvdReclaimStrategyConfig(),
+        SimplePositionSizer(SimplePositionSizerConfig()),
+    )
+    execution_state = live_runtime_types.ExecutionState("pos-1", 1000.0)
+    trader = FakeTrader()
+    journal = FakeJournal()
+    state_store = FakeStateStore()
+    account_snapshot = FakeAccountSnapshot()
+    account_snapshot.position = PositionSnapshot("LONG", Decimal("10"), 100.0, 1.0, Decimal("10"))
+    halt_deduper = HaltAlertDeduper()
+
+    now_ms = int(time.time() * 1000) - 1000
+    dme.arm_delayed_market_exit(
+        strategy_state=strategy.state,
+        execution_state=execution_state,
+        position_id="pos-1",
+        side="LONG",
+        reason="core_tp_place_failed_delayed_market_exit_armed",
+        context="test",
+        source_event="TEST",
+        now_ms=now_ms,
+        delay_seconds=0.0,
+    )
+
+    # Execute DME once
+    result1 = await run_delayed_market_exit_phase(
+        state_lock=asyncio.Lock(),
+        execution_state=execution_state,
+        account_snapshot=account_snapshot,
+        trader=trader,
+        strategy=strategy,
+        journal=journal,
+        state_store=state_store,
+        email_sender=None,
+        halt_alert_deduper=halt_deduper,
+    )
+    assert result1.status == "executed"
+    assert strategy.state.delayed_market_exit_status == "WAITING_FLAT"
+    assert execution_state.trading_halted is True
+
+    # Now position becomes flat
+    account_snapshot.position = None
+
+    result2 = await run_delayed_market_exit_phase(
+        state_lock=asyncio.Lock(),
+        execution_state=execution_state,
+        account_snapshot=account_snapshot,
+        trader=trader,
+        strategy=strategy,
+        journal=journal,
+        state_store=state_store,
+        email_sender=None,
+        halt_alert_deduper=halt_deduper,
+    )
+    assert result2.status == "cleared_already_flat"
+    assert strategy.state.delayed_market_exit_armed is False
+    assert strategy.state.delayed_market_exit_status is None
+    # Halt should be cleared
+    assert execution_state.trading_halted is False
+

@@ -21,6 +21,7 @@ Design rules (hard):
 5. Program restart must restore the countdown state.
 6. If position is flat before countdown expires → clear delayed exit state.
 7. Email failure must never affect the arm state.
+8. DME execution is idempotent: at most ONE market exit per armed event.
 """
 
 from __future__ import annotations
@@ -56,6 +57,23 @@ def _order_failure_market_exit_delay_seconds() -> float:
 #   delayed_market_exit_deadline_ts_ms: int | None = None
 #   delayed_market_exit_manual_intervention_required: bool = False
 #   delayed_market_exit_last_error: str | None = None
+#   delayed_market_exit_status: str | None = None  # ARMED|WAITING_FLAT|FAILED|CLEARED
+#   delayed_market_exit_executed_ts_ms: int | None = None
+#   delayed_market_exit_exit_attempt_count: int = 0
+#   delayed_market_exit_last_exit_message: str | None = None
+
+
+# ── Status machine ─────────────────────────────────────────────────────
+#
+#   None ──(arm)──> ARMED ──(countdown)──> [DME phase checks]
+#                      │
+#   ARMED ──(due + exit_ok)──> WAITING_FLAT ──(flat settlement)──> CLEARED
+#   ARMED ──(due + !exit_ok)──> FAILED (manual intervention)
+#   ARMED ──(position already flat)──> CLEARED
+#
+#   WAITING_FLAT: no further market exit.  Wait for flat settlement.
+#   FAILED:        no further auto market exit.  Manual intervention required.
+#   CLEARED:       all DME state reset to defaults.
 
 
 def arm_delayed_market_exit(
@@ -94,6 +112,11 @@ def arm_delayed_market_exit(
     strategy_state.delayed_market_exit_deadline_ts_ms = deadline_ts_ms
     strategy_state.delayed_market_exit_manual_intervention_required = True
     strategy_state.delayed_market_exit_last_error = error
+    # ── Idempotency fields ────────────────────────────────────────────
+    strategy_state.delayed_market_exit_status = "ARMED"
+    strategy_state.delayed_market_exit_executed_ts_ms = None
+    strategy_state.delayed_market_exit_exit_attempt_count = 0
+    strategy_state.delayed_market_exit_last_exit_message = None
 
     # ── Set execution state halt ────────────────────────────────────────
     execution_state.trading_halted = True
@@ -113,6 +136,7 @@ def arm_delayed_market_exit(
         "countdown_seconds": delay_seconds,
         "manual_intervention_required": True,
         "error": error,
+        "delayed_market_exit_status": "ARMED",
     }
 
     return payload
@@ -130,16 +154,90 @@ def clear_delayed_market_exit(strategy_state: Any) -> None:
     strategy_state.delayed_market_exit_deadline_ts_ms = None
     strategy_state.delayed_market_exit_manual_intervention_required = False
     strategy_state.delayed_market_exit_last_error = None
+    # ── Idempotency fields ────────────────────────────────────────────
+    strategy_state.delayed_market_exit_status = None
+    strategy_state.delayed_market_exit_executed_ts_ms = None
+    strategy_state.delayed_market_exit_exit_attempt_count = 0
+    strategy_state.delayed_market_exit_last_exit_message = None
 
 
 def delayed_market_exit_due(strategy_state: Any, now_ms: int) -> bool:
-    """Return True if the delayed market exit countdown has expired."""
+    """Return True if the delayed market exit countdown has expired.
+
+    Only returns True for status None or ARMED.  Once the status has
+    transitioned to WAITING_FLAT, FAILED, or CLEARED, the exit is no
+    longer due — preventing repeat executions.
+    """
     if not getattr(strategy_state, "delayed_market_exit_armed", False):
+        return False
+    status = getattr(strategy_state, "delayed_market_exit_status", None)
+    if status not in {None, "ARMED"}:
         return False
     deadline = getattr(strategy_state, "delayed_market_exit_deadline_ts_ms", None)
     if deadline is None:
         return False
     return now_ms >= deadline
+
+
+def delayed_market_exit_due_from_snapshot(snapshot: dict, now_ms: int) -> bool:
+    """Check due from a snapshot dict (no live state read).
+
+    Returns True only when:
+    - armed=True
+    - status is None or "ARMED"
+    - deadline_ts_ms is not None
+    - now_ms >= deadline_ts_ms
+    """
+    armed = bool(snapshot.get("armed"))
+    if not armed:
+        return False
+    status = snapshot.get("status")
+    if status not in {None, "ARMED"}:
+        return False
+    deadline = snapshot.get("deadline_ts_ms")
+    if deadline is None:
+        return False
+    return now_ms >= deadline
+
+
+def mark_delayed_market_exit_waiting_flat(
+    strategy_state: Any,
+    *,
+    executed_ts_ms: int,
+    exit_message: str | None = None,
+) -> None:
+    """Transition status to WAITING_FLAT after a successful market exit.
+
+    This prevents repeat market exit on subsequent account sync cycles.
+    delayed_market_exit_armed stays True so the flat settlement phase
+    can record the was-armed fact in the flat journal.
+    """
+    strategy_state.delayed_market_exit_status = "WAITING_FLAT"
+    strategy_state.delayed_market_exit_executed_ts_ms = executed_ts_ms
+    strategy_state.delayed_market_exit_exit_attempt_count = (
+        int(getattr(strategy_state, "delayed_market_exit_exit_attempt_count", 0) or 0) + 1
+    )
+    strategy_state.delayed_market_exit_last_exit_message = exit_message
+
+
+def mark_delayed_market_exit_failed(
+    strategy_state: Any,
+    *,
+    executed_ts_ms: int,
+    exit_message: str | None = None,
+) -> None:
+    """Transition status to FAILED after an unsuccessful market exit.
+
+    This prevents further automatic retry.  Manual intervention is required.
+    """
+    strategy_state.delayed_market_exit_status = "FAILED"
+    strategy_state.delayed_market_exit_executed_ts_ms = executed_ts_ms
+    strategy_state.delayed_market_exit_exit_attempt_count = (
+        int(getattr(strategy_state, "delayed_market_exit_exit_attempt_count", 0) or 0) + 1
+    )
+    strategy_state.delayed_market_exit_last_exit_message = exit_message
+    strategy_state.delayed_market_exit_manual_intervention_required = True
+    strategy_state.delayed_market_exit_last_error = exit_message
 
 
 def delayed_market_exit_payload(strategy_state: Any) -> dict:
@@ -157,4 +255,9 @@ def delayed_market_exit_payload(strategy_state: Any) -> dict:
             strategy_state, "delayed_market_exit_manual_intervention_required", False
         ),
         "delayed_market_exit_last_error": getattr(strategy_state, "delayed_market_exit_last_error", None),
+        # ── Idempotency fields ────────────────────────────────────────
+        "delayed_market_exit_status": getattr(strategy_state, "delayed_market_exit_status", None),
+        "delayed_market_exit_executed_ts_ms": getattr(strategy_state, "delayed_market_exit_executed_ts_ms", None),
+        "delayed_market_exit_exit_attempt_count": getattr(strategy_state, "delayed_market_exit_exit_attempt_count", 0),
+        "delayed_market_exit_last_exit_message": getattr(strategy_state, "delayed_market_exit_last_exit_message", None),
     }

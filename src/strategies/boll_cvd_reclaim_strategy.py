@@ -519,6 +519,12 @@ class StrategyPositionState:
     delayed_market_exit_deadline_ts_ms: int | None = None
     delayed_market_exit_manual_intervention_required: bool = False
     delayed_market_exit_last_error: str | None = None
+    # ── Idempotency fields ────────────────────────────────────────────
+    delayed_market_exit_status: str | None = None
+    # None | "ARMED" | "WAITING_FLAT" | "FAILED" | "CLEARED"
+    delayed_market_exit_executed_ts_ms: int | None = None
+    delayed_market_exit_exit_attempt_count: int = 0
+    delayed_market_exit_last_exit_message: str | None = None
 
 
 def _env_bool(name: str, default: bool) -> bool:

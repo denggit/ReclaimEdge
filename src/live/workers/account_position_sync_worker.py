@@ -134,7 +134,33 @@ async def account_position_sync_worker(
             middle_bucket_split_fast_protection_payload: dict[str, Any] | None = None
             clear_state = False
             flat_previous_halt_reason: str | None = None
+
+            # ── Delayed Market Exit phase (BEFORE TP progress) ────────────
+            # DME must run first: if a delayed exit is due (or already
+            # executed in a prior cycle and now WAITING_FLAT/FAILED), we
+            # must NOT run TP progress or place new protective orders.
+            # TP progress could trigger new SL placements while the DME
+            # countdown is running or has already market-exited.
+            dme_result = DelayedMarketExitPhaseResult(status="not_armed")
             if pending_flat_payload is None and core_position.has_position:
+                dme_result = await account_sync_delayed_market_exit_phase.run_delayed_market_exit_phase(
+                    state_lock=state_lock,
+                    execution_state=execution_state,
+                    account_snapshot=account_snapshot,
+                    trader=trader,
+                    strategy=strategy,
+                    journal=journal,
+                    state_store=state_store,
+                    email_sender=email_sender,
+                    halt_alert_deduper=halt_alert_deduper,
+                )
+
+            # ── TP progress (only if DME does not block) ────────────────────
+            if (
+                pending_flat_payload is None
+                and core_position.has_position
+                and not dme_result.should_skip_remaining_account_sync
+            ):
                 tp_progress_result = account_sync_tp_progress_phase.run_account_sync_tp_progress_phase(
                     account_snapshot=account_snapshot,
                     execution_state=execution_state,
@@ -158,30 +184,7 @@ async def account_position_sync_worker(
                 middle_bucket_split_fast_protection_payload = tp_progress_result.middle_bucket_split_fast_protection_payload
                 last_logged_position_key = tp_progress_result.last_logged_position_key
 
-            # ── Delayed Market Exit phase ──────────────────────────────────
-            # Must run AFTER pre_core position refresh but BEFORE protective
-            # orders.  If the countdown has expired and a market exit was
-            # executed (or failed), we skip remaining protective order work
-            # for this sync cycle.
-            dme_result = DelayedMarketExitPhaseResult(status="not_armed")
-            if pending_flat_payload is None and core_position.has_position:
-                dme_result = await account_sync_delayed_market_exit_phase.run_delayed_market_exit_phase(
-                    state_lock=state_lock,
-                    execution_state=execution_state,
-                    account_snapshot=account_snapshot,
-                    trader=trader,
-                    strategy=strategy,
-                    journal=journal,
-                    state_store=state_store,
-                    email_sender=email_sender,
-                    halt_alert_deduper=halt_alert_deduper,
-                )
-
-            # ── Skip protective orders when DME executed/failed ────────────
-            # After a delayed market exit has executed (or failed), we must
-            # NOT place new protective orders in this sync cycle.  The position
-            # has been market-exited (or attempted) and protective orders would
-            # be stale or conflicting.
+            # ── Skip protective orders when DME executed/failed/waiting_flat ─
             if dme_result.should_skip_remaining_account_sync:
                 three_stage_post_tp1_sl_payload = None
                 middle_runner_sl_payload = None

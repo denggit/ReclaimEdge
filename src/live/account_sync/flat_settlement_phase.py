@@ -101,6 +101,9 @@ async def prepare_account_sync_flat_settlement_phase(
         "equity_after": settled.equity,
         "delayed_market_exit_was_armed": getattr(strategy.state, "delayed_market_exit_armed", False),
         "delayed_market_exit_reason": getattr(strategy.state, "delayed_market_exit_reason", None),
+        "delayed_market_exit_status": getattr(strategy.state, "delayed_market_exit_status", None),
+        "delayed_market_exit_executed_ts_ms": getattr(strategy.state, "delayed_market_exit_executed_ts_ms", None),
+        "delayed_market_exit_exit_attempt_count": getattr(strategy.state, "delayed_market_exit_exit_attempt_count", 0),
         "delayed_market_exit_cleared": True,
     }
     result_cash = settled.cash
