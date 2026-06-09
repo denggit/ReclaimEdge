@@ -131,6 +131,59 @@ def test_live_entry_runtime_paths_after_runtime_configs() -> None:
 # ============================================================================
 
 
+# ============================================================================
+# 5. B07 – RollingLossGuard uses from_runtime_paths, not from_env
+# ============================================================================
+
+
+def test_live_entry_uses_rolling_loss_guard_from_runtime_paths() -> None:
+    """B07 wires RollingLossGuard.from_runtime_paths into the live entry."""
+    source = _source()
+    assert "RollingLossGuard.from_runtime_paths(" in source, (
+        "B07 must wire RollingLossGuard.from_runtime_paths into run_boll_cvd_live.py"
+    )
+
+
+def test_live_entry_no_longer_uses_rolling_loss_guard_from_env() -> None:
+    """B07 removes RollingLossGuard.from_env() from the live entry."""
+    source = _source()
+    assert "RollingLossGuard.from_env()" not in source, (
+        "B07 must remove RollingLossGuard.from_env() from run_boll_cvd_live.py"
+    )
+
+
+def test_live_entry_rolling_loss_guard_ordering() -> None:
+    """B07 ordering: handoff → from_runtime_paths → load_or_initialize,
+    and RuntimePaths before from_runtime_paths."""
+    source = _source()
+
+    handoff_idx = source.index("handoff_legacy_runtime_files(")
+    rlg_from_rp_idx = source.index("RollingLossGuard.from_runtime_paths(")
+    rlg_load_idx = source.index("rolling_loss_guard.load_or_initialize(")
+    runtime_paths_idx = source.index("RuntimePaths(")
+
+    assert handoff_idx < rlg_load_idx, (
+        f"handoff_legacy_runtime_files must be before "
+        f"rolling_loss_guard.load_or_initialize — "
+        f"handoff at {handoff_idx}, load_or_initialize at {rlg_load_idx}"
+    )
+    assert rlg_from_rp_idx < rlg_load_idx, (
+        f"RollingLossGuard.from_runtime_paths must be before "
+        f"rolling_loss_guard.load_or_initialize — "
+        f"from_runtime_paths at {rlg_from_rp_idx}, load_or_initialize at {rlg_load_idx}"
+    )
+    assert runtime_paths_idx < rlg_from_rp_idx, (
+        f"RuntimePaths must be constructed before "
+        f"RollingLossGuard.from_runtime_paths — "
+        f"RuntimePaths at {runtime_paths_idx}, from_runtime_paths at {rlg_from_rp_idx}"
+    )
+
+
+# ============================================================================
+# 6. No runtime handoff in tick path
+# ============================================================================
+
+
 def test_no_runtime_handoff_in_tick_path() -> None:
     """RuntimePaths and handoff_legacy_runtime_files must NOT appear in
     tick / execution / sync worker files — they are startup-only."""

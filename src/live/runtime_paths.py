@@ -140,6 +140,16 @@ class RuntimePaths:
     def logs_dir(self) -> Path:
         return self.runtime_dir / "logs"
 
+    @property
+    def risk_dir(self) -> Path:
+        """Account-level runtime risk directory (NOT symbol-scoped)."""
+        return self.runtime_dir / "risk"
+
+    @property
+    def rolling_loss_guard_state_file(self) -> Path:
+        """Account-level rolling loss guard state file (NOT symbol-scoped)."""
+        return self.risk_dir / "rolling_loss_guard_state.json"
+
     # Symbol‑scoped files --------------------------------------------------
 
     @property

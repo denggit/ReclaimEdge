@@ -118,7 +118,6 @@ async def main() -> None:
         raise RuntimeError("LIVE_TRADING is not true. Refusing to start live runner.")
 
     email_sender = EmailSender()
-    rolling_loss_guard = RollingLossGuard.from_env()
     trader = Trader()
     await trader.start()
     try:
@@ -147,6 +146,7 @@ async def main() -> None:
             )
         journal = LiveTradeJournal.from_runtime_paths(runtime_paths)
         state_store = LiveStateStore.from_runtime_paths(runtime_paths)
+        rolling_loss_guard = RollingLossGuard.from_runtime_paths(runtime_paths)
         reporter = DailyTradeReporter(journal, email_sender)
         monitor_config = runtime_configs.monitor
         cvd_config = runtime_configs.cvd

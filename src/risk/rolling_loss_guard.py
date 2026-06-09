@@ -5,7 +5,7 @@ import math
 import os
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Protocol
 
 from src.reporting.trade_journal import JournalEvent
 from src.utils.log import get_logger
@@ -13,6 +13,7 @@ from src.utils.log import get_logger
 logger = get_logger(__name__)
 
 ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_ROLLING_LOSS_STATE_PATH = ROOT / "data" / "trade_journal" / "rolling_loss_guard_state.json"
 ROLLING_LOSS_HALT_REASONS = {"rolling_loss_soft_halt", "rolling_loss_hard_halt"}
 MS_PER_HOUR = 60 * 60 * 1000
 
@@ -55,6 +56,18 @@ class RollingLossGuardConfig:
             email_enabled=_env_bool("ROLLING_LOSS_EMAIL_ENABLED", True),
             event_time_tolerance_ms=int(os.getenv("ROLLING_LOSS_EVENT_TIME_TOLERANCE_MS", "5000")),
         )
+
+
+class RollingLossGuardPathProvider(Protocol):
+    """Structural interface for any object that can supply the rolling loss
+    guard state file path.
+
+    This avoids a hard import of :class:`~src.live.runtime_paths.RuntimePaths`
+    from the risk layer.
+    """
+
+    @property
+    def rolling_loss_guard_state_file(self) -> Path: ...
 
 
 @dataclass
@@ -113,11 +126,33 @@ class RollingLossGuard:
 
     @classmethod
     def from_env(cls) -> "RollingLossGuard":
-        raw_path = os.getenv(
-            "ROLLING_LOSS_STATE_PATH",
-            "data/trade_journal/rolling_loss_guard_state.json",
+        raw_path = os.getenv("ROLLING_LOSS_STATE_PATH")
+        if raw_path:
+            return cls(Path(raw_path), RollingLossGuardConfig.from_env())
+        return cls(DEFAULT_ROLLING_LOSS_STATE_PATH, RollingLossGuardConfig.from_env())
+
+    @classmethod
+    def from_runtime_paths(
+        cls,
+        runtime_paths: RollingLossGuardPathProvider,
+        config: RollingLossGuardConfig | None = None,
+    ) -> "RollingLossGuard":
+        """Construct a RollingLossGuard whose state file lives under the
+        runtime risk directory.
+
+        Parameters
+        ----------
+        runtime_paths:
+            Any object satisfying :class:`RollingLossGuardPathProvider`
+            (e.g. a :class:`~src.live.runtime_paths.RuntimePaths` instance).
+        config:
+            Optional guard config.  When ``None`` the config is read from
+            environment via :meth:`RollingLossGuardConfig.from_env`.
+        """
+        return cls(
+            runtime_paths.rolling_loss_guard_state_file,
+            config or RollingLossGuardConfig.from_env(),
         )
-        return cls(Path(raw_path), RollingLossGuardConfig.from_env())
 
     def load_or_initialize(self, now_ms: int, equity: float) -> RollingLossGuardState:
         state = self._load_state(current_equity=equity)

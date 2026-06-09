@@ -155,6 +155,14 @@ class TestRuntimePathsForETH:
             "runtime/reports/ETH-USDT-SWAP/index.json"
         )
 
+    def test_risk_dir(self, paths: RuntimePaths) -> None:
+        assert paths.risk_dir == Path("runtime/risk")
+
+    def test_rolling_loss_guard_state_file(self, paths: RuntimePaths) -> None:
+        assert paths.rolling_loss_guard_state_file == Path(
+            "runtime/risk/rolling_loss_guard_state.json"
+        )
+
 
 class TestRuntimePathsDoesNotCreateDirectories:
     """RuntimePaths is a pure path-builder — no filesystem side effects."""
@@ -170,11 +178,13 @@ class TestRuntimePathsDoesNotCreateDirectories:
         _ = paths.heartbeats_dir
         _ = paths.events_dir
         _ = paths.logs_dir
+        _ = paths.risk_dir
         _ = paths.state_file
         _ = paths.journal_file
         _ = paths.heartbeat_file
         _ = paths.events_file
         _ = paths.log_file
+        _ = paths.rolling_loss_guard_state_file
         _ = paths.daily_reports_dir
         _ = paths.weekly_reports_dir
         _ = paths.summary_reports_dir
@@ -210,6 +220,10 @@ class TestRuntimePathsAcceptsOtherSafeSymbols:
         )
         assert paths.report_index_file == Path(
             "runtime/reports/BTC-USDT-SWAP/index.json"
+        )
+        # rolling_loss_guard_state_file is account-level, NOT BTC-specific
+        assert paths.rolling_loss_guard_state_file == Path(
+            "runtime/risk/rolling_loss_guard_state.json"
         )
 
     def test_sol_usdt_swap(self) -> None:

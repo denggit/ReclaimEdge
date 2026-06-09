@@ -8,6 +8,7 @@ from typing import Iterable
 from src.live.runtime_paths import RuntimePaths
 from src.reporting.live_state_store import DEFAULT_STATE_PATH
 from src.reporting.trade_journal import DEFAULT_JOURNAL_PATH, DEFAULT_SUMMARY_PATH
+from src.risk.rolling_loss_guard import DEFAULT_ROLLING_LOSS_STATE_PATH
 
 LEGACY_RUNTIME_SYMBOL = "ETH-USDT-SWAP"
 """Only this symbol is allowed to receive legacy file handoff.
@@ -106,6 +107,7 @@ def handoff_legacy_runtime_files(
         ("state", DEFAULT_STATE_PATH, runtime_paths.state_file),
         ("journal", DEFAULT_JOURNAL_PATH, runtime_paths.journal_file),
         ("summary", DEFAULT_SUMMARY_PATH, runtime_paths.trade_summary_file),
+        ("rolling_loss_guard", DEFAULT_ROLLING_LOSS_STATE_PATH, runtime_paths.rolling_loss_guard_state_file),
     ]
 
     runtime_symbol = runtime_paths.symbol_slug

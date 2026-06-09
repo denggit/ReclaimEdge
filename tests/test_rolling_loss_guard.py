@@ -14,6 +14,8 @@ from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 if importlib.util.find_spec("dotenv") is None:
     dotenv = types.ModuleType("dotenv")
     dotenv.load_dotenv = lambda *args, **kwargs: None
@@ -23,7 +25,9 @@ from src.live.workers.account_position_sync_worker import account_position_sync_
 from src.execution.trader import PositionSnapshot  # noqa: E402
 from src.live.runtime_types import AccountSnapshot, ExecutionState  # noqa: E402
 from src.reporting.trade_journal import JournalEvent  # noqa: E402
+from src.live.runtime_paths import RuntimePaths  # noqa: E402
 from src.risk.rolling_loss_guard import (  # noqa: E402
+    DEFAULT_ROLLING_LOSS_STATE_PATH,
     MS_PER_HOUR,
     RollingLossGuard,
     RollingLossGuardConfig,
@@ -721,6 +725,60 @@ class RollingLossGuardTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(journal.rolling_loss_events[-1]["mode"], "flat_to_flat_drawdown")
             self.assertAlmostEqual(journal.rolling_loss_events[-1]["drawdown_pct"], 0.20)
             self.assertIn("Rolling loss guard hard halt: 20% realized loss reached", email_sender.subjects)
+
+
+# ============================================================================
+# B07 – from_env / from_runtime_paths path wiring
+# ============================================================================
+
+
+def test_from_env_default_path_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When ROLLING_LOSS_STATE_PATH is not set, from_env uses
+    DEFAULT_ROLLING_LOSS_STATE_PATH."""
+    monkeypatch.delenv("ROLLING_LOSS_STATE_PATH", raising=False)
+    guard = RollingLossGuard.from_env()
+    assert guard.state_path == DEFAULT_ROLLING_LOSS_STATE_PATH
+
+
+def test_from_env_override_still_wins(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When ROLLING_LOSS_STATE_PATH is set, from_env must honour it."""
+    custom = tmp_path / "custom_rolling_loss.json"
+    monkeypatch.setenv("ROLLING_LOSS_STATE_PATH", str(custom))
+    guard = RollingLossGuard.from_env()
+    assert guard.state_path.resolve() == custom.resolve()
+
+
+def test_from_runtime_paths_uses_runtime_risk_path(tmp_path: Path) -> None:
+    """from_runtime_paths must place the state file under runtime/risk/."""
+    runtime_paths = RuntimePaths(
+        runtime_dir=tmp_path / "runtime", inst_id="ETH-USDT-SWAP"
+    )
+    guard = RollingLossGuard.from_runtime_paths(
+        runtime_paths,
+        config=RollingLossGuardConfig(email_enabled=False),
+    )
+    expected = tmp_path / "runtime" / "risk" / "rolling_loss_guard_state.json"
+    assert guard.state_path == expected
+
+
+def test_from_runtime_paths_load_or_initialize_writes_runtime_risk_file(
+    tmp_path: Path,
+) -> None:
+    """load_or_initialize must write to the runtime risk path, not the
+    old data/trade_journal/ path."""
+    runtime_paths = RuntimePaths(
+        runtime_dir=tmp_path / "runtime", inst_id="ETH-USDT-SWAP"
+    )
+    guard = RollingLossGuard.from_runtime_paths(
+        runtime_paths,
+        config=RollingLossGuardConfig(email_enabled=False),
+    )
+    guard.load_or_initialize(NOW_MS, 100.0)
+    assert runtime_paths.rolling_loss_guard_state_file.exists()
+    old_path = tmp_path / "data" / "trade_journal" / "rolling_loss_guard_state.json"
+    assert not old_path.exists()
 
 
 if __name__ == "__main__":

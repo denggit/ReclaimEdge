@@ -34,17 +34,19 @@ def test_handoff_copies_missing_eth_legacy_files(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """When legacy files exist and symbol-scoped targets are missing,
-    handoff must copy all three files and leave old files in place."""
+    handoff must copy all four files and leave old files in place."""
     legacy_dir = tmp_path / "legacy"
     legacy_dir.mkdir(parents=True)
 
     legacy_state = legacy_dir / "live_state.json"
     legacy_journal = legacy_dir / "live_trade_events.jsonl"
     legacy_summary = legacy_dir / "live_trade_summary.jsonl"
+    legacy_rolling_loss = legacy_dir / "rolling_loss_guard_state.json"
 
     legacy_state.write_text('{"symbol":"ETH-USDT-SWAP"}')
     legacy_journal.write_text('{"event_type":"ENTRY"}\n')
     legacy_summary.write_text('{"event_type":"SUMMARY"}\n')
+    legacy_rolling_loss.write_text('{"enabled":true}')
 
     monkeypatch.setattr(
         "src.live.runtime_path_compat.DEFAULT_STATE_PATH",
@@ -58,6 +60,10 @@ def test_handoff_copies_missing_eth_legacy_files(
         "src.live.runtime_path_compat.DEFAULT_SUMMARY_PATH",
         legacy_summary,
     )
+    monkeypatch.setattr(
+        "src.live.runtime_path_compat.DEFAULT_ROLLING_LOSS_STATE_PATH",
+        legacy_rolling_loss,
+    )
 
     runtime_paths = _eth_paths(tmp_path)
     result = handoff_legacy_runtime_files(
@@ -65,7 +71,7 @@ def test_handoff_copies_missing_eth_legacy_files(
         inst_id="ETH-USDT-SWAP",
     )
 
-    # -- All three items must be "copied" -----------------------------------
+    # -- All four items must be "copied" -----------------------------------
     for item in result.items:
         assert item.action == "copied", (
             f"Expected copied for {item.label}, got {item.action}: {item.reason}"
@@ -75,11 +81,13 @@ def test_handoff_copies_missing_eth_legacy_files(
     assert runtime_paths.state_file.read_text() == '{"symbol":"ETH-USDT-SWAP"}'
     assert runtime_paths.journal_file.read_text() == '{"event_type":"ENTRY"}\n'
     assert runtime_paths.trade_summary_file.read_text() == '{"event_type":"SUMMARY"}\n'
+    assert runtime_paths.rolling_loss_guard_state_file.read_text() == '{"enabled":true}'
 
     # -- Legacy files must still exist (not deleted / moved) ----------------
     assert legacy_state.exists()
     assert legacy_journal.exists()
     assert legacy_summary.exists()
+    assert legacy_rolling_loss.exists()
 
 
 # ============================================================================
@@ -98,10 +106,12 @@ def test_handoff_does_not_overwrite_existing_symbol_files(
     legacy_state = legacy_dir / "live_state.json"
     legacy_journal = legacy_dir / "live_trade_events.jsonl"
     legacy_summary = legacy_dir / "live_trade_summary.jsonl"
+    legacy_rolling_loss = legacy_dir / "rolling_loss_guard_state.json"
 
     legacy_state.write_text("LEGACY_STATE")
     legacy_journal.write_text("LEGACY_JOURNAL\n")
     legacy_summary.write_text("LEGACY_SUMMARY\n")
+    legacy_rolling_loss.write_text("LEGACY_ROLLING_LOSS")
 
     monkeypatch.setattr(
         "src.live.runtime_path_compat.DEFAULT_STATE_PATH",
@@ -115,14 +125,20 @@ def test_handoff_does_not_overwrite_existing_symbol_files(
         "src.live.runtime_path_compat.DEFAULT_SUMMARY_PATH",
         legacy_summary,
     )
+    monkeypatch.setattr(
+        "src.live.runtime_path_compat.DEFAULT_ROLLING_LOSS_STATE_PATH",
+        legacy_rolling_loss,
+    )
 
     runtime_paths = _eth_paths(tmp_path)
     # Pre-create symbol-scoped targets with different content
     runtime_paths.state_file.parent.mkdir(parents=True, exist_ok=True)
     runtime_paths.journal_file.parent.mkdir(parents=True, exist_ok=True)
+    runtime_paths.rolling_loss_guard_state_file.parent.mkdir(parents=True, exist_ok=True)
     runtime_paths.state_file.write_text("EXISTING_STATE")
     runtime_paths.journal_file.write_text("EXISTING_JOURNAL\n")
     runtime_paths.trade_summary_file.write_text("EXISTING_SUMMARY\n")
+    runtime_paths.rolling_loss_guard_state_file.write_text("EXISTING_ROLLING_LOSS")
 
     result = handoff_legacy_runtime_files(
         runtime_paths=runtime_paths,
@@ -142,6 +158,7 @@ def test_handoff_does_not_overwrite_existing_symbol_files(
     assert runtime_paths.state_file.read_text() == "EXISTING_STATE"
     assert runtime_paths.journal_file.read_text() == "EXISTING_JOURNAL\n"
     assert runtime_paths.trade_summary_file.read_text() == "EXISTING_SUMMARY\n"
+    assert runtime_paths.rolling_loss_guard_state_file.read_text() == "EXISTING_ROLLING_LOSS"
 
 
 # ============================================================================
@@ -169,6 +186,10 @@ def test_handoff_skips_when_legacy_missing(
         "src.live.runtime_path_compat.DEFAULT_SUMMARY_PATH",
         missing / "live_trade_summary.jsonl",
     )
+    monkeypatch.setattr(
+        "src.live.runtime_path_compat.DEFAULT_ROLLING_LOSS_STATE_PATH",
+        missing / "rolling_loss_guard_state.json",
+    )
 
     runtime_paths = _eth_paths(tmp_path)
     result = handoff_legacy_runtime_files(
@@ -188,6 +209,7 @@ def test_handoff_skips_when_legacy_missing(
     assert not runtime_paths.state_file.exists()
     assert not runtime_paths.journal_file.exists()
     assert not runtime_paths.trade_summary_file.exists()
+    assert not runtime_paths.rolling_loss_guard_state_file.exists()
 
 
 # ============================================================================
@@ -210,10 +232,12 @@ def test_handoff_skips_non_eth_symbol(
     legacy_state = legacy_dir / "live_state.json"
     legacy_journal = legacy_dir / "live_trade_events.jsonl"
     legacy_summary = legacy_dir / "live_trade_summary.jsonl"
+    legacy_rolling_loss = legacy_dir / "rolling_loss_guard_state.json"
 
     legacy_state.write_text("ETH_STATE")
     legacy_journal.write_text("ETH_JOURNAL\n")
     legacy_summary.write_text("ETH_SUMMARY\n")
+    legacy_rolling_loss.write_text("ETH_ROLLING_LOSS")
 
     monkeypatch.setattr(
         "src.live.runtime_path_compat.DEFAULT_STATE_PATH",
@@ -226,6 +250,10 @@ def test_handoff_skips_non_eth_symbol(
     monkeypatch.setattr(
         "src.live.runtime_path_compat.DEFAULT_SUMMARY_PATH",
         legacy_summary,
+    )
+    monkeypatch.setattr(
+        "src.live.runtime_path_compat.DEFAULT_ROLLING_LOSS_STATE_PATH",
+        legacy_rolling_loss,
     )
 
     runtime_paths = _btc_paths(tmp_path)
@@ -246,11 +274,13 @@ def test_handoff_skips_non_eth_symbol(
     assert not runtime_paths.state_file.exists()
     assert not runtime_paths.journal_file.exists()
     assert not runtime_paths.trade_summary_file.exists()
+    assert not runtime_paths.rolling_loss_guard_state_file.exists()
 
     # -- Legacy files must still exist (not deleted / moved) ----------------
     assert legacy_state.exists()
     assert legacy_journal.exists()
     assert legacy_summary.exists()
+    assert legacy_rolling_loss.exists()
 
 
 # ============================================================================
@@ -269,10 +299,12 @@ def test_handoff_skips_when_runtime_paths_symbol_mismatches_inst_id(
     legacy_state = legacy_dir / "live_state.json"
     legacy_journal = legacy_dir / "live_trade_events.jsonl"
     legacy_summary = legacy_dir / "live_trade_summary.jsonl"
+    legacy_rolling_loss = legacy_dir / "rolling_loss_guard_state.json"
 
     legacy_state.write_text("ETH_STATE")
     legacy_journal.write_text("ETH_JOURNAL\n")
     legacy_summary.write_text("ETH_SUMMARY\n")
+    legacy_rolling_loss.write_text("ETH_ROLLING_LOSS")
 
     monkeypatch.setattr(
         "src.live.runtime_path_compat.DEFAULT_STATE_PATH",
@@ -285,6 +317,10 @@ def test_handoff_skips_when_runtime_paths_symbol_mismatches_inst_id(
     monkeypatch.setattr(
         "src.live.runtime_path_compat.DEFAULT_SUMMARY_PATH",
         legacy_summary,
+    )
+    monkeypatch.setattr(
+        "src.live.runtime_path_compat.DEFAULT_ROLLING_LOSS_STATE_PATH",
+        legacy_rolling_loss,
     )
 
     runtime_paths = _btc_paths(tmp_path)
@@ -305,11 +341,13 @@ def test_handoff_skips_when_runtime_paths_symbol_mismatches_inst_id(
     assert not runtime_paths.state_file.exists()
     assert not runtime_paths.journal_file.exists()
     assert not runtime_paths.trade_summary_file.exists()
+    assert not runtime_paths.rolling_loss_guard_state_file.exists()
 
     # -- Legacy files must still exist (not deleted / moved) ----------------
     assert legacy_state.exists()
     assert legacy_journal.exists()
     assert legacy_summary.exists()
+    assert legacy_rolling_loss.exists()
 
 
 # ============================================================================
@@ -328,10 +366,12 @@ def test_handoff_skips_when_inst_id_non_eth_even_if_runtime_paths_eth(
     legacy_state = legacy_dir / "live_state.json"
     legacy_journal = legacy_dir / "live_trade_events.jsonl"
     legacy_summary = legacy_dir / "live_trade_summary.jsonl"
+    legacy_rolling_loss = legacy_dir / "rolling_loss_guard_state.json"
 
     legacy_state.write_text("ETH_STATE")
     legacy_journal.write_text("ETH_JOURNAL\n")
     legacy_summary.write_text("ETH_SUMMARY\n")
+    legacy_rolling_loss.write_text("ETH_ROLLING_LOSS")
 
     monkeypatch.setattr(
         "src.live.runtime_path_compat.DEFAULT_STATE_PATH",
@@ -344,6 +384,10 @@ def test_handoff_skips_when_inst_id_non_eth_even_if_runtime_paths_eth(
     monkeypatch.setattr(
         "src.live.runtime_path_compat.DEFAULT_SUMMARY_PATH",
         legacy_summary,
+    )
+    monkeypatch.setattr(
+        "src.live.runtime_path_compat.DEFAULT_ROLLING_LOSS_STATE_PATH",
+        legacy_rolling_loss,
     )
 
     runtime_paths = _eth_paths(tmp_path)
@@ -364,11 +408,13 @@ def test_handoff_skips_when_inst_id_non_eth_even_if_runtime_paths_eth(
     assert not runtime_paths.state_file.exists()
     assert not runtime_paths.journal_file.exists()
     assert not runtime_paths.trade_summary_file.exists()
+    assert not runtime_paths.rolling_loss_guard_state_file.exists()
 
     # -- Legacy files must still exist (not deleted / moved) ----------------
     assert legacy_state.exists()
     assert legacy_journal.exists()
     assert legacy_summary.exists()
+    assert legacy_rolling_loss.exists()
 
 
 # ============================================================================
@@ -382,16 +428,18 @@ def test_handoff_skips_when_legacy_not_file(
     """When every legacy path exists but is a directory (not a regular file),
     handoff must skip all of them.
 
-    All three DEFAULT_* paths are monkeypatched to separate directories
+    All four DEFAULT_* paths are monkeypatched to separate directories
     inside *tmp_path* so the test is fully isolated and does not depend on
     whether the real ``data/trade_journal/`` directory happens to exist.
     """
     state_dir = tmp_path / "legacy_state_dir"
     journal_dir = tmp_path / "legacy_journal_dir"
     summary_dir = tmp_path / "legacy_summary_dir"
+    rolling_loss_dir = tmp_path / "legacy_rolling_loss_dir"
     state_dir.mkdir(parents=True)
     journal_dir.mkdir(parents=True)
     summary_dir.mkdir(parents=True)
+    rolling_loss_dir.mkdir(parents=True)
 
     monkeypatch.setattr(
         "src.live.runtime_path_compat.DEFAULT_STATE_PATH",
@@ -405,6 +453,10 @@ def test_handoff_skips_when_legacy_not_file(
         "src.live.runtime_path_compat.DEFAULT_SUMMARY_PATH",
         summary_dir,
     )
+    monkeypatch.setattr(
+        "src.live.runtime_path_compat.DEFAULT_ROLLING_LOSS_STATE_PATH",
+        rolling_loss_dir,
+    )
 
     runtime_paths = _eth_paths(tmp_path)
     result = handoff_legacy_runtime_files(
@@ -412,7 +464,7 @@ def test_handoff_skips_when_legacy_not_file(
         inst_id="ETH-USDT-SWAP",
     )
 
-    # All three items must be skipped with reason "legacy not file".
+    # All four items must be skipped with reason "legacy not file".
     for item in result.items:
         assert item.action == "skipped", (
             f"Expected skipped for {item.label}, got {item.action}"
@@ -425,6 +477,7 @@ def test_handoff_skips_when_legacy_not_file(
     assert not runtime_paths.state_file.exists()
     assert not runtime_paths.journal_file.exists()
     assert not runtime_paths.trade_summary_file.exists()
+    assert not runtime_paths.rolling_loss_guard_state_file.exists()
 
 
 # ============================================================================
@@ -461,6 +514,33 @@ def test_handoff_skips_same_path(
 
     # Content must be unchanged.
     assert runtime_paths.state_file.read_text() == "shared content"
+
+
+def test_handoff_rolling_loss_same_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the legacy rolling loss path equals the runtime risk path,
+    handoff must skip it (same file, nothing to copy)."""
+    runtime_paths = _eth_paths(tmp_path)
+
+    runtime_paths.rolling_loss_guard_state_file.parent.mkdir(parents=True, exist_ok=True)
+    runtime_paths.rolling_loss_guard_state_file.write_text("shared rolling loss")
+
+    monkeypatch.setattr(
+        "src.live.runtime_path_compat.DEFAULT_ROLLING_LOSS_STATE_PATH",
+        runtime_paths.rolling_loss_guard_state_file,
+    )
+
+    result = handoff_legacy_runtime_files(
+        runtime_paths=runtime_paths,
+        inst_id="ETH-USDT-SWAP",
+    )
+
+    rl_item = [i for i in result.items if i.label == "rolling_loss_guard"][0]
+    assert rl_item.action == "skipped"
+    assert rl_item.reason == "same path"
+
+    assert runtime_paths.rolling_loss_guard_state_file.read_text() == "shared rolling loss"
 
 
 # ============================================================================
