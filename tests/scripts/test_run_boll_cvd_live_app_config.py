@@ -222,3 +222,63 @@ def test_live_app_config_not_imported_in_tick_workers() -> None:
         assert "LiveAppConfig" not in source, (
             f"{rel_path} must not import or reference LiveAppConfig"
         )
+
+
+# ============================================================================
+# 9. C06 heartbeat env keys must be in LiveAppConfig source
+# ============================================================================
+
+_C06_HEARTBEAT_ENV_KEYS = [
+    "SYMBOL_WORKER_HEARTBEAT_ENABLED",
+    "SYMBOL_WORKER_HEARTBEAT_INTERVAL_SECONDS",
+    "SYMBOL_WORKER_HEARTBEAT_STALE_AFTER_SECONDS",
+]
+
+
+def test_live_app_config_source_contains_heartbeat_env_keys() -> None:
+    """LiveAppConfig source must contain the C06 heartbeat env keys."""
+    config_source = (_PROJECT_ROOT / "src" / "live" / "live_app_config.py").read_text()
+    for key in _C06_HEARTBEAT_ENV_KEYS:
+        assert key in config_source, (
+            f"LiveAppConfig source must contain {key}"
+        )
+    assert "LiveHeartbeatConfig" in config_source, (
+        "LiveAppConfig source must define LiveHeartbeatConfig"
+    )
+
+
+def test_live_entry_no_direct_heartbeat_env_reads() -> None:
+    """run_boll_cvd_live.py must NOT directly os.getenv C06 heartbeat keys."""
+    source = _live_source()
+    for key in _C06_HEARTBEAT_ENV_KEYS:
+        assert f'os.getenv("{key}"' not in source, (
+            f"run_boll_cvd_live.py must not directly os.getenv {key}"
+        )
+
+
+def test_app_no_direct_heartbeat_env_reads() -> None:
+    """SymbolWorkerApp must NOT directly os.getenv C06 heartbeat keys."""
+    source = _app_source()
+    for key in _C06_HEARTBEAT_ENV_KEYS:
+        assert f'os.getenv("{key}"' not in source, (
+            f"SymbolWorkerApp must not directly os.getenv {key}"
+        )
+
+
+def test_workers_no_live_heartbeat_config() -> None:
+    """Workers must NOT reference LiveHeartbeatConfig."""
+    worker_files = [
+        "src/live/workers/strategy_tick_worker.py",
+        "src/live/workers/execution_worker.py",
+        "src/live/workers/execution_command_processor.py",
+        "src/live/workers/account_position_sync_worker.py",
+    ]
+
+    for rel_path in worker_files:
+        full_path = _PROJECT_ROOT / rel_path
+        if not full_path.exists():
+            continue
+        source = full_path.read_text(encoding="utf-8")
+        assert "LiveHeartbeatConfig" not in source, (
+            f"{rel_path} must not reference LiveHeartbeatConfig"
+        )

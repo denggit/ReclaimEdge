@@ -7,7 +7,8 @@ from typing import Callable, Sequence
 
 from src.execution.trader import Trader
 from src.indicators.cvd_tracker import CvdTracker, CvdTrackerConfig
-from src.live.live_app_config import LiveAppConfig
+from src.live.heartbeat_writer import HeartbeatWriter, HeartbeatWriterConfig
+from src.live.live_app_config import LiveAppConfig, LiveHeartbeatConfig
 from src.live.runtime_paths import RuntimePaths
 from src.live.runtime_types import TradeCommand
 from src.monitors.boll_band_breakout_monitor import (
@@ -104,6 +105,21 @@ class SymbolWorkerFactory:
         return SymbolWorkerQueues(
             strategy_tick_queue=asyncio.Queue(maxsize=app_config.strategy_tick_queue_maxsize),
             execution_queue=asyncio.Queue(maxsize=app_config.execution_queue_maxsize),
+        )
+
+    def create_heartbeat_writer(
+        self,
+        *,
+        runtime_paths: RuntimePaths,
+        heartbeat_config: LiveHeartbeatConfig,
+    ) -> HeartbeatWriter:
+        return HeartbeatWriter(
+            runtime_paths=runtime_paths,
+            config=HeartbeatWriterConfig(
+                enabled=heartbeat_config.enabled,
+                interval_seconds=heartbeat_config.interval_seconds,
+                stale_after_seconds=heartbeat_config.stale_after_seconds,
+            ),
         )
 
     def create_monitor(

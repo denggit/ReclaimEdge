@@ -4,7 +4,7 @@ import os
 
 import pytest
 
-from src.live.live_app_config import LiveAppConfig
+from src.live.live_app_config import LiveAppConfig, LiveHeartbeatConfig
 
 
 # ---------------------------------------------------------------------------
@@ -26,6 +26,9 @@ _C01_ENV_KEYS = [
     "WEEKLY_SUMMARY_TIME",
     "WEEKLY_SUMMARY_WEEKDAY",
     "WEEKLY_COMPACT_AFTER_SUCCESS",
+    "SYMBOL_WORKER_HEARTBEAT_ENABLED",
+    "SYMBOL_WORKER_HEARTBEAT_INTERVAL_SECONDS",
+    "SYMBOL_WORKER_HEARTBEAT_STALE_AFTER_SECONDS",
 ]
 
 
@@ -68,6 +71,10 @@ def test_from_env_defaults() -> None:
     assert cfg.weekly_summary.minute == 0
     assert cfg.weekly_summary.compact_after_success is False
 
+    assert cfg.heartbeat.enabled is True
+    assert cfg.heartbeat.interval_seconds == 10.0
+    assert cfg.heartbeat.stale_after_seconds == 30.0
+
 
 # ---------------------------------------------------------------------------
 # 2. test_from_env_overrides
@@ -90,6 +97,9 @@ def test_from_env_overrides() -> None:
     os.environ["WEEKLY_SUMMARY_TIME"] = "12:00"
     os.environ["WEEKLY_SUMMARY_WEEKDAY"] = "3"
     os.environ["WEEKLY_COMPACT_AFTER_SUCCESS"] = "true"
+    os.environ["SYMBOL_WORKER_HEARTBEAT_ENABLED"] = "false"
+    os.environ["SYMBOL_WORKER_HEARTBEAT_INTERVAL_SECONDS"] = "2.5"
+    os.environ["SYMBOL_WORKER_HEARTBEAT_STALE_AFTER_SECONDS"] = "9.5"
 
     try:
         cfg = LiveAppConfig.from_env()
@@ -115,6 +125,10 @@ def test_from_env_overrides() -> None:
         assert cfg.weekly_summary.hour == 12
         assert cfg.weekly_summary.minute == 0
         assert cfg.weekly_summary.compact_after_success is True
+
+        assert cfg.heartbeat.enabled is False
+        assert cfg.heartbeat.interval_seconds == 2.5
+        assert cfg.heartbeat.stale_after_seconds == 9.5
     finally:
         _clear_c01_env()
 
@@ -202,3 +216,54 @@ def test_config_is_frozen() -> None:
 
     with pytest.raises(Exception):
         cfg.weekly_summary.enabled = False  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# 8. test_invalid_heartbeat_interval_raises
+# ---------------------------------------------------------------------------
+
+
+def test_invalid_heartbeat_interval_raises() -> None:
+    """SYMBOL_WORKER_HEARTBEAT_INTERVAL_SECONDS=0 must raise ValueError."""
+    _clear_c01_env()
+    os.environ["SYMBOL_WORKER_HEARTBEAT_INTERVAL_SECONDS"] = "0"
+    try:
+        with pytest.raises(ValueError, match="heartbeat interval_seconds must be > 0"):
+            LiveAppConfig.from_env()
+    finally:
+        _clear_c01_env()
+
+
+# ---------------------------------------------------------------------------
+# 9. test_invalid_heartbeat_stale_after_raises
+# ---------------------------------------------------------------------------
+
+
+def test_invalid_heartbeat_stale_after_raises() -> None:
+    """SYMBOL_WORKER_HEARTBEAT_STALE_AFTER_SECONDS=0 must raise ValueError."""
+    _clear_c01_env()
+    os.environ["SYMBOL_WORKER_HEARTBEAT_STALE_AFTER_SECONDS"] = "0"
+    try:
+        with pytest.raises(ValueError, match="heartbeat stale_after_seconds must be > 0"):
+            LiveAppConfig.from_env()
+    finally:
+        _clear_c01_env()
+
+
+# ---------------------------------------------------------------------------
+# 10. test_heartbeat_config_is_frozen
+# ---------------------------------------------------------------------------
+
+
+def test_heartbeat_config_is_frozen() -> None:
+    """LiveHeartbeatConfig is a frozen dataclass — setting an attribute must raise."""
+    cfg = LiveHeartbeatConfig(enabled=True, interval_seconds=5.0, stale_after_seconds=15.0)
+
+    with pytest.raises(Exception):
+        cfg.enabled = False  # type: ignore[misc]
+
+    with pytest.raises(Exception):
+        cfg.interval_seconds = 99.0  # type: ignore[misc]
+
+    with pytest.raises(Exception):
+        cfg.stale_after_seconds = 99.0  # type: ignore[misc]

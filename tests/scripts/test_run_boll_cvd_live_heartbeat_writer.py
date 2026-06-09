@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""C05 source guard — ensures the heartbeat writer is NOT wired into the
-live runtime yet.  C05 only adds the writer component and its tests; C06
-will be responsible for integration into SymbolWorkerApp.
+"""C06 source guard — ensures the heartbeat writer IS wired into
+SymbolWorkerApp.run() but NOT into the thin live entry or tick-path
+workers.  The live entry remains thin, and workers do not write heartbeats.
 """
 
 from __future__ import annotations
@@ -19,18 +19,19 @@ _APP_MODULE = _PROJECT_ROOT / "src" / "live" / "symbol_worker_app.py"
 # ============================================================================
 
 
-def test_live_entry_does_not_reference_heartbeat_writer_in_c05() -> None:
-    """C05 must NOT wire HeartbeatWriter into run_boll_cvd_live.py."""
+def test_live_entry_does_not_reference_heartbeat_writer() -> None:
+    """run_boll_cvd_live.py must NOT reference HeartbeatWriter or heartbeat —
+    the thin entry stays thin."""
     source = _LIVE_SCRIPT.read_text(encoding="utf-8")
 
     assert "HeartbeatWriter" not in source, (
-        "C05 must not reference HeartbeatWriter in run_boll_cvd_live.py"
+        "run_boll_cvd_live.py must not reference HeartbeatWriter"
     )
     assert "HeartbeatWriterConfig" not in source, (
-        "C05 must not reference HeartbeatWriterConfig in run_boll_cvd_live.py"
+        "run_boll_cvd_live.py must not reference HeartbeatWriterConfig"
     )
     assert "heartbeat" not in source, (
-        "C05 must not reference heartbeat in run_boll_cvd_live.py"
+        "run_boll_cvd_live.py must not reference heartbeat"
     )
 
 
@@ -39,22 +40,16 @@ def test_live_entry_does_not_reference_heartbeat_writer_in_c05() -> None:
 # ============================================================================
 
 
-def test_symbol_worker_app_does_not_start_heartbeat_in_c05() -> None:
-    """C05 must NOT wire HeartbeatWriter into SymbolWorkerApp.run()."""
+def test_symbol_worker_app_starts_heartbeat_in_c06() -> None:
+    """C06 MUST wire HeartbeatWriter into SymbolWorkerApp.run()."""
     source = _APP_MODULE.read_text(encoding="utf-8")
 
-    forbidden = [
-        "HeartbeatWriter(",
-        "HeartbeatWriterConfig(",
-        "run_until_cancelled(",
-        "heartbeat_file",
-        "heartbeat_task",
-        "create_task",
-    ]
-    for token in forbidden:
-        assert token not in source, (
-            f"C05 SymbolWorkerApp must not contain {token!r}"
-        )
+    assert "factory.create_heartbeat_writer(" in source, (
+        "C06 SymbolWorkerApp must call factory.create_heartbeat_writer"
+    )
+    assert "heartbeat_writer.run_until_cancelled(" in source, (
+        "C06 SymbolWorkerApp must call heartbeat_writer.run_until_cancelled"
+    )
 
 
 # ============================================================================
@@ -104,4 +99,22 @@ def test_runtime_paths_heartbeat_file_still_exists() -> None:
     )
     assert "heartbeats_dir" in rp_source, (
         "RuntimePaths must still define heartbeats_dir"
+    )
+
+
+# ============================================================================
+# 5. No asyncio.create_task for heartbeat
+# ============================================================================
+
+
+def test_no_asyncio_create_task_for_heartbeat() -> None:
+    """SymbolWorkerApp must NOT use asyncio.create_task or heartbeat_task
+    to start the heartbeat."""
+    source = _APP_MODULE.read_text(encoding="utf-8")
+
+    assert "asyncio.create_task(" not in source, (
+        "SymbolWorkerApp must not use asyncio.create_task for heartbeat"
+    )
+    assert "heartbeat_task" not in source, (
+        "SymbolWorkerApp must not define heartbeat_task"
     )

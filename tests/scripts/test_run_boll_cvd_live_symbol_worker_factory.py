@@ -208,3 +208,41 @@ def test_factory_not_imported_in_workers() -> None:
         assert "SymbolWorkerFactory" not in source, (
             f"{rel_path} must not import or reference SymbolWorkerFactory"
         )
+
+
+# ============================================================================
+# 8. C06 heartbeat factory source guards
+# ============================================================================
+
+
+def test_app_source_contains_factory_create_heartbeat_writer() -> None:
+    """SymbolWorkerApp source must use self.factory.create_heartbeat_writer."""
+    source = _app_source()
+    assert "self.factory.create_heartbeat_writer(" in source, (
+        "C06 SymbolWorkerApp must call self.factory.create_heartbeat_writer"
+    )
+
+
+def test_factory_source_contains_heartbeat_constructors() -> None:
+    """Factory source must construct HeartbeatWriter with HeartbeatWriterConfig."""
+    source = _factory_source()
+    assert "HeartbeatWriter(" in source, (
+        "Factory must construct HeartbeatWriter"
+    )
+    assert "HeartbeatWriterConfig(" in source, (
+        "Factory must construct HeartbeatWriterConfig"
+    )
+
+
+def test_factory_source_does_not_start_heartbeat() -> None:
+    """Factory must NOT start or run the heartbeat writer — only construct it."""
+    source = _factory_source()
+    forbidden = [
+        "run_until_cancelled(",
+        "write_once(",
+        "asyncio.create_task",
+    ]
+    for token in forbidden:
+        assert token not in source, (
+            f"Factory must not contain {token!r}"
+        )

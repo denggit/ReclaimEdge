@@ -21,6 +21,7 @@ import pytest
 from src.live.live_app_config import (
     DailyReportConfig,
     LiveAppConfig,
+    LiveHeartbeatConfig,
     WeeklySummaryConfig,
 )
 from src.live.runtime_paths import RuntimePaths
@@ -103,6 +104,9 @@ def test_create_queues_uses_app_config_sizes() -> None:
             hour=10,
             minute=0,
             compact_after_success=False,
+        ),
+        heartbeat=LiveHeartbeatConfig(
+            enabled=True, interval_seconds=10.0, stale_after_seconds=30.0
         ),
     )
     factory = SymbolWorkerFactory()
@@ -207,3 +211,44 @@ def test_factory_source_creates_strategy_objects_correctly() -> None:
     assert "BollCvdShockReclaimStrategy(strategy_config, sizer)" in source, (
         "factory must construct BollCvdShockReclaimStrategy(strategy_config, sizer)"
     )
+
+
+# ---------------------------------------------------------------------------
+# 8. test_create_heartbeat_writer_uses_runtime_paths_and_config
+# ---------------------------------------------------------------------------
+
+
+def test_create_heartbeat_writer_uses_runtime_paths_and_config(tmp_path: Path) -> None:
+    factory = SymbolWorkerFactory()
+    runtime_paths = RuntimePaths(tmp_path / "runtime", "ETH-USDT-SWAP")
+    heartbeat_config = LiveHeartbeatConfig(
+        enabled=True, interval_seconds=2.0, stale_after_seconds=6.0
+    )
+    writer = factory.create_heartbeat_writer(
+        runtime_paths=runtime_paths, heartbeat_config=heartbeat_config
+    )
+
+    assert writer.path == runtime_paths.heartbeat_file
+    assert writer.config.enabled is True
+    assert writer.config.interval_seconds == 2.0
+    assert writer.config.stale_after_seconds == 6.0
+
+
+# ---------------------------------------------------------------------------
+# 9. test_factory_source_does_not_start_heartbeat
+# ---------------------------------------------------------------------------
+
+
+def test_factory_source_does_not_start_heartbeat() -> None:
+    """The factory source must NOT start the heartbeat writer — it only constructs."""
+    source = _factory_source()
+
+    forbidden = [
+        "run_until_cancelled(",
+        "write_once(",
+        "asyncio.create_task",
+    ]
+    for token in forbidden:
+        assert token not in source, (
+            f"factory must not start heartbeat: {token!r}"
+        )

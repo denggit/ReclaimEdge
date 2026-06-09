@@ -15,6 +15,7 @@ import pytest
 from src.live.live_app_config import (
     DailyReportConfig,
     LiveAppConfig,
+    LiveHeartbeatConfig,
     WeeklySummaryConfig,
 )
 from src.live.symbol_worker_app import SymbolWorkerApp
@@ -58,6 +59,9 @@ def _make_app_config() -> LiveAppConfig:
             hour=10,
             minute=0,
             compact_after_success=False,
+        ),
+        heartbeat=LiveHeartbeatConfig(
+            enabled=True, interval_seconds=10.0, stale_after_seconds=30.0
         ),
     )
 
@@ -123,6 +127,7 @@ def test_symbol_worker_app_run_has_expected_runtime_order() -> None:
         "_assert_trader_matches_symbol_config(trader,",
         "factory.create_runtime_paths(",
         "handoff_legacy_runtime_files(",
+        "factory.create_heartbeat_writer(",
         "factory.create_persistence(",
         "factory.create_strategy_objects(",
         "await trader.fetch_position_snapshot()",
@@ -142,6 +147,7 @@ def test_symbol_worker_app_run_has_expected_runtime_order() -> None:
         "async def weekly_summary_loop",
         "factory.create_monitor(",
         "asyncio.gather(",
+        "heartbeat_writer.run_until_cancelled(",
         "monitor.run_forever()",
         "await trader.close()",
     ]
@@ -226,8 +232,8 @@ def test_symbol_worker_app_keeps_report_loops_inside_app() -> None:
 
 
 def test_symbol_worker_app_no_btc_or_supervisor() -> None:
-    """SymbolWorkerApp must NOT contain any BTC, subprocess, supervisor,
-    or heartbeat references."""
+    """SymbolWorkerApp must NOT contain any BTC, subprocess, or supervisor
+    references.  Heartbeat references ARE allowed as of C06."""
     source = _app_source()
 
     forbidden = [
@@ -266,3 +272,65 @@ def test_assert_trader_matches_symbol_config_present() -> None:
     assert "leverage" in source, (
         "SymbolWorkerApp must check leverage"
     )
+
+
+# ============================================================================
+# 10. test_symbol_worker_app_heartbeat_order
+# ============================================================================
+
+
+def test_symbol_worker_app_heartbeat_order() -> None:
+    """Verify heartbeat writer is created before asyncio.gather and runs
+    between weekly_summary_loop and monitor.run_forever."""
+    source = _app_source()
+
+    assert "factory.create_heartbeat_writer(" in source, (
+        "SymbolWorkerApp must call factory.create_heartbeat_writer"
+    )
+    assert "heartbeat_writer.run_until_cancelled(" in source, (
+        "SymbolWorkerApp must call heartbeat_writer.run_until_cancelled"
+    )
+
+    create_heartbeat_writer_idx = source.find("factory.create_heartbeat_writer(")
+    asyncio_gather_idx = source.find("asyncio.gather(")
+    account_worker_idx = source.find("account_position_sync_worker_module.account_position_sync_worker(")
+    strategy_worker_idx = source.find("strategy_tick_worker_module.strategy_tick_worker(")
+    execution_worker_idx = source.find("execution_worker_module.execution_worker(")
+    weekly_summary_idx = source.find("weekly_summary_loop()")
+    heartbeat_idx = source.find("heartbeat_writer.run_until_cancelled(")
+    monitor_idx = source.find("monitor.run_forever()")
+
+    assert create_heartbeat_writer_idx > 0
+    assert heartbeat_idx > 0
+    assert create_heartbeat_writer_idx < asyncio_gather_idx, (
+        "heartbeat writer must be created before asyncio.gather"
+    )
+    assert account_worker_idx < strategy_worker_idx < execution_worker_idx, (
+        "core workers must be in order: account → strategy → execution"
+    )
+    assert heartbeat_idx > weekly_summary_idx, (
+        "heartbeat_writer.run_until_cancelled must be after weekly_summary_loop"
+    )
+    assert heartbeat_idx < monitor_idx, (
+        "heartbeat_writer.run_until_cancelled must be before monitor.run_forever"
+    )
+
+
+# ============================================================================
+# 11. test_symbol_worker_app_does_not_create_heartbeat_task
+# ============================================================================
+
+
+def test_symbol_worker_app_does_not_create_heartbeat_task() -> None:
+    """SymbolWorkerApp must NOT use asyncio.create_task or heartbeat_task
+    to start the heartbeat."""
+    source = _app_source()
+
+    forbidden = [
+        "asyncio.create_task(",
+        "heartbeat_task",
+    ]
+    for token in forbidden:
+        assert token not in source, (
+            f"SymbolWorkerApp must not contain {token!r}"
+        )

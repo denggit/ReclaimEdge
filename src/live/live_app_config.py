@@ -30,6 +30,19 @@ def _env_float(name: str, default: float) -> float:
 
 
 @dataclass(frozen=True)
+class LiveHeartbeatConfig:
+    enabled: bool = True
+    interval_seconds: float = 10.0
+    stale_after_seconds: float = 30.0
+
+    def __post_init__(self) -> None:
+        if self.interval_seconds <= 0:
+            raise ValueError("heartbeat interval_seconds must be > 0")
+        if self.stale_after_seconds <= 0:
+            raise ValueError("heartbeat stale_after_seconds must be > 0")
+
+
+@dataclass(frozen=True)
 class DailyReportConfig:
     raw_time: str
     hour: int
@@ -60,6 +73,7 @@ class LiveAppConfig:
     execution_queue_backlog_log_seconds: float
     daily_report: DailyReportConfig
     weekly_summary: WeeklySummaryConfig
+    heartbeat: LiveHeartbeatConfig
 
     @classmethod
     def from_env(cls) -> "LiveAppConfig":
@@ -98,5 +112,10 @@ class LiveAppConfig:
                 hour=weekly_hour,
                 minute=weekly_minute,
                 compact_after_success=compact_after_success,
+            ),
+            heartbeat=LiveHeartbeatConfig(
+                enabled=_env_bool("SYMBOL_WORKER_HEARTBEAT_ENABLED", True),
+                interval_seconds=_env_float("SYMBOL_WORKER_HEARTBEAT_INTERVAL_SECONDS", 10.0),
+                stale_after_seconds=_env_float("SYMBOL_WORKER_HEARTBEAT_STALE_AFTER_SECONDS", 30.0),
             ),
         )

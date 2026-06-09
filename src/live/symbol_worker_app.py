@@ -123,6 +123,10 @@ class SymbolWorkerApp:
                     item.legacy_path,
                     item.symbol_path,
                 )
+            heartbeat_writer = self.factory.create_heartbeat_writer(
+                runtime_paths=runtime_paths,
+                heartbeat_config=self.app_config.heartbeat,
+            )
             persistence = self.factory.create_persistence(
                 runtime_paths=runtime_paths,
                 email_sender=email_sender,
@@ -395,6 +399,7 @@ class SymbolWorkerApp:
                 ),
                 daily_report_loop(),
                 weekly_summary_loop(),
+                heartbeat_writer.run_until_cancelled(),
                 monitor.run_forever(),
             )
         finally:
