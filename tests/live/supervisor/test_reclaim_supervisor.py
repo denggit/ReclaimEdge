@@ -104,6 +104,7 @@ class FakeChildProcess:
         running: bool = True,
         terminate_error: Exception | None = None,
         terminate_cancelled: bool = False,
+        terminate_keeps_running: bool = False,
     ) -> None:
         self.spec = spec
         self.started = False
@@ -113,6 +114,7 @@ class FakeChildProcess:
         self._running = running
         self._terminate_error = terminate_error
         self._terminate_cancelled = terminate_cancelled
+        self._terminate_keeps_running = terminate_keeps_running
         self.terminate_calls = 0
 
     @property
@@ -129,7 +131,12 @@ class FakeChildProcess:
             raise asyncio.CancelledError()
         if self._terminate_error is not None:
             raise self._terminate_error
+        if self._terminate_keeps_running:
+            # terminate call succeeds but process stays running (simulates
+            # a stuck subprocess that resists SIGTERM).
+            return self.snapshot()
         self.terminated = True
+        self._running = False
         return self.snapshot()
 
     def snapshot(self) -> ChildProcessSnapshot:
@@ -231,7 +238,6 @@ def test_default_config() -> None:
     assert config.stop_on_bad_heartbeat is True
     assert config.restart_on_child_exit is True
     assert config.restart_on_bad_heartbeat is True
-    assert config.bad_heartbeat_restart_terminate_timeout_seconds == 10.0
     assert config.restart_policy.enabled is True
     assert config.restart_policy.max_restarts == 3
 
@@ -1127,6 +1133,88 @@ async def test_bad_heartbeat_restart_max_exceeded_requests_stop() -> None:
 
 
 @pytest.mark.asyncio
+async def test_bad_heartbeat_terminate_failure_suppresses_restart_and_stops() -> None:
+    """When old child terminate raises, restart is suppressed and supervisor stops."""
+    config = ReclaimSupervisorConfig(
+        restart_policy=RestartPolicyConfig(max_restarts=3, cooldown_seconds=0, window_seconds=600.0),
+        restart_on_bad_heartbeat=True,
+        heartbeat_startup_grace_seconds=0.01,
+    )
+    supervisor = ReclaimSupervisor(config=config)
+
+    base = time.monotonic()
+    old_child = FakeChildProcess(
+        supervisor.build_child_spec(),
+        running=True,
+        terminate_error=RuntimeError("terminate boom"),
+    )
+    old_child.started = True
+    supervisor._child = old_child  # type: ignore[assignment]
+    supervisor._child_started_monotonic = base - 30.0
+
+    stale_status = _fake_heartbeat_status(status="stale", fresh=False, stale=True, age_seconds=99.0)
+    supervisor._heartbeat_monitor = FailingHeartbeatMonitor(stale_status)  # type: ignore[assignment]
+
+    new_child = FakeChildProcess(supervisor.build_child_spec(), running=True)
+    supervisor.create_child_process = lambda: new_child  # type: ignore[method-assign]
+
+    status = await supervisor.check_heartbeat_once(now_monotonic=base)
+    assert status is not None
+    assert old_child.terminate_calls == 1
+    # New child must NOT be started.
+    assert new_child.started is False
+    assert supervisor.stop_requested is True
+
+    event_types = [e.event_type for e in supervisor.health_events]
+    assert "CHILD_TERMINATE_FOR_RESTART_REQUESTED" in event_types
+    assert "CHILD_TERMINATE_FOR_RESTART_FAILED" in event_types
+    assert "CHILD_RESTARTED" not in event_types
+
+
+@pytest.mark.asyncio
+async def test_bad_heartbeat_terminate_still_running_suppresses_restart_and_stops() -> None:
+    """When terminate returns but child is still running, restart is suppressed."""
+    config = ReclaimSupervisorConfig(
+        restart_policy=RestartPolicyConfig(max_restarts=3, cooldown_seconds=0, window_seconds=600.0),
+        restart_on_bad_heartbeat=True,
+        heartbeat_startup_grace_seconds=0.01,
+    )
+    supervisor = ReclaimSupervisor(config=config)
+
+    base = time.monotonic()
+    old_child = FakeChildProcess(
+        supervisor.build_child_spec(),
+        running=True,
+        terminate_keeps_running=True,
+    )
+    old_child.started = True
+    supervisor._child = old_child  # type: ignore[assignment]
+    supervisor._child_started_monotonic = base - 30.0
+
+    stale_status = _fake_heartbeat_status(status="stale", fresh=False, stale=True, age_seconds=99.0)
+    supervisor._heartbeat_monitor = FailingHeartbeatMonitor(stale_status)  # type: ignore[assignment]
+
+    new_child = FakeChildProcess(supervisor.build_child_spec(), running=True)
+    supervisor.create_child_process = lambda: new_child  # type: ignore[method-assign]
+
+    status = await supervisor.check_heartbeat_once(now_monotonic=base)
+    assert status is not None
+    assert old_child.terminate_calls == 1
+    # New child must NOT be started.
+    assert new_child.started is False
+    assert supervisor.stop_requested is True
+
+    event_types = [e.event_type for e in supervisor.health_events]
+    assert "CHILD_RESTART_SUPPRESSED" in event_types
+    assert "CHILD_RESTARTED" not in event_types
+
+    # Verify the suppressed reason is old_child_still_running.
+    suppressed = [e for e in supervisor.health_events if e.event_type == "CHILD_RESTART_SUPPRESSED"]
+    assert len(suppressed) == 1
+    assert suppressed[0].restart_suppressed_reason == "old_child_still_running"
+
+
+@pytest.mark.asyncio
 async def test_run_forever_child_exit_restart_skips_heartbeat_same_loop() -> None:
     """After restart in a loop iteration, heartbeat is not checked in the same iteration."""
     config = ReclaimSupervisorConfig(
@@ -1174,11 +1262,6 @@ async def test_restart_policy_property_accessible() -> None:
     assert rp.config.enabled is True
     assert rp.config.max_restarts == 3
     assert rp.restart_count_in_window == 0
-
-
-def test_config_invalid_bad_heartbeat_restart_timeout_raises() -> None:
-    with pytest.raises(ValueError, match="bad_heartbeat_restart_terminate_timeout_seconds must be > 0"):
-        ReclaimSupervisorConfig(bad_heartbeat_restart_terminate_timeout_seconds=0)
 
 
 # ============================================================================

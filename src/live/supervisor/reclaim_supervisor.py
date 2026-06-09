@@ -80,7 +80,6 @@ class ReclaimSupervisorConfig:
     restart_policy: RestartPolicyConfig = field(default_factory=RestartPolicyConfig)
     restart_on_child_exit: bool = True
     restart_on_bad_heartbeat: bool = True
-    bad_heartbeat_restart_terminate_timeout_seconds: float = 10.0
 
     def __post_init__(self) -> None:
         if self.poll_interval_seconds <= 0:
@@ -97,8 +96,6 @@ class ReclaimSupervisorConfig:
             raise ValueError("heartbeat_default_stale_after_seconds must be > 0")
         if self.heartbeat_startup_grace_seconds <= 0:
             raise ValueError("heartbeat_startup_grace_seconds must be > 0")
-        if self.bad_heartbeat_restart_terminate_timeout_seconds <= 0:
-            raise ValueError("bad_heartbeat_restart_terminate_timeout_seconds must be > 0")
         object.__setattr__(self, "project_root", Path(self.project_root))
         object.__setattr__(self, "worker_script", Path(self.worker_script))
         object.__setattr__(self, "runtime_dir", Path(self.runtime_dir))
@@ -360,6 +357,11 @@ class ReclaimSupervisor:
         """Evaluate restart policy, terminate the old child, and restart.
 
         Returns ``True`` if the child was restarted, ``False`` otherwise.
+
+        **Guard**: a new child is started **only** when the old child is
+        confirmed to no longer be running.  If terminate raises or the child
+        is still running after the terminate attempt, the restart is
+        suppressed and ``request_stop`` is called.
         """
         now = time.monotonic() if now_monotonic is None else now_monotonic
         decision = self._restart_policy.evaluate(now_monotonic=now)
@@ -394,7 +396,7 @@ class ReclaimSupervisor:
             )
             return False
 
-        # Allowed: terminate old child first
+        # ── Allowed: terminate old child first ──────────────────────────
         self._append_health_event(
             event_type="CHILD_TERMINATE_FOR_RESTART_REQUESTED",
             snapshot=self._child.snapshot() if self._child is not None else None,
@@ -414,13 +416,45 @@ class ReclaimSupervisor:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                terminate_error = f"{type(exc).__name__}: {exc}"
                 logger.error(
-                    "RECLAIM_SUPERVISOR_CHILD_TERMINATE_FAILED | name=%s pid=%s error=%s",
+                    "RECLAIM_SUPERVISOR_CHILD_TERMINATE_FOR_RESTART_FAILED | "
+                    "name=%s pid=%s error=%s",
                     self._config.child_name,
                     self._child.pid,
-                    f"{type(exc).__name__}: {exc}",
+                    terminate_error,
                 )
+                self._append_health_event(
+                    event_type="CHILD_TERMINATE_FOR_RESTART_FAILED",
+                    snapshot=self._child.snapshot(),
+                    heartbeat_status=heartbeat_status,
+                    restart_reason=reason,
+                    restart_count_in_window=decision.restart_count_in_window,
+                    restart_suppressed_reason="terminate_failed",
+                )
+                self.request_stop()
+                return False
 
+        # ── Verify old child is truly stopped ────────────────────────────
+        if self._child is not None and self._child.snapshot().running:
+            logger.error(
+                "RECLAIM_SUPERVISOR_CHILD_TERMINATE_FOR_RESTART_STILL_RUNNING | "
+                "child=%s pid=%s",
+                self._config.child_name,
+                self._child.pid,
+            )
+            self._append_health_event(
+                event_type="CHILD_RESTART_SUPPRESSED",
+                snapshot=self._child.snapshot(),
+                heartbeat_status=heartbeat_status,
+                restart_reason=reason,
+                restart_count_in_window=decision.restart_count_in_window,
+                restart_suppressed_reason="old_child_still_running",
+            )
+            self.request_stop()
+            return False
+
+        # ── Old child confirmed stopped — record and start new child ─────
         self._append_health_event(
             event_type="CHILD_TERMINATED_FOR_RESTART",
             snapshot=self._child.snapshot() if self._child is not None else None,
