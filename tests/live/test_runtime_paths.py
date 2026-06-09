@@ -102,6 +102,11 @@ class TestRuntimePathsForETH:
             "runtime/journal/live_trades_ETH-USDT-SWAP.jsonl"
         )
 
+    def test_trade_summary_file(self, paths: RuntimePaths) -> None:
+        assert paths.trade_summary_file == Path(
+            "runtime/journal/live_trade_summary_ETH-USDT-SWAP.jsonl"
+        )
+
     def test_heartbeat_file(self, paths: RuntimePaths) -> None:
         assert paths.heartbeat_file == Path(
             "runtime/heartbeats/ETH-USDT-SWAP.heartbeat.json"
@@ -172,6 +177,9 @@ class TestRuntimePathsAcceptsOtherSafeSymbols:
         )
         assert paths.journal_file == Path(
             "runtime/journal/live_trades_BTC-USDT-SWAP.jsonl"
+        )
+        assert paths.trade_summary_file == Path(
+            "runtime/journal/live_trade_summary_BTC-USDT-SWAP.jsonl"
         )
         assert paths.heartbeat_file == Path(
             "runtime/heartbeats/BTC-USDT-SWAP.heartbeat.json"
@@ -252,4 +260,24 @@ def test_b02_does_not_touch_live_entry() -> None:
     )
     assert "from_runtime_paths(" not in source, (
         "B02 must not wire from_runtime_paths into run_boll_cvd_live.py"
+    )
+
+
+def test_b03_does_not_touch_live_entry() -> None:
+    """B03 only gives LiveTradeJournal symbol‑path support.
+
+    Wiring LiveTradeJournal.from_runtime_paths or trade_summary_file
+    into the live entry point is a **B05** task.  This test fails if
+    anyone accidentally adds these references to
+    ``scripts/run_boll_cvd_live.py`` before B05 is ready.
+    """
+    source = Path("scripts/run_boll_cvd_live.py").read_text(encoding="utf-8")
+    assert "LiveTradeJournal.from_runtime_paths(" not in source, (
+        "B03 must not wire LiveTradeJournal.from_runtime_paths into run_boll_cvd_live.py"
+    )
+    assert "trade_summary_file" not in source, (
+        "B03 must not wire trade_summary_file into run_boll_cvd_live.py"
+    )
+    assert "journal_file" not in source, (
+        "B03 must not wire journal_file into run_boll_cvd_live.py"
     )

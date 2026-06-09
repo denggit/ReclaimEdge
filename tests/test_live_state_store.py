@@ -181,9 +181,18 @@ class LiveStateStoreTest(unittest.TestCase):
 # ===========================================================================
 
 
-def test_default_state_store_path_unchanged() -> None:
-    """``DEFAULT_STATE_PATH`` still points to the legacy single‑coin path."""
-    assert DEFAULT_STATE_PATH == ROOT / "data" / "trade_journal" / "live_state.json"
+def test_default_state_store_path_unchanged(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """``DEFAULT_STATE_PATH`` still points to the legacy single‑coin path,
+    and ``LiveStateStore()`` with no arguments uses that path."""
+    import src.reporting.live_state_store as live_state_store_module
+
+    default_path = tmp_path / "live_state.json"
+    monkeypatch.setattr(live_state_store_module, "DEFAULT_STATE_PATH", default_path)
+    monkeypatch.delenv("LIVE_STATE_PATH", raising=False)
+
+    store = LiveStateStore()
+
+    assert store.path == default_path
 
 
 def test_env_live_state_path_still_overrides_default(

@@ -6,7 +6,7 @@ import uuid
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Protocol
 
 from src.utils import to_json_safe
 
@@ -36,20 +36,54 @@ class UnclosedPositionMatch:
     last_event_ts_iso: str
 
 
+class JournalPathProvider(Protocol):
+    """Structural interface for any object that exposes symbol‑scoped journal paths.
+
+    This protocol lets :class:`LiveTradeJournal` accept a :class:`RuntimePaths`
+    instance **without** importing ``src.live.runtime_paths``, keeping the
+    reporting layer decoupled from the live layer.
+    """
+
+    @property
+    def journal_file(self) -> Path:
+        ...
+
+    @property
+    def trade_summary_file(self) -> Path:
+        ...
+
+
 class LiveTradeJournal:
     """Append-only JSONL journal for live trading review and daily reports."""
 
-    def __init__(self, path: str | Path | None = None) -> None:
+    def __init__(self, path: str | Path | None = None, summary_path: str | Path | None = None) -> None:
         raw_path = path or os.getenv("TRADE_JOURNAL_PATH") or DEFAULT_JOURNAL_PATH
         self.path = Path(raw_path)
         if not self.path.is_absolute():
             self.path = ROOT / self.path
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        raw_summary_path = os.getenv("TRADE_SUMMARY_PATH") or self.path.with_name("live_trade_summary.jsonl")
+        raw_summary_path = (
+            summary_path
+            or os.getenv("TRADE_SUMMARY_PATH")
+            or self.path.with_name("live_trade_summary.jsonl")
+        )
         self.summary_path = Path(raw_summary_path)
         if not self.summary_path.is_absolute():
             self.summary_path = ROOT / self.summary_path
         self.summary_path.parent.mkdir(parents=True, exist_ok=True)
+
+    @classmethod
+    def from_runtime_paths(cls, runtime_paths: JournalPathProvider) -> "LiveTradeJournal":
+        """Create a journal using symbol‑scoped RuntimePaths journal files.
+
+        This does **not** read env and does **not** migrate legacy journal files.
+        It delegates entirely to the supplied path provider's ``journal_file``
+        and ``trade_summary_file`` properties.
+        """
+        return cls(
+            path=runtime_paths.journal_file,
+            summary_path=runtime_paths.trade_summary_file,
+        )
 
     def new_position_id(self, symbol: str, side: str, ts_ms: int | None = None) -> str:
         if ts_ms is None:

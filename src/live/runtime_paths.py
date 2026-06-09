@@ -74,6 +74,11 @@ class RuntimePaths:
     * talks to the network
     * depends on any live runtime state
 
+    Symbol‑scoped files provided:
+
+    * ``journal_file`` — main trade event journal
+    * ``trade_summary_file`` — trade summary journal
+
     Parameters
     ----------
     runtime_dir : Path
@@ -137,6 +142,10 @@ class RuntimePaths:
     @property
     def journal_file(self) -> Path:
         return self.journal_dir / f"live_trades_{self.symbol_slug}.jsonl"
+
+    @property
+    def trade_summary_file(self) -> Path:
+        return self.journal_dir / f"live_trade_summary_{self.symbol_slug}.jsonl"
 
     @property
     def heartbeat_file(self) -> Path:
