@@ -1,7 +1,8 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """Regression tests ensuring ``scripts/run_boll_cvd_live.py`` calls
-``build_live_symbol_runtime_configs`` exactly once (A07 fix).
+``build_live_symbol_runtime_configs`` exactly once, after
+``trader.initialize()``, and passes ``account_equity_usdt`` (A07 fix).
 
 These tests use AST / source inspection — they never import or instantiate
 live runtime objects, Trader, or asyncio workers.
@@ -45,39 +46,69 @@ def test_live_entry_calls_symbol_bootstrap_once() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 2. test_live_entry_does_not_pass_account_equity_to_bootstrap
+# 2. test_live_entry_passes_trader_account_equity_to_bootstrap
 # ---------------------------------------------------------------------------
 
 
-def test_live_entry_does_not_pass_account_equity_to_bootstrap() -> None:
-    """The single call to ``build_live_symbol_runtime_configs`` must not pass
-    ``account_equity_usdt`` — equity should be applied via
-    ``dataclasses.replace`` instead."""
+def test_live_entry_passes_trader_account_equity_to_bootstrap() -> None:
+    """The single call to ``build_live_symbol_runtime_configs`` must pass
+    ``account_equity_usdt=trader.account_equity_usdt`` so the legacy
+    ``.env`` path uses ``from_account_equity()`` instead of ``from_env()``."""
     tree = _ast()
+    found_call = False
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
             func = node.func
             if isinstance(func, ast.Name) and func.id == "build_live_symbol_runtime_configs":
-                for kw in node.keywords:
-                    assert kw.arg != "account_equity_usdt", (
-                        "build_live_symbol_runtime_configs must not receive "
-                        "account_equity_usdt — use dataclasses.replace on "
-                        "position_sizer_config instead"
-                    )
+                found_call = True
+                kw_names = {kw.arg for kw in node.keywords}
+                assert "account_equity_usdt" in kw_names, (
+                    "build_live_symbol_runtime_configs must receive "
+                    "account_equity_usdt= to use from_account_equity() "
+                    "on the legacy .env path"
+                )
+    assert found_call, "build_live_symbol_runtime_configs call not found"
 
 
 # ---------------------------------------------------------------------------
-# 3. test_live_entry_uses_dataclasses_replace_for_account_equity
+# 3. test_live_entry_does_not_use_replace_for_account_equity
 # ---------------------------------------------------------------------------
 
 
-def test_live_entry_uses_dataclasses_replace_for_account_equity() -> None:
-    """Account equity must be applied via ``dataclasses.replace`` on
-    ``position_sizer_config``, not via a second bootstrap call."""
+def test_live_entry_does_not_use_replace_for_account_equity() -> None:
+    """Account equity must be applied via ``account_equity_usdt`` parameter
+    to ``build_live_symbol_runtime_configs`` — NOT via
+    ``dataclasses.replace``.
+
+    The source must not contain ``from dataclasses import replace`` nor
+    ``dry_run_equity_usdt=trader.account_equity_usdt``.
+    """
     source = _source()
-    assert "replace(" in source, (
-        "Expected dataclasses.replace(…) call in the live entrypoint"
+    assert "from dataclasses import replace" not in source, (
+        "dataclasses.replace must not be imported — account equity "
+        "should be passed to build_live_symbol_runtime_configs()"
     )
-    assert "dry_run_equity_usdt=trader.account_equity_usdt" in source, (
-        "Expected replace(position_sizer_config, dry_run_equity_usdt=trader.account_equity_usdt)"
+    assert "dry_run_equity_usdt=trader.account_equity_usdt" not in source, (
+        "dry_run_equity_usdt must not be set via replace — pass "
+        "account_equity_usdt to build_live_symbol_runtime_configs() instead"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 4. test_live_entry_bootstrap_occurs_after_trader_initialize
+# ---------------------------------------------------------------------------
+
+
+def test_live_entry_bootstrap_occurs_after_trader_initialize() -> None:
+    """``build_live_symbol_runtime_configs`` must be called AFTER
+    ``await trader.initialize()`` so that ``trader.account_equity_usdt``
+    is available and the legacy ``.env`` path does not read
+    ``DRY_RUN_EQUITY_USDT``."""
+    source = _source()
+    init_idx = source.index("await trader.initialize()")
+    bootstrap_idx = source.index("build_live_symbol_runtime_configs(")
+    assert init_idx < bootstrap_idx, (
+        f"build_live_symbol_runtime_configs must be called after "
+        f"trader.initialize() — found initialize at {init_idx}, "
+        f"bootstrap at {bootstrap_idx}"
     )

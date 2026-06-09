@@ -240,3 +240,28 @@ def test_account_equity_env_path() -> None:
     assert result.position_sizer.dry_run_equity_usdt == 5000.0
     # Other fields come from env defaults.
     assert result.position_sizer.layer_margin_pct == 0.03
+
+
+# ---------------------------------------------------------------------------
+# 11. test_legacy_path_account_equity_does_not_read_dry_run_equity
+# ---------------------------------------------------------------------------
+
+
+def test_legacy_path_account_equity_does_not_read_dry_run_equity() -> None:
+    """Legacy path with account_equity_usdt must NOT read DRY_RUN_EQUITY_USDT.
+
+    When live passes real account equity, the helper must use
+    ``from_account_equity()`` — even if ``DRY_RUN_EQUITY_USDT`` is set to
+    an invalid value the call must succeed and use the passed equity.
+    """
+    result = build_live_symbol_runtime_configs(
+        env={
+            "RECLAIM_USE_SYMBOL_TOML": "false",
+            "DRY_RUN_EQUITY_USDT": "not-a-number",
+        },
+        account_equity_usdt=5000.0,
+    )
+
+    assert result.symbol_config is None
+    assert result.env_runtime.use_symbol_toml is False
+    assert result.position_sizer.dry_run_equity_usdt == 5000.0

@@ -6,7 +6,6 @@ import os
 import sys
 import time
 from pathlib import Path
-from dataclasses import replace
 
 from dotenv import load_dotenv
 
@@ -68,11 +67,6 @@ async def main() -> None:
     if not live_config_helpers.live_trading_enabled():
         raise RuntimeError("LIVE_TRADING is not true. Refusing to start live runner.")
 
-    runtime_configs = build_live_symbol_runtime_configs()
-    monitor_config = runtime_configs.monitor
-    cvd_config = runtime_configs.cvd
-    strategy_config = runtime_configs.strategy
-    position_sizer_config = runtime_configs.position_sizer
     email_sender = EmailSender()
     journal = LiveTradeJournal()
     rolling_loss_guard = RollingLossGuard.from_env()
@@ -82,10 +76,13 @@ async def main() -> None:
     await trader.start()
     try:
         await trader.initialize()
-        position_sizer_config = replace(
-            position_sizer_config,
-            dry_run_equity_usdt=trader.account_equity_usdt,
+        runtime_configs = build_live_symbol_runtime_configs(
+            account_equity_usdt=trader.account_equity_usdt,
         )
+        monitor_config = runtime_configs.monitor
+        cvd_config = runtime_configs.cvd
+        strategy_config = runtime_configs.strategy
+        position_sizer_config = runtime_configs.position_sizer
         sizer = SimplePositionSizer(position_sizer_config)
         strategy = BollCvdShockReclaimStrategy(strategy_config, sizer)
         startup_position = await trader.fetch_position_snapshot()
