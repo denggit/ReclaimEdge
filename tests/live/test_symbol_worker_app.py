@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""C03 unit tests for ``src.live.symbol_worker_app``.
+"""C04 unit tests for ``src.live.symbol_worker_app``.
 
 These tests use source inspection primarily — they do NOT start a real
 Trader, OKX connection, or websocket.
@@ -207,7 +207,7 @@ def test_symbol_worker_app_handoff_not_hidden_in_factory() -> None:
 # ============================================================================
 
 
-def test_symbol_worker_app_keeps_report_loops_inside_app_for_c03() -> None:
+def test_symbol_worker_app_keeps_report_loops_inside_app() -> None:
     """daily_report_loop and weekly_summary_loop must be defined inside
     SymbolWorkerApp.run()."""
     source = _app_source()

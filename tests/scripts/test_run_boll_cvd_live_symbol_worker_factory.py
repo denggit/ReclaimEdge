@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""C02 source guard — ensures ``scripts/run_boll_cvd_live.py`` uses
-``SymbolWorkerFactory`` for object creation and does not directly
+"""C04 source guard — ensures ``SymbolWorkerApp`` (not the thin live entry)
+uses ``SymbolWorkerFactory`` for object creation and does not directly
 construct core runtime objects.
 
 These tests use source inspection — they never import or instantiate
@@ -14,11 +14,16 @@ from pathlib import Path
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 _LIVE_SCRIPT = _PROJECT_ROOT / "scripts" / "run_boll_cvd_live.py"
+_APP_MODULE = _PROJECT_ROOT / "src" / "live" / "symbol_worker_app.py"
 _FACTORY_MODULE = _PROJECT_ROOT / "src" / "live" / "symbol_worker_factory.py"
 
 
-def _source() -> str:
+def _live_source() -> str:
     return _LIVE_SCRIPT.read_text()
+
+
+def _app_source() -> str:
+    return _APP_MODULE.read_text()
 
 
 def _factory_source() -> str:
@@ -26,55 +31,70 @@ def _factory_source() -> str:
 
 
 # ============================================================================
-# 1. test_live_entry_constructs_factory
+# 1. test_app_uses_factory_for_core_objects
 # ============================================================================
 
 
-def test_live_entry_constructs_factory() -> None:
-    """The live entry must import and construct SymbolWorkerFactory."""
-    source = _source()
-    assert "SymbolWorkerFactory" in source, (
-        "C02 must import SymbolWorkerFactory in run_boll_cvd_live.py"
-    )
-    assert "factory = SymbolWorkerFactory()" in source, (
-        "C02 must construct SymbolWorkerFactory() in run_boll_cvd_live.py"
-    )
-
-
-# ============================================================================
-# 2. test_live_entry_uses_factory_for_core_objects
-# ============================================================================
-
-
-def test_live_entry_uses_factory_for_core_objects() -> None:
-    """The live entry must use factory methods for all core object creation."""
-    source = _source()
+def test_app_uses_factory_for_core_objects() -> None:
+    """SymbolWorkerApp.run() must use factory methods for all core object creation."""
+    source = _app_source()
 
     required = [
-        "factory.create_email_sender(",
-        "factory.create_trader(",
-        "factory.create_runtime_paths(",
-        "factory.create_persistence(",
-        "factory.create_strategy_objects(",
-        "factory.create_cvd_tracker(",
-        "factory.create_queues(",
-        "factory.create_monitor(",
+        "self.factory.create_email_sender(",
+        "self.factory.create_trader(",
+        "self.factory.create_runtime_paths(",
+        "self.factory.create_persistence(",
+        "self.factory.create_strategy_objects(",
+        "self.factory.create_cvd_tracker(",
+        "self.factory.create_queues(",
+        "self.factory.create_monitor(",
     ]
     for token in required:
         assert token in source, (
-            f"C02 live entry must use {token}"
+            f"C04 SymbolWorkerApp.run() must use {token}"
         )
 
 
 # ============================================================================
-# 3. test_live_entry_no_direct_core_constructors
+# 2. test_live_entry_no_direct_core_constructors
 # ============================================================================
 
 
 def test_live_entry_no_direct_core_constructors() -> None:
-    """The live entry must NOT directly construct core runtime objects —
+    """The thin live entry must NOT directly construct core runtime objects —
+    those should be created by the factory inside SymbolWorkerApp.run()."""
+    source = _live_source()
+
+    forbidden = [
+        "email_sender = EmailSender()",
+        "trader = Trader()",
+        "runtime_paths = RuntimePaths(",
+        "journal = LiveTradeJournal.from_runtime_paths(",
+        "state_store = LiveStateStore.from_runtime_paths(",
+        "rolling_loss_guard = RollingLossGuard.from_runtime_paths(",
+        "reporter = DailyTradeReporter(",
+        "sizer = SimplePositionSizer(",
+        "strategy = BollCvdShockReclaimStrategy(",
+        "cvd = CvdTracker(",
+        "monitor = BollBandBreakoutMonitor(",
+        # Also forbid the pre-C04 direct factory construction pattern
+        "factory = SymbolWorkerFactory()",
+    ]
+    for token in forbidden:
+        assert token not in source, (
+            f"C04 live entry must not directly construct: {token!r}"
+        )
+
+
+# ============================================================================
+# 3. test_app_no_direct_core_constructors
+# ============================================================================
+
+
+def test_app_no_direct_core_constructors() -> None:
+    """SymbolWorkerApp.run() must NOT directly construct core runtime objects —
     those should be created by the factory."""
-    source = _source()
+    source = _app_source()
 
     forbidden = [
         "email_sender = EmailSender()",
@@ -91,61 +111,78 @@ def test_live_entry_no_direct_core_constructors() -> None:
     ]
     for token in forbidden:
         assert token not in source, (
-            f"C02 live entry must not directly construct: {token!r}"
+            f"C04 SymbolWorkerApp must not directly construct: {token!r}"
         )
 
 
 # ============================================================================
-# 4. test_handoff_still_in_live_entry_not_factory
+# 4. test_handoff_still_in_app_not_factory
 # ============================================================================
 
 
-def test_handoff_still_in_live_entry_not_factory() -> None:
-    """handoff_legacy_runtime_files must stay in the live entry, not move
-    to the factory."""
-    source = _source()
+def test_handoff_still_in_app_not_factory() -> None:
+    """handoff_legacy_runtime_files must stay in SymbolWorkerApp.run(),
+    not move to the factory or the thin live entry."""
+    app_source = _app_source()
     factory_source = _factory_source()
+    live_source = _live_source()
 
-    assert "handoff_legacy_runtime_files(" in source, (
-        "handoff_legacy_runtime_files must remain in run_boll_cvd_live.py"
+    assert "handoff_legacy_runtime_files(" in app_source, (
+        "C04 handoff_legacy_runtime_files must remain in SymbolWorkerApp.run()"
     )
     assert "handoff_legacy_runtime_files(" not in factory_source, (
         "handoff_legacy_runtime_files must NOT be in symbol_worker_factory.py"
     )
+    assert "handoff_legacy_runtime_files(" not in live_source, (
+        "C04 handoff_legacy_runtime_files must NOT be in thin live entry"
+    )
 
 
 # ============================================================================
-# 5. test_asyncio_gather_still_in_live_entry_not_factory
+# 5. test_asyncio_gather_in_app_not_factory
 # ============================================================================
 
 
-def test_asyncio_gather_still_in_live_entry_not_factory() -> None:
-    """asyncio.gather must stay in the live entry, not move to the factory."""
-    source = _source()
+def test_asyncio_gather_in_app_not_factory() -> None:
+    """asyncio.gather must stay in SymbolWorkerApp.run(), not move to the
+    factory or the thin live entry."""
+    app_source = _app_source()
     factory_source = _factory_source()
+    live_source = _live_source()
 
-    assert "asyncio.gather(" in source, (
-        "asyncio.gather must remain in run_boll_cvd_live.py"
+    assert "asyncio.gather(" in app_source, (
+        "C04 asyncio.gather must remain in SymbolWorkerApp.run()"
     )
     assert "asyncio.gather(" not in factory_source, (
         "asyncio.gather must NOT be in symbol_worker_factory.py"
     )
-
-
-# ============================================================================
-# 6. test_report_loops_still_in_live_entry
-# ============================================================================
-
-
-def test_report_loops_still_in_live_entry() -> None:
-    """daily_report_loop and weekly_summary_loop must stay in the live entry."""
-    source = _source()
-
-    assert "async def daily_report_loop" in source, (
-        "daily_report_loop must remain in run_boll_cvd_live.py"
+    assert "asyncio.gather(" not in live_source, (
+        "C04 asyncio.gather must NOT be in thin live entry"
     )
-    assert "async def weekly_summary_loop" in source, (
-        "weekly_summary_loop must remain in run_boll_cvd_live.py"
+
+
+# ============================================================================
+# 6. test_report_loops_in_app_not_live_entry
+# ============================================================================
+
+
+def test_report_loops_in_app_not_live_entry() -> None:
+    """daily_report_loop and weekly_summary_loop must be in
+    SymbolWorkerApp.run(), not in the thin live entry."""
+    app_source = _app_source()
+    live_source = _live_source()
+
+    assert "async def daily_report_loop" in app_source, (
+        "C04 daily_report_loop must remain in SymbolWorkerApp.run()"
+    )
+    assert "async def weekly_summary_loop" in app_source, (
+        "C04 weekly_summary_loop must remain in SymbolWorkerApp.run()"
+    )
+    assert "async def daily_report_loop" not in live_source, (
+        "C04 daily_report_loop must NOT be in thin live entry"
+    )
+    assert "async def weekly_summary_loop" not in live_source, (
+        "C04 weekly_summary_loop must NOT be in thin live entry"
     )
 
 

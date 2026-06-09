@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""Regression tests ensuring ``scripts/run_boll_cvd_live.py`` wires
+"""C04 regression tests ensuring ``SymbolWorkerApp.run()`` wires
 RuntimePaths, legacy handoff, and symbol-scoped LiveTradeJournal /
 LiveStateStore correctly (B05 + B06), and that
 ``src/live/symbol_worker_factory.py`` provides the construction
@@ -16,11 +16,16 @@ from pathlib import Path
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 _LIVE_SCRIPT = _PROJECT_ROOT / "scripts" / "run_boll_cvd_live.py"
+_APP_MODULE = _PROJECT_ROOT / "src" / "live" / "symbol_worker_app.py"
 _FACTORY_MODULE = _PROJECT_ROOT / "src" / "live" / "symbol_worker_factory.py"
 
 
-def _source() -> str:
+def _live_source() -> str:
     return _LIVE_SCRIPT.read_text()
+
+
+def _app_source() -> str:
+    return _APP_MODULE.read_text()
 
 
 def _factory_source() -> str:
@@ -28,31 +33,28 @@ def _factory_source() -> str:
 
 
 # ============================================================================
-# 1. test_live_entry_uses_runtime_paths_for_state_and_journal (updated C02)
+# 1. test_app_uses_runtime_paths_for_state_and_journal (updated C04)
 # ============================================================================
 
 
-def test_live_entry_uses_runtime_paths_for_state_and_journal() -> None:
-    """The live entry must construct RuntimePaths via the factory and
+def test_app_uses_runtime_paths_for_state_and_journal() -> None:
+    """SymbolWorkerApp.run() must construct RuntimePaths via the factory and
     wire it into persistence via factory.create_persistence."""
-    source = _source()
+    app_source = _app_source()
     factory_source = _factory_source()
 
-    assert "SymbolWorkerFactory" in source, (
-        "C02 live entry must import SymbolWorkerFactory"
+    assert "factory.create_runtime_paths(" in app_source, (
+        "C04 SymbolWorkerApp.run() must use factory.create_runtime_paths"
     )
-    assert "factory.create_runtime_paths(" in source, (
-        "C02 live entry must use factory.create_runtime_paths"
+    assert "handoff_legacy_runtime_files(" in app_source, (
+        "SymbolWorkerApp.run() must call handoff_legacy_runtime_files"
     )
-    assert "handoff_legacy_runtime_files(" in source, (
-        "live entry must call handoff_legacy_runtime_files"
-    )
-    assert "factory.create_persistence(" in source, (
-        "C02 live entry must use factory.create_persistence"
+    assert "factory.create_persistence(" in app_source, (
+        "C04 SymbolWorkerApp.run() must use factory.create_persistence"
     )
 
-    # These from_runtime_paths calls now live in the factory, not the
-    # live entry directly.
+    # These from_runtime_paths calls live in the factory, not the
+    # app directly.
     assert "LiveTradeJournal.from_runtime_paths(" in factory_source, (
         "C02 factory must use LiveTradeJournal.from_runtime_paths"
     )
@@ -65,34 +67,34 @@ def test_live_entry_uses_runtime_paths_for_state_and_journal() -> None:
 
 
 # ============================================================================
-# 2. test_live_entry_no_longer_uses_bare_state_or_journal_constructors
+# 2. test_app_no_longer_uses_bare_state_or_journal_constructors
 # ============================================================================
 
 
-def test_live_entry_no_longer_uses_bare_state_or_journal_constructors() -> None:
-    """The live entry must NOT use the old bare constructors
+def test_app_no_longer_uses_bare_state_or_journal_constructors() -> None:
+    """SymbolWorkerApp.run() must NOT use the old bare constructors
     ``LiveTradeJournal()`` or ``LiveStateStore()``."""
-    source = _source()
+    source = _app_source()
 
     assert "journal = LiveTradeJournal()" not in source, (
-        "live entry must not use bare LiveTradeJournal() — "
+        "SymbolWorkerApp must not use bare LiveTradeJournal() — "
         "use LiveTradeJournal.from_runtime_paths() instead"
     )
     assert "state_store = LiveStateStore()" not in source, (
-        "live entry must not use bare LiveStateStore() — "
+        "SymbolWorkerApp must not use bare LiveStateStore() — "
         "use LiveStateStore.from_runtime_paths() instead"
     )
 
 
 # ============================================================================
-# 3. test_live_entry_handoff_before_state_load
+# 3. test_app_handoff_before_state_load
 # ============================================================================
 
 
-def test_live_entry_handoff_before_state_load() -> None:
+def test_app_handoff_before_state_load() -> None:
     """handoff must happen before state_store.load() so the legacy state
     is seeded before the strategy tries to restore from it."""
-    source = _source()
+    source = _app_source()
 
     handoff_idx = source.index("handoff_legacy_runtime_files(")
     state_load_idx = source.index("state_store.load()")
@@ -116,14 +118,14 @@ def test_live_entry_handoff_before_state_load() -> None:
 
 
 # ============================================================================
-# 4. test_live_entry_runtime_paths_after_runtime_configs
+# 4. test_app_runtime_paths_after_runtime_configs
 # ============================================================================
 
 
-def test_live_entry_runtime_paths_after_runtime_configs() -> None:
+def test_app_runtime_paths_after_runtime_configs() -> None:
     """RuntimePaths must be constructed AFTER build_live_symbol_runtime_configs
     because it depends on runtime_configs.env_runtime.runtime_dir."""
-    source = _source()
+    source = _app_source()
 
     bootstrap_idx = source.index("build_live_symbol_runtime_configs(")
     runtime_paths_idx = source.index("factory.create_runtime_paths(")
@@ -140,7 +142,7 @@ def test_live_entry_runtime_paths_after_runtime_configs() -> None:
 # ============================================================================
 
 
-def test_live_entry_uses_rolling_loss_guard_from_runtime_paths() -> None:
+def test_app_uses_rolling_loss_guard_from_runtime_paths() -> None:
     """B07 wires RollingLossGuard.from_runtime_paths into the factory."""
     factory_source = _factory_source()
     assert "RollingLossGuard.from_runtime_paths(" in factory_source, (
@@ -149,41 +151,38 @@ def test_live_entry_uses_rolling_loss_guard_from_runtime_paths() -> None:
     )
 
 
-def test_live_entry_no_longer_uses_rolling_loss_guard_from_env() -> None:
-    """B07 removes RollingLossGuard.from_env() from the live entry."""
-    source = _source()
-    assert "RollingLossGuard.from_env()" not in source, (
-        "B07 must remove RollingLossGuard.from_env() from run_boll_cvd_live.py"
+def test_app_no_longer_uses_rolling_loss_guard_from_env() -> None:
+    """B07 removes RollingLossGuard.from_env() from the app."""
+    app_source = _app_source()
+    assert "RollingLossGuard.from_env()" not in app_source, (
+        "B07 must remove RollingLossGuard.from_env() from SymbolWorkerApp"
     )
 
 
-def test_live_entry_rolling_loss_guard_ordering() -> None:
+def test_app_rolling_loss_guard_ordering() -> None:
     """B07 ordering: handoff → from_runtime_paths → load_or_initialize,
     and RuntimePaths before from_runtime_paths."""
-    source = _source()
+    app_source = _app_source()
 
-    handoff_idx = source.index("handoff_legacy_runtime_files(")
-    rlg_from_rp_idx = _factory_source().index("RollingLossGuard.from_runtime_paths(")
-    rlg_load_idx = source.index("rolling_loss_guard.load_or_initialize(")
-    create_runtime_paths_idx = source.index("factory.create_runtime_paths(")
+    handoff_idx = app_source.index("handoff_legacy_runtime_files(")
+    # RollingLossGuard.from_runtime_paths lives in the factory,
+    # which is called via factory.create_persistence after handoff.
+    rlg_load_idx = app_source.index("rolling_loss_guard.load_or_initialize(")
+    create_runtime_paths_idx = app_source.index("factory.create_runtime_paths(")
 
     assert handoff_idx < rlg_load_idx, (
         f"handoff_legacy_runtime_files must be before "
         f"rolling_loss_guard.load_or_initialize — "
         f"handoff at {handoff_idx}, load_or_initialize at {rlg_load_idx}"
     )
-    # RollingLossGuard.from_runtime_paths is now in the factory, which is
-    # called after handoff — the ordering is preserved structurally.
     assert create_runtime_paths_idx < rlg_load_idx, (
         f"factory.create_runtime_paths must be constructed before "
         f"rolling_loss_guard.load_or_initialize — "
         f"create_runtime_paths at {create_runtime_paths_idx}, "
         f"load_or_initialize at {rlg_load_idx}"
     )
-    # Verify factory's from_runtime_paths is after handoff in
-    # architectural sense: factory.create_persistence is called after
-    # handoff in the live entry.
-    create_persistence_idx = source.index("factory.create_persistence(")
+    # Verify factory.create_persistence is called after handoff
+    create_persistence_idx = app_source.index("factory.create_persistence(")
     assert handoff_idx < create_persistence_idx, (
         f"handoff_legacy_runtime_files must be before "
         f"factory.create_persistence — "
@@ -192,7 +191,29 @@ def test_live_entry_rolling_loss_guard_ordering() -> None:
 
 
 # ============================================================================
-# 6. No runtime handoff in tick path
+# 6. test_live_entry_no_runtime_path_wiring
+# ============================================================================
+
+
+def test_live_entry_no_runtime_path_wiring() -> None:
+    """C04 thin live entry must NOT contain RuntimePaths, handoff, or
+    persistence wiring — that lives in SymbolWorkerApp.run()."""
+    source = _live_source()
+
+    forbidden = [
+        "factory.create_runtime_paths(",
+        "handoff_legacy_runtime_files(",
+        "factory.create_persistence(",
+        "RuntimePaths",
+    ]
+    for token in forbidden:
+        assert token not in source, (
+            f"C04 thin live entry must not contain {token!r}"
+        )
+
+
+# ============================================================================
+# 7. No runtime handoff in tick path
 # ============================================================================
 
 
