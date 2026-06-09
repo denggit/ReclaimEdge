@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""D03 source guard tests — verifies ChildProcess is NOT wired into
-ReclaimSupervisor, run scripts, or workers.  D03 only adds the abstraction;
-wiring happens in D05+.
+"""D05 source guard tests — verifies ChildProcess IS wired into
+ReclaimSupervisor (ETH-only, no BTC, no heartbeat, no multi-symbol).
+Also verifies that the entry script and workers remain untouched.
 """
 
 from __future__ import annotations
@@ -17,36 +17,78 @@ def _read(path: Path) -> str:
 
 
 # ============================================================================
-# 1. test_reclaim_supervisor_does_not_import_child_process_yet
+# 1. test_reclaim_supervisor_imports_child_process
 # ============================================================================
 
 
-def test_reclaim_supervisor_does_not_import_child_process_yet() -> None:
+def test_reclaim_supervisor_imports_child_process() -> None:
     source = _read(_PROJECT_ROOT / "src" / "live" / "supervisor" / "reclaim_supervisor.py")
 
-    forbidden = [
+    required = [
         "ChildProcess",
         "ChildProcessSpec",
-        "create_subprocess_exec",
-        "run_symbol_worker",
-        "Popen(",
-        "Process(",
-        "multiprocessing",
-        "RECLAIM_SYMBOLS",
-        "BTC",
+        "build_child_spec",
+        "create_child_process",
+        "scripts/run_symbol_worker.py",
     ]
-    for token in forbidden:
-        assert token not in source, (
-            f"reclaim_supervisor.py must NOT contain {token!r}"
+    for token in required:
+        assert token in source, (
+            f"D05 reclaim_supervisor.py must contain {token!r}"
         )
 
 
 # ============================================================================
-# 2. test_run_reclaim_supervisor_does_not_import_child_process_yet
+# 2. test_reclaim_supervisor_still_does_not_use_heartbeat_monitor
 # ============================================================================
 
 
-def test_run_reclaim_supervisor_does_not_import_child_process_yet() -> None:
+def test_reclaim_supervisor_still_does_not_use_heartbeat_monitor() -> None:
+    source = _read(_PROJECT_ROOT / "src" / "live" / "supervisor" / "reclaim_supervisor.py")
+
+    forbidden = [
+        "HeartbeatMonitor",
+        "HeartbeatStatus",
+        "read_status",
+        "heartbeat_file",
+        "heartbeats_dir",
+    ]
+    for token in forbidden:
+        assert token not in source, (
+            f"D05 reclaim_supervisor.py must NOT contain {token!r}"
+        )
+
+
+# ============================================================================
+# 3. test_reclaim_supervisor_eth_only_no_multi_symbol
+# ============================================================================
+
+
+def test_reclaim_supervisor_eth_only_no_multi_symbol() -> None:
+    source = _read(_PROJECT_ROOT / "src" / "live" / "supervisor" / "reclaim_supervisor.py")
+
+    assert "ETH-USDT-SWAP" in source, (
+        "D05 reclaim_supervisor.py must contain ETH-USDT-SWAP (single child)"
+    )
+
+    forbidden = [
+        "RECLAIM_SYMBOLS",
+        "BTC-USDT-SWAP",
+        "BTC",
+        "argparse",
+        "--symbol",
+    ]
+    for token in forbidden:
+        assert token not in source, (
+            f"D05 reclaim_supervisor.py must NOT contain {token!r}"
+        )
+
+
+# ============================================================================
+# 4. test_run_reclaim_supervisor_entry_still_not_wired_directly_to_child_process
+# ============================================================================
+
+
+def test_run_reclaim_supervisor_entry_still_not_wired_directly_to_child_process() -> None:
     source = _read(_PROJECT_ROOT / "scripts" / "run_reclaim_supervisor.py")
 
     forbidden = [
@@ -60,12 +102,12 @@ def test_run_reclaim_supervisor_does_not_import_child_process_yet() -> None:
     ]
     for token in forbidden:
         assert token not in source, (
-            f"run_reclaim_supervisor.py must NOT contain {token!r}"
+            f"D05 run_reclaim_supervisor.py must NOT contain {token!r}"
         )
 
 
 # ============================================================================
-# 3. test_existing_entries_not_changed
+# 5. test_existing_entries_not_changed
 # ============================================================================
 
 
@@ -78,12 +120,10 @@ def test_run_boll_cvd_live_still_uses_symbol_worker_app() -> None:
     assert "app.run" in source or "app.run(" in source, (
         "run_boll_cvd_live.py must still call app.run"
     )
-    assert "ReclaimSupervisor" not in source, (
-        "run_boll_cvd_live.py must NOT import ReclaimSupervisor"
-    )
-    assert "ChildProcess" not in source, (
-        "run_boll_cvd_live.py must NOT import ChildProcess"
-    )
+    for token in ["ReclaimSupervisor", "ChildProcess", "HeartbeatMonitor"]:
+        assert token not in source, (
+            f"run_boll_cvd_live.py must NOT contain {token!r}"
+        )
 
 
 def test_run_symbol_worker_still_uses_symbol_worker_app() -> None:
@@ -95,20 +135,18 @@ def test_run_symbol_worker_still_uses_symbol_worker_app() -> None:
     assert "app.run" in source or "app.run(" in source, (
         "run_symbol_worker.py must still call app.run"
     )
-    assert "ReclaimSupervisor" not in source, (
-        "run_symbol_worker.py must NOT import ReclaimSupervisor"
-    )
-    assert "ChildProcess" not in source, (
-        "run_symbol_worker.py must NOT import ChildProcess"
-    )
+    for token in ["ReclaimSupervisor", "ChildProcess", "HeartbeatMonitor"]:
+        assert token not in source, (
+            f"run_symbol_worker.py must NOT contain {token!r}"
+        )
 
 
 # ============================================================================
-# 4. test_child_process_module_not_used_by_workers
+# 6. test_workers_do_not_import_child_process
 # ============================================================================
 
 
-def test_child_process_module_not_used_by_workers() -> None:
+def test_workers_do_not_import_child_process() -> None:
     workers_dir = _PROJECT_ROOT / "src" / "live" / "workers"
     for worker_path in sorted(workers_dir.glob("*.py")):
         if worker_path.name == "__init__.py":

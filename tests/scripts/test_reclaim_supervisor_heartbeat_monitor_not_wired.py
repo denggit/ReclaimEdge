@@ -24,14 +24,14 @@ def _read(path: Path) -> str:
 def test_reclaim_supervisor_does_not_import_heartbeat_monitor_yet() -> None:
     source = _read(_PROJECT_ROOT / "src" / "live" / "supervisor" / "reclaim_supervisor.py")
 
+    # D05 now wires ChildProcess — so ChildProcess is allowed.
+    # HeartbeatMonitor must still not be wired.
     forbidden = [
         "HeartbeatMonitor",
         "HeartbeatStatus",
         "read_status",
         "heartbeat_file",
         "heartbeats_dir",
-        "ChildProcess",
-        "run_symbol_worker",
         "RECLAIM_SYMBOLS",
         "BTC",
     ]
