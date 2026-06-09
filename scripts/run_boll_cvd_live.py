@@ -21,6 +21,8 @@ from src.live import config_helpers as live_config_helpers  # noqa: E402
 from src.live import queue_helpers as live_queue_helpers  # noqa: E402
 from src.live import runtime_types as live_runtime_types  # noqa: E402
 from src.live import time_utils as live_time_utils  # noqa: E402
+from src.live.runtime_path_compat import handoff_legacy_runtime_files  # noqa: E402
+from src.live.runtime_paths import RuntimePaths  # noqa: E402
 from src.live.workers import account_position_sync_worker as account_position_sync_worker_module  # noqa: E402
 from src.live.workers import execution_worker as execution_worker_module  # noqa: E402
 from src.live.workers import strategy_tick_worker as strategy_tick_worker_module  # noqa: E402
@@ -116,10 +118,7 @@ async def main() -> None:
         raise RuntimeError("LIVE_TRADING is not true. Refusing to start live runner.")
 
     email_sender = EmailSender()
-    journal = LiveTradeJournal()
     rolling_loss_guard = RollingLossGuard.from_env()
-    state_store = LiveStateStore()
-    reporter = DailyTradeReporter(journal, email_sender)
     trader = Trader()
     await trader.start()
     try:
@@ -128,6 +127,27 @@ async def main() -> None:
             account_equity_usdt=trader.account_equity_usdt,
         )
         _assert_trader_matches_symbol_config(trader, runtime_configs)
+        runtime_paths = RuntimePaths(
+            runtime_dir=runtime_configs.env_runtime.runtime_dir,
+            inst_id=trader.symbol,
+        )
+        handoff_result = handoff_legacy_runtime_files(
+            runtime_paths=runtime_paths,
+            inst_id=trader.symbol,
+        )
+        for item in handoff_result.items:
+            logger.info(
+                "RUNTIME_PATH_HANDOFF | symbol=%s label=%s action=%s reason=%s legacy_path=%s symbol_path=%s",
+                handoff_result.inst_id,
+                item.label,
+                item.action,
+                item.reason,
+                item.legacy_path,
+                item.symbol_path,
+            )
+        journal = LiveTradeJournal.from_runtime_paths(runtime_paths)
+        state_store = LiveStateStore.from_runtime_paths(runtime_paths)
+        reporter = DailyTradeReporter(journal, email_sender)
         monitor_config = runtime_configs.monitor
         cvd_config = runtime_configs.cvd
         strategy_config = runtime_configs.strategy

@@ -267,47 +267,48 @@ class TestFrozen:
 
 
 # ============================================================================
-# B02 guard – prevent accidental live‑entry wiring
+# B05 guard – RuntimePaths allowed in live entry, banned from tick path
 # ============================================================================
 
 
-def test_b02_does_not_touch_live_entry() -> None:
-    """B02 only gives LiveStateStore symbol‑path support.
+def test_b05_runtime_paths_wired_in_live_entry() -> None:
+    """B05 wires RuntimePaths into the live entry point.
 
-    Wiring RuntimePaths into the live entry point is a **B05** task.
-    This test fails if anyone accidentally adds RuntimePaths references
-    to ``scripts/run_boll_cvd_live.py`` before B05 is ready.
+    This test confirms the wiring is present — it replaces the old B02/B03
+    guards that *prevented* RuntimePaths from appearing in the live script.
     """
     source = Path("scripts/run_boll_cvd_live.py").read_text(encoding="utf-8")
-    assert "RuntimePaths(" not in source, (
-        "B02 must not wire RuntimePaths into run_boll_cvd_live.py"
+    assert "RuntimePaths(" in source, (
+        "B05 must wire RuntimePaths into run_boll_cvd_live.py"
     )
-    assert "build_runtime_paths(" not in source, (
-        "B02 must not wire build_runtime_paths into run_boll_cvd_live.py"
-    )
-    assert "from_runtime_paths(" not in source, (
-        "B02 must not wire from_runtime_paths into run_boll_cvd_live.py"
+    assert "from_runtime_paths(" in source, (
+        "B05 must wire from_runtime_paths into run_boll_cvd_live.py"
     )
 
 
-def test_b03_does_not_touch_live_entry() -> None:
-    """B03 only gives LiveTradeJournal symbol‑path support.
+def test_b05_runtime_paths_not_in_tick_workers() -> None:
+    """RuntimePaths must NOT appear in tick / execution / sync worker files.
 
-    Wiring LiveTradeJournal.from_runtime_paths or trade_summary_file
-    into the live entry point is a **B05** task.  This test fails if
-    anyone accidentally adds these references to
-    ``scripts/run_boll_cvd_live.py`` before B05 is ready.
+    RuntimePaths is a startup-only concern — tick-path workers receive
+    already-constructed journal and state_store objects.
     """
-    source = Path("scripts/run_boll_cvd_live.py").read_text(encoding="utf-8")
-    assert "LiveTradeJournal.from_runtime_paths(" not in source, (
-        "B03 must not wire LiveTradeJournal.from_runtime_paths into run_boll_cvd_live.py"
-    )
-    assert "trade_summary_file" not in source, (
-        "B03 must not wire trade_summary_file into run_boll_cvd_live.py"
-    )
-    assert "journal_file" not in source, (
-        "B03 must not wire journal_file into run_boll_cvd_live.py"
-    )
+    worker_files = [
+        "src/live/workers/strategy_tick_worker.py",
+        "src/live/workers/execution_worker.py",
+        "src/live/workers/execution_command_processor.py",
+        "src/live/workers/account_position_sync_worker.py",
+    ]
+    for rel_path in worker_files:
+        full_path = Path(rel_path)
+        if not full_path.exists():
+            continue
+        source = full_path.read_text(encoding="utf-8")
+        assert "RuntimePaths" not in source, (
+            f"{rel_path} must not reference RuntimePaths"
+        )
+        assert "handoff_legacy_runtime_files" not in source, (
+            f"{rel_path} must not reference handoff_legacy_runtime_files"
+        )
 
 
 # ============================================================================
@@ -318,9 +319,10 @@ def test_b03_does_not_touch_live_entry() -> None:
 def test_b04_does_not_touch_live_entry() -> None:
     """B04 only adds report path data structures.
 
-    Wiring SymbolReportPaths or report artifact paths into the live entry
-    point is a **B05** task.  This test fails if anyone accidentally adds
-    these references to ``scripts/run_boll_cvd_live.py`` before B05 is ready.
+    B05 has wired RuntimePaths into the live entry for state and journal,
+    but SymbolReportPaths and report artifact paths are still NOT wired.
+    This test fails if anyone accidentally adds report artifact paths to
+    ``scripts/run_boll_cvd_live.py`` before the report-artifact B0X task.
     """
     source = Path("scripts/run_boll_cvd_live.py").read_text(encoding="utf-8")
     assert "SymbolReportPaths" not in source, (
@@ -342,7 +344,8 @@ def test_b04_does_not_make_daily_reporter_write_files() -> None:
 
     DailyTradeReporter continues to send HTML emails — it does NOT write
     report artifacts to disk.  This test fails if anyone accidentally adds
-    file‑write calls to the reporter before B05/B06 is ready.
+    file‑write calls to the reporter before the report-artifact B0X task
+    is ready.
     """
     source = Path("src/reporting/daily_trade_reporter.py").read_text(encoding="utf-8")
     assert "SymbolReportPaths" not in source, (
