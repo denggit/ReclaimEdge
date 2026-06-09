@@ -19,6 +19,9 @@ from src.strategies.middle_bucket_split_apply import (
     apply_middle_runner_bucket_split,
     apply_three_stage_middle_bucket_split,
 )
+from src.strategies.pre_tp1_degrade_replan import (
+    decide_pre_tp1_degrade_stage_for_replan,
+)
 from src.utils.log import get_logger
 
 if TYPE_CHECKING:
@@ -274,38 +277,28 @@ class EntryAddFlowCoordinator:
         non-Three-Stage strategies are never erroneously capped to
         MIDDLE_RUNNER or SINGLE.
 
-        Rules (all based on ``first_entry_ts_ms``, which is never
-        reset by an add):
-
-        * age < middle_runner_after_seconds  →  degrade_stage = None
-        * middle_runner_after_seconds ≤ age < single_after_seconds
-          →  degrade_stage = "MIDDLE_RUNNER"
-        * age ≥ single_after_seconds  →  degrade_stage = "SINGLE"
-
-        When ``three_stage_pre_tp1_degrade_enabled`` is False or
-        ``three_stage_replan_cap_applicable`` is False the degrade
-        stage is unconditionally cleared.
+        Delegates to the shared pure helper
+        ``decide_pre_tp1_degrade_stage_for_replan()`` so that the
+        entry/add replan path and the startup reconcile path use
+        identical age-based cap logic.
         """
         strategy = self.strategy
         old_stage = strategy.state.three_stage_pre_tp1_degrade_stage
         old_degraded_ts_ms = strategy.state.three_stage_pre_tp1_degraded_ts_ms
 
-        age_seconds = strategy._three_stage_pre_tp1_age_seconds(ts_ms)
+        decision = decide_pre_tp1_degrade_stage_for_replan(
+            first_entry_ts_ms=strategy.state.first_entry_ts_ms,
+            ts_ms=ts_ms,
+            three_stage_replan_cap_applicable=three_stage_replan_cap_applicable,
+            degrade_enabled=strategy.config.three_stage_pre_tp1_degrade_enabled,
+            middle_runner_after_seconds=strategy.config.three_stage_pre_tp1_middle_runner_after_seconds,
+            single_after_seconds=strategy.config.three_stage_pre_tp1_single_after_seconds,
+        )
 
-        new_stage: str | None = None
-        if (
-            three_stage_replan_cap_applicable
-            and strategy.config.three_stage_pre_tp1_degrade_enabled
-        ):
-            if age_seconds >= strategy.config.three_stage_pre_tp1_single_after_seconds:
-                new_stage = "SINGLE"
-            elif age_seconds >= strategy.config.three_stage_pre_tp1_middle_runner_after_seconds:
-                new_stage = "MIDDLE_RUNNER"
+        strategy.state.three_stage_pre_tp1_degrade_stage = decision.new_stage
+        strategy.state.three_stage_pre_tp1_degraded_ts_ms = decision.degraded_ts_ms
 
-        strategy.state.three_stage_pre_tp1_degrade_stage = new_stage
-        strategy.state.three_stage_pre_tp1_degraded_ts_ms = ts_ms if new_stage is not None else 0
-
-        if old_stage != new_stage or old_degraded_ts_ms != strategy.state.three_stage_pre_tp1_degraded_ts_ms:
+        if old_stage != decision.new_stage or old_degraded_ts_ms != decision.degraded_ts_ms:
             logger.warning(
                 "THREE_STAGE_PRE_TP1_DEGRADE_REFRESHED_BEFORE_POSITION_REPLAN | "
                 "next_layer=%s old_stage=%s new_stage=%s old_degraded_ts_ms=%s "
@@ -314,13 +307,14 @@ class EntryAddFlowCoordinator:
                 "three_stage_replan_cap_applicable=%s "
                 "three_stage_runner_enabled=%s "
                 "pre_replan_tp_plan=%s "
-                "pre_replan_three_stage_enabled_for_position=%s",
+                "pre_replan_three_stage_enabled_for_position=%s "
+                "reason=%s",
                 next_layer,
                 old_stage,
-                new_stage,
+                decision.new_stage,
                 old_degraded_ts_ms,
-                strategy.state.three_stage_pre_tp1_degraded_ts_ms,
-                age_seconds,
+                decision.degraded_ts_ms,
+                decision.age_seconds,
                 strategy.state.first_entry_ts_ms,
                 strategy.config.three_stage_pre_tp1_middle_runner_after_seconds,
                 strategy.config.three_stage_pre_tp1_single_after_seconds,
@@ -328,6 +322,7 @@ class EntryAddFlowCoordinator:
                 strategy.config.three_stage_runner_enabled,
                 pre_replan_tp_plan,
                 pre_replan_three_stage_enabled_for_position,
+                decision.reason,
             )
 
     # ------------------------------------------------------------------

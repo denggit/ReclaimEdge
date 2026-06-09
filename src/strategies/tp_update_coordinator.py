@@ -20,6 +20,9 @@ from src.strategies.middle_bucket_split_apply import (
     apply_middle_runner_bucket_split,
     apply_three_stage_middle_bucket_split,
 )
+from src.strategies.pre_tp1_degrade_replan import (
+    decide_pre_tp1_degrade_stage_for_replan,
+)
 from src.utils.log import get_logger
 
 if TYPE_CHECKING:
@@ -96,6 +99,10 @@ class TpUpdateCoordinator:
                 boll.candle_ts_ms,
                 s.state.last_tp_update_candle_ts_ms,
             )
+            # Refresh stale pre-TP1 degrade stage before reconcile so that
+            # a saved SINGLE cap doesn't block recovery to THREE_STAGE_RUNNER
+            # or MIDDLE_RUNNER when the position age actually permits it.
+            self._refresh_pre_tp1_degrade_stage_before_startup_reconcile(ts_ms=ts_ms)
 
         # ── Three-Stage waiting-TP2 branch ────────────────────────────
         if s._three_stage_waiting_tp2():
@@ -170,6 +177,7 @@ class TpUpdateCoordinator:
             tp_price, tp_mode, partial_tp_price, partial_tp_ratio, tp_plan, \
                 reason_override = self._apply_normal_plan_selection_branch(
                     tp_price, tp_mode, boll, ts_ms, reason_override,
+                    force_reconcile=force_reconcile,
                 )
 
         # ── Finalize state & emit intent (or skip) ────────────────────
@@ -687,8 +695,16 @@ class TpUpdateCoordinator:
         boll: BollSnapshot,
         ts_ms: int,
         reason_override: str | None,
+        *,
+        force_reconcile: bool = False,
     ) -> tuple[float, TpMode, float | None, float, str, str | None]:
-        """Normal _select_tp_plan branch with middle/three-stage runner setup."""
+        """Normal _select_tp_plan branch with middle/three-stage runner setup.
+
+        When ``force_reconcile=True`` (startup path), the branch also
+        attempts to re-apply Middle Bucket Split for THREE_STAGE_RUNNER
+        and MIDDLE_RUNNER plans — this ensures startup reconcile can
+        recover split state that was not persisted across restarts.
+        """
         s = self.strategy
 
         partial_tp_price, partial_tp_ratio, tp_plan = s._select_tp_plan(
@@ -702,8 +718,65 @@ class TpUpdateCoordinator:
             tp_price, _tp_src = s._select_three_stage_tp2_outer(s.state.side, boll)
 
         if tp_plan == "MIDDLE_RUNNER":
+            # ── Startup reconcile: re-apply Middle Bucket Split ──────
+            if force_reconcile and s.config.middle_bucket_split_enabled:
+                split_result = self._apply_middle_bucket_split_for_middle_runner(boll)
+
+                if split_result.action == "SPLIT":
+                    partial_tp_price = split_result.partial_tp_price
+                    partial_tp_ratio = split_result.partial_tp_ratio
+                    tp_plan = split_result.tp_plan or "MIDDLE_RUNNER"
+                    s.state.middle_runner_first_tp_price = partial_tp_price
+                    s.state.middle_runner_final_tp_price = tp_price
+                    s.state.middle_runner_pending = True
+                    reason_override = reason_override or "startup_force_tp_reconcile"
+                    return tp_price, tp_mode, partial_tp_price, partial_tp_ratio, tp_plan, reason_override
+
+                if split_result.action == "UNSPLIT_SLOW_MIDDLE":
+                    partial_tp_price = split_result.partial_tp_price
+                    partial_tp_ratio = split_result.partial_tp_ratio
+                    tp_plan = "MIDDLE_RUNNER"
+                    s.state.middle_runner_first_tp_price = partial_tp_price
+                    s.state.middle_runner_final_tp_price = tp_price
+                    s.state.middle_runner_pending = True
+                    reason_override = reason_override or "startup_force_tp_reconcile"
+                    return tp_price, tp_mode, partial_tp_price, partial_tp_ratio, tp_plan, reason_override
+
+                # FALLBACK_OUTER / INVALID / DISABLED → fall through
+
             s._set_middle_runner_planned(partial_tp_price, tp_price)
         elif tp_plan == "THREE_STAGE_RUNNER":
+            # ── Startup reconcile: re-apply Middle Bucket Split ──────
+            if force_reconcile and s.config.middle_bucket_split_enabled:
+                # Ensure THREE_STAGE state fields are initialised before the
+                # split helper reads them (tp1_ratio, etc. may be zero if the
+                # THREE_STAGE plan was just recovered from a stale SINGLE cap).
+                tp1_ratio, tp2_ratio, runner_ratio = s._normalized_three_stage_ratios()
+                s.state.three_stage_tp1_ratio = tp1_ratio
+                s.state.three_stage_tp2_ratio = tp2_ratio
+                s.state.three_stage_runner_ratio = runner_ratio
+                s.state.three_stage_runner_enabled_for_position = True
+
+                split_result = self._apply_middle_bucket_split_for_three_stage(boll)
+
+                if split_result.action == "SPLIT":
+                    partial_tp_price = split_result.partial_tp_price
+                    partial_tp_ratio = split_result.partial_tp_ratio
+                    tp_plan = split_result.tp_plan or "THREE_STAGE_RUNNER"
+                    reason_override = reason_override or "startup_force_tp_reconcile"
+                    return tp_price, tp_mode, partial_tp_price, partial_tp_ratio, tp_plan, reason_override
+
+                if split_result.action == "UNSPLIT_SLOW_MIDDLE":
+                    partial_tp_price = split_result.partial_tp_price
+                    partial_tp_ratio = split_result.partial_tp_ratio
+                    tp_plan = "THREE_STAGE_RUNNER"
+                    s.state.three_stage_tp1_price = partial_tp_price
+                    s.state.three_stage_tp2_price = tp_price
+                    reason_override = reason_override or "startup_force_tp_reconcile"
+                    return tp_price, tp_mode, partial_tp_price, partial_tp_ratio, tp_plan, reason_override
+
+                # FALLBACK_OUTER / INVALID / DISABLED → fall through
+
             if not s._update_three_stage_dynamic_targets_without_reset(s.state.side, boll):
                 tp_price, tp_mode = s._fallback_to_single_outer_due_middle_profit_insufficient(
                     side=s.state.side,
@@ -899,6 +972,79 @@ class TpUpdateCoordinator:
     def _reset_middle_bucket_split_state(self) -> None:
         """Clear all middle-bucket-split state fields."""
         clear_middle_bucket_split_state(self.strategy.state, reason=None)
+
+    # ------------------------------------------------------------------
+    # Pre-TP1 degrade stage refresh (startup reconcile only)
+    # ------------------------------------------------------------------
+
+    def _refresh_pre_tp1_degrade_stage_before_startup_reconcile(
+        self,
+        *,
+        ts_ms: int,
+    ) -> None:
+        """Re-compute the pre-TP1 degrade cap before startup TP reconcile.
+
+        This is ONLY called when ``force_reconcile=True`` (startup path).
+        It re-evaluates the stale degrade stage based on current position
+        age so that a saved SINGLE cap doesn't permanently block recovery
+        to THREE_STAGE_RUNNER or MIDDLE_RUNNER when market conditions
+        actually permit it.
+
+        Delegates to the shared pure helper
+        ``decide_pre_tp1_degrade_stage_for_replan()``.
+        """
+        s = self.strategy
+        old_stage = s.state.three_stage_pre_tp1_degrade_stage
+        old_degraded_ts_ms = s.state.three_stage_pre_tp1_degraded_ts_ms
+        pre_reconcile_tp_plan = s.state.tp_plan
+        pre_reconcile_three_stage_enabled_for_position = (
+            s.state.three_stage_runner_enabled_for_position
+        )
+
+        three_stage_replan_cap_applicable = (
+            s.config.three_stage_runner_enabled
+            or pre_reconcile_three_stage_enabled_for_position
+            or pre_reconcile_tp_plan == "THREE_STAGE_RUNNER"
+        )
+
+        decision = decide_pre_tp1_degrade_stage_for_replan(
+            first_entry_ts_ms=s.state.first_entry_ts_ms,
+            ts_ms=ts_ms,
+            three_stage_replan_cap_applicable=three_stage_replan_cap_applicable,
+            degrade_enabled=s.config.three_stage_pre_tp1_degrade_enabled,
+            middle_runner_after_seconds=s.config.three_stage_pre_tp1_middle_runner_after_seconds,
+            single_after_seconds=s.config.three_stage_pre_tp1_single_after_seconds,
+        )
+
+        s.state.three_stage_pre_tp1_degrade_stage = decision.new_stage
+        s.state.three_stage_pre_tp1_degraded_ts_ms = decision.degraded_ts_ms
+
+        # Always log on startup reconcile — it's a low-frequency path and
+        # the log entry is invaluable for diagnosing stale-stage issues.
+        logger.warning(
+            "STARTUP_PRE_TP1_DEGRADE_REFRESHED_BEFORE_TP_RECONCILE | "
+            "old_stage=%s new_stage=%s old_degraded_ts_ms=%s "
+            "new_degraded_ts_ms=%s age_seconds=%.1f first_entry_ts_ms=%s "
+            "middle_after_seconds=%s single_after_seconds=%s "
+            "three_stage_replan_cap_applicable=%s "
+            "three_stage_runner_enabled=%s "
+            "pre_reconcile_tp_plan=%s "
+            "pre_reconcile_three_stage_enabled_for_position=%s "
+            "reason=%s",
+            old_stage,
+            decision.new_stage,
+            old_degraded_ts_ms,
+            decision.degraded_ts_ms,
+            decision.age_seconds,
+            s.state.first_entry_ts_ms,
+            s.config.three_stage_pre_tp1_middle_runner_after_seconds,
+            s.config.three_stage_pre_tp1_single_after_seconds,
+            three_stage_replan_cap_applicable,
+            s.config.three_stage_runner_enabled,
+            pre_reconcile_tp_plan,
+            pre_reconcile_three_stage_enabled_for_position,
+            decision.reason,
+        )
 
     def _apply_middle_bucket_split_for_three_stage(
         self,
