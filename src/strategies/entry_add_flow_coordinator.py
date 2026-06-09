@@ -12,6 +12,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from src.position_management.middle_bucket_split_state import (
+    clear_middle_bucket_split_state,
+)
 from src.strategies.middle_bucket_split_apply import (
     apply_middle_runner_bucket_split,
     apply_three_stage_middle_bucket_split,
@@ -243,6 +246,70 @@ class EntryAddFlowCoordinator:
         )
 
     # ------------------------------------------------------------------
+    # _refresh_pre_tp1_degrade_stage_before_position_replan
+    # ------------------------------------------------------------------
+
+    def _refresh_pre_tp1_degrade_stage_before_position_replan(
+        self,
+        *,
+        ts_ms: int,
+        next_layer: int,
+    ) -> None:
+        """Re-compute the pre-TP1 degrade cap based on current position age.
+
+        This helper is called during entry/add TP replan, NOT during
+        ordinary tick-driven TP updates.  It intentionally does NOT
+        delegate to ``_three_stage_pre_tp1_degrade_target()`` because
+        that function has sticky guards that short-circuit when the
+        current degrade_stage is already SINGLE or MIDDLE_RUNNER —
+        those guards are correct for tick updates but wrong for
+        position-replan after a position-size increase.
+
+        Rules (all based on ``first_entry_ts_ms``, which is never
+        reset by an add):
+
+        * age < middle_runner_after_seconds  →  degrade_stage = None
+        * middle_runner_after_seconds ≤ age < single_after_seconds
+          →  degrade_stage = "MIDDLE_RUNNER"
+        * age ≥ single_after_seconds  →  degrade_stage = "SINGLE"
+
+        When ``three_stage_pre_tp1_degrade_enabled`` is False the
+        degrade stage is unconditionally cleared.
+        """
+        strategy = self.strategy
+        old_stage = strategy.state.three_stage_pre_tp1_degrade_stage
+        old_degraded_ts_ms = strategy.state.three_stage_pre_tp1_degraded_ts_ms
+
+        age_seconds = strategy._three_stage_pre_tp1_age_seconds(ts_ms)
+
+        new_stage: str | None = None
+        if strategy.config.three_stage_pre_tp1_degrade_enabled:
+            if age_seconds >= strategy.config.three_stage_pre_tp1_single_after_seconds:
+                new_stage = "SINGLE"
+            elif age_seconds >= strategy.config.three_stage_pre_tp1_middle_runner_after_seconds:
+                new_stage = "MIDDLE_RUNNER"
+
+        strategy.state.three_stage_pre_tp1_degrade_stage = new_stage
+        strategy.state.three_stage_pre_tp1_degraded_ts_ms = ts_ms if new_stage is not None else 0
+
+        if old_stage != new_stage or old_degraded_ts_ms != strategy.state.three_stage_pre_tp1_degraded_ts_ms:
+            logger.warning(
+                "THREE_STAGE_PRE_TP1_DEGRADE_REFRESHED_BEFORE_POSITION_REPLAN | "
+                "next_layer=%s old_stage=%s new_stage=%s old_degraded_ts_ms=%s "
+                "new_degraded_ts_ms=%s age_seconds=%.1f first_entry_ts_ms=%s "
+                "middle_after_seconds=%s single_after_seconds=%s",
+                next_layer,
+                old_stage,
+                new_stage,
+                old_degraded_ts_ms,
+                strategy.state.three_stage_pre_tp1_degraded_ts_ms,
+                age_seconds,
+                strategy.state.first_entry_ts_ms,
+                strategy.config.three_stage_pre_tp1_middle_runner_after_seconds,
+                strategy.config.three_stage_pre_tp1_single_after_seconds,
+            )
+
+    # ------------------------------------------------------------------
     # open_position
     # ------------------------------------------------------------------
 
@@ -295,6 +362,17 @@ class EntryAddFlowCoordinator:
         strategy._reset_near_tp_state()
         strategy._reset_middle_runner_state()
         strategy._reset_three_stage_runner_state()
+
+        clear_middle_bucket_split_state(
+            strategy.state,
+            reason="position_replan_before_tp_selection",
+        )
+
+        self._refresh_pre_tp1_degrade_stage_before_position_replan(
+            ts_ms=ts_ms,
+            next_layer=next_layer,
+        )
+
         tp_price, tp_mode = strategy._select_tp_price(side, boll)
         partial_tp_price, partial_tp_ratio, tp_plan = strategy._select_tp_plan(side, tp_price, next_layer, tp_mode=tp_mode,
                                                                                boll=boll)
