@@ -104,6 +104,54 @@ async def _save_state_on_shutdown(
         logger.exception("SYMBOL_WORKER_SHUTDOWN_STATE_SAVE_FAILED")
 
 
+async def _drain_critical_runtime_tasks(
+    tasks: set[asyncio.Task],
+    *,
+    execution_queue: asyncio.Queue | None = None,
+    timeout: float,
+) -> None:
+    """Wait briefly for critical runtime tasks to drain before cancellation.
+
+    This function does NOT cancel tasks.  It waits up to *timeout*
+    seconds for the execution queue to empty or all critical tasks to
+    complete — whichever happens first.
+
+    This is a best-effort grace window.  It is NOT a guarantee that every
+    in-flight exchange request has completed.  Future phases can make this more
+    precise (e.g.  execution_worker drain event), but for D06b the goal is
+    simply to avoid immediately cancelling the execution path.
+    """
+    if not tasks:
+        return
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    queue_empty_at_start = (
+        execution_queue.empty() if execution_queue is not None else True
+    )
+
+    while loop.time() < deadline:
+        if execution_queue is not None and execution_queue.empty():
+            break
+        if all(t.done() for t in tasks):
+            break
+        await asyncio.sleep(0.05)
+
+    remaining = sum(1 for t in tasks if not t.done())
+    queue_empty = (
+        execution_queue.empty() if execution_queue is not None else True
+    )
+
+    logger.warning(
+        "SYMBOL_WORKER_CRITICAL_DRAIN_COMPLETE | "
+        "queue_empty_at_start=%s queue_empty=%s remaining_tasks=%s timeout_seconds=%s",
+        queue_empty_at_start,
+        queue_empty,
+        remaining,
+        timeout,
+    )
+
+
 async def _cancel_runtime_tasks(
     tasks: set[asyncio.Task],
     timeout: float,

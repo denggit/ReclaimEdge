@@ -325,15 +325,19 @@ def test_symbol_worker_app_heartbeat_order() -> None:
 # ============================================================================
 
 
-def test_symbol_worker_app_allows_task_creation_for_shutdown() -> None:
-    """SymbolWorkerApp may use asyncio.ensure_future for the D06b shutdown
-    task management, but must NOT create a dedicated heartbeat_task."""
+def test_symbol_worker_app_uses_named_task_references_for_shutdown() -> None:
+    """SymbolWorkerApp must use named task references (account_task,
+    execution_task, heartbeat_task, etc.) so the D06b two-stage shutdown
+    can classify tasks into critical_drain_tasks and producer_or_aux_tasks."""
     source = _app_source()
 
-    forbidden = [
-        "heartbeat_task",
+    required = [
+        "account_task",
+        "execution_task",
+        "critical_drain_tasks",
+        "producer_or_aux_tasks",
     ]
-    for token in forbidden:
-        assert token not in source, (
-            f"SymbolWorkerApp must not contain {token!r}"
+    for token in required:
+        assert token in source, (
+            f"SymbolWorkerApp must contain named reference {token!r}"
         )

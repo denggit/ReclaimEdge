@@ -20,6 +20,7 @@ from src.live.symbol_worker_factory import SymbolWorkerFactory
 from src.live.symbol_worker_shutdown_runtime import (
     _begin_symbol_worker_drain,
     _cancel_runtime_tasks,
+    _drain_critical_runtime_tasks,
     _save_state_on_shutdown,
     _wait_for_shutdown,
 )
@@ -374,70 +375,106 @@ class SymbolWorkerApp:
         shutdown_controller = self.shutdown_controller or WorkerShutdownController()
 
         try:
-            # Build task list preserving the C05 gather order:
-            # account → strategy → execution → daily_report → weekly_summary
-            # → heartbeat (if enabled) → monitor
-            tasks: list[asyncio.Task] = [
-                asyncio.ensure_future(
-                    account_position_sync_worker_module.account_position_sync_worker(
-                        state_lock=state_lock,
-                        account_snapshot=account_snapshot,
-                        execution_state=execution_state,
-                        trader=trader,
-                        sizer=sizer,
-                        strategy=strategy,
-                        journal=journal,
-                        state_store=state_store,
-                        position_sync_seconds=position_sync_seconds,
-                        account_sync_seconds=account_sync_seconds,
-                        cash_log_min_delta_usdt=cash_log_min_delta_usdt,
-                        rolling_loss_guard=rolling_loss_guard,
-                        email_sender=email_sender,
-                    )
-                ),
-                asyncio.ensure_future(
-                    strategy_tick_worker_module.strategy_tick_worker(
-                        strategy_tick_queue=strategy_tick_queue,
-                        execution_queue=execution_queue,
-                        state_lock=state_lock,
-                        account_snapshot=account_snapshot,
-                        execution_state=execution_state,
-                        cvd=cvd,
-                        strategy=strategy,
-                        heartbeat_seconds=market_tick_heartbeat_seconds,
-                        account_stale_warn_seconds=account_snapshot_stale_warn_seconds,
-                        strategy_lag_warn_seconds=strategy_lag_warn_seconds,
-                    )
-                ),
-                asyncio.ensure_future(
-                    execution_worker_module.execution_worker(
-                        execution_queue=execution_queue,
-                        state_lock=state_lock,
-                        execution_state=execution_state,
-                        account_snapshot=account_snapshot,
-                        trader=trader,
-                        strategy=strategy,
-                        journal=journal,
-                        state_store=state_store,
-                        email_sender=email_sender,
-                        backlog_log_seconds=execution_backlog_log_seconds,
-                        sidecar_skip_first_layer=sizer.config.sidecar_skip_first_layer,
-                    )
-                ),
-                asyncio.ensure_future(daily_report_loop()),
-            ]
+            # ── D06b: named task references for shutdown classification ──
+            # Each runtime task is kept as a named variable so the
+            # shutdown path can distinguish critical tasks (account sync,
+            # execution worker) from producer / auxiliary tasks (strategy,
+            # monitor, report loops, heartbeat loop).
+            account_task = asyncio.ensure_future(
+                account_position_sync_worker_module.account_position_sync_worker(
+                    state_lock=state_lock,
+                    account_snapshot=account_snapshot,
+                    execution_state=execution_state,
+                    trader=trader,
+                    sizer=sizer,
+                    strategy=strategy,
+                    journal=journal,
+                    state_store=state_store,
+                    position_sync_seconds=position_sync_seconds,
+                    account_sync_seconds=account_sync_seconds,
+                    cash_log_min_delta_usdt=cash_log_min_delta_usdt,
+                    rolling_loss_guard=rolling_loss_guard,
+                    email_sender=email_sender,
+                )
+            )
+            strategy_task = asyncio.ensure_future(
+                strategy_tick_worker_module.strategy_tick_worker(
+                    strategy_tick_queue=strategy_tick_queue,
+                    execution_queue=execution_queue,
+                    state_lock=state_lock,
+                    account_snapshot=account_snapshot,
+                    execution_state=execution_state,
+                    cvd=cvd,
+                    strategy=strategy,
+                    heartbeat_seconds=market_tick_heartbeat_seconds,
+                    account_stale_warn_seconds=account_snapshot_stale_warn_seconds,
+                    strategy_lag_warn_seconds=strategy_lag_warn_seconds,
+                )
+            )
+            execution_task = asyncio.ensure_future(
+                execution_worker_module.execution_worker(
+                    execution_queue=execution_queue,
+                    state_lock=state_lock,
+                    execution_state=execution_state,
+                    account_snapshot=account_snapshot,
+                    trader=trader,
+                    strategy=strategy,
+                    journal=journal,
+                    state_store=state_store,
+                    email_sender=email_sender,
+                    backlog_log_seconds=execution_backlog_log_seconds,
+                    sidecar_skip_first_layer=sizer.config.sidecar_skip_first_layer,
+                )
+            )
+            daily_report_task = asyncio.ensure_future(daily_report_loop())
+
+            weekly_summary_task: asyncio.Task | None = None
             if self.app_config.weekly_summary.enabled:
-                tasks.append(asyncio.ensure_future(weekly_summary_loop()))
+                weekly_summary_task = asyncio.ensure_future(weekly_summary_loop())
             else:
                 logger.info("Weekly overall summary loop disabled")
+
             # Only add heartbeat to the FIRST_COMPLETED wait when it is
             # enabled — a disabled heartbeat returns immediately, which
             # would falsely trigger the shutdown path.
+            heartbeat_task: asyncio.Task | None = None
             if heartbeat_writer.config.enabled:
-                tasks.append(
-                    asyncio.ensure_future(heartbeat_writer.run_until_cancelled())
+                heartbeat_task = asyncio.ensure_future(
+                    heartbeat_writer.run_until_cancelled()
                 )
-            tasks.append(asyncio.ensure_future(monitor.run_forever()))
+
+            monitor_task = asyncio.ensure_future(monitor.run_forever())
+
+            # Build the flat task list for asyncio.wait preserving the
+            # C05 gather order:
+            # account → strategy → execution → daily_report → weekly_summary
+            # → heartbeat (if enabled) → monitor
+            tasks: list[asyncio.Task] = [
+                account_task,
+                strategy_task,
+                execution_task,
+                daily_report_task,
+            ]
+            if weekly_summary_task is not None:
+                tasks.append(weekly_summary_task)
+            if heartbeat_task is not None:
+                tasks.append(heartbeat_task)
+            tasks.append(monitor_task)
+
+            # ── D06b: task classification for two-stage shutdown ─────────
+            # Critical tasks may be in the middle of an OKX request +
+            # journal + state_store save.  They get a drain window before
+            # cancellation.
+            critical_drain_tasks: set[asyncio.Task] = {
+                account_task,
+                execution_task,
+            }
+            # Producer / auxiliary tasks create new work or observe the
+            # market.  They are cancelled first so the execution queue
+            # drains naturally.
+            producer_or_aux_tasks: set[asyncio.Task] = (
+                set(tasks) - critical_drain_tasks
+            )
 
             shutdown_task = asyncio.ensure_future(
                 _wait_for_shutdown(shutdown_controller)
@@ -449,14 +486,49 @@ class SymbolWorkerApp:
             )
 
             if shutdown_task in done:
-                # ── Graceful shutdown path ─────────────────────────────
+                # ── Graceful shutdown path (D06b two-stage) ─────────────
+                # Stage 1: drain critical tasks, then save state, then
+                # cancel remaining critical tasks.
+
+                # 1. Begin drain: mark trading_halted, no new positions
                 await _begin_symbol_worker_drain(
                     execution_state=execution_state,
                     state_lock=state_lock,
                     reason=shutdown_controller.reason or "unknown",
                 )
 
-                # Best-effort: save strategy state for restart recovery
+                # 2. Write stopping heartbeat best-effort (early signal)
+                if (
+                    self.app_config.symbol_worker_shutdown_heartbeat_enabled
+                    and heartbeat_writer.config.enabled
+                ):
+                    heartbeat_writer.write_status_once("stopping")
+
+                # 3. Cancel producer / auxiliary tasks first
+                #    (strategy tick, monitor, report loops, heartbeat loop).
+                #    These produce new work; cancelling them early means the
+                #    execution queue will drain naturally.
+                await _cancel_runtime_tasks(
+                    producer_or_aux_tasks & pending,
+                    timeout=min(
+                        2.0,
+                        self.app_config.symbol_worker_shutdown_drain_timeout_seconds,
+                    ),
+                )
+
+                # 4. Drain critical tasks WITHOUT immediate cancellation.
+                #    Give the execution worker and account sync a window to
+                #    finish in-flight OKX requests, journal writes, and
+                #    state_store saves.
+                await _drain_critical_runtime_tasks(
+                    critical_drain_tasks & pending,
+                    execution_queue=execution_queue,
+                    timeout=self.app_config.symbol_worker_shutdown_drain_timeout_seconds,
+                )
+
+                # 5. Save strategy state AFTER critical drain.
+                #    Captures the most recent state from any work that
+                #    completed during the drain window.
                 if self.app_config.symbol_worker_shutdown_save_state_enabled:
                     await _save_state_on_shutdown(
                         execution_state=execution_state,
@@ -465,26 +537,21 @@ class SymbolWorkerApp:
                         state_store=state_store,
                     )
 
-                # Best-effort: write stopping heartbeat
-                if (
-                    self.app_config.symbol_worker_shutdown_heartbeat_enabled
-                    and heartbeat_writer.config.enabled
-                ):
-                    heartbeat_writer.write_status_once("stopping")
-
-                # Cancel remaining runtime tasks with bounded grace
+                # 6. Cancel any critical tasks still running after drain
+                #    (best-effort cleanup with a short timeout).
                 await _cancel_runtime_tasks(
-                    pending - {shutdown_task},
-                    timeout=self.app_config.symbol_worker_shutdown_drain_timeout_seconds,
+                    {t for t in critical_drain_tasks if not t.done()},
+                    timeout=2.0,
                 )
 
-                # Best-effort: write stopped heartbeat before exit
+                # 7. Write stopped heartbeat best-effort (final signal)
                 if (
                     self.app_config.symbol_worker_shutdown_heartbeat_enabled
                     and heartbeat_writer.config.enabled
                 ):
                     heartbeat_writer.write_status_once("stopped")
 
+                # 8. Complete
                 logger.warning("SYMBOL_WORKER_SHUTDOWN_COMPLETE")
             else:
                 # ── Unexpected task exit (existing behaviour) ──────────

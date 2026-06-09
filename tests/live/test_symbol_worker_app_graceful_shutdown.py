@@ -836,3 +836,814 @@ class TestSymbolWorkerAppNoTradingMutation:
             assert token not in source, (
                 f"symbol_worker_app.py must not contain {token!r}"
             )
+
+
+# ============================================================================
+# 13. _drain_critical_runtime_tasks helper — direct tests
+# ============================================================================
+
+
+class TestDrainCriticalRuntimeTasks:
+    @pytest.mark.asyncio
+    async def test_drain_does_not_cancel_tasks(self) -> None:
+        """_drain_critical_runtime_tasks must NOT cancel tasks."""
+        from src.live.symbol_worker_shutdown_runtime import (
+            _drain_critical_runtime_tasks,
+        )
+
+        async def _block() -> None:
+            await asyncio.Event().wait()
+
+        task = asyncio.ensure_future(_block())
+        try:
+            await _drain_critical_runtime_tasks(
+                {task}, timeout=0.01,
+            )
+            # Task must NOT be cancelled or done after drain.
+            assert not task.cancelled()
+            assert not task.done()
+        finally:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+    @pytest.mark.asyncio
+    async def test_drain_empty_tasks_returns_immediately(self) -> None:
+        """_drain_critical_runtime_tasks with empty set must return immediately."""
+        from src.live.symbol_worker_shutdown_runtime import (
+            _drain_critical_runtime_tasks,
+        )
+
+        await _drain_critical_runtime_tasks(set(), timeout=10.0)
+
+    @pytest.mark.asyncio
+    async def test_drain_returns_when_execution_queue_empty(self) -> None:
+        """_drain_critical_runtime_tasks must return when the execution
+        queue becomes empty, even if critical tasks are still running."""
+        from src.live.symbol_worker_shutdown_runtime import (
+            _drain_critical_runtime_tasks,
+        )
+
+        execution_queue: asyncio.Queue = asyncio.Queue()
+
+        # Put one item — the drain loop should NOT exit immediately.
+        await execution_queue.put("pending_item")
+
+        async def _block() -> None:
+            await asyncio.Event().wait()
+
+        task = asyncio.ensure_future(_block())
+
+        # Background: drain the queue item after a short delay.
+        async def _drain_queue() -> None:
+            await asyncio.sleep(0.05)
+            execution_queue.get_nowait()
+
+        drainer = asyncio.ensure_future(_drain_queue())
+
+        try:
+            await _drain_critical_runtime_tasks(
+                {task},
+                execution_queue=execution_queue,
+                timeout=10.0,
+            )
+            # Task is still running — drain returned because queue emptied.
+            assert not task.cancelled()
+            assert not task.done()
+            assert execution_queue.empty()
+        finally:
+            task.cancel()
+            if not drainer.done():
+                drainer.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            try:
+                await drainer
+            except asyncio.CancelledError:
+                pass
+
+    @pytest.mark.asyncio
+    async def test_drain_returns_when_all_tasks_done(self) -> None:
+        """_drain_critical_runtime_tasks must return when all critical
+        tasks complete, even if the execution queue is not empty."""
+        from src.live.symbol_worker_shutdown_runtime import (
+            _drain_critical_runtime_tasks,
+        )
+
+        execution_queue: asyncio.Queue = asyncio.Queue()
+        await execution_queue.put("pending_item")
+
+        allow_finish = asyncio.Event()
+
+        async def _finish_quickly() -> None:
+            await allow_finish.wait()
+
+        task = asyncio.ensure_future(_finish_quickly())
+
+        # Background: set allow_finish after a short delay.
+        async def _trigger() -> None:
+            await asyncio.sleep(0.05)
+            allow_finish.set()
+
+        trigger = asyncio.ensure_future(_trigger())
+
+        try:
+            await _drain_critical_runtime_tasks(
+                {task},
+                execution_queue=execution_queue,
+                timeout=10.0,
+            )
+            # Task completed — drain returned because all tasks done,
+            # even though the queue still has an item.
+            assert task.done()
+            assert not task.cancelled()
+            assert not execution_queue.empty()
+        finally:
+            if not task.done():
+                task.cancel()
+            if not trigger.done():
+                trigger.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            try:
+                await trigger
+            except asyncio.CancelledError:
+                pass
+
+
+# ============================================================================
+# 14. Shutdown does NOT cancel execution_task immediately
+# ============================================================================
+
+
+class TestShutdownDoesNotCancelExecutionImmediately:
+    @pytest.mark.asyncio
+    async def test_shutdown_does_not_cancel_execution_task_immediately(
+        self, tmp_path: Any, monkeypatch: Any
+    ) -> None:
+        """When shutdown is triggered, the execution worker must NOT be
+        cancelled immediately.  It must get a drain window to finish its
+        work naturally."""
+        controller = WorkerShutdownController()
+        factory = _ShutdownTestFactory(tmp_path=tmp_path)
+
+        execution_started = asyncio.Event()
+        allow_finish = asyncio.Event()
+        cancelled_before_finish: list[str] = []
+
+        async def _fake_execution_worker(**kwargs: Any) -> None:
+            execution_started.set()
+            try:
+                await allow_finish.wait()
+            except asyncio.CancelledError:
+                cancelled_before_finish.append("cancelled_before_finish")
+                raise
+
+        async def _fake_account_worker(**kwargs: Any) -> None:
+            # Block forever — account sync is also critical.
+            await asyncio.Event().wait()
+
+        async def _fake_strategy_worker(**kwargs: Any) -> None:
+            # Block forever — will be cancelled as producer.
+            await asyncio.Event().wait()
+
+        async def _fake_monitor_run(self: Any) -> None:
+            await asyncio.Event().wait()
+
+        app_config = _make_app_config(
+            symbol_worker_shutdown_drain_timeout_seconds=2.0,
+            symbol_worker_shutdown_save_state_enabled=False,
+            symbol_worker_shutdown_heartbeat_enabled=False,
+        )
+
+        app = SymbolWorkerApp(
+            app_config=app_config,
+            factory=factory,
+            shutdown_controller=controller,
+        )
+
+        # Monkeypatch startup helpers.
+        async def _fake_fetch_cash(_trader: Any) -> float:
+            return 10000.0
+
+        async def _noop(**kwargs: Any) -> None:
+            return None
+
+        def _noop_sync(**kwargs: Any) -> bool:
+            return False
+
+        monkeypatch.setattr(
+            "src.live.symbol_worker_app.live_flat_balance.fetch_usdt_cash_balance",
+            _fake_fetch_cash,
+        )
+        monkeypatch.setattr(
+            "src.live.symbol_worker_app.startup_order_recovery.apply_main_tp_startup_recovery",
+            _noop,
+        )
+        monkeypatch.setattr(
+            "src.live.symbol_worker_app.startup_order_recovery.apply_sidecar_startup_recovery",
+            _noop,
+        )
+        monkeypatch.setattr(
+            "src.live.symbol_worker_app.rolling_loss_live_helpers.apply_rolling_loss_guard_startup_state",
+            _noop,
+        )
+        monkeypatch.setattr(
+            "src.live.symbol_worker_app.runner_live_helpers.apply_three_stage_startup_safety_gate",
+            _noop_sync,
+        )
+
+        # Monkeypatch workers to control behaviour.
+        monkeypatch.setattr(
+            "src.live.symbol_worker_app.execution_worker_module.execution_worker",
+            _fake_execution_worker,
+        )
+        monkeypatch.setattr(
+            "src.live.symbol_worker_app.account_position_sync_worker_module.account_position_sync_worker",
+            _fake_account_worker,
+        )
+        monkeypatch.setattr(
+            "src.live.symbol_worker_app.strategy_tick_worker_module.strategy_tick_worker",
+            _fake_strategy_worker,
+        )
+        monkeypatch.setattr(
+            _FakeMonitor, "run_forever", _fake_monitor_run,
+        )
+
+        # Monkeypatch _drain_critical_runtime_tasks to give the
+        # execution worker time to finish.  In a real shutdown the
+        # execution queue would typically have items in flight, so the
+        # drain loop would naturally wait.  In this test the fake queue
+        # is empty, so we simulate a brief drain window.
+        async def _patched_drain(tasks: set[asyncio.Task], **kwargs: Any) -> None:
+            # Signal the execution worker to finish.
+            allow_finish.set()
+            # Wait a short time for it to process the signal.
+            await asyncio.sleep(0.05)
+
+        monkeypatch.setattr(
+            "src.live.symbol_worker_app._drain_critical_runtime_tasks",
+            _patched_drain,
+        )
+
+        # Run app.run in background.
+        run_completed = asyncio.Event()
+
+        async def _run_app() -> None:
+            await app.run()
+            run_completed.set()
+
+        run_task = asyncio.ensure_future(_run_app())
+
+        try:
+            # Wait for execution worker to start.
+            await asyncio.wait_for(execution_started.wait(), timeout=5.0)
+
+            # Trigger shutdown.
+            controller.request_shutdown("test_no_immediate_cancel")
+
+            # Wait for app.run to complete.
+            await asyncio.wait_for(run_completed.wait(), timeout=5.0)
+
+            # Execution worker must NOT have been cancelled — it was
+            # allowed to finish naturally during the drain window.
+            assert len(cancelled_before_finish) == 0, (
+                "execution worker was cancelled instead of allowed to finish"
+            )
+
+        finally:
+            if not run_task.done():
+                run_task.cancel()
+                try:
+                    await run_task
+                except asyncio.CancelledError:
+                    pass
+            allow_finish.set()
+
+        assert controller.requested is True
+
+
+# ============================================================================
+# 15. Shutdown cancels execution_task after drain timeout
+# ============================================================================
+
+
+class TestShutdownCancelsExecutionAfterDrainTimeout:
+    @pytest.mark.asyncio
+    async def test_shutdown_cancels_execution_task_after_drain_timeout(
+        self, tmp_path: Any, monkeypatch: Any
+    ) -> None:
+        """When the execution worker does not finish within the drain
+        timeout, it must be cancelled in the final cleanup step."""
+        controller = WorkerShutdownController()
+        factory = _ShutdownTestFactory(tmp_path=tmp_path)
+
+        cancelled_events: list[str] = []
+
+        async def _fake_execution_worker(**kwargs: Any) -> None:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled_events.append("execution_cancelled")
+                raise
+
+        async def _fake_account_worker(**kwargs: Any) -> None:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled_events.append("account_cancelled")
+                raise
+
+        async def _fake_strategy_worker(**kwargs: Any) -> None:
+            await asyncio.Event().wait()
+
+        async def _fake_monitor_run(self: Any) -> None:
+            await asyncio.Event().wait()
+
+        app_config = _make_app_config(
+            symbol_worker_shutdown_drain_timeout_seconds=0.05,
+            symbol_worker_shutdown_save_state_enabled=False,
+            symbol_worker_shutdown_heartbeat_enabled=False,
+        )
+
+        app = SymbolWorkerApp(
+            app_config=app_config,
+            factory=factory,
+            shutdown_controller=controller,
+        )
+
+        async def _fake_fetch_cash(_trader: Any) -> float:
+            return 10000.0
+
+        async def _noop(**kwargs: Any) -> None:
+            return None
+
+        def _noop_sync(**kwargs: Any) -> bool:
+            return False
+
+        monkeypatch.setattr(
+            "src.live.symbol_worker_app.live_flat_balance.fetch_usdt_cash_balance",
+            _fake_fetch_cash,
+        )
+        monkeypatch.setattr(
+            "src.live.symbol_worker_app.startup_order_recovery.apply_main_tp_startup_recovery",
+            _noop,
+        )
+        monkeypatch.setattr(
+            "src.live.symbol_worker_app.startup_order_recovery.apply_sidecar_startup_recovery",
+            _noop,
+        )
+        monkeypatch.setattr(
+            "src.live.symbol_worker_app.rolling_loss_live_helpers.apply_rolling_loss_guard_startup_state",
+            _noop,
+        )
+        monkeypatch.setattr(
+            "src.live.symbol_worker_app.runner_live_helpers.apply_three_stage_startup_safety_gate",
+            _noop_sync,
+        )
+        monkeypatch.setattr(
+            "src.live.symbol_worker_app.execution_worker_module.execution_worker",
+            _fake_execution_worker,
+        )
+        monkeypatch.setattr(
+            "src.live.symbol_worker_app.account_position_sync_worker_module.account_position_sync_worker",
+            _fake_account_worker,
+        )
+        monkeypatch.setattr(
+            "src.live.symbol_worker_app.strategy_tick_worker_module.strategy_tick_worker",
+            _fake_strategy_worker,
+        )
+        monkeypatch.setattr(
+            _FakeMonitor, "run_forever", _fake_monitor_run,
+        )
+
+        run_completed = asyncio.Event()
+
+        async def _run_app() -> None:
+            await app.run()
+            run_completed.set()
+
+        run_task = asyncio.ensure_future(_run_app())
+
+        try:
+            # Give startup time to finish.
+            await asyncio.sleep(0.10)
+
+            # Trigger shutdown.
+            controller.request_shutdown("test_drain_timeout")
+
+            # Wait for app.run to complete.
+            await asyncio.wait_for(run_completed.wait(), timeout=5.0)
+
+            # After the drain timeout, critical tasks must have been
+            # cancelled in the final cleanup step.
+            assert "execution_cancelled" in cancelled_events, (
+                "execution worker was not cancelled after drain timeout"
+            )
+            assert "account_cancelled" in cancelled_events, (
+                "account worker was not cancelled after drain timeout"
+            )
+
+        finally:
+            if not run_task.done():
+                run_task.cancel()
+                try:
+                    await run_task
+                except asyncio.CancelledError:
+                    pass
+
+        assert controller.requested is True
+
+
+# ============================================================================
+# 16. Shutdown saves state AFTER critical drain
+# ============================================================================
+
+
+class TestShutdownSavesStateAfterCriticalDrain:
+    @pytest.mark.asyncio
+    async def test_shutdown_saves_state_after_critical_drain(
+        self, tmp_path: Any, monkeypatch: Any
+    ) -> None:
+        """When the execution worker modifies strategy state during the
+        drain window, save_state must capture the updated state (i.e.
+        save must happen AFTER the critical drain, not before it)."""
+        controller = WorkerShutdownController()
+        state_store = _FakeStateStore()
+        strategy = _FakeStrategy(layers=1)
+        factory = _ShutdownTestFactory(
+            tmp_path=tmp_path,
+            strategy=strategy,
+            state_store=state_store,
+        )
+
+        allow_finish = asyncio.Event()
+
+        async def _fake_execution_worker(strategy: Any = None, **kwargs: Any) -> None:
+            # Simulate work that updates strategy state during drain.
+            await allow_finish.wait()
+            # Mutate strategy state — save_state should capture this.
+            strategy.state.layers = 2
+
+        async def _fake_account_worker(**kwargs: Any) -> None:
+            # Block — cancelled after drain.
+            await asyncio.Event().wait()
+
+        async def _fake_strategy_worker(**kwargs: Any) -> None:
+            await asyncio.Event().wait()
+
+        async def _fake_monitor_run(self: Any) -> None:
+            await asyncio.Event().wait()
+
+        app_config = _make_app_config(
+            symbol_worker_shutdown_drain_timeout_seconds=2.0,
+            symbol_worker_shutdown_save_state_enabled=True,
+            symbol_worker_shutdown_heartbeat_enabled=False,
+        )
+
+        app = SymbolWorkerApp(
+            app_config=app_config,
+            factory=factory,
+            shutdown_controller=controller,
+        )
+
+        async def _fake_fetch_cash(_trader: Any) -> float:
+            return 10000.0
+
+        async def _noop(**kwargs: Any) -> None:
+            return None
+
+        def _noop_sync(**kwargs: Any) -> bool:
+            return False
+
+        monkeypatch.setattr(
+            "src.live.symbol_worker_app.live_flat_balance.fetch_usdt_cash_balance",
+            _fake_fetch_cash,
+        )
+        monkeypatch.setattr(
+            "src.live.symbol_worker_app.startup_order_recovery.apply_main_tp_startup_recovery",
+            _noop,
+        )
+        monkeypatch.setattr(
+            "src.live.symbol_worker_app.startup_order_recovery.apply_sidecar_startup_recovery",
+            _noop,
+        )
+        monkeypatch.setattr(
+            "src.live.symbol_worker_app.rolling_loss_live_helpers.apply_rolling_loss_guard_startup_state",
+            _noop,
+        )
+        monkeypatch.setattr(
+            "src.live.symbol_worker_app.runner_live_helpers.apply_three_stage_startup_safety_gate",
+            _noop_sync,
+        )
+        monkeypatch.setattr(
+            "src.live.symbol_worker_app.execution_worker_module.execution_worker",
+            _fake_execution_worker,
+        )
+        monkeypatch.setattr(
+            "src.live.symbol_worker_app.account_position_sync_worker_module.account_position_sync_worker",
+            _fake_account_worker,
+        )
+        monkeypatch.setattr(
+            "src.live.symbol_worker_app.strategy_tick_worker_module.strategy_tick_worker",
+            _fake_strategy_worker,
+        )
+        monkeypatch.setattr(
+            _FakeMonitor, "run_forever", _fake_monitor_run,
+        )
+
+        run_completed = asyncio.Event()
+
+        async def _run_app() -> None:
+            await app.run()
+            run_completed.set()
+
+        run_task = asyncio.ensure_future(_run_app())
+
+        try:
+            await asyncio.sleep(0.10)
+
+            # Trigger shutdown.
+            controller.request_shutdown("test_save_after_drain")
+
+            # Give the shutdown path time to reach the drain step.
+            await asyncio.sleep(0.10)
+
+            # Allow execution worker to finish (it sets layers=2).
+            allow_finish.set()
+
+            # Wait for app.run to complete.
+            await asyncio.wait_for(run_completed.wait(), timeout=5.0)
+
+            # Save must have been called and must reflect layers=2,
+            # proving save happened AFTER the execution worker updated
+            # strategy state in the drain window.
+            assert len(state_store.save_calls) >= 1, (
+                "state_store.save was not called"
+            )
+            saved_state = state_store.save_calls[-1]
+            # The saved state should have layers=2 (updated during drain).
+            # LiveStateStore.from_strategy_state stores the strategy_state,
+            # so we need to check what was actually saved.
+            # The FakeStateStore.save appends the LiveStateStore object.
+            from src.reporting.live_state_store import LiveStateStore
+            if hasattr(saved_state, "strategy_state"):
+                assert saved_state.strategy_state.layers == 2, (
+                    f"save captured layers={saved_state.strategy_state.layers},"
+                    f" expected 2 (state should be saved AFTER critical drain)"
+                )
+
+        finally:
+            if not run_task.done():
+                run_task.cancel()
+                try:
+                    await run_task
+                except asyncio.CancelledError:
+                    pass
+            allow_finish.set()
+
+        assert controller.requested is True
+
+
+# ============================================================================
+# 17. Producers cancelled before critical drain
+# ============================================================================
+
+
+class TestShutdownCancelsProducersBeforeCriticalDrain:
+    @pytest.mark.asyncio
+    async def test_shutdown_cancels_producers_before_critical_drain(
+        self, tmp_path: Any, monkeypatch: Any
+    ) -> None:
+        """Strategy tick worker, monitor, and report loops must be
+        cancelled BEFORE the critical drain starts."""
+        controller = WorkerShutdownController()
+        factory = _ShutdownTestFactory(tmp_path=tmp_path)
+
+        cancel_order: list[str] = []
+
+        allow_execution_finish = asyncio.Event()
+
+        async def _fake_execution_worker(**kwargs: Any) -> None:
+            await allow_execution_finish.wait()
+
+        async def _fake_account_worker(**kwargs: Any) -> None:
+            await asyncio.Event().wait()
+
+        async def _fake_strategy_worker(**kwargs: Any) -> None:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancel_order.append("strategy_cancelled")
+                raise
+
+        async def _fake_monitor_run(self: Any) -> None:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancel_order.append("monitor_cancelled")
+                raise
+
+        app_config = _make_app_config(
+            symbol_worker_shutdown_drain_timeout_seconds=2.0,
+            symbol_worker_shutdown_save_state_enabled=False,
+            symbol_worker_shutdown_heartbeat_enabled=False,
+        )
+
+        app = SymbolWorkerApp(
+            app_config=app_config,
+            factory=factory,
+            shutdown_controller=controller,
+        )
+
+        async def _fake_fetch_cash(_trader: Any) -> float:
+            return 10000.0
+
+        async def _noop(**kwargs: Any) -> None:
+            return None
+
+        def _noop_sync(**kwargs: Any) -> bool:
+            return False
+
+        monkeypatch.setattr(
+            "src.live.symbol_worker_app.live_flat_balance.fetch_usdt_cash_balance",
+            _fake_fetch_cash,
+        )
+        monkeypatch.setattr(
+            "src.live.symbol_worker_app.startup_order_recovery.apply_main_tp_startup_recovery",
+            _noop,
+        )
+        monkeypatch.setattr(
+            "src.live.symbol_worker_app.startup_order_recovery.apply_sidecar_startup_recovery",
+            _noop,
+        )
+        monkeypatch.setattr(
+            "src.live.symbol_worker_app.rolling_loss_live_helpers.apply_rolling_loss_guard_startup_state",
+            _noop,
+        )
+        monkeypatch.setattr(
+            "src.live.symbol_worker_app.runner_live_helpers.apply_three_stage_startup_safety_gate",
+            _noop_sync,
+        )
+        monkeypatch.setattr(
+            "src.live.symbol_worker_app.execution_worker_module.execution_worker",
+            _fake_execution_worker,
+        )
+        monkeypatch.setattr(
+            "src.live.symbol_worker_app.account_position_sync_worker_module.account_position_sync_worker",
+            _fake_account_worker,
+        )
+        monkeypatch.setattr(
+            "src.live.symbol_worker_app.strategy_tick_worker_module.strategy_tick_worker",
+            _fake_strategy_worker,
+        )
+        monkeypatch.setattr(
+            _FakeMonitor, "run_forever", _fake_monitor_run,
+        )
+
+        run_completed = asyncio.Event()
+
+        async def _run_app() -> None:
+            await app.run()
+            run_completed.set()
+
+        run_task = asyncio.ensure_future(_run_app())
+
+        try:
+            await asyncio.sleep(0.10)
+
+            # Trigger shutdown.
+            controller.request_shutdown("test_producers_first")
+
+            # Wait a bit for producers to be cancelled.
+            await asyncio.sleep(0.20)
+
+            # Producers must have been cancelled.
+            assert "strategy_cancelled" in cancel_order, (
+                "strategy worker was not cancelled before drain"
+            )
+            assert "monitor_cancelled" in cancel_order, (
+                "monitor was not cancelled before drain"
+            )
+
+            # Execution worker must still be running (critical, not yet cancelled).
+            # We prove this by allowing it to finish now.
+            allow_execution_finish.set()
+
+            # Wait for app.run to complete.
+            await asyncio.wait_for(run_completed.wait(), timeout=5.0)
+
+        finally:
+            if not run_task.done():
+                run_task.cancel()
+                try:
+                    await run_task
+                except asyncio.CancelledError:
+                    pass
+            allow_execution_finish.set()
+
+        assert controller.requested is True
+
+
+# ============================================================================
+# 18. shutdown_runtime.py source guard — extended
+# ============================================================================
+
+
+class TestShutdownRuntimeExtendedSourceGuard:
+    def test_shutdown_runtime_no_external_http_or_trading(self) -> None:
+        """symbol_worker_shutdown_runtime.py must not import or reference
+        any external HTTP library, OKX client, websocket, or trading
+        mutation symbols."""
+        from pathlib import Path
+
+        source = (
+            Path(__file__)
+            .resolve()
+            .parent.parent.parent.joinpath(
+                "src", "live", "symbol_worker_shutdown_runtime.py"
+            )
+            .read_text(encoding="utf-8")
+        )
+
+        forbidden = [
+            "from src.execution.trader",
+            "place_market_order",
+            "market_close",
+            "close_position",
+            "cancel_all",
+            "cancel_algo_order",
+            "cancel_near_tp",
+            "cancel_middle_runner",
+            "cancel_three_stage",
+            "cancel_trend_runner",
+            "import okx",
+            "from okx",
+            "import httpx",
+            "from httpx",
+            "import requests",
+            "from requests",
+            "import websocket",
+            "from websocket",
+        ]
+        for token in forbidden:
+            assert token not in source, (
+                f"symbol_worker_shutdown_runtime.py must not reference {token!r}"
+            )
+
+    def test_shutdown_runtime_contains_drain_critical_helper(self) -> None:
+        """symbol_worker_shutdown_runtime.py must define
+        _drain_critical_runtime_tasks."""
+        from pathlib import Path
+
+        source = (
+            Path(__file__)
+            .resolve()
+            .parent.parent.parent.joinpath(
+                "src", "live", "symbol_worker_shutdown_runtime.py"
+            )
+            .read_text(encoding="utf-8")
+        )
+
+        assert "async def _drain_critical_runtime_tasks(" in source, (
+            "symbol_worker_shutdown_runtime.py must define"
+            " _drain_critical_runtime_tasks"
+        )
+        assert "does NOT cancel" in source, (
+            "_drain_critical_runtime_tasks docstring must state it does not cancel"
+        )
+
+
+# ============================================================================
+# 19. symbol_worker_app.py source guard — shutdown classification
+# ============================================================================
+
+
+class TestSymbolWorkerAppShutdownClassification:
+    def test_app_source_contains_critical_drain_classification(self) -> None:
+        """symbol_worker_app.py must contain the two-stage shutdown
+        classification variables."""
+        from pathlib import Path
+
+        source = (
+            Path(__file__)
+            .resolve()
+            .parent.parent.parent.joinpath("src", "live", "symbol_worker_app.py")
+            .read_text(encoding="utf-8")
+        )
+
+        assert "critical_drain_tasks" in source, (
+            "symbol_worker_app.py must classify critical_drain_tasks"
+        )
+        assert "producer_or_aux_tasks" in source, (
+            "symbol_worker_app.py must classify producer_or_aux_tasks"
+        )
+        assert "_drain_critical_runtime_tasks(" in source, (
+            "symbol_worker_app.py must call _drain_critical_runtime_tasks"
+        )
