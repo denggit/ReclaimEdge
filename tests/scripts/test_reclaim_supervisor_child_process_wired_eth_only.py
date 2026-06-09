@@ -1,8 +1,9 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""D05 source guard tests — verifies ChildProcess IS wired into
-ReclaimSupervisor (ETH-only, no BTC, no heartbeat, no multi-symbol).
-Also verifies that the entry script and workers remain untouched.
+"""D06 source guard tests — verifies ChildProcess IS wired into
+ReclaimSupervisor (ETH-only, no BTC, no heartbeat, no multi-symbol),
+signal handlers are installed from the entry, and the entry script
+and workers remain untouched.
 """
 
 from __future__ import annotations
@@ -91,6 +92,11 @@ def test_reclaim_supervisor_eth_only_no_multi_symbol() -> None:
 def test_run_reclaim_supervisor_entry_still_not_wired_directly_to_child_process() -> None:
     source = _read(_PROJECT_ROOT / "scripts" / "run_reclaim_supervisor.py")
 
+    # D06 allows install_supervisor_signal_handlers in the entry.
+    assert "install_supervisor_signal_handlers" in source, (
+        "D06 run_reclaim_supervisor.py must install signal handlers"
+    )
+
     forbidden = [
         "ChildProcess",
         "ChildProcessSpec",
@@ -102,7 +108,7 @@ def test_run_reclaim_supervisor_entry_still_not_wired_directly_to_child_process(
     ]
     for token in forbidden:
         assert token not in source, (
-            f"D05 run_reclaim_supervisor.py must NOT contain {token!r}"
+            f"D06 run_reclaim_supervisor.py must NOT contain {token!r}"
         )
 
 

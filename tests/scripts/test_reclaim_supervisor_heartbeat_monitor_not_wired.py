@@ -1,8 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""D04 source guard tests — verifies HeartbeatMonitor is NOT wired into
-ReclaimSupervisor, run scripts, or ChildProcess.  D04 only adds the module;
-wiring happens in D05+.
+"""D06 source guard tests — verifies HeartbeatMonitor is NOT wired into
+ReclaimSupervisor, run scripts, ChildProcess, or signal_handlers.
 """
 
 from __future__ import annotations
@@ -82,6 +81,26 @@ def test_child_process_does_not_import_heartbeat_monitor() -> None:
     for token in forbidden:
         assert token not in source, (
             f"child_process.py must NOT contain {token!r}"
+        )
+
+
+# ============================================================================
+# 3b. test_signal_handlers_does_not_import_heartbeat_monitor
+# ============================================================================
+
+
+def test_signal_handlers_does_not_import_heartbeat_monitor() -> None:
+    source = _read(_PROJECT_ROOT / "src" / "live" / "supervisor" / "signal_handlers.py")
+
+    forbidden = [
+        "HeartbeatMonitor",
+        "HeartbeatStatus",
+        "heartbeat_file",
+        "heartbeats_dir",
+    ]
+    for token in forbidden:
+        assert token not in source, (
+            f"signal_handlers.py must NOT contain {token!r}"
         )
 
 

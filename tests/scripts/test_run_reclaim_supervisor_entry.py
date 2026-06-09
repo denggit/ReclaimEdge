@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""D02 source guard — ensures ``scripts/run_reclaim_supervisor.py`` is a thin
-entry that calls ``ReclaimSupervisor``, and that it does NOT introduce
-child processes, trading objects, BTC, or CLI symbol parameters.
+"""D06 source guard — ensures ``scripts/run_reclaim_supervisor.py`` is a thin
+entry that calls ``ReclaimSupervisor``, installs signal handlers, and that it
+does NOT introduce child processes, trading objects, BTC, or CLI symbol parameters.
 
 These tests use source inspection — they never import or instantiate
 live runtime objects, Trader, or asyncio workers.
@@ -56,6 +56,7 @@ def test_run_reclaim_supervisor_is_thin_entry() -> None:
         "load_dotenv()",
         "live_config_helpers.live_trading_enabled()",
         "ReclaimSupervisor.from_env()",
+        "install_supervisor_signal_handlers(supervisor)",
         "await supervisor.run_forever()",
         "asyncio.run(main())",
     ]
@@ -100,7 +101,12 @@ def test_run_reclaim_supervisor_no_symbol_worker_or_child_start() -> None:
         "Popen(",
         "Process(",
         "ChildProcess",
+        "ChildProcessSpec",
         "HeartbeatMonitor",
+        "HeartbeatStatus",
+        "RECLAIM_SYMBOLS",
+        "BTC",
+        "workers",
     ]
     for token in forbidden:
         assert token not in source, (

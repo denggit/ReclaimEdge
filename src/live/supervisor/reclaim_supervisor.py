@@ -22,6 +22,21 @@ def _default_project_root() -> Path:
 
 
 @dataclass(frozen=True)
+class SupervisorShutdownResult:
+    child_name: str
+    child_started: bool
+    child_running_before_shutdown: bool
+    child_pid: int | None
+    child_returncode_before_shutdown: int | None
+    terminate_attempted: bool
+    terminate_error: str | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.terminate_error is None
+
+
+@dataclass(frozen=True)
 class ReclaimSupervisorConfig:
     poll_interval_seconds: float = 5.0
     project_root: Path = field(default_factory=_default_project_root)
@@ -49,6 +64,8 @@ class ReclaimSupervisor:
         self._started_at_ms: int | None = None
         self._stop_requested = False
         self._child: ChildProcess | None = None
+        self._shutdown_started = False
+        self._shutdown_result: SupervisorShutdownResult | None = None
 
     @classmethod
     def from_env(cls) -> "ReclaimSupervisor":
@@ -75,8 +92,18 @@ class ReclaimSupervisor:
     def child_snapshot(self) -> ChildProcessSnapshot | None:
         return self._child.snapshot() if self._child is not None else None
 
+    @property
+    def shutdown_started(self) -> bool:
+        return self._shutdown_started
+
+    @property
+    def shutdown_result(self) -> SupervisorShutdownResult | None:
+        return self._shutdown_result
+
     def request_stop(self) -> None:
-        self._stop_requested = True
+        if not self._stop_requested:
+            logger.info("RECLAIM_SUPERVISOR_STOP_REQUESTED")
+            self._stop_requested = True
 
     def build_child_spec(self) -> ChildProcessSpec:
         script_path = self._config.project_root / self._config.worker_script
@@ -91,6 +118,57 @@ class ReclaimSupervisor:
 
     def create_child_process(self) -> ChildProcess:
         return ChildProcess(self.build_child_spec())
+
+    async def shutdown(self) -> SupervisorShutdownResult:
+        if self._shutdown_result is not None:
+            return self._shutdown_result
+
+        self._shutdown_started = True
+        self._stop_requested = True
+
+        child = self._child
+        if child is None:
+            result = SupervisorShutdownResult(
+                child_name=self._config.child_name,
+                child_started=False,
+                child_running_before_shutdown=False,
+                child_pid=None,
+                child_returncode_before_shutdown=None,
+                terminate_attempted=False,
+                terminate_error=None,
+            )
+            self._shutdown_result = result
+            return result
+
+        snapshot = child.snapshot()
+        terminate_attempted = snapshot.running
+        terminate_error: str | None = None
+
+        if snapshot.running:
+            try:
+                await child.terminate()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                terminate_error = f"{type(exc).__name__}: {exc}"
+                logger.error(
+                    "RECLAIM_SUPERVISOR_CHILD_TERMINATE_FAILED | name=%s pid=%s error=%s",
+                    snapshot.name,
+                    snapshot.pid,
+                    terminate_error,
+                )
+
+        result = SupervisorShutdownResult(
+            child_name=snapshot.name,
+            child_started=snapshot.started,
+            child_running_before_shutdown=snapshot.running,
+            child_pid=snapshot.pid,
+            child_returncode_before_shutdown=snapshot.returncode,
+            terminate_attempted=terminate_attempted,
+            terminate_error=terminate_error,
+        )
+        self._shutdown_result = result
+        return result
 
     async def run_forever(self) -> None:
         self._started_at_ms = live_time_utils.utc_ms()
@@ -114,6 +192,10 @@ class ReclaimSupervisor:
             raise
         finally:
             logger.info("RECLAIM_SUPERVISOR_STOPPING")
-            if self._child is not None:
-                await self._child.terminate()
-            logger.info("RECLAIM_SUPERVISOR_STOPPED")
+            result = await self.shutdown()
+            logger.info(
+                "RECLAIM_SUPERVISOR_STOPPED | child=%s terminate_attempted=%s terminate_error=%s",
+                result.child_name,
+                result.terminate_attempted,
+                result.terminate_error,
+            )
