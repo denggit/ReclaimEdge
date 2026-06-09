@@ -70,6 +70,7 @@ Not every field declared in the TOML schema is consumed by live runtime yet.
 |----------------------|-----------|-------|
 | `[market].boll_window / boll_std_multiplier / boll_distance_threshold_pct` | Wired | Monitor BOLL config |
 | `[market].tp_boll_window` | Wired | TP-only BOLL window |
+| `[market].min_outside_pct` | Wired | Former `BOLL_MIN_OUTSIDE_PCT` — BOLL outside threshold |
 | `[market].td_mode / pos_side_mode` | Checked | Compared against Trader env at startup |
 | `[market].contract_value / min_contracts / contract_precision / price_precision` | Pending | Future Trader/instrument metadata migration |
 | `[cvd].*` | Wired | CvdTrackerConfig |
@@ -77,8 +78,11 @@ Not every field declared in the TOML schema is consumed by live runtime yet.
 | `[capital].dry_run_equity_usdt` | Partially wired | Overridden by live OKX account equity at startup |
 | `[entry].add_gap_pct` | Wired | Strategy add gap |
 | `[entry].add_freeze_seconds` | Pending | Not yet consumed by live mapper |
+| `[entry].first_add_block_seconds` | Wired | Add timing gate — legacy `FIRST_ADD_BLOCK_SECONDS` |
+| `[entry].add_min_interval_seconds` | Wired | Add timing gate — legacy `ADD_MIN_INTERVAL_SECONDS` |
 | `[entry].alert_freeze_seconds` | Wired to monitor alert only | **Not a live trade entry gate** — monitor alert cooldown. Future cleanup may move it to `[monitor]` or `[alert]`. |
-| `[tp].*` | Wired | Strategy TP / Three-Stage config |
+| `[tp].*` (TP ratios / three-stage / middle runner) | Wired | Strategy TP / Three-Stage config |
+| `[tp].split_tp_enabled` | Wired | Legacy Split TP switch; keep false when Three-Stage/Middle Bucket is intended |
 | `[middle_bucket_split].*` | Wired | Strategy middle bucket split config |
 | `[sidecar].enabled / margin_pct / tp_pct / skip_first_layer / max_legs / order_status_check_seconds` | Wired | Position sizing / sidecar sizing inputs |
 | `[sidecar].tp_place_retry_* / tp_rate_limit_fail_action` | Pending | Validated, not fully wired through execution |

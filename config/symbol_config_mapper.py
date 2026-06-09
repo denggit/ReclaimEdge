@@ -140,6 +140,10 @@ def to_strategy_config(
         middle_bucket_split_fast_sl_fee_buffer_pct=decimal_to_float(
             config.middle_bucket_split.fast_sl_fee_buffer_pct
         ),
+        min_outside_pct=decimal_to_float(config.market.min_outside_pct),
+        first_add_block_seconds=config.entry.first_add_block_seconds,
+        add_min_interval_seconds=config.entry.add_min_interval_seconds,
+        split_tp_enabled=config.tp.split_tp_enabled,
     )
 
 

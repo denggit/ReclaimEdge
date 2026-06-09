@@ -40,6 +40,8 @@ boll_window = 20
 boll_std_multiplier = "2.0"
 boll_distance_threshold_pct = "0.005"
 tp_boll_window = 15
+# min_outside_pct: wired to strategy min_outside_pct; legacy env name BOLL_MIN_OUTSIDE_PCT.
+min_outside_pct = "0.0005"
 
 [capital]
 # layer_margin_pct, leverage, max_layers, layer_multiplier_step: wired to
@@ -56,6 +58,10 @@ add_gap_pct = "0.003"
 # add_freeze_seconds: pending; current live add-freeze behavior still comes
 # from existing strategy defaults/env path until explicitly wired.
 add_freeze_seconds = 3600
+# first_add_block_seconds / add_min_interval_seconds: wired to strategy add
+# timing gates.
+first_add_block_seconds = 3600
+add_min_interval_seconds = 1800
 # alert_freeze_seconds: wired to monitor alert cooldown only; NOT a live
 # trade entry gate.  Keep here only for backward schema compatibility;
 # future config cleanup may move it to [monitor] or [alert].
@@ -82,6 +88,9 @@ three_stage_tp2_ratio = "0.10"
 three_stage_runner_ratio = "0.10"
 three_stage_tp2_use_structure_boll = true
 middle_runner_enabled = false
+# split_tp_enabled: wired; keep false when Three-Stage Runner / Middle
+# Bucket Split is the intended TP path.
+split_tp_enabled = false
 
 [middle_bucket_split]
 # Listed fields wired to strategy middle bucket split config.

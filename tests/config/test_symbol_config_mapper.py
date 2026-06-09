@@ -135,6 +135,10 @@ def test_to_strategy_config_default_eth() -> None:
     assert mapped.middle_bucket_split_fast_ratio == 0.60
     assert mapped.middle_bucket_split_fast_sl_enabled is True
     assert mapped.middle_bucket_split_fast_sl_fee_buffer_pct == 0.001
+    assert mapped.min_outside_pct == 0.0005
+    assert mapped.first_add_block_seconds == 3600
+    assert mapped.add_min_interval_seconds == 1800
+    assert mapped.split_tp_enabled is False
 
 
 # ---------------------------------------------------------------------------

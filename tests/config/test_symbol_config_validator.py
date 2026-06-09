@@ -256,3 +256,60 @@ def test_rejects_bool_for_execution_max_order_retries() -> None:
     )
     with pytest.raises(SymbolConfigValidationError, match="max_order_retries"):
         validate_symbol_config(config)
+
+
+# ---------------------------------------------------------------------------
+# 9. New field rejections (A08 wiring)
+# ---------------------------------------------------------------------------
+
+
+def test_rejects_negative_min_outside_pct() -> None:
+    """min_outside_pct must be >= 0."""
+    config = replace(
+        SymbolConfig.default_eth(),
+        market=replace(
+            SymbolConfig.default_eth().market,
+            min_outside_pct=Decimal("-0.001"),
+        ),
+    )
+    with pytest.raises(SymbolConfigValidationError, match="min_outside_pct"):
+        validate_symbol_config(config)
+
+
+def test_rejects_bool_for_entry_first_add_block_seconds() -> None:
+    """bool must be rejected for int field first_add_block_seconds."""
+    config = replace(
+        SymbolConfig.default_eth(),
+        entry=replace(
+            SymbolConfig.default_eth().entry,
+            first_add_block_seconds=True,  # type: ignore[arg-type]
+        ),
+    )
+    with pytest.raises(SymbolConfigValidationError, match="first_add_block_seconds"):
+        validate_symbol_config(config)
+
+
+def test_rejects_bool_for_entry_add_min_interval_seconds() -> None:
+    """bool must be rejected for int field add_min_interval_seconds."""
+    config = replace(
+        SymbolConfig.default_eth(),
+        entry=replace(
+            SymbolConfig.default_eth().entry,
+            add_min_interval_seconds=True,  # type: ignore[arg-type]
+        ),
+    )
+    with pytest.raises(SymbolConfigValidationError, match="add_min_interval_seconds"):
+        validate_symbol_config(config)
+
+
+def test_rejects_non_bool_for_tp_split_tp_enabled() -> None:
+    """non-bool must be rejected for split_tp_enabled."""
+    config = replace(
+        SymbolConfig.default_eth(),
+        tp=replace(
+            SymbolConfig.default_eth().tp,
+            split_tp_enabled=1,  # type: ignore[arg-type]
+        ),
+    )
+    with pytest.raises(SymbolConfigValidationError, match="split_tp_enabled"):
+        validate_symbol_config(config)

@@ -164,6 +164,11 @@ def _validate_market(config: SymbolConfig) -> None:
 
     _ensure_int_at_least(sec, "tp_boll_window", m.tp_boll_window, 2)
 
+    if not isinstance(m.min_outside_pct, Decimal):
+        _fail(sec, "min_outside_pct", f"expected Decimal, got {type(m.min_outside_pct).__name__}")
+    if m.min_outside_pct < Decimal("0") or m.min_outside_pct > Decimal("0.01"):
+        _fail(sec, "min_outside_pct", f"must be between 0 and 0.01, got {m.min_outside_pct}")
+
 
 def _validate_capital(config: SymbolConfig) -> None:
     c = config.capital
@@ -189,6 +194,8 @@ def _validate_entry(config: SymbolConfig) -> None:
 
     _ensure_pct_open_closed(sec, "add_gap_pct", e.add_gap_pct)
     _ensure_non_negative_int(sec, "add_freeze_seconds", e.add_freeze_seconds)
+    _ensure_non_negative_int(sec, "first_add_block_seconds", e.first_add_block_seconds)
+    _ensure_non_negative_int(sec, "add_min_interval_seconds", e.add_min_interval_seconds)
     _ensure_non_negative_int(sec, "alert_freeze_seconds", e.alert_freeze_seconds)
 
 
@@ -257,6 +264,8 @@ def _validate_tp(config: SymbolConfig) -> None:
         )
 
     _ensure_bool(sec, "middle_runner_enabled", tp.middle_runner_enabled)
+
+    _ensure_bool(sec, "split_tp_enabled", tp.split_tp_enabled)
 
 
 def _validate_middle_bucket_split(config: SymbolConfig) -> None:

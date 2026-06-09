@@ -114,6 +114,28 @@ class TestDefaultEthMarketConfig:
     def test_tp_boll_window(self) -> None:
         assert self.config().market.tp_boll_window == 15
 
+    def test_min_outside_pct(self) -> None:
+        assert self.config().market.min_outside_pct == Decimal("0.0005")
+
+
+# ---------------------------------------------------------------------------
+# SymbolConfig.default_eth() – entry
+# ---------------------------------------------------------------------------
+
+
+class TestDefaultEthEntryConfig:
+    """Entry-parameter defaults."""
+
+    @staticmethod
+    def config() -> SymbolConfig:
+        return SymbolConfig.default_eth()
+
+    def test_first_add_block_seconds(self) -> None:
+        assert self.config().entry.first_add_block_seconds == 3600
+
+    def test_add_min_interval_seconds(self) -> None:
+        assert self.config().entry.add_min_interval_seconds == 1800
+
 
 # ---------------------------------------------------------------------------
 # SymbolConfig.default_eth() – TP safety defaults
@@ -141,6 +163,9 @@ class TestDefaultEthTpSafetyDefaults:
 
     def test_tp2_use_structure_boll_is_true(self) -> None:
         assert self.config().tp.three_stage_tp2_use_structure_boll is True
+
+    def test_split_tp_enabled_is_false(self) -> None:
+        assert self.config().tp.split_tp_enabled is False
 
 
 # ---------------------------------------------------------------------------

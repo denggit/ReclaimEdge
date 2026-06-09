@@ -62,6 +62,7 @@ def test_default_eth_toml_matches_live_config() -> None:
     assert loaded.market.bar == "15m"
     assert loaded.market.td_mode == "isolated"
     assert loaded.market.pos_side_mode == "net"
+    assert loaded.market.min_outside_pct == Decimal("0.0005")
 
     # capital (live values)
     assert loaded.capital.layer_margin_pct == Decimal("0.06")
@@ -72,6 +73,8 @@ def test_default_eth_toml_matches_live_config() -> None:
     # entry (live values)
     assert loaded.entry.add_gap_pct == Decimal("0.003")
     assert loaded.entry.add_freeze_seconds == 3600
+    assert loaded.entry.first_add_block_seconds == 3600
+    assert loaded.entry.add_min_interval_seconds == 1800
     assert loaded.entry.alert_freeze_seconds == 3600
 
     # cvd
@@ -82,6 +85,7 @@ def test_default_eth_toml_matches_live_config() -> None:
     assert loaded.tp.three_stage_tp1_ratio == Decimal("0.80")
     assert loaded.tp.three_stage_tp2_ratio == Decimal("0.10")
     assert loaded.tp.three_stage_runner_ratio == Decimal("0.10")
+    assert loaded.tp.split_tp_enabled is False
 
     # middle bucket split (live values)
     assert loaded.middle_bucket_split.enabled is True

@@ -82,6 +82,7 @@ class SymbolMarketConfig:
     boll_std_multiplier: Decimal = Decimal("2.0")
     boll_distance_threshold_pct: Decimal = Decimal("0.005")
     tp_boll_window: int = 15
+    min_outside_pct: Decimal = Decimal("0.0005")
 
 
 # ---------------------------------------------------------------------------
@@ -111,6 +112,8 @@ class SymbolEntryConfig:
 
     add_gap_pct: Decimal = Decimal("0.006")
     add_freeze_seconds: int = 3600
+    first_add_block_seconds: int = 3600
+    add_min_interval_seconds: int = 1800
     alert_freeze_seconds: int = 3600
 
 
@@ -150,6 +153,7 @@ class SymbolTpConfig:
     three_stage_runner_ratio: Decimal = Decimal("0.10")
     three_stage_tp2_use_structure_boll: bool = True
     middle_runner_enabled: bool = False
+    split_tp_enabled: bool = False
 
 
 # ---------------------------------------------------------------------------
