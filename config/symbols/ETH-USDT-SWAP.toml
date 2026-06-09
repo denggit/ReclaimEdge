@@ -1,0 +1,96 @@
+# ---------------------------------------------------------------------------
+# ETH-USDT-SWAP per-symbol configuration
+# ---------------------------------------------------------------------------
+# This file is a static data file — it is NOT automatically read by the live
+# runtime.  It serves as the canonical reference for this symbol's defaults.
+#
+# Decimal fields are written as strings to avoid TOML float ambiguity.
+# ---------------------------------------------------------------------------
+
+[symbol]
+inst_id = "ETH-USDT-SWAP"
+enabled = true
+live_trading = false
+
+[market]
+bar = "15m"
+td_mode = "isolated"
+pos_side_mode = "net"
+contract_value = "0.1"
+min_contracts = "0.01"
+contract_precision = "0.01"
+price_precision = "0.01"
+boll_window = 20
+boll_std_multiplier = "2.0"
+boll_distance_threshold_pct = "0.005"
+tp_boll_window = 15
+
+[capital]
+dry_run_equity_usdt = "1000"
+layer_margin_pct = "0.03"
+leverage = "50"
+max_layers = 3
+layer_multiplier_step = "0.15"
+
+[entry]
+add_gap_pct = "0.006"
+add_freeze_seconds = 3600
+alert_freeze_seconds = 3600
+
+[cvd]
+fast_window_seconds = "5"
+price_stall_seconds = "2"
+price_stall_tolerance_pct = "0.0005"
+burst_window_seconds = "3"
+burst_baseline_seconds = "60"
+burst_min_move_ratio = "2.5"
+burst_min_volume_ratio = "2.0"
+burst_min_abs_range_pct = "0.0015"
+
+[tp]
+tp_min_net_profit_pct = "0.002"
+tp_boll_enabled = true
+three_stage_runner_enabled = true
+three_stage_tp1_ratio = "0.70"
+three_stage_tp2_ratio = "0.20"
+three_stage_runner_ratio = "0.10"
+three_stage_tp2_use_structure_boll = true
+middle_runner_enabled = false
+
+[middle_bucket_split]
+enabled = false
+fast_ratio = "0.60"
+fast_sl_enabled = true
+fast_sl_fee_buffer_pct = "0.001"
+
+[sidecar]
+enabled = false
+margin_pct = "0.01"
+tp_pct = "0.004"
+skip_first_layer = true
+max_legs = 10
+order_status_check_seconds = "5"
+tp_place_retry_count = 3
+tp_place_retry_interval_seconds = "0.8"
+tp_place_retry_backoff_multiplier = "1.5"
+tp_rate_limit_fail_action = "HALT_ONLY"
+
+[risk]
+rolling_loss_guard_enabled = true
+rolling_loss_warn_pct = "0.50"
+rolling_loss_soft_halt_pct = "0.10"
+order_failure_market_exit_delay_seconds = 1800
+
+[execution]
+private_write_min_interval_seconds = "0.6"
+max_order_retries = 3
+
+[runtime]
+strategy_tick_queue_maxsize = 20000
+execution_queue_maxsize = 1000
+position_sync_seconds = "5"
+account_sync_seconds = "60"
+market_tick_heartbeat_seconds = "60"
+account_snapshot_stale_warn_seconds = "30"
+strategy_tick_lag_warn_seconds = "2"
+execution_backlog_log_seconds = "30"
