@@ -61,6 +61,31 @@ When `RECLAIM_USE_SYMBOL_TOML=true` (the default), the live entrypoint checks th
 
 **A mismatch causes startup failure** with a clear error message listing every inconsistency. This prevents dangerous silent divergence between what Trader configures on OKX and what the strategy/sizer assumes.
 
+## TOML Field Wiring Status
+
+Not every field declared in the TOML schema is consumed by live runtime yet.
+**"Pending" means the loader and validator know the field, but changing it may not affect live behavior.**  Do not rely on pending TOML fields for live safety behavior until the specific wiring task is completed.
+
+| TOML section / field | A08 status | Notes |
+|----------------------|-----------|-------|
+| `[market].boll_window / boll_std_multiplier / boll_distance_threshold_pct` | Wired | Monitor BOLL config |
+| `[market].tp_boll_window` | Wired | TP-only BOLL window |
+| `[market].td_mode / pos_side_mode` | Checked | Compared against Trader env at startup |
+| `[market].contract_value / min_contracts / contract_precision / price_precision` | Pending | Future Trader/instrument metadata migration |
+| `[cvd].*` | Wired | CvdTrackerConfig |
+| `[capital].layer_margin_pct / leverage / max_layers / layer_multiplier_step` | Wired | Position sizing / strategy max layers |
+| `[capital].dry_run_equity_usdt` | Partially wired | Overridden by live OKX account equity at startup |
+| `[entry].add_gap_pct` | Wired | Strategy add gap |
+| `[entry].add_freeze_seconds` | Pending | Not yet consumed by live mapper |
+| `[entry].alert_freeze_seconds` | Wired to monitor alert only | **Not a live trade entry gate** — monitor alert cooldown. Future cleanup may move it to `[monitor]` or `[alert]`. |
+| `[tp].*` | Wired | Strategy TP / Three-Stage config |
+| `[middle_bucket_split].*` | Wired | Strategy middle bucket split config |
+| `[sidecar].enabled / margin_pct / tp_pct / skip_first_layer / max_legs / order_status_check_seconds` | Wired | Position sizing / sidecar sizing inputs |
+| `[sidecar].tp_place_retry_* / tp_rate_limit_fail_action` | Pending | Validated, not fully wired through execution |
+| `[risk].*` | Pending | RollingLossGuard / DME still existing runtime/env paths |
+| `[execution].*` | Pending | Private write/retry config not wired from TOML yet |
+| `[runtime].*` | Pending until B phase | live queue/sync still from `.env` |
+
 ## Legacy .env Strategy Parameters
 
 The `.env.example` file retains all legacy strategy parameters in a clearly marked section. These parameters are **ignored by default** after A08 because `RECLAIM_USE_SYMBOL_TOML=true`. They only take effect when `RECLAIM_USE_SYMBOL_TOML=false`.
@@ -87,3 +112,4 @@ The project uses `OKX_PASSPHASE` (not `OKX_PASSPHRASE`). This is a deliberate hi
 6. **Do not create `BTC-USDT-SWAP.toml` as enabled yet.**
 7. **Keep `sidecar.tp_rate_limit_fail_action = "HALT_ONLY"`.**
 8. **Keep `risk.order_failure_market_exit_delay_seconds >= 1800`.**
+9. **Do not rely on pending TOML fields for live safety behavior.** Check the wiring status table above before assuming a TOML change takes effect.

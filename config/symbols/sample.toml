@@ -12,17 +12,32 @@
 #
 # live_trading = false is data only; the actual live gate remains
 # LIVE_TRADING in .env.
+#
+# A08+ wiring status:
+#   - This sample contains both wired and pending fields.
+#   - Pending fields are included to show the future complete SymbolConfig
+#     shape.
+#   - Do not assume pending fields affect live until wired in code.
+#   - See docs/configuration.md for the full wiring status table.
 # ===========================================================================
 
 [symbol]
+# inst_id: wired for monitor and TOML/env consistency check.
 inst_id = "ETH-USDT-SWAP"
+# enabled: pending / future supervisor use.
 enabled = true
+# live_trading: data only; real live gate remains LIVE_TRADING in .env.
 live_trading = false
 
 [market]
+# bar, boll_window, boll_std_multiplier, boll_distance_threshold_pct,
+# tp_boll_window: wired to BollBandBreakoutMonitorConfig.
 bar = "15m"
+# td_mode, pos_side_mode: checked against Trader env; Trader still reads .env.
 td_mode = "isolated"
 pos_side_mode = "net"
+# contract_value, min_contracts, contract_precision, price_precision:
+# pending for future Trader/instrument metadata migration.
 contract_value = "0.1"
 min_contracts = "0.01"
 contract_precision = "0.01"
@@ -33,6 +48,8 @@ boll_distance_threshold_pct = "0.005"
 tp_boll_window = 15
 
 [capital]
+# layer_margin_pct, leverage, max_layers, layer_multiplier_step: wired to
+# SimplePositionSizerConfig and strategy config.
 dry_run_equity_usdt = "1000"
 layer_margin_pct = "0.03"
 leverage = "50"
@@ -40,11 +57,18 @@ max_layers = 3
 layer_multiplier_step = "0.15"
 
 [entry]
+# add_gap_pct: wired to strategy add_layer_gap_pct.
 add_gap_pct = "0.006"
+# add_freeze_seconds: pending; current live add-freeze behavior still comes
+# from existing strategy defaults/env path until explicitly wired.
 add_freeze_seconds = 3600
+# alert_freeze_seconds: wired to monitor alert cooldown only; NOT a live
+# trade entry gate.  Keep here only for backward schema compatibility;
+# future config cleanup may move it to [monitor] or [alert].
 alert_freeze_seconds = 3600
 
 [cvd]
+# All fields wired to CvdTrackerConfig.
 fast_window_seconds = "5"
 price_stall_seconds = "2"
 price_stall_tolerance_pct = "0.0005"
@@ -55,6 +79,7 @@ burst_min_volume_ratio = "2.0"
 burst_min_abs_range_pct = "0.0015"
 
 [tp]
+# Listed fields wired to BollCvdReclaimStrategyConfig.
 tp_min_net_profit_pct = "0.002"
 tp_boll_enabled = true
 three_stage_runner_enabled = true
@@ -65,34 +90,50 @@ three_stage_tp2_use_structure_boll = true
 middle_runner_enabled = false
 
 [middle_bucket_split]
+# Listed fields wired to strategy middle bucket split config.
 enabled = false
 fast_ratio = "0.60"
 fast_sl_enabled = true
 fast_sl_fee_buffer_pct = "0.001"
 
 [sidecar]
+# enabled, margin_pct, tp_pct, skip_first_layer, max_legs,
+# order_status_check_seconds: wired into position sizing / sidecar runtime
+# state.
 enabled = false
 margin_pct = "0.01"
 tp_pct = "0.004"
 skip_first_layer = true
 max_legs = 10
 order_status_check_seconds = "5"
+# tp_place_retry_count, tp_place_retry_interval_seconds,
+# tp_place_retry_backoff_multiplier, tp_rate_limit_fail_action:
+# pending / validated safety fields; not fully wired through live execution
+# yet.  Keep tp_rate_limit_fail_action = "HALT_ONLY".
 tp_place_retry_count = 3
 tp_place_retry_interval_seconds = "0.8"
 tp_place_retry_backoff_multiplier = "1.5"
 tp_rate_limit_fail_action = "HALT_ONLY"
 
 [risk]
+# Pending.  Current RollingLossGuard and DME safety still use existing
+# env/runtime paths.  order_failure_market_exit_delay_seconds remains
+# validated for safety, but verify runtime wiring before relying on TOML
+# changes.
 rolling_loss_guard_enabled = true
 rolling_loss_warn_pct = "0.50"
 rolling_loss_soft_halt_pct = "0.10"
 order_failure_market_exit_delay_seconds = 1800
 
 [execution]
+# Pending.  Current private write limiter / retry behavior still use
+# existing env/runtime code paths.
 private_write_min_interval_seconds = "0.6"
 max_order_retries = 3
 
 [runtime]
+# Pending until B phase.  Current live queue/sync/heartbeat values are
+# still read from .env in scripts/run_boll_cvd_live.py.
 strategy_tick_queue_maxsize = 20000
 execution_queue_maxsize = 1000
 position_sync_seconds = "5"

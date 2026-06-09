@@ -97,7 +97,25 @@ def test_env_example_does_not_enable_live_by_default() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 5. configuration.md documents boundaries
+# 5. .env.example explains legacy duplication
+# ---------------------------------------------------------------------------
+
+
+def test_env_example_explains_legacy_duplication() -> None:
+    text = _read(".env.example")
+
+    # Must mention intentional duplication.
+    assert "intentionally duplicate" in text
+
+    # Must reference the explicit opt-out flag.
+    assert "RECLAIM_USE_SYMBOL_TOML=false" in text
+
+    # Must warn about pending TOML fields.
+    assert "Some TOML fields are pending wiring" in text
+
+
+# ---------------------------------------------------------------------------
+# 6. configuration.md documents boundaries
 # ---------------------------------------------------------------------------
 
 
@@ -113,7 +131,58 @@ def test_configuration_doc_documents_boundaries() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 6. No BTC symbol TOML created
+# 7. configuration.md documents TOML wiring status
+# ---------------------------------------------------------------------------
+
+
+def test_configuration_doc_documents_wiring_status() -> None:
+    text = _read("docs/configuration.md")
+
+    # Must have a wiring status section.
+    assert "TOML Field Wiring Status" in text
+
+    # Must mention pending fields.
+    assert "Pending" in text
+
+    # Must reference specific sections from the wiring table.
+    assert "[runtime]" in text or "[runtime].*" in text
+
+    # alert_freeze_seconds must be documented as not a trade entry gate.
+    assert "alert_freeze_seconds" in text
+    assert "not a live trade entry gate" in text.lower()
+
+
+# ---------------------------------------------------------------------------
+# 8. sample.toml documents wired and pending fields
+# ---------------------------------------------------------------------------
+
+
+def test_sample_toml_documents_wired_and_pending_fields() -> None:
+    text = _read("config/symbols/sample.toml").lower()
+
+    assert "wired" in text
+    assert "pending" in text
+    assert "alert cooldown" in text
+    # The comment is split across two TOML comment lines; verify both halves.
+    assert "not a live" in text
+    assert "trade entry gate" in text
+
+
+# ---------------------------------------------------------------------------
+# 9. ETH TOML documents wired and pending fields
+# ---------------------------------------------------------------------------
+
+
+def test_eth_toml_documents_wired_and_pending_fields() -> None:
+    text = _read("config/symbols/ETH-USDT-SWAP.toml").lower()
+
+    assert "wired" in text
+    assert "pending" in text
+    assert "alert cooldown" in text
+
+
+# ---------------------------------------------------------------------------
+# 10. No BTC symbol TOML created
 # ---------------------------------------------------------------------------
 
 

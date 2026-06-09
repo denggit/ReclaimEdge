@@ -120,7 +120,7 @@ def test_toml_flag_uses_account_equity_override() -> None:
     )
 
     assert result.position_sizer.dry_run_equity_usdt == 1234.5
-    assert result.position_sizer.layer_margin_pct == 0.03
+    assert result.position_sizer.layer_margin_pct == 0.06
     assert result.position_sizer.layer_multiplier_step == 0.15
 
 

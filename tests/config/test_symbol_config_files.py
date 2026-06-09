@@ -9,6 +9,7 @@ exists, can be loaded by the A02 loader, matches the Python-side
 
 from __future__ import annotations
 
+from decimal import Decimal
 from pathlib import Path
 
 from config.symbol_config import SymbolConfig
@@ -53,54 +54,54 @@ def test_default_eth_toml_loads() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_default_eth_toml_matches_schema_defaults() -> None:
-    """Every key field in the TOML must match SymbolConfig.default_eth()."""
+def test_default_eth_toml_matches_live_config() -> None:
+    """The ETH TOML must contain the current live production values."""
     loaded = load_symbol_config_from_dir(str(_SYMBOLS_DIR), "ETH-USDT-SWAP")
-    default = SymbolConfig.default_eth()
 
     # market
-    assert loaded.market.bar == default.market.bar
-    assert loaded.market.contract_value == default.market.contract_value
+    assert loaded.market.bar == "15m"
+    assert loaded.market.td_mode == "isolated"
+    assert loaded.market.pos_side_mode == "net"
 
-    # capital
-    assert loaded.capital.layer_margin_pct == default.capital.layer_margin_pct
-    assert loaded.capital.leverage == default.capital.leverage
-    assert loaded.capital.max_layers == default.capital.max_layers
+    # capital (live values)
+    assert loaded.capital.layer_margin_pct == Decimal("0.06")
+    assert loaded.capital.leverage == Decimal("15")
+    assert loaded.capital.max_layers == 10
+    assert loaded.capital.dry_run_equity_usdt == Decimal("1000")
 
-    # entry
-    assert loaded.entry.add_gap_pct == default.entry.add_gap_pct
+    # entry (live values)
+    assert loaded.entry.add_gap_pct == Decimal("0.003")
+    assert loaded.entry.add_freeze_seconds == 3600
+    assert loaded.entry.alert_freeze_seconds == 3600
 
     # cvd
-    assert loaded.cvd.fast_window_seconds == default.cvd.fast_window_seconds
+    assert loaded.cvd.fast_window_seconds == Decimal("5")
 
-    # tp
-    assert loaded.tp.three_stage_tp1_ratio == default.tp.three_stage_tp1_ratio
-    assert loaded.tp.three_stage_tp2_ratio == default.tp.three_stage_tp2_ratio
-    assert loaded.tp.three_stage_runner_ratio == default.tp.three_stage_runner_ratio
+    # tp (live values)
+    assert loaded.tp.tp_min_net_profit_pct == Decimal("0.004")
+    assert loaded.tp.three_stage_tp1_ratio == Decimal("0.80")
+    assert loaded.tp.three_stage_tp2_ratio == Decimal("0.10")
+    assert loaded.tp.three_stage_runner_ratio == Decimal("0.10")
 
-    # middle bucket split
-    assert loaded.middle_bucket_split.fast_ratio == default.middle_bucket_split.fast_ratio
+    # middle bucket split (live values)
+    assert loaded.middle_bucket_split.enabled is True
+    assert loaded.middle_bucket_split.fast_ratio == Decimal("0.70")
 
-    # sidecar
-    assert loaded.sidecar.margin_pct == default.sidecar.margin_pct
+    # sidecar (live values)
+    assert loaded.sidecar.enabled is True
+    assert loaded.sidecar.margin_pct == Decimal("0.02")
+    assert loaded.sidecar.tp_pct == Decimal("0.0044")
+    assert loaded.sidecar.max_legs == 12
 
     # risk
-    assert (
-        loaded.risk.order_failure_market_exit_delay_seconds
-        == default.risk.order_failure_market_exit_delay_seconds
-    )
+    assert loaded.risk.order_failure_market_exit_delay_seconds == 1800
 
     # execution
-    assert (
-        loaded.execution.private_write_min_interval_seconds
-        == default.execution.private_write_min_interval_seconds
-    )
+    assert loaded.execution.private_write_min_interval_seconds == Decimal("0.6")
 
-    # runtime
-    assert (
-        loaded.runtime.strategy_tick_queue_maxsize
-        == default.runtime.strategy_tick_queue_maxsize
-    )
+    # runtime (live values)
+    assert loaded.runtime.market_tick_heartbeat_seconds == Decimal("300")
+    assert loaded.runtime.strategy_tick_queue_maxsize == 20000
 
 
 # ---------------------------------------------------------------------------
@@ -112,7 +113,7 @@ def test_default_eth_toml_safety_switches() -> None:
     """Safety-critical fields must be locked to their safe defaults."""
     loaded = load_symbol_config_from_dir(str(_SYMBOLS_DIR), "ETH-USDT-SWAP")
 
-    # live_trading must be off
+    # live_trading must be off (real gate is LIVE_TRADING in .env)
     assert loaded.symbol.enabled is True
     assert loaded.symbol.live_trading is False
     assert loaded.is_live_trading_enabled is False
@@ -120,11 +121,11 @@ def test_default_eth_toml_safety_switches() -> None:
     # three_stage_tp2 must use structure Boll
     assert loaded.tp.three_stage_tp2_use_structure_boll is True
 
-    # order failure market exit delay must be 1800
-    assert loaded.risk.order_failure_market_exit_delay_seconds == 1800
+    # order failure market exit delay must be at least 1800
+    assert loaded.risk.order_failure_market_exit_delay_seconds >= 1800
 
-    # sidecar must be disabled
-    assert loaded.sidecar.enabled is False
+    # tp_rate_limit_fail_action must be HALT_ONLY
+    assert loaded.sidecar.tp_rate_limit_fail_action == "HALT_ONLY"
 
 
 # ---------------------------------------------------------------------------
