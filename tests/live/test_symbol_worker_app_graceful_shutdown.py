@@ -115,9 +115,9 @@ class _FakeStrategyState:
 class _FakeTrader:
     def __init__(self) -> None:
         self.symbol = "ETH-USDT-SWAP"
-        self.td_mode = "cross"
+        self.td_mode = "isolated"
         self.pos_side_mode = "net"
-        self.leverage = 10
+        self.leverage = 15
         self.account_equity_usdt = 10000.0
 
     async def start(self) -> None:
@@ -131,14 +131,14 @@ class _FakeTrader:
 
     async def fetch_position_snapshot(self) -> Any:
         from src.execution.trader import PositionSnapshot
+        from decimal import Decimal
 
         return PositionSnapshot(
-            symbol="ETH-USDT-SWAP",
             side=None,
-            contracts=0,
+            contracts=Decimal("0"),
             eth_qty=0.0,
             avg_entry_price=0.0,
-            has_position=False,
+            raw_pos=Decimal("0"),
         )
 
 
@@ -222,6 +222,9 @@ class _FakeRuntimePaths:
         self.heartbeats_dir = tmp_path
         self.symbol_slug = "ETH-USDT-SWAP"
         self.state_file = tmp_path / "state.json"
+        self.journal_file = tmp_path / "journal.jsonl"
+        self.trade_summary_file = tmp_path / "summary.jsonl"
+        self.rolling_loss_guard_state_file = tmp_path / "rolling_loss.json"
 
 
 class _ShutdownTestFactory(SymbolWorkerFactory):
@@ -553,3 +556,283 @@ class TestShutdownConfig:
         assert config.symbol_worker_shutdown_drain_timeout_seconds == 10.0
         assert config.symbol_worker_shutdown_save_state_enabled is True
         assert config.symbol_worker_shutdown_heartbeat_enabled is True
+
+
+# ============================================================================
+# 8. Weekly summary disabled → not added to FIRST_COMPLETED tasks
+# ============================================================================
+
+
+class TestWeeklySummaryDisabled:
+    @pytest.mark.asyncio
+    async def test_weekly_summary_disabled_not_scheduled(
+        self, tmp_path: Any, monkeypatch: Any
+    ) -> None:
+        """When weekly_summary.enabled=False, the weekly_summary_loop must NOT
+        enter the FIRST_COMPLETED task set.  app.run() must exit through the
+        graceful-shutdown path when shutdown is triggered, NOT because
+        weekly_summary_loop returns immediately."""
+        controller = WorkerShutdownController()
+        factory = _ShutdownTestFactory(tmp_path=tmp_path)
+
+        app_config = _make_app_config(
+            weekly_summary=WeeklySummaryConfig(
+                enabled=False,
+                raw_time="10:00",
+                raw_weekday="0",
+                weekday=0,
+                hour=10,
+                minute=0,
+                compact_after_success=False,
+            ),
+            symbol_worker_shutdown_save_state_enabled=False,
+            symbol_worker_shutdown_heartbeat_enabled=True,
+        )
+
+        app = SymbolWorkerApp(
+            app_config=app_config,
+            factory=factory,
+            shutdown_controller=controller,
+        )
+
+        # Monkeypatch startup functions that need a real trader / OKX API.
+        async def _fake_fetch_cash(_trader: Any) -> float:
+            return 10000.0
+
+        async def _noop_tp_recovery(**kwargs: Any) -> None:
+            return None
+
+        async def _noop_sidecar_recovery(**kwargs: Any) -> None:
+            return None
+
+        async def _noop_rolling_loss(**kwargs: Any) -> None:
+            return None
+
+        def _noop_safety_gate(**kwargs: Any) -> bool:
+            return False
+
+        monkeypatch.setattr(
+            "src.live.symbol_worker_app.live_flat_balance.fetch_usdt_cash_balance",
+            _fake_fetch_cash,
+        )
+        monkeypatch.setattr(
+            "src.live.symbol_worker_app.startup_order_recovery.apply_main_tp_startup_recovery",
+            _noop_tp_recovery,
+        )
+        monkeypatch.setattr(
+            "src.live.symbol_worker_app.startup_order_recovery.apply_sidecar_startup_recovery",
+            _noop_sidecar_recovery,
+        )
+        monkeypatch.setattr(
+            "src.live.symbol_worker_app.rolling_loss_live_helpers.apply_rolling_loss_guard_startup_state",
+            _noop_rolling_loss,
+        )
+        monkeypatch.setattr(
+            "src.live.symbol_worker_app.runner_live_helpers.apply_three_stage_startup_safety_gate",
+            _noop_safety_gate,
+        )
+
+        # Schedule shutdown after a short delay so app.run() reaches
+        # the asyncio.wait before we trigger it.
+        async def _trigger_shutdown() -> None:
+            await asyncio.sleep(0.10)
+            controller.request_shutdown("test_disabled_weekly")
+
+        trigger_task = asyncio.ensure_future(_trigger_shutdown())
+
+        try:
+            # If weekly_summary_loop were scheduled and returns immediately
+            # (because enabled=False), this would enter the unexpected-exit
+            # path and raise RuntimeError.  The fact that we can reach here
+            # without error proves it wasn't scheduled.
+            await asyncio.wait_for(app.run(), timeout=10.0)
+        finally:
+            if not trigger_task.done():
+                trigger_task.cancel()
+                try:
+                    await trigger_task
+                except asyncio.CancelledError:
+                    pass
+
+        # Shutdown was requested → controller must reflect that.
+        assert controller.requested is True
+        assert controller.reason == "test_disabled_weekly"
+
+
+# ============================================================================
+# 9. Unexpected clean task completion raises RuntimeError
+# ============================================================================
+
+
+class TestUnexpectedCleanTaskCompletion:
+    @pytest.mark.asyncio
+    async def test_unexpected_clean_task_completion_raises(
+        self, tmp_path: Any, monkeypatch: Any
+    ) -> None:
+        """When a runtime task returns None cleanly (without raising),
+        SymbolWorkerApp.run() must raise RuntimeError instead of silently
+        exiting.  This prevents a silent worker return from being mistaken
+        for a successful shutdown."""
+
+        controller = WorkerShutdownController()
+        factory = _ShutdownTestFactory(tmp_path=tmp_path)
+
+        app = SymbolWorkerApp(
+            app_config=_make_app_config(),
+            factory=factory,
+            shutdown_controller=controller,
+        )
+
+        # Monkeypatch startup functions that need a real trader / OKX API.
+        async def _fake_fetch_cash(_trader: Any) -> float:
+            return 10000.0
+
+        async def _noop_tp_recovery(**kwargs: Any) -> None:
+            return None
+
+        async def _noop_sidecar_recovery(**kwargs: Any) -> None:
+            return None
+
+        async def _noop_rolling_loss(**kwargs: Any) -> None:
+            return None
+
+        def _noop_safety_gate(**kwargs: Any) -> bool:
+            return False
+
+        monkeypatch.setattr(
+            "src.live.symbol_worker_app.live_flat_balance.fetch_usdt_cash_balance",
+            _fake_fetch_cash,
+        )
+        monkeypatch.setattr(
+            "src.live.symbol_worker_app.startup_order_recovery.apply_main_tp_startup_recovery",
+            _noop_tp_recovery,
+        )
+        monkeypatch.setattr(
+            "src.live.symbol_worker_app.startup_order_recovery.apply_sidecar_startup_recovery",
+            _noop_sidecar_recovery,
+        )
+        monkeypatch.setattr(
+            "src.live.symbol_worker_app.rolling_loss_live_helpers.apply_rolling_loss_guard_startup_state",
+            _noop_rolling_loss,
+        )
+        monkeypatch.setattr(
+            "src.live.symbol_worker_app.runner_live_helpers.apply_three_stage_startup_safety_gate",
+            _noop_safety_gate,
+        )
+
+        # Monkeypatch account_position_sync_worker to return immediately
+        # without raising.  This simulates a worker that unexpectedly
+        # returns cleanly (rather than blocking forever).
+        async def _fake_worker(*args: Any, **kwargs: Any) -> None:
+            return None
+
+        monkeypatch.setattr(
+            "src.live.symbol_worker_app.account_position_sync_worker_module.account_position_sync_worker",
+            _fake_worker,
+        )
+
+        with pytest.raises(
+            RuntimeError,
+            match="Symbol worker runtime task exited unexpectedly without exception",
+        ):
+            await app.run()
+
+
+# ============================================================================
+# 10. Weekly summary enabled source guard
+# ============================================================================
+
+
+class TestWeeklySummaryEnabledSourceGuard:
+    def test_weekly_summary_enabled_condition_present(self) -> None:
+        """symbol_worker_app.py must contain the conditional check
+        for weekly_summary.enabled."""
+        from pathlib import Path
+
+        source = (
+            Path(__file__)
+            .resolve()
+            .parent.parent.parent.joinpath("src", "live", "symbol_worker_app.py")
+            .read_text(encoding="utf-8")
+        )
+
+        assert "if self.app_config.weekly_summary.enabled:" in source, (
+            "symbol_worker_app.py must conditionally schedule weekly_summary_loop"
+            " based on self.app_config.weekly_summary.enabled"
+        )
+        assert "weekly_summary_loop()" in source, (
+            "symbol_worker_app.py must still contain weekly_summary_loop()"
+        )
+
+    def test_unexpected_clean_exit_runtime_error_present(self) -> None:
+        """symbol_worker_app.py must contain the RuntimeError for unexpected
+        clean task exit."""
+        from pathlib import Path
+
+        source = (
+            Path(__file__)
+            .resolve()
+            .parent.parent.parent.joinpath("src", "live", "symbol_worker_app.py")
+            .read_text(encoding="utf-8")
+        )
+
+        assert (
+            "Symbol worker runtime task exited unexpectedly without exception"
+        ) in source, (
+            "symbol_worker_app.py must raise RuntimeError for unexpected clean exit"
+        )
+
+
+# ============================================================================
+# 11. Disabled heartbeat not scheduled source guard
+# ============================================================================
+
+
+class TestDisabledHeartbeatSourceGuard:
+    def test_disabled_heartbeat_condition_present(self) -> None:
+        """symbol_worker_app.py must conditionally schedule heartbeat only
+        when heartbeat_writer.config.enabled is True."""
+        from pathlib import Path
+
+        source = (
+            Path(__file__)
+            .resolve()
+            .parent.parent.parent.joinpath("src", "live", "symbol_worker_app.py")
+            .read_text(encoding="utf-8")
+        )
+
+        assert "if heartbeat_writer.config.enabled:" in source, (
+            "symbol_worker_app.py must conditionally schedule heartbeat"
+        )
+
+
+# ============================================================================
+# 12. symbol_worker_app.py source guard — no trading mutation
+# ============================================================================
+
+
+class TestSymbolWorkerAppNoTradingMutation:
+    def test_app_source_no_trading_mutation(self) -> None:
+        """symbol_worker_app.py must NOT contain market_close,
+        close_position, cancel_all, cancel_algo_order, or
+        place_market_order."""
+        from pathlib import Path
+
+        source = (
+            Path(__file__)
+            .resolve()
+            .parent.parent.parent.joinpath("src", "live", "symbol_worker_app.py")
+            .read_text(encoding="utf-8")
+        )
+
+        forbidden = [
+            "market_close",
+            "close_position",
+            "cancel_all",
+            "cancel_algo_order",
+            "place_market_order",
+        ]
+        for token in forbidden:
+            assert token not in source, (
+                f"symbol_worker_app.py must not contain {token!r}"
+            )

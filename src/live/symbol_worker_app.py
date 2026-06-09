@@ -425,8 +425,11 @@ class SymbolWorkerApp:
                     )
                 ),
                 asyncio.ensure_future(daily_report_loop()),
-                asyncio.ensure_future(weekly_summary_loop()),
             ]
+            if self.app_config.weekly_summary.enabled:
+                tasks.append(asyncio.ensure_future(weekly_summary_loop()))
+            else:
+                logger.info("Weekly overall summary loop disabled")
             # Only add heartbeat to the FIRST_COMPLETED wait when it is
             # enabled — a disabled heartbeat returns immediately, which
             # would falsely trigger the shutdown path.
@@ -495,10 +498,17 @@ class SymbolWorkerApp:
                     return_exceptions=True,
                 )
                 # Propagate the first exception from the unexpectedly
-                # completed task, preserving the existing gather semantics.
+                # completed task. If a runtime task exited cleanly
+                # (no exception), raise a RuntimeError so that a
+                # silent return from a worker doesn't go unnoticed.
                 for task in done:
+                    if task is shutdown_task:
+                        continue
                     exc = task.exception()
                     if exc is not None:
                         raise exc
+                    raise RuntimeError(
+                        "Symbol worker runtime task exited unexpectedly without exception"
+                    )
         finally:
             await trader.close()
