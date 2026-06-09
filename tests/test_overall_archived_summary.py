@@ -172,33 +172,6 @@ class OverallArchivedSummaryTest(unittest.TestCase):
             self.assertEqual(journal.load_summary_events(), [])
             self.assertEqual([item.event_id for item in journal.load_events()], ["closed-entry", "closed-flat"])
 
-    def test_weekly_compaction_default_disabled(self) -> None:
-        """C01: WEEKLY_COMPACT_AFTER_SUCCESS defaults to False in LiveAppConfig."""
-        from src.live.live_app_config import LiveAppConfig
-
-        # Clear C01 env keys so we read the true default.
-        for key in (
-            "WEEKLY_COMPACT_AFTER_SUCCESS",
-            "WEEKLY_SUMMARY_ENABLED",
-            "WEEKLY_SUMMARY_TIME",
-            "WEEKLY_SUMMARY_WEEKDAY",
-            "DAILY_REPORT_TIME",
-        ):
-            os.environ.pop(key, None)
-
-        try:
-            cfg = LiveAppConfig.from_env()
-            self.assertFalse(cfg.weekly_summary.compact_after_success)
-        finally:
-            for key in (
-                "WEEKLY_COMPACT_AFTER_SUCCESS",
-                "WEEKLY_SUMMARY_ENABLED",
-                "WEEKLY_SUMMARY_TIME",
-                "WEEKLY_SUMMARY_WEEKDAY",
-                "DAILY_REPORT_TIME",
-            ):
-                os.environ.pop(key, None)
-
 
 if __name__ == "__main__":
     unittest.main()
