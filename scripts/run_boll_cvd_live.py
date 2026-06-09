@@ -14,6 +14,7 @@ SRC = ROOT / "src"
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(SRC))
 
+from config.live_symbol_config_bootstrap import build_live_symbol_runtime_configs  # noqa: E402
 from src.execution.trader import Trader  # noqa: E402
 from src.indicators.cvd_tracker import CvdTracker, CvdTrackerConfig  # noqa: E402
 from src.live import config_helpers as live_config_helpers  # noqa: E402
@@ -66,8 +67,9 @@ async def main() -> None:
     if not live_config_helpers.live_trading_enabled():
         raise RuntimeError("LIVE_TRADING is not true. Refusing to start live runner.")
 
-    monitor_config = BollBandBreakoutMonitorConfig.from_env()
-    cvd_config = CvdTrackerConfig.from_env()
+    _runtime = build_live_symbol_runtime_configs()
+    monitor_config = _runtime.monitor
+    cvd_config = _runtime.cvd
     email_sender = EmailSender()
     journal = LiveTradeJournal()
     rolling_loss_guard = RollingLossGuard.from_env()
@@ -77,8 +79,9 @@ async def main() -> None:
     await trader.start()
     try:
         await trader.initialize()
-        sizer = SimplePositionSizer(SimplePositionSizerConfig.from_account_equity(trader.account_equity_usdt))
-        strategy = BollCvdShockReclaimStrategy(BollCvdReclaimStrategyConfig.from_env(), sizer)
+        _runtime_eq = build_live_symbol_runtime_configs(account_equity_usdt=trader.account_equity_usdt)
+        sizer = SimplePositionSizer(_runtime_eq.position_sizer)
+        strategy = BollCvdShockReclaimStrategy(_runtime_eq.strategy, sizer)
         startup_position = await trader.fetch_position_snapshot()
         startup_cash = await live_flat_balance.fetch_usdt_cash_balance(trader)
         rolling_loss_guard.load_or_initialize(live_time_utils.utc_ms(), trader.account_equity_usdt)
