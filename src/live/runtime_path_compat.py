@@ -72,9 +72,12 @@ def handoff_legacy_runtime_files(
 
     Rules (per file kind — state, journal, summary):
 
-    * Only ``inst_id == "ETH-USDT-SWAP"`` is eligible for handoff.
-      All other symbols receive ``action="skipped"`` with a reason
-      explaining the restriction.
+    * Both *inst_id* and *runtime_paths.symbol_slug* must equal
+      ``"ETH-USDT-SWAP"`` for handoff to be eligible.  If either differs,
+      all items receive ``action="skipped"`` with a reason explaining the
+      dual-guard restriction.  This prevents accidental cross-symbol
+      contamination (e.g. copying ETH legacy state into a BTC
+      symbol-scoped path).
     * If the symbol-scoped target already exists → skipped (never overwrite).
     * If the legacy source does not exist → skipped.
     * If the legacy source exists but is not a regular file → skipped.
@@ -91,7 +94,8 @@ def handoff_legacy_runtime_files(
     runtime_paths : RuntimePaths
         Symbol-scoped path builder for the target symbol.
     inst_id : str
-        OKX instrument ID (must match *runtime_paths.inst_id*).
+        OKX instrument ID (must equal *runtime_paths.symbol_slug* and
+        both must be ``"ETH-USDT-SWAP"``).
 
     Returns
     -------
@@ -104,10 +108,11 @@ def handoff_legacy_runtime_files(
         ("summary", DEFAULT_SUMMARY_PATH, runtime_paths.trade_summary_file),
     ]
 
+    runtime_symbol = runtime_paths.symbol_slug
     items: list[LegacyRuntimeFileHandoff] = []
 
     for label, legacy_path, symbol_path in file_specs:
-        if inst_id != LEGACY_RUNTIME_SYMBOL:
+        if inst_id != LEGACY_RUNTIME_SYMBOL or runtime_symbol != LEGACY_RUNTIME_SYMBOL:
             items.append(
                 LegacyRuntimeFileHandoff(
                     label=label,
@@ -115,8 +120,10 @@ def handoff_legacy_runtime_files(
                     symbol_path=symbol_path,
                     action="skipped",
                     reason=(
-                        f"legacy handoff only allowed for {LEGACY_RUNTIME_SYMBOL}, "
-                        f"not {inst_id}"
+                        "legacy handoff only allowed when both inst_id and "
+                        "runtime_paths symbol are "
+                        f"{LEGACY_RUNTIME_SYMBOL}; "
+                        f"got inst_id={inst_id!r} runtime_symbol={runtime_symbol!r}"
                     ),
                 )
             )

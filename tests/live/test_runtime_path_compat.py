@@ -198,8 +198,12 @@ def test_handoff_skips_when_legacy_missing(
 def test_handoff_skips_non_eth_symbol(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """BTC-USDT-SWAP must NOT receive ETH legacy files.  All items must be
-    skipped with a reason mentioning the ETH-only restriction."""
+    """When both *inst_id* and *runtime_paths* are non-ETH (e.g. BTC),
+    handoff must skip all items.
+
+    All items must be skipped with a reason mentioning the dual-guard
+    restriction (both inst_id and runtime_paths symbol must be ETH-USDT-SWAP).
+    """
     legacy_dir = tmp_path / "legacy"
     legacy_dir.mkdir(parents=True)
 
@@ -234,8 +238,8 @@ def test_handoff_skips_non_eth_symbol(
         assert item.action == "skipped", (
             f"BTC {item.label} must be skipped, got {item.action}"
         )
-        assert "ETH-USDT-SWAP" in item.reason, (
-            f"Reason must mention ETH-only restriction: {item.reason}"
+        assert "both inst_id and runtime_paths symbol" in item.reason, (
+            f"Reason must mention dual-guard restriction: {item.reason}"
         )
 
     # -- BTC symbol-scoped targets must NOT exist ---------------------------
@@ -250,22 +254,156 @@ def test_handoff_skips_non_eth_symbol(
 
 
 # ============================================================================
-# 5. test_handoff_skips_when_legacy_not_file
+# 5. test_handoff_skips_when_runtime_paths_symbol_mismatches_inst_id
+# ============================================================================
+
+
+def test_handoff_skips_when_runtime_paths_symbol_mismatches_inst_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When runtime_paths targets BTC but inst_id claims ETH, handoff
+    must skip everything — ETH legacy data must NOT land in BTC paths."""
+    legacy_dir = tmp_path / "legacy"
+    legacy_dir.mkdir(parents=True)
+
+    legacy_state = legacy_dir / "live_state.json"
+    legacy_journal = legacy_dir / "live_trade_events.jsonl"
+    legacy_summary = legacy_dir / "live_trade_summary.jsonl"
+
+    legacy_state.write_text("ETH_STATE")
+    legacy_journal.write_text("ETH_JOURNAL\n")
+    legacy_summary.write_text("ETH_SUMMARY\n")
+
+    monkeypatch.setattr(
+        "src.live.runtime_path_compat.DEFAULT_STATE_PATH",
+        legacy_state,
+    )
+    monkeypatch.setattr(
+        "src.live.runtime_path_compat.DEFAULT_JOURNAL_PATH",
+        legacy_journal,
+    )
+    monkeypatch.setattr(
+        "src.live.runtime_path_compat.DEFAULT_SUMMARY_PATH",
+        legacy_summary,
+    )
+
+    runtime_paths = _btc_paths(tmp_path)
+    result = handoff_legacy_runtime_files(
+        runtime_paths=runtime_paths,
+        inst_id="ETH-USDT-SWAP",
+    )
+
+    for item in result.items:
+        assert item.action == "skipped", (
+            f"mismatched {item.label} must be skipped, got {item.action}"
+        )
+        assert "both inst_id and runtime_paths symbol" in item.reason, (
+            f"Reason must mention dual-guard restriction: {item.reason}"
+        )
+
+    # -- BTC symbol-scoped targets must NOT exist ---------------------------
+    assert not runtime_paths.state_file.exists()
+    assert not runtime_paths.journal_file.exists()
+    assert not runtime_paths.trade_summary_file.exists()
+
+    # -- Legacy files must still exist (not deleted / moved) ----------------
+    assert legacy_state.exists()
+    assert legacy_journal.exists()
+    assert legacy_summary.exists()
+
+
+# ============================================================================
+# 6. test_handoff_skips_when_inst_id_non_eth_even_if_runtime_paths_eth
+# ============================================================================
+
+
+def test_handoff_skips_when_inst_id_non_eth_even_if_runtime_paths_eth(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When runtime_paths targets ETH but inst_id claims BTC, handoff
+    must skip everything — the caller is inconsistent and must not copy."""
+    legacy_dir = tmp_path / "legacy"
+    legacy_dir.mkdir(parents=True)
+
+    legacy_state = legacy_dir / "live_state.json"
+    legacy_journal = legacy_dir / "live_trade_events.jsonl"
+    legacy_summary = legacy_dir / "live_trade_summary.jsonl"
+
+    legacy_state.write_text("ETH_STATE")
+    legacy_journal.write_text("ETH_JOURNAL\n")
+    legacy_summary.write_text("ETH_SUMMARY\n")
+
+    monkeypatch.setattr(
+        "src.live.runtime_path_compat.DEFAULT_STATE_PATH",
+        legacy_state,
+    )
+    monkeypatch.setattr(
+        "src.live.runtime_path_compat.DEFAULT_JOURNAL_PATH",
+        legacy_journal,
+    )
+    monkeypatch.setattr(
+        "src.live.runtime_path_compat.DEFAULT_SUMMARY_PATH",
+        legacy_summary,
+    )
+
+    runtime_paths = _eth_paths(tmp_path)
+    result = handoff_legacy_runtime_files(
+        runtime_paths=runtime_paths,
+        inst_id="BTC-USDT-SWAP",
+    )
+
+    for item in result.items:
+        assert item.action == "skipped", (
+            f"mismatched {item.label} must be skipped, got {item.action}"
+        )
+        assert "both inst_id and runtime_paths symbol" in item.reason, (
+            f"Reason must mention dual-guard restriction: {item.reason}"
+        )
+
+    # -- ETH symbol-scoped targets must NOT exist (mismatch blocked copy) ---
+    assert not runtime_paths.state_file.exists()
+    assert not runtime_paths.journal_file.exists()
+    assert not runtime_paths.trade_summary_file.exists()
+
+    # -- Legacy files must still exist (not deleted / moved) ----------------
+    assert legacy_state.exists()
+    assert legacy_journal.exists()
+    assert legacy_summary.exists()
+
+
+# ============================================================================
+# 7. test_handoff_skips_when_legacy_not_file
 # ============================================================================
 
 
 def test_handoff_skips_when_legacy_not_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """When the legacy path exists but is a directory (not a regular file),
-    handoff must skip it."""
-    legacy_dir = tmp_path / "legacy_dir"
-    legacy_dir.mkdir(parents=True)
+    """When every legacy path exists but is a directory (not a regular file),
+    handoff must skip all of them.
 
-    # Make the "legacy" paths point to directories.
+    All three DEFAULT_* paths are monkeypatched to separate directories
+    inside *tmp_path* so the test is fully isolated and does not depend on
+    whether the real ``data/trade_journal/`` directory happens to exist.
+    """
+    state_dir = tmp_path / "legacy_state_dir"
+    journal_dir = tmp_path / "legacy_journal_dir"
+    summary_dir = tmp_path / "legacy_summary_dir"
+    state_dir.mkdir(parents=True)
+    journal_dir.mkdir(parents=True)
+    summary_dir.mkdir(parents=True)
+
     monkeypatch.setattr(
         "src.live.runtime_path_compat.DEFAULT_STATE_PATH",
-        legacy_dir,
+        state_dir,
+    )
+    monkeypatch.setattr(
+        "src.live.runtime_path_compat.DEFAULT_JOURNAL_PATH",
+        journal_dir,
+    )
+    monkeypatch.setattr(
+        "src.live.runtime_path_compat.DEFAULT_SUMMARY_PATH",
+        summary_dir,
     )
 
     runtime_paths = _eth_paths(tmp_path)
@@ -274,22 +412,23 @@ def test_handoff_skips_when_legacy_not_file(
         inst_id="ETH-USDT-SWAP",
     )
 
-    # The state item must be skipped because legacy is a dir.
-    state_item = result.items[0]
-    assert state_item.label == "state"
-    assert state_item.action == "skipped"
-    assert state_item.reason == "legacy not file"
-
-    # The other two (journal, summary) use the real DEFAULT paths which may
-    # or may not exist — we only care that none were copied.
+    # All three items must be skipped with reason "legacy not file".
     for item in result.items:
-        assert item.action != "copied", (
-            f"{item.label} must not be copied when legacy is a directory"
+        assert item.action == "skipped", (
+            f"Expected skipped for {item.label}, got {item.action}"
         )
+        assert item.reason == "legacy not file", (
+            f"Expected 'legacy not file' for {item.label}, got {item.reason}"
+        )
+
+    # No target files must be created.
+    assert not runtime_paths.state_file.exists()
+    assert not runtime_paths.journal_file.exists()
+    assert not runtime_paths.trade_summary_file.exists()
 
 
 # ============================================================================
-# 6. test_handoff_skips_same_path
+# 8. test_handoff_skips_same_path
 # ============================================================================
 
 
