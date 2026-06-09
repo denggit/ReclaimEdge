@@ -166,3 +166,33 @@ def test_live_entry_does_not_use_symbol_live_trading_as_gate() -> None:
         "symbol_config.symbol.live_trading must not be used as a live "
         "trading gate — LIVE_TRADING is still controlled by the .env gate"
     )
+
+
+# ---------------------------------------------------------------------------
+# 8. test_sidecar_max_legs_refresh_uses_mapped_config_not_env
+# ---------------------------------------------------------------------------
+
+
+def test_sidecar_max_legs_refresh_uses_mapped_config_not_env() -> None:
+    """Startup sidecar state refresh must use the mapped
+    ``position_sizer_config.sidecar_max_legs`` — NOT a direct
+    ``os.getenv("SIDECAR_MAX_LEGS")`` read."""
+    source = _source()
+
+    # Must NOT contain direct env reads for SIDECAR_MAX_LEGS.
+    assert 'os.getenv("SIDECAR_MAX_LEGS"' not in source, (
+        "SIDECAR_MAX_LEGS must not be read directly from env"
+    )
+    assert "os.getenv('SIDECAR_MAX_LEGS'" not in source, (
+        "SIDECAR_MAX_LEGS must not be read directly from env"
+    )
+
+    # Must still call refresh_sidecar_state_totals.
+    assert "refresh_sidecar_state_totals" in source, (
+        "refresh_sidecar_state_totals must still be called"
+    )
+
+    # The max legs argument must come from the mapped config.
+    assert "position_sizer_config.sidecar_max_legs" in source, (
+        "sidecar max legs must come from position_sizer_config.sidecar_max_legs"
+    )

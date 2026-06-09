@@ -217,7 +217,7 @@ async def main() -> None:
         journal=journal,
         state_store=state_store,
     )
-    sidecar_runtime_state.refresh_sidecar_state_totals(strategy.state, int(os.getenv("SIDECAR_MAX_LEGS", "10")))
+    sidecar_runtime_state.refresh_sidecar_state_totals(strategy.state, int(position_sizer_config.sidecar_max_legs))
     startup_core_position = build_core_position_view(
         startup_position,
         sidecar_open_qty(strategy.state.sidecar_legs),
