@@ -903,7 +903,8 @@ async def test_run_forever_bad_heartbeat_stops_loop_and_shutdowns_child() -> Non
     # Health event should contain heartbeat stale.
     hb_events = [e for e in supervisor.health_events if e.event_type == "HEARTBEAT_STALE"]
     assert len(hb_events) >= 1
-    hb_events[0].heartbeat_status == "stale"
+    assert hb_events[0].heartbeat_status == "stale"
+    assert hb_events[0].heartbeat_age_seconds == 99.0
 
     # Child should have been terminated via shutdown.
     assert supervisor.shutdown_result is not None

@@ -1,6 +1,7 @@
 from src.live.supervisor.reclaim_supervisor import (
     ReclaimSupervisor,
     ReclaimSupervisorConfig,
+    SupervisorHealthEvent,
     SupervisorShutdownResult,
 )
 from src.live.supervisor.child_process import ChildProcess, ChildProcessSnapshot, ChildProcessSpec
@@ -17,6 +18,7 @@ from src.live.supervisor.signal_handlers import (
 __all__ = [
     "ReclaimSupervisor",
     "ReclaimSupervisorConfig",
+    "SupervisorHealthEvent",
     "SupervisorShutdownResult",
     "ChildProcess",
     "ChildProcessSnapshot",
