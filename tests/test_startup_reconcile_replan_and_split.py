@@ -731,5 +731,342 @@ class TestNonThreeStageNotCappedByStartupReconcile(unittest.TestCase):
             self.assertNotEqual(intent.tp_plan, "THREE_STAGE_RUNNER")
 
 
+# ── Test 7: startup reconcile + tp1_consumed → does NOT write pre-TP1 degrade stage ──
+
+
+class TestStartupReconcileTp1ConsumedDoesNotWritePreTp1DegradeStage(unittest.TestCase):
+    """When tp1_consumed=True, is_pre_tp1=False → degrade stage must be None/cleared."""
+
+    def test_tp1_consumed_clears_pre_tp1_degrade_stage(self) -> None:
+        ts_ms = BASE_TS_MS
+        age_2h = 2 * 3600
+        first_entry_ts_ms = ts_ms - age_2h * 1000
+
+        config = BollCvdReclaimStrategyConfig(
+            three_stage_runner_enabled=True,
+            middle_bucket_split_enabled=True,
+            tp_boll_enabled=True,
+            tp_min_net_profit_pct=0.004,
+            three_stage_pre_tp1_degrade_enabled=True,
+            three_stage_pre_tp1_middle_runner_after_seconds=10800,
+            three_stage_pre_tp1_single_after_seconds=21600,
+            middle_runner_enabled=False,
+        )
+        strategy = BollCvdReclaimStrategy(config, _sizer())
+
+        _setup_strategy_for_tp_update(
+            strategy=strategy,
+            first_entry_ts_ms=first_entry_ts_ms,
+            avg_entry_notional=3960.0,
+            eth_qty=2.0,
+            side="LONG",
+            layers=2,
+            old_degrade_stage="SINGLE",
+            old_degraded_ts_ms=first_entry_ts_ms + 60_000,
+            old_tp_plan="THREE_STAGE_RUNNER",
+            three_stage_enabled_for_position=True,
+            startup_force_tp_reconcile=True,
+        )
+
+        # Mark TP1 as consumed (post-TP1 state)
+        strategy.state.three_stage_tp1_consumed = True
+        strategy.state.three_stage_tp1_price = 2005.0
+        strategy.state.three_stage_tp2_price = 2100.0
+        strategy.state.three_stage_tp1_ratio = 0.60
+        strategy.state.three_stage_tp2_ratio = 0.20
+        strategy.state.three_stage_runner_ratio = 0.20
+
+        boll = _boll(
+            middle=2000.0,
+            upper=2100.0,
+            lower=1900.0,
+            tp_middle=2008.0,
+            tp_upper=2110.0,
+            tp_lower=1890.0,
+            candle_ts_ms=ts_ms,
+        )
+        cvd = _cvd()
+
+        coord = _coordinator(strategy)
+        intent = coord.maybe_update_tp(
+            price=2000.0,
+            ts_ms=ts_ms,
+            boll=boll,
+            cvd=cvd,
+        )
+
+        # Degrade stage must be None — not_pre_tp1_lifecycle guard
+        self.assertIsNone(strategy.state.three_stage_pre_tp1_degrade_stage)
+        self.assertEqual(strategy.state.three_stage_pre_tp1_degraded_ts_ms, 0)
+
+        # tp1_consumed must NOT be reset
+        self.assertTrue(strategy.state.three_stage_tp1_consumed)
+
+        # tp2_consumed must NOT be reset
+        self.assertFalse(strategy.state.three_stage_tp2_consumed)
+
+        # The waiting-TP2 branch sets tp_plan to "THREE_STAGE_RUNNER" — that
+        # is correct post-TP1 behaviour and not a pre-TP1 replan regression.
+        # The key invariant is that the pre-TP1 degrade stage is None.
+        if intent is not None:
+            self.assertEqual(intent.tp_plan, "THREE_STAGE_RUNNER")
+
+
+# ── Test 8: startup reconcile + waiting TP2 → does NOT refresh pre-TP1 stage ──
+
+
+class TestStartupReconcileWaitingTp2DoesNotRefreshPreTp1Stage(unittest.TestCase):
+    """When waiting TP2 (tp1 consumed, tp2 not consumed), pre-TP1 stage must be None."""
+
+    def test_waiting_tp2_does_not_refresh_pre_tp1_stage(self) -> None:
+        ts_ms = BASE_TS_MS
+        age_30m = 30 * 60  # well under 3h
+        first_entry_ts_ms = ts_ms - age_30m * 1000
+
+        config = BollCvdReclaimStrategyConfig(
+            three_stage_runner_enabled=True,
+            middle_bucket_split_enabled=False,
+            tp_boll_enabled=True,
+            tp_min_net_profit_pct=0.004,
+            three_stage_pre_tp1_degrade_enabled=True,
+            three_stage_pre_tp1_middle_runner_after_seconds=10800,
+            three_stage_pre_tp1_single_after_seconds=21600,
+            middle_runner_enabled=False,
+        )
+        strategy = BollCvdReclaimStrategy(config, _sizer())
+
+        _setup_strategy_for_tp_update(
+            strategy=strategy,
+            first_entry_ts_ms=first_entry_ts_ms,
+            avg_entry_notional=3960.0,
+            eth_qty=2.0,
+            side="LONG",
+            layers=2,
+            old_degrade_stage="SINGLE",
+            old_degraded_ts_ms=first_entry_ts_ms + 60_000,
+            old_tp_plan="THREE_STAGE_RUNNER",
+            three_stage_enabled_for_position=True,
+            startup_force_tp_reconcile=True,
+        )
+
+        # Set up waiting-TP2 state
+        strategy.state.three_stage_tp1_consumed = True
+        strategy.state.three_stage_tp2_consumed = False
+        strategy.state.three_stage_runner_enabled_for_position = True
+        strategy.state.three_stage_tp1_price = 2005.0
+        strategy.state.three_stage_tp2_price = 2100.0
+        strategy.state.three_stage_tp1_ratio = 0.60
+        strategy.state.three_stage_tp2_ratio = 0.20
+        strategy.state.three_stage_runner_ratio = 0.20
+
+        boll = _boll(
+            middle=2000.0,
+            upper=2100.0,
+            lower=1900.0,
+            tp_middle=2008.0,
+            tp_upper=2110.0,
+            tp_lower=1890.0,
+            candle_ts_ms=ts_ms,
+        )
+        cvd = _cvd()
+
+        coord = _coordinator(strategy)
+        intent = coord.maybe_update_tp(
+            price=2000.0,
+            ts_ms=ts_ms,
+            boll=boll,
+            cvd=cvd,
+        )
+
+        # Pre-TP1 degrade stage must be None when waiting TP2
+        self.assertIsNone(strategy.state.three_stage_pre_tp1_degrade_stage)
+        self.assertEqual(strategy.state.three_stage_pre_tp1_degraded_ts_ms, 0)
+
+        # tp1_consumed must still be True
+        self.assertTrue(strategy.state.three_stage_tp1_consumed)
+
+        # tp2_consumed must still be False
+        self.assertFalse(strategy.state.three_stage_tp2_consumed)
+
+        # Branch should remain waiting TP2 (the intent may be None if prices unchanged)
+        # The key assertion is that tp1_consumed is preserved and degrade stage is None
+        self.assertTrue(strategy.state.three_stage_runner_enabled_for_position)
+
+
+# ── Test 9: startup reconcile + trend runner active → does NOT refresh pre-TP1 stage ──
+
+
+class TestStartupReconcileTrendRunnerActiveDoesNotRefreshPreTp1Stage(unittest.TestCase):
+    """When trend_runner_active=True, pre-TP1 stage must be None/cleared."""
+
+    def test_trend_runner_active_clears_pre_tp1_stage(self) -> None:
+        ts_ms = BASE_TS_MS
+        age_30m = 30 * 60
+        first_entry_ts_ms = ts_ms - age_30m * 1000
+
+        config = BollCvdReclaimStrategyConfig(
+            three_stage_runner_enabled=True,
+            middle_bucket_split_enabled=False,
+            tp_boll_enabled=True,
+            tp_min_net_profit_pct=0.004,
+            three_stage_pre_tp1_degrade_enabled=True,
+            three_stage_pre_tp1_middle_runner_after_seconds=10800,
+            three_stage_pre_tp1_single_after_seconds=21600,
+            middle_runner_enabled=False,
+            runner_dynamic_enabled=False,
+        )
+        strategy = BollCvdReclaimStrategy(config, _sizer())
+
+        _setup_strategy_for_tp_update(
+            strategy=strategy,
+            first_entry_ts_ms=first_entry_ts_ms,
+            avg_entry_notional=3960.0,
+            eth_qty=2.0,
+            side="LONG",
+            layers=2,
+            old_degrade_stage="SINGLE",
+            old_degraded_ts_ms=first_entry_ts_ms + 60_000,
+            old_tp_plan="THREE_STAGE_RUNNER",
+            startup_force_tp_reconcile=True,
+        )
+
+        # Set trend runner active
+        strategy.state.trend_runner_active = True
+        strategy.state.trend_runner_tp_price = 2150.0
+        strategy.state.trend_runner_sl_price = 1950.0
+
+        boll = _boll(
+            middle=2000.0,
+            upper=2100.0,
+            lower=1900.0,
+            tp_middle=2008.0,
+            tp_upper=2110.0,
+            tp_lower=1890.0,
+            candle_ts_ms=ts_ms,
+        )
+        cvd = _cvd()
+
+        coord = _coordinator(strategy)
+        intent = coord.maybe_update_tp(
+            price=2000.0,
+            ts_ms=ts_ms,
+            boll=boll,
+            cvd=cvd,
+        )
+
+        # Pre-TP1 degrade stage must be None
+        self.assertIsNone(strategy.state.three_stage_pre_tp1_degrade_stage)
+        self.assertEqual(strategy.state.three_stage_pre_tp1_degraded_ts_ms, 0)
+
+        # trend_runner_active must NOT be reset
+        self.assertTrue(strategy.state.trend_runner_active)
+
+        # Runner fields must NOT be reset
+        self.assertIsNotNone(strategy.state.trend_runner_tp_price)
+        self.assertIsNotNone(strategy.state.trend_runner_sl_price)
+
+
+# ── Test 10: startup reconcile + middle runner active → does NOT refresh pre-TP1 stage ──
+
+
+class TestStartupReconcileMiddleRunnerActiveDoesNotRefreshPreTp1Stage(unittest.TestCase):
+    """When middle_runner_active=True, pre-TP1 stage must be None/cleared."""
+
+    def test_middle_runner_active_clears_pre_tp1_stage(self) -> None:
+        ts_ms = BASE_TS_MS
+        age_30m = 30 * 60
+        first_entry_ts_ms = ts_ms - age_30m * 1000
+
+        config = BollCvdReclaimStrategyConfig(
+            three_stage_runner_enabled=True,
+            middle_bucket_split_enabled=False,
+            middle_runner_enabled=True,
+            tp_boll_enabled=True,
+            tp_min_net_profit_pct=0.004,
+            three_stage_pre_tp1_degrade_enabled=True,
+            three_stage_pre_tp1_middle_runner_after_seconds=10800,
+            three_stage_pre_tp1_single_after_seconds=21600,
+        )
+        strategy = BollCvdReclaimStrategy(config, _sizer())
+
+        _setup_strategy_for_tp_update(
+            strategy=strategy,
+            first_entry_ts_ms=first_entry_ts_ms,
+            avg_entry_notional=3960.0,
+            eth_qty=2.0,
+            side="LONG",
+            layers=2,
+            old_degrade_stage="SINGLE",
+            old_degraded_ts_ms=first_entry_ts_ms + 60_000,
+            old_tp_plan="MIDDLE_RUNNER",
+            startup_force_tp_reconcile=True,
+        )
+
+        # Set middle runner active
+        strategy.state.middle_runner_active = True
+        strategy.state.middle_runner_protective_sl_price = 1950.0
+        strategy.state.middle_runner_first_close_ratio = 0.70
+
+        boll = _boll(
+            middle=2000.0,
+            upper=2100.0,
+            lower=1900.0,
+            tp_middle=2008.0,
+            tp_upper=2110.0,
+            tp_lower=1890.0,
+            candle_ts_ms=ts_ms,
+        )
+        cvd = _cvd()
+
+        coord = _coordinator(strategy)
+        intent = coord.maybe_update_tp(
+            price=2000.0,
+            ts_ms=ts_ms,
+            boll=boll,
+            cvd=cvd,
+        )
+
+        # Pre-TP1 degrade stage must be None
+        self.assertIsNone(strategy.state.three_stage_pre_tp1_degrade_stage)
+        self.assertEqual(strategy.state.three_stage_pre_tp1_degraded_ts_ms, 0)
+
+        # middle_runner_active must NOT be reset
+        self.assertTrue(strategy.state.middle_runner_active)
+
+        # Runner fields must NOT be reset
+        self.assertIsNotNone(strategy.state.middle_runner_protective_sl_price)
+
+
+# ── Test 11: pure helper is_pre_tp1=False returns None ──
+
+
+class TestPureHelperIsPreTp1FalseReturnsNone(unittest.TestCase):
+    """When is_pre_tp1=False, the pure helper must return new_stage=None."""
+
+    def test_is_pre_tp1_false_returns_none(self) -> None:
+        from src.strategies.pre_tp1_degrade_replan import (
+            decide_pre_tp1_degrade_stage_for_replan,
+        )
+
+        ts_ms = BASE_TS_MS
+        age_7h = 7 * 3600
+        first_entry_ts_ms = ts_ms - age_7h * 1000
+
+        decision = decide_pre_tp1_degrade_stage_for_replan(
+            first_entry_ts_ms=first_entry_ts_ms,
+            ts_ms=ts_ms,
+            is_pre_tp1=False,
+            three_stage_replan_cap_applicable=True,
+            degrade_enabled=True,
+            middle_runner_after_seconds=10800,
+            single_after_seconds=21600,
+        )
+
+        self.assertIsNone(decision.new_stage)
+        self.assertEqual(decision.degraded_ts_ms, 0)
+        self.assertEqual(decision.reason, "not_pre_tp1_lifecycle")
+        self.assertFalse(decision.cap_applicable)
+
+
 if __name__ == "__main__":
     unittest.main()

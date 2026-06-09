@@ -990,6 +990,11 @@ class TpUpdateCoordinator:
         to THREE_STAGE_RUNNER or MIDDLE_RUNNER when market conditions
         actually permit it.
 
+        **Post-TP1 guard**: if TP1 has already been consumed, or a
+        trend/middle runner is active, or partial TP has been consumed,
+        then pre-TP1 degrade stage is NOT refreshed — it is cleared
+        instead to avoid polluting post-TP1 / runner state.
+
         Delegates to the shared pure helper
         ``decide_pre_tp1_degrade_stage_for_replan()``.
         """
@@ -1001,6 +1006,15 @@ class TpUpdateCoordinator:
             s.state.three_stage_runner_enabled_for_position
         )
 
+        # ── Guard: only allow pre-TP1 degrade stage refresh when truly pre-TP1 ─
+        is_pre_tp1 = not (
+            s.state.three_stage_tp1_consumed
+            or s.state.three_stage_tp2_consumed
+            or s.state.trend_runner_active
+            or s.state.middle_runner_active
+            or s.state.partial_tp_consumed
+        )
+
         three_stage_replan_cap_applicable = (
             s.config.three_stage_runner_enabled
             or pre_reconcile_three_stage_enabled_for_position
@@ -1010,14 +1024,22 @@ class TpUpdateCoordinator:
         decision = decide_pre_tp1_degrade_stage_for_replan(
             first_entry_ts_ms=s.state.first_entry_ts_ms,
             ts_ms=ts_ms,
+            is_pre_tp1=is_pre_tp1,
             three_stage_replan_cap_applicable=three_stage_replan_cap_applicable,
             degrade_enabled=s.config.three_stage_pre_tp1_degrade_enabled,
             middle_runner_after_seconds=s.config.three_stage_pre_tp1_middle_runner_after_seconds,
             single_after_seconds=s.config.three_stage_pre_tp1_single_after_seconds,
         )
 
-        s.state.three_stage_pre_tp1_degrade_stage = decision.new_stage
-        s.state.three_stage_pre_tp1_degraded_ts_ms = decision.degraded_ts_ms
+        # When not pre-TP1, clear degrade stage (post-TP1 should never hold
+        # pre-TP1 cap).  Do NOT reset TP1/TP2/runner fields, tp_plan, or
+        # protective SL.  Do NOT emit an intent solely because of this clear.
+        if not is_pre_tp1:
+            s.state.three_stage_pre_tp1_degrade_stage = None
+            s.state.three_stage_pre_tp1_degraded_ts_ms = 0
+        else:
+            s.state.three_stage_pre_tp1_degrade_stage = decision.new_stage
+            s.state.three_stage_pre_tp1_degraded_ts_ms = decision.degraded_ts_ms
 
         # Always log on startup reconcile — it's a low-frequency path and
         # the log entry is invaluable for diagnosing stale-stage issues.
@@ -1026,10 +1048,14 @@ class TpUpdateCoordinator:
             "old_stage=%s new_stage=%s old_degraded_ts_ms=%s "
             "new_degraded_ts_ms=%s age_seconds=%.1f first_entry_ts_ms=%s "
             "middle_after_seconds=%s single_after_seconds=%s "
+            "is_pre_tp1=%s "
             "three_stage_replan_cap_applicable=%s "
             "three_stage_runner_enabled=%s "
             "pre_reconcile_tp_plan=%s "
             "pre_reconcile_three_stage_enabled_for_position=%s "
+            "tp1_consumed=%s tp2_consumed=%s "
+            "trend_runner_active=%s middle_runner_active=%s "
+            "partial_tp_consumed=%s "
             "reason=%s",
             old_stage,
             decision.new_stage,
@@ -1039,10 +1065,16 @@ class TpUpdateCoordinator:
             s.state.first_entry_ts_ms,
             s.config.three_stage_pre_tp1_middle_runner_after_seconds,
             s.config.three_stage_pre_tp1_single_after_seconds,
+            is_pre_tp1,
             three_stage_replan_cap_applicable,
             s.config.three_stage_runner_enabled,
             pre_reconcile_tp_plan,
             pre_reconcile_three_stage_enabled_for_position,
+            s.state.three_stage_tp1_consumed,
+            s.state.three_stage_tp2_consumed,
+            s.state.trend_runner_active,
+            s.state.middle_runner_active,
+            s.state.partial_tp_consumed,
             decision.reason,
         )
 

@@ -34,6 +34,7 @@ def decide_pre_tp1_degrade_stage_for_replan(
     *,
     first_entry_ts_ms: int,
     ts_ms: int,
+    is_pre_tp1: bool,
     three_stage_replan_cap_applicable: bool,
     degrade_enabled: bool,
     middle_runner_after_seconds: int,
@@ -45,6 +46,7 @@ def decide_pre_tp1_degrade_stage_for_replan(
 
     Rules (all based on ``first_entry_ts_ms``, which is never reset):
 
+    * If ``is_pre_tp1`` is False → new_stage = None (post-TP1 / runner active)
     * If ``three_stage_replan_cap_applicable`` is False → new_stage = None
     * If ``degrade_enabled`` is False → new_stage = None
     * age >= ``single_after_seconds`` → new_stage = "SINGLE"
@@ -57,6 +59,17 @@ def decide_pre_tp1_degrade_stage_for_replan(
         age_seconds = max((ts_ms - first_entry_ts_ms) / 1000.0, 0.0)
     else:
         age_seconds = 0.0
+
+    # Guard: pre-TP1 lifecycle only — post-TP1 / runner active must not write
+    # degrade stage
+    if not is_pre_tp1:
+        return PreTp1DegradeReplanDecision(
+            new_stage=None,
+            degraded_ts_ms=0,
+            age_seconds=age_seconds,
+            cap_applicable=False,
+            reason="not_pre_tp1_lifecycle",
+        )
 
     # Guard: cap only applies to Three-Stage lifecycle
     if not three_stage_replan_cap_applicable:

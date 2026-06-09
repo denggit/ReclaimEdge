@@ -286,17 +286,35 @@ class EntryAddFlowCoordinator:
         old_stage = strategy.state.three_stage_pre_tp1_degrade_stage
         old_degraded_ts_ms = strategy.state.three_stage_pre_tp1_degraded_ts_ms
 
+        # ── Guard: pre-TP1 lifecycle — entry/add guards already prevent
+        # post-TP1 adds, but we compute the flag defensively for correctness.
+        is_pre_tp1 = not (
+            strategy.state.three_stage_tp1_consumed
+            or strategy.state.three_stage_tp2_consumed
+            or strategy.state.trend_runner_active
+            or strategy.state.middle_runner_active
+            or strategy.state.partial_tp_consumed
+        )
+
         decision = decide_pre_tp1_degrade_stage_for_replan(
             first_entry_ts_ms=strategy.state.first_entry_ts_ms,
             ts_ms=ts_ms,
+            is_pre_tp1=is_pre_tp1,
             three_stage_replan_cap_applicable=three_stage_replan_cap_applicable,
             degrade_enabled=strategy.config.three_stage_pre_tp1_degrade_enabled,
             middle_runner_after_seconds=strategy.config.three_stage_pre_tp1_middle_runner_after_seconds,
             single_after_seconds=strategy.config.three_stage_pre_tp1_single_after_seconds,
         )
 
-        strategy.state.three_stage_pre_tp1_degrade_stage = decision.new_stage
-        strategy.state.three_stage_pre_tp1_degraded_ts_ms = decision.degraded_ts_ms
+        # When not pre-TP1, force-clear degrade stage to avoid polluting
+        # post-TP1 / runner state (defensive; entry/add guards already
+        # prevent reaching here post-TP1).
+        if not is_pre_tp1:
+            strategy.state.three_stage_pre_tp1_degrade_stage = None
+            strategy.state.three_stage_pre_tp1_degraded_ts_ms = 0
+        else:
+            strategy.state.three_stage_pre_tp1_degrade_stage = decision.new_stage
+            strategy.state.three_stage_pre_tp1_degraded_ts_ms = decision.degraded_ts_ms
 
         if old_stage != decision.new_stage or old_degraded_ts_ms != decision.degraded_ts_ms:
             logger.warning(
@@ -304,10 +322,14 @@ class EntryAddFlowCoordinator:
                 "next_layer=%s old_stage=%s new_stage=%s old_degraded_ts_ms=%s "
                 "new_degraded_ts_ms=%s age_seconds=%.1f first_entry_ts_ms=%s "
                 "middle_after_seconds=%s single_after_seconds=%s "
+                "is_pre_tp1=%s "
                 "three_stage_replan_cap_applicable=%s "
                 "three_stage_runner_enabled=%s "
                 "pre_replan_tp_plan=%s "
                 "pre_replan_three_stage_enabled_for_position=%s "
+                "tp1_consumed=%s tp2_consumed=%s "
+                "trend_runner_active=%s middle_runner_active=%s "
+                "partial_tp_consumed=%s "
                 "reason=%s",
                 next_layer,
                 old_stage,
@@ -318,10 +340,16 @@ class EntryAddFlowCoordinator:
                 strategy.state.first_entry_ts_ms,
                 strategy.config.three_stage_pre_tp1_middle_runner_after_seconds,
                 strategy.config.three_stage_pre_tp1_single_after_seconds,
+                is_pre_tp1,
                 three_stage_replan_cap_applicable,
                 strategy.config.three_stage_runner_enabled,
                 pre_replan_tp_plan,
                 pre_replan_three_stage_enabled_for_position,
+                strategy.state.three_stage_tp1_consumed,
+                strategy.state.three_stage_tp2_consumed,
+                strategy.state.trend_runner_active,
+                strategy.state.middle_runner_active,
+                strategy.state.partial_tp_consumed,
                 decision.reason,
             )
 
