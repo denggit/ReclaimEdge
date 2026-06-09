@@ -3,12 +3,16 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
 from src.live import time_utils as live_time_utils
 from src.live.runtime_paths import RuntimePaths
+from src.utils.log import get_logger
+
+logger = get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -21,12 +25,15 @@ class HeartbeatWriterConfig:
     enabled: bool = False
     interval_seconds: float = 10.0
     stale_after_seconds: float = 30.0
+    failure_log_interval_seconds: float = 60.0
 
     def __post_init__(self) -> None:
         if self.interval_seconds <= 0:
             raise ValueError("heartbeat interval_seconds must be > 0")
         if self.stale_after_seconds <= 0:
             raise ValueError("heartbeat stale_after_seconds must be > 0")
+        if self.failure_log_interval_seconds <= 0:
+            raise ValueError("heartbeat failure_log_interval_seconds must be > 0")
 
 
 @dataclass(frozen=True)
@@ -69,6 +76,9 @@ class HeartbeatWriter:
         self._pid_provider = pid_provider
         self._sequence = 0
         self._started_at_ms = self._clock_ms()
+        self._consecutive_failures = 0
+        self._last_error: str | None = None
+        self._last_failure_log_monotonic = 0.0
 
     @property
     def config(self) -> HeartbeatWriterConfig:
@@ -77,6 +87,22 @@ class HeartbeatWriter:
     @property
     def path(self) -> Path:
         return self._runtime_paths.heartbeat_file
+
+    @property
+    def consecutive_failures(self) -> int:
+        return self._consecutive_failures
+
+    @property
+    def last_error(self) -> str | None:
+        return self._last_error
+
+    def _record_success(self) -> None:
+        self._consecutive_failures = 0
+        self._last_error = None
+
+    def _record_failure(self, exc: Exception) -> None:
+        self._consecutive_failures += 1
+        self._last_error = f"{type(exc).__name__}: {exc}"
 
     def build_payload(self, *, status: str = "running") -> dict:
         """Build the heartbeat payload dict without writing to disk.
@@ -126,6 +152,7 @@ class HeartbeatWriter:
         )
         os.replace(tmp_path, path)
         self._sequence = int(payload["sequence"])
+        self._record_success()
 
         return HeartbeatWriteResult(
             wrote=True,
@@ -149,12 +176,29 @@ class HeartbeatWriter:
         **not** swallowed — it propagates naturally so the caller can
         handle cancellation.
 
-        C05 does **not** call this method from any live runtime path.
+        Write failures are **degraded**: a single failed write does not
+        kill the loop.  Consecutive failures are counted and logged at a
+        throttled interval so the supervisor can still detect a stuck
+        worker.
         """
         if not self._config.enabled:
             return
 
         provider = status_provider or (lambda: "running")
         while True:
-            self.write_once(status=provider())
+            try:
+                self.write_once(status=provider())
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self._record_failure(exc)
+                now = time.monotonic()
+                if now - self._last_failure_log_monotonic >= self._config.failure_log_interval_seconds:
+                    logger.warning(
+                        "HEARTBEAT_WRITE_FAILED | path=%s consecutive_failures=%s error=%s",
+                        self.path,
+                        self._consecutive_failures,
+                        self._last_error,
+                    )
+                    self._last_failure_log_monotonic = now
             await asyncio.sleep(self._config.interval_seconds)

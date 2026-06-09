@@ -12,6 +12,7 @@ from pathlib import Path
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 _LIVE_SCRIPT = _PROJECT_ROOT / "scripts" / "run_boll_cvd_live.py"
 _APP_MODULE = _PROJECT_ROOT / "src" / "live" / "symbol_worker_app.py"
+_HEARTBEAT_WRITER_MODULE = _PROJECT_ROOT / "src" / "live" / "heartbeat_writer.py"
 
 
 # ============================================================================
@@ -103,18 +104,72 @@ def test_runtime_paths_heartbeat_file_still_exists() -> None:
 
 
 # ============================================================================
-# 5. No asyncio.create_task for heartbeat
+# 5. No asyncio.create_task for heartbeat (SymbolWorkerApp + heartbeat_writer)
 # ============================================================================
 
 
 def test_no_asyncio_create_task_for_heartbeat() -> None:
     """SymbolWorkerApp must NOT use asyncio.create_task or heartbeat_task
     to start the heartbeat."""
-    source = _APP_MODULE.read_text(encoding="utf-8")
+    app_source = _APP_MODULE.read_text(encoding="utf-8")
 
-    assert "asyncio.create_task(" not in source, (
+    assert "asyncio.create_task(" not in app_source, (
         "SymbolWorkerApp must not use asyncio.create_task for heartbeat"
     )
-    assert "heartbeat_task" not in source, (
+    assert "heartbeat_task" not in app_source, (
         "SymbolWorkerApp must not define heartbeat_task"
+    )
+
+    hb_source = _HEARTBEAT_WRITER_MODULE.read_text(encoding="utf-8")
+    assert "asyncio.create_task(" not in hb_source, (
+        "heartbeat_writer.py must not use asyncio.create_task"
+    )
+
+
+# ============================================================================
+# 6. C06b — degrade logic stays in heartbeat_writer.py, NOT SymbolWorkerApp
+# ============================================================================
+
+
+def test_heartbeat_writer_degrades_failures_without_symbol_worker_app_catch() -> None:
+    """SymbolWorkerApp must NOT contain heartbeat degrade logic —
+    that belongs in heartbeat_writer.py."""
+    source = _APP_MODULE.read_text(encoding="utf-8")
+
+    assert "HEARTBEAT_WRITE_FAILED" not in source, (
+        "SymbolWorkerApp must not contain HEARTBEAT_WRITE_FAILED"
+    )
+    assert "consecutive_failures" not in source, (
+        "SymbolWorkerApp must not reference consecutive_failures"
+    )
+    assert "last_error" not in source, (
+        "SymbolWorkerApp must not reference last_error"
+    )
+
+
+# ============================================================================
+# 7. C06b — heartbeat_writer.py contains failure degrade logic
+# ============================================================================
+
+
+def test_heartbeat_writer_contains_failure_degrade_logic() -> None:
+    """heartbeat_writer.py must contain the C06b failure degrade logic."""
+    source = _HEARTBEAT_WRITER_MODULE.read_text(encoding="utf-8")
+
+    required = [
+        "HEARTBEAT_WRITE_FAILED",
+        "consecutive_failures",
+        "last_error",
+        "failure_log_interval_seconds",
+        "except asyncio.CancelledError",
+        "except Exception as exc",
+        "logger.warning(",
+    ]
+    for token in required:
+        assert token in source, (
+            f"heartbeat_writer.py must contain {token!r}"
+        )
+
+    assert "logger.exception(" not in source, (
+        "heartbeat_writer.py must NOT use logger.exception"
     )
