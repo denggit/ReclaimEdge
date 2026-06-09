@@ -585,6 +585,7 @@ class TestWeeklySummaryDisabled:
                 minute=0,
                 compact_after_success=False,
             ),
+            symbol_worker_shutdown_drain_timeout_seconds=0.05,
             symbol_worker_shutdown_save_state_enabled=False,
             symbol_worker_shutdown_heartbeat_enabled=True,
         )
@@ -879,50 +880,45 @@ class TestDrainCriticalRuntimeTasks:
         await _drain_critical_runtime_tasks(set(), timeout=10.0)
 
     @pytest.mark.asyncio
-    async def test_drain_returns_when_execution_queue_empty(self) -> None:
-        """_drain_critical_runtime_tasks must return when the execution
-        queue becomes empty, even if critical tasks are still running."""
+    async def test_drain_does_not_return_early_when_queue_empty_but_task_running(self) -> None:
+        """_drain_critical_runtime_tasks must NOT return early just because
+        the execution queue is empty — an empty queue does not mean the
+        execution worker is idle (it may be mid-flight on an exchange
+        request, journal write, or state_store save)."""
         from src.live.symbol_worker_shutdown_runtime import (
             _drain_critical_runtime_tasks,
         )
 
         execution_queue: asyncio.Queue = asyncio.Queue()
-
-        # Put one item — the drain loop should NOT exit immediately.
-        await execution_queue.put("pending_item")
+        # Queue starts empty — simulates execution_worker having already
+        # popped a command and being mid-flight.
 
         async def _block() -> None:
             await asyncio.Event().wait()
 
         task = asyncio.ensure_future(_block())
-
-        # Background: drain the queue item after a short delay.
-        async def _drain_queue() -> None:
-            await asyncio.sleep(0.05)
-            execution_queue.get_nowait()
-
-        drainer = asyncio.ensure_future(_drain_queue())
-
         try:
+            loop = asyncio.get_running_loop()
+            start = loop.time()
             await _drain_critical_runtime_tasks(
                 {task},
                 execution_queue=execution_queue,
-                timeout=10.0,
+                timeout=0.05,
             )
-            # Task is still running — drain returned because queue emptied.
+            elapsed = loop.time() - start
+            # Must have waited at least close to the full timeout.
+            # The queue was empty but the task was still running, so the
+            # helper must NOT have returned early.
+            assert elapsed >= 0.04, (
+                f"drain returned after {elapsed:.3f}s — should have waited"
+                f" for timeout (0.05s) since task was still running"
+            )
             assert not task.cancelled()
             assert not task.done()
-            assert execution_queue.empty()
         finally:
             task.cancel()
-            if not drainer.done():
-                drainer.cancel()
             try:
                 await task
-            except asyncio.CancelledError:
-                pass
-            try:
-                await drainer
             except asyncio.CancelledError:
                 pass
 
@@ -1017,7 +1013,10 @@ class TestShutdownDoesNotCancelExecutionImmediately:
             await asyncio.Event().wait()
 
         app_config = _make_app_config(
-            symbol_worker_shutdown_drain_timeout_seconds=2.0,
+            # Short drain timeout — long enough for the execution worker
+            # to finish after we signal it, but short enough that the
+            # test doesn't hang.
+            symbol_worker_shutdown_drain_timeout_seconds=0.30,
             symbol_worker_shutdown_save_state_enabled=False,
             symbol_worker_shutdown_heartbeat_enabled=False,
         )
@@ -1076,22 +1075,6 @@ class TestShutdownDoesNotCancelExecutionImmediately:
             _FakeMonitor, "run_forever", _fake_monitor_run,
         )
 
-        # Monkeypatch _drain_critical_runtime_tasks to give the
-        # execution worker time to finish.  In a real shutdown the
-        # execution queue would typically have items in flight, so the
-        # drain loop would naturally wait.  In this test the fake queue
-        # is empty, so we simulate a brief drain window.
-        async def _patched_drain(tasks: set[asyncio.Task], **kwargs: Any) -> None:
-            # Signal the execution worker to finish.
-            allow_finish.set()
-            # Wait a short time for it to process the signal.
-            await asyncio.sleep(0.05)
-
-        monkeypatch.setattr(
-            "src.live.symbol_worker_app._drain_critical_runtime_tasks",
-            _patched_drain,
-        )
-
         # Run app.run in background.
         run_completed = asyncio.Event()
 
@@ -1108,7 +1091,13 @@ class TestShutdownDoesNotCancelExecutionImmediately:
             # Trigger shutdown.
             controller.request_shutdown("test_no_immediate_cancel")
 
-            # Wait for app.run to complete.
+            # Give the shutdown path a moment to enter the drain step,
+            # then signal the execution worker to finish.  The drain
+            # timeout is 0.30s — plenty of time for the signal to arrive.
+            await asyncio.sleep(0.05)
+            allow_finish.set()
+
+            # Wait for app.run to complete (drain timeout + cleanup).
             await asyncio.wait_for(run_completed.wait(), timeout=5.0)
 
             # Execution worker must NOT have been cancelled — it was
@@ -1617,6 +1606,53 @@ class TestShutdownRuntimeExtendedSourceGuard:
         )
         assert "does NOT cancel" in source, (
             "_drain_critical_runtime_tasks docstring must state it does not cancel"
+        )
+
+    def test_drain_does_not_break_on_queue_empty(self) -> None:
+        """_drain_critical_runtime_tasks must NOT contain an early-exit
+        condition based on execution_queue.empty().  An empty queue does
+        not mean the execution worker is idle — it may be mid-flight."""
+        from pathlib import Path
+
+        source = (
+            Path(__file__)
+            .resolve()
+            .parent.parent.parent.joinpath(
+                "src", "live", "symbol_worker_shutdown_runtime.py"
+            )
+            .read_text(encoding="utf-8")
+        )
+
+        # The old bug: "if execution_queue is not None and execution_queue.empty():\n            break"
+        forbidden_patterns = [
+            "and execution_queue.empty():",
+            "and queue.empty():",
+        ]
+        for pattern in forbidden_patterns:
+            assert pattern not in source, (
+                f"symbol_worker_shutdown_runtime.py must not contain"
+                f" queue-empty-based early exit: {pattern!r}"
+            )
+
+    def test_drain_early_exit_only_on_tasks_done(self) -> None:
+        """_drain_critical_runtime_tasks must only exit early when
+        all tasks are done (plus the timeout guard)."""
+        from pathlib import Path
+
+        source = (
+            Path(__file__)
+            .resolve()
+            .parent.parent.parent.joinpath(
+                "src", "live", "symbol_worker_shutdown_runtime.py"
+            )
+            .read_text(encoding="utf-8")
+        )
+
+        assert "if all(t.done() for t in tasks):" in source, (
+            "must still break when all critical tasks are done"
+        )
+        assert "execution_queue.empty()" in source, (
+            "queue empty must still be observed (for logging)"
         )
 
 

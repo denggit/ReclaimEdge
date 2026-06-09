@@ -113,13 +113,18 @@ async def _drain_critical_runtime_tasks(
     """Wait briefly for critical runtime tasks to drain before cancellation.
 
     This function does NOT cancel tasks.  It waits up to *timeout*
-    seconds for the execution queue to empty or all critical tasks to
-    complete — whichever happens first.
+    seconds for all critical tasks to complete.
+
+    ``execution_queue.empty()`` is observed **only for logging** — an empty
+    queue does NOT prove the execution worker is idle.  The worker may have
+    already popped a command and be mid-flight on an exchange request,
+    journal write, or state_store save.  Exiting early because the queue is
+    empty risks interrupting that in-flight work.
 
     This is a best-effort grace window.  It is NOT a guarantee that every
-    in-flight exchange request has completed.  Future phases can make this more
-    precise (e.g.  execution_worker drain event), but for D06b the goal is
-    simply to avoid immediately cancelling the execution path.
+    in-flight exchange request has completed.  Future phases can make this
+    more precise (e.g.  execution_worker drain event), but for D06b the goal
+    is simply to avoid immediately cancelling the execution path.
     """
     if not tasks:
         return
@@ -131,8 +136,6 @@ async def _drain_critical_runtime_tasks(
     )
 
     while loop.time() < deadline:
-        if execution_queue is not None and execution_queue.empty():
-            break
         if all(t.done() for t in tasks):
             break
         await asyncio.sleep(0.05)
