@@ -23,6 +23,7 @@ from src.live import runtime_types as live_runtime_types  # noqa: E402
 from src.live import time_utils as live_time_utils  # noqa: E402
 from src.live.live_app_config import LiveAppConfig  # noqa: E402
 from src.live.runtime_path_compat import handoff_legacy_runtime_files  # noqa: E402
+from src.live.symbol_worker_factory import SymbolWorkerFactory  # noqa: E402
 from src.live.runtime_paths import RuntimePaths  # noqa: E402
 from src.live.workers import account_position_sync_worker as account_position_sync_worker_module  # noqa: E402
 from src.live.workers import execution_worker as execution_worker_module  # noqa: E402
@@ -118,9 +119,10 @@ async def main() -> None:
     if not live_config_helpers.live_trading_enabled():
         raise RuntimeError("LIVE_TRADING is not true. Refusing to start live runner.")
     app_config = LiveAppConfig.from_env()
+    factory = SymbolWorkerFactory()
 
-    email_sender = EmailSender()
-    trader = Trader()
+    email_sender = factory.create_email_sender()
+    trader = factory.create_trader()
     await trader.start()
     try:
         await trader.initialize()
@@ -128,7 +130,7 @@ async def main() -> None:
             account_equity_usdt=trader.account_equity_usdt,
         )
         _assert_trader_matches_symbol_config(trader, runtime_configs)
-        runtime_paths = RuntimePaths(
+        runtime_paths = factory.create_runtime_paths(
             runtime_dir=runtime_configs.env_runtime.runtime_dir,
             inst_id=trader.symbol,
         )
@@ -146,16 +148,24 @@ async def main() -> None:
                 item.legacy_path,
                 item.symbol_path,
             )
-        journal = LiveTradeJournal.from_runtime_paths(runtime_paths)
-        state_store = LiveStateStore.from_runtime_paths(runtime_paths)
-        rolling_loss_guard = RollingLossGuard.from_runtime_paths(runtime_paths)
-        reporter = DailyTradeReporter(journal, email_sender)
+        persistence = factory.create_persistence(
+            runtime_paths=runtime_paths,
+            email_sender=email_sender,
+        )
+        journal = persistence.journal
+        state_store = persistence.state_store
+        rolling_loss_guard = persistence.rolling_loss_guard
+        reporter = persistence.reporter
         monitor_config = runtime_configs.monitor
         cvd_config = runtime_configs.cvd
         strategy_config = runtime_configs.strategy
         position_sizer_config = runtime_configs.position_sizer
-        sizer = SimplePositionSizer(position_sizer_config)
-        strategy = BollCvdShockReclaimStrategy(strategy_config, sizer)
+        strategy_objects = factory.create_strategy_objects(
+            strategy_config=strategy_config,
+            position_sizer_config=position_sizer_config,
+        )
+        sizer = strategy_objects.sizer
+        strategy = strategy_objects.strategy
         startup_position = await trader.fetch_position_snapshot()
         startup_cash = await live_flat_balance.fetch_usdt_cash_balance(trader)
         rolling_loss_guard.load_or_initialize(live_time_utils.utc_ms(), trader.account_equity_usdt)
@@ -208,7 +218,7 @@ async def main() -> None:
     else:
         state_store.clear()
 
-    cvd = CvdTracker(cvd_config)
+    cvd = factory.create_cvd_tracker(cvd_config)
     state_lock = asyncio.Lock()
     account_snapshot = live_runtime_types.AccountSnapshot(
         position=startup_position,
@@ -269,10 +279,9 @@ async def main() -> None:
         state_store=state_store,
         trader_symbol=trader.symbol,
     )
-    strategy_tick_queue: asyncio.Queue[MarketTickEvent] = asyncio.Queue(
-        maxsize=app_config.strategy_tick_queue_maxsize)
-    execution_queue: asyncio.Queue[live_runtime_types.TradeCommand] = asyncio.Queue(
-        maxsize=app_config.execution_queue_maxsize)
+    queues = factory.create_queues(app_config)
+    strategy_tick_queue = queues.strategy_tick_queue
+    execution_queue = queues.execution_queue
     position_sync_seconds = app_config.position_sync_seconds
     account_sync_seconds = app_config.account_sync_seconds
     cash_log_min_delta_usdt = app_config.cash_log_min_delta_usdt
@@ -363,7 +372,7 @@ async def main() -> None:
     async def on_market_tick(event: MarketTickEvent) -> None:
         await live_queue_helpers.enqueue_strategy_tick(event, strategy_tick_queue, state_lock, execution_state)
 
-    monitor = BollBandBreakoutMonitor(
+    monitor = factory.create_monitor(
         config=monitor_config,
         tick_handlers=[on_market_tick],
     )

@@ -288,15 +288,17 @@ class TestFrozen:
 def test_b05_runtime_paths_wired_in_live_entry() -> None:
     """B05 wires RuntimePaths into the live entry point.
 
-    This test confirms the wiring is present — it replaces the old B02/B03
-    guards that *prevented* RuntimePaths from appearing in the live script.
+    As of C02, RuntimePaths construction goes through the
+    SymbolWorkerFactory, but the wiring is still present in the live
+    script.
     """
     source = Path("scripts/run_boll_cvd_live.py").read_text(encoding="utf-8")
-    assert "RuntimePaths(" in source, (
-        "B05 must wire RuntimePaths into run_boll_cvd_live.py"
+    assert "factory.create_runtime_paths(" in source, (
+        "B05/C02 must wire factory.create_runtime_paths into run_boll_cvd_live.py"
     )
-    assert "from_runtime_paths(" in source, (
-        "B05 must wire from_runtime_paths into run_boll_cvd_live.py"
+    assert "from_runtime_paths(" in source or "factory.create_persistence(" in source, (
+        "B05/C02 must wire from_runtime_paths or factory.create_persistence "
+        "into run_boll_cvd_live.py"
     )
 
 

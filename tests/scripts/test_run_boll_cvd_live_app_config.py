@@ -13,10 +13,15 @@ from pathlib import Path
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 _LIVE_SCRIPT = _PROJECT_ROOT / "scripts" / "run_boll_cvd_live.py"
+_FACTORY_MODULE = _PROJECT_ROOT / "src" / "live" / "symbol_worker_factory.py"
 
 
 def _source() -> str:
     return _LIVE_SCRIPT.read_text()
+
+
+def _FACTORY_SOURCE() -> str:
+    return _FACTORY_MODULE.read_text()
 
 
 # ============================================================================
@@ -83,13 +88,23 @@ def test_live_entry_no_direct_app_level_env_reads() -> None:
 
 
 def test_live_entry_uses_app_config_for_queue_sizes() -> None:
-    """Queue maxsize values must come from app_config."""
+    """Queue maxsize values must come from app_config — as of C02 this
+    flows through factory.create_queues(app_config)."""
     source = _source()
-    assert "app_config.strategy_tick_queue_maxsize" in source, (
-        "C01 must use app_config.strategy_tick_queue_maxsize"
+    assert "factory.create_queues(app_config)" in source, (
+        "C02 must use factory.create_queues(app_config)"
     )
-    assert "app_config.execution_queue_maxsize" in source, (
-        "C01 must use app_config.execution_queue_maxsize"
+    assert "app_config.strategy_tick_queue_maxsize" in source or (
+        "app_config.strategy_tick_queue_maxsize" in _FACTORY_SOURCE()
+    ), (
+        "C01/C02 app_config.strategy_tick_queue_maxsize must be used "
+        "in either live entry or factory"
+    )
+    assert "app_config.execution_queue_maxsize" in source or (
+        "app_config.execution_queue_maxsize" in _FACTORY_SOURCE()
+    ), (
+        "C01/C02 app_config.execution_queue_maxsize must be used "
+        "in either live entry or factory"
     )
 
 
