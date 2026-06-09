@@ -1,7 +1,9 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""D06 source guard tests — verifies HeartbeatMonitor is NOT wired into
-ReclaimSupervisor, run scripts, ChildProcess, or signal_handlers.
+"""D07 source guard tests — verifies HeartbeatMonitor IS now wired into
+ReclaimSupervisor via check_heartbeat_once / maybe_check_heartbeat, but
+NOT directly imported by run_reclaim_supervisor.py, ChildProcess,
+signal_handlers, or workers.  No BTC, RECLAIM_SYMBOLS, or restart.
 """
 
 from __future__ import annotations
@@ -16,36 +18,47 @@ def _read(path: Path) -> str:
 
 
 # ============================================================================
-# 1. test_reclaim_supervisor_does_not_import_heartbeat_monitor_yet
+# 1. test_reclaim_supervisor_now_imports_heartbeat_monitor
 # ============================================================================
 
 
-def test_reclaim_supervisor_does_not_import_heartbeat_monitor_yet() -> None:
+def test_reclaim_supervisor_now_imports_heartbeat_monitor() -> None:
     source = _read(_PROJECT_ROOT / "src" / "live" / "supervisor" / "reclaim_supervisor.py")
 
-    # D05 now wires ChildProcess — so ChildProcess is allowed.
-    # HeartbeatMonitor must still not be wired.
-    forbidden = [
+    required = [
         "HeartbeatMonitor",
         "HeartbeatStatus",
+        "HeartbeatMonitorConfig",
         "read_status",
         "heartbeat_file",
-        "heartbeats_dir",
+        "check_heartbeat_once",
+        "maybe_check_heartbeat",
+    ]
+    for token in required:
+        assert token in source, (
+            f"D07 reclaim_supervisor.py must contain {token!r}"
+        )
+
+    forbidden = [
         "RECLAIM_SYMBOLS",
-        "BTC",
     ]
     for token in forbidden:
         assert token not in source, (
-            f"reclaim_supervisor.py must NOT contain {token!r}"
+            f"D07 reclaim_supervisor.py must NOT contain {token!r}"
         )
 
+    # BTC symbol must not appear.
+    assert "BTC" not in source, (
+        "D07 reclaim_supervisor.py must NOT contain BTC"
+    )
+
 
 # ============================================================================
-# 2. test_run_reclaim_supervisor_does_not_import_heartbeat_monitor_yet
+# 2. test_run_reclaim_supervisor_does_not_import_heartbeat_monitor
 # ============================================================================
 
 
-def test_run_reclaim_supervisor_does_not_import_heartbeat_monitor_yet() -> None:
+def test_run_reclaim_supervisor_does_not_import_heartbeat_monitor() -> None:
     source = _read(_PROJECT_ROOT / "scripts" / "run_reclaim_supervisor.py")
 
     forbidden = [
@@ -60,7 +73,7 @@ def test_run_reclaim_supervisor_does_not_import_heartbeat_monitor_yet() -> None:
     ]
     for token in forbidden:
         assert token not in source, (
-            f"run_reclaim_supervisor.py must NOT contain {token!r}"
+            f"D07 run_reclaim_supervisor.py must NOT contain {token!r}"
         )
 
 
@@ -85,7 +98,7 @@ def test_child_process_does_not_import_heartbeat_monitor() -> None:
 
 
 # ============================================================================
-# 3b. test_signal_handlers_does_not_import_heartbeat_monitor
+# 4. test_signal_handlers_does_not_import_heartbeat_monitor
 # ============================================================================
 
 
@@ -105,7 +118,7 @@ def test_signal_handlers_does_not_import_heartbeat_monitor() -> None:
 
 
 # ============================================================================
-# 4. test_existing_entries_not_changed
+# 5. test_existing_entries_not_changed
 # ============================================================================
 
 
@@ -138,7 +151,7 @@ def test_existing_entries_not_changed() -> None:
 
 
 # ============================================================================
-# 5. test_workers_do_not_import_heartbeat_monitor
+# 6. test_workers_do_not_import_heartbeat_monitor
 # ============================================================================
 
 

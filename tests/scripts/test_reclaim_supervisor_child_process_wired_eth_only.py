@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""D06 source guard tests — verifies ChildProcess IS wired into
-ReclaimSupervisor (ETH-only, no BTC, no heartbeat, no multi-symbol),
+"""D07 source guard tests — verifies ChildProcess and HeartbeatMonitor ARE
+wired into ReclaimSupervisor (ETH-only, no BTC, no multi-symbol, no restart),
 signal handlers are installed from the entry, and the entry script
 and workers remain untouched.
 """
@@ -34,28 +34,29 @@ def test_reclaim_supervisor_imports_child_process() -> None:
     ]
     for token in required:
         assert token in source, (
-            f"D05 reclaim_supervisor.py must contain {token!r}"
+            f"D07 reclaim_supervisor.py must contain {token!r}"
         )
 
 
 # ============================================================================
-# 2. test_reclaim_supervisor_still_does_not_use_heartbeat_monitor
+# 2. test_reclaim_supervisor_imports_heartbeat_monitor
 # ============================================================================
 
 
-def test_reclaim_supervisor_still_does_not_use_heartbeat_monitor() -> None:
+def test_reclaim_supervisor_imports_heartbeat_monitor() -> None:
     source = _read(_PROJECT_ROOT / "src" / "live" / "supervisor" / "reclaim_supervisor.py")
 
-    forbidden = [
+    # D07 now wires HeartbeatMonitor into ReclaimSupervisor.
+    required = [
         "HeartbeatMonitor",
+        "HeartbeatMonitorConfig",
         "HeartbeatStatus",
-        "read_status",
-        "heartbeat_file",
-        "heartbeats_dir",
+        "check_heartbeat_once",
+        "maybe_check_heartbeat",
     ]
-    for token in forbidden:
-        assert token not in source, (
-            f"D05 reclaim_supervisor.py must NOT contain {token!r}"
+    for token in required:
+        assert token in source, (
+            f"D07 reclaim_supervisor.py must contain {token!r}"
         )
 
 
@@ -68,20 +69,24 @@ def test_reclaim_supervisor_eth_only_no_multi_symbol() -> None:
     source = _read(_PROJECT_ROOT / "src" / "live" / "supervisor" / "reclaim_supervisor.py")
 
     assert "ETH-USDT-SWAP" in source, (
-        "D05 reclaim_supervisor.py must contain ETH-USDT-SWAP (single child)"
+        "D07 reclaim_supervisor.py must contain ETH-USDT-SWAP (single child)"
     )
 
     forbidden = [
         "RECLAIM_SYMBOLS",
         "BTC-USDT-SWAP",
-        "BTC",
         "argparse",
         "--symbol",
     ]
     for token in forbidden:
         assert token not in source, (
-            f"D05 reclaim_supervisor.py must NOT contain {token!r}"
+            f"D07 reclaim_supervisor.py must NOT contain {token!r}"
         )
+
+    # BTC token should not appear anywhere.
+    assert "BTC" not in source, (
+        "D07 reclaim_supervisor.py must NOT contain BTC"
+    )
 
 
 # ============================================================================
@@ -94,7 +99,7 @@ def test_run_reclaim_supervisor_entry_still_not_wired_directly_to_child_process(
 
     # D06 allows install_supervisor_signal_handlers in the entry.
     assert "install_supervisor_signal_handlers" in source, (
-        "D06 run_reclaim_supervisor.py must install signal handlers"
+        "D07 run_reclaim_supervisor.py must install signal handlers"
     )
 
     forbidden = [
@@ -108,7 +113,7 @@ def test_run_reclaim_supervisor_entry_still_not_wired_directly_to_child_process(
     ]
     for token in forbidden:
         assert token not in source, (
-            f"D06 run_reclaim_supervisor.py must NOT contain {token!r}"
+            f"D07 run_reclaim_supervisor.py must NOT contain {token!r}"
         )
 
 

@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""D06 source guard — verifies graceful shutdown wiring: SupervisorShutdownResult,
-shutdown() method, signal handlers install, and that no D07+ concerns
-(heartbeat, restart, BTC) have leaked in.
+"""D07 source guard — verifies graceful shutdown wiring: SupervisorShutdownResult,
+shutdown() method, signal handlers install, and that heartbeat detection is now
+wired into ReclaimSupervisor.  Forbids restart, BTC, email, multi-symbol.
 """
 
 from __future__ import annotations
@@ -37,7 +37,7 @@ def test_supervisor_shutdown_result_exists_in_reclaim_supervisor() -> None:
     ]
     for token in required:
         assert token in source, (
-            f"D06 reclaim_supervisor.py must contain SupervisorShutdownResult with {token!r}"
+            f"D07 reclaim_supervisor.py must contain SupervisorShutdownResult with {token!r}"
         )
 
 
@@ -50,13 +50,13 @@ def test_shutdown_method_exists_and_is_idempotent() -> None:
     source = _read(_PROJECT_ROOT / "src" / "live" / "supervisor" / "reclaim_supervisor.py")
 
     assert "async def shutdown(self)" in source, (
-        "D06 reclaim_supervisor.py must have async shutdown method"
+        "D07 reclaim_supervisor.py must have async shutdown method"
     )
     assert "self._shutdown_result is not None" in source, (
-        "D06 shutdown must be idempotent via _shutdown_result check"
+        "D07 shutdown must be idempotent via _shutdown_result check"
     )
     assert "self._shutdown_started = True" in source, (
-        "D06 shutdown must set _shutdown_started"
+        "D07 shutdown must set _shutdown_started"
     )
 
 
@@ -69,7 +69,7 @@ def test_request_stop_logs() -> None:
     source = _read(_PROJECT_ROOT / "src" / "live" / "supervisor" / "reclaim_supervisor.py")
 
     assert "RECLAIM_SUPERVISOR_STOP_REQUESTED" in source, (
-        "D06 request_stop must log RECLAIM_SUPERVISOR_STOP_REQUESTED"
+        "D07 request_stop must log RECLAIM_SUPERVISOR_STOP_REQUESTED"
     )
 
 
@@ -82,10 +82,10 @@ def test_run_forever_uses_shutdown_in_finally() -> None:
     source = _read(_PROJECT_ROOT / "src" / "live" / "supervisor" / "reclaim_supervisor.py")
 
     assert "result = await self.shutdown()" in source, (
-        "D06 run_forever finally must call await self.shutdown()"
+        "D07 run_forever finally must call await self.shutdown()"
     )
     assert "RECLAIM_SUPERVISOR_STOPPED" in source, (
-        "D06 run_forever finally must log RECLAIM_SUPERVISOR_STOPPED with result fields"
+        "D07 run_forever finally must log RECLAIM_SUPERVISOR_STOPPED with result fields"
     )
 
 
@@ -96,7 +96,7 @@ def test_run_forever_uses_shutdown_in_finally() -> None:
 
 def test_signal_handlers_module_exists() -> None:
     path = _PROJECT_ROOT / "src" / "live" / "supervisor" / "signal_handlers.py"
-    assert path.exists(), "D06 must create src/live/supervisor/signal_handlers.py"
+    assert path.exists(), "D07 must keep src/live/supervisor/signal_handlers.py"
 
 
 # ============================================================================
@@ -108,13 +108,13 @@ def test_signal_handlers_exports_correct_names() -> None:
     source = _read(_PROJECT_ROOT / "src" / "live" / "supervisor" / "signal_handlers.py")
 
     assert "class SignalHandlerInstallResult" in source, (
-        "D06 signal_handlers.py must define SignalHandlerInstallResult"
+        "D07 signal_handlers.py must define SignalHandlerInstallResult"
     )
     assert "def install_supervisor_signal_handlers" in source, (
-        "D06 signal_handlers.py must define install_supervisor_signal_handlers"
+        "D07 signal_handlers.py must define install_supervisor_signal_handlers"
     )
     assert "add_signal_handler" in source, (
-        "D06 signal_handlers.py must use add_signal_handler"
+        "D07 signal_handlers.py must use add_signal_handler"
     )
 
 
@@ -127,13 +127,13 @@ def test_supervisor_init_exports_shutdown_and_signal_names() -> None:
     source = _read(_PROJECT_ROOT / "src" / "live" / "supervisor" / "__init__.py")
 
     assert "SupervisorShutdownResult" in source, (
-        "D06 __init__.py must export SupervisorShutdownResult"
+        "D07 __init__.py must export SupervisorShutdownResult"
     )
     assert "SignalHandlerInstallResult" in source, (
-        "D06 __init__.py must export SignalHandlerInstallResult"
+        "D07 __init__.py must export SignalHandlerInstallResult"
     )
     assert "install_supervisor_signal_handlers" in source, (
-        "D06 __init__.py must export install_supervisor_signal_handlers"
+        "D07 __init__.py must export install_supervisor_signal_handlers"
     )
 
 
@@ -146,34 +146,52 @@ def test_entry_installs_signal_handlers() -> None:
     source = _read(_PROJECT_ROOT / "scripts" / "run_reclaim_supervisor.py")
 
     assert "install_supervisor_signal_handlers(supervisor)" in source, (
-        "D06 run_reclaim_supervisor.py must call install_supervisor_signal_handlers"
+        "D07 run_reclaim_supervisor.py must call install_supervisor_signal_handlers"
     )
 
 
 # ============================================================================
-# 9. no heartbeat, BTC, restart in supervisor
+# 9. heartbeat monitoring now wired, but no restart / BTC / email
 # ============================================================================
 
 
-def test_supervisor_no_heartbeat_btc_restart() -> None:
+def test_supervisor_has_heartbeat_but_no_restart_btc_email() -> None:
     source = _read(_PROJECT_ROOT / "src" / "live" / "supervisor" / "reclaim_supervisor.py")
 
-    forbidden = [
+    # D07 wires heartbeat detection — these must be present.
+    allowed = [
         "HeartbeatMonitor",
         "HeartbeatStatus",
-        "read_status",
+        "HeartbeatMonitorConfig",
+        "RuntimePaths",
+        "check_heartbeat_once",
+        "maybe_check_heartbeat",
+    ]
+    for token in allowed:
+        assert token in source, (
+            f"D07 reclaim_supervisor.py must contain {token!r}"
+        )
+
+    # Forbidden: restart, BTC, multi-symbol, trading modules, email.
+    forbidden = [
         "restart",
+        "relaunch",
         "RECLAIM_SYMBOLS",
         "BTC-USDT-SWAP",
-        "BTC",
         "SymbolWorkerApp",
         "Trader",
-        "RuntimePaths",
+        "EmailSender",
+        "send_email",
     ]
     for token in forbidden:
         assert token not in source, (
-            f"D06 reclaim_supervisor.py must NOT contain {token!r}"
+            f"D07 reclaim_supervisor.py must NOT contain {token!r}"
         )
+
+    # BTC token must not appear anywhere.
+    assert "BTC" not in source, (
+        "D07 reclaim_supervisor.py must NOT contain BTC"
+    )
 
 
 # ============================================================================
@@ -197,7 +215,7 @@ def test_entry_no_direct_child_or_heartbeat() -> None:
     ]
     for token in forbidden:
         assert token not in source, (
-            f"D06 run_reclaim_supervisor.py must NOT contain {token!r}"
+            f"D07 run_reclaim_supervisor.py must NOT contain {token!r}"
         )
 
 
