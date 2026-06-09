@@ -175,3 +175,123 @@ def test_from_runtime_paths_does_not_read_env(
     # Must use symbol‑scoped paths, NOT env paths
     assert journal.path == tmp_path / "runtime" / "journal" / "live_trades_ETH-USDT-SWAP.jsonl"
     assert journal.summary_path == tmp_path / "runtime" / "journal" / "live_trade_summary_ETH-USDT-SWAP.jsonl"
+
+
+# ===========================================================================
+# record_flat extra fields — delayed_market_exit_* compatibility
+# ===========================================================================
+
+
+def test_record_flat_accepts_delayed_market_exit_extra_fields(tmp_path: Path) -> None:
+    """record_flat accepts delayed_market_exit_* fields via **extra without TypeError."""
+    journal = LiveTradeJournal(
+        path=tmp_path / "events.jsonl",
+        summary_path=tmp_path / "summary.jsonl",
+    )
+    journal.record_flat(
+        position_id="pos-dme-1",
+        symbol="ETH-USDT-SWAP",
+        side="LONG",
+        cash_before_position=1000.0,
+        cash_after=1050.0,
+        equity_after=1050.0,
+        reason="tp_hit",
+        layers=1,
+        avg_entry_price=3000.0,
+        last_tp_price=3100.0,
+        delayed_market_exit_was_armed=True,
+        delayed_market_exit_reason="core_tp_place_failed",
+        delayed_market_exit_status="FAILED",
+        delayed_market_exit_executed_ts_ms=123,
+        delayed_market_exit_exit_attempt_count=2,
+        delayed_market_exit_cleared=True,
+    )
+
+    events = journal.load_events()
+    assert len(events) == 1
+    assert events[0].event_type == "FLAT"
+    assert events[0].position_id == "pos-dme-1"
+
+    payload = events[0].payload
+    assert payload["delayed_market_exit_was_armed"] is True
+    assert payload["delayed_market_exit_reason"] == "core_tp_place_failed"
+    assert payload["delayed_market_exit_status"] == "FAILED"
+    assert payload["delayed_market_exit_executed_ts_ms"] == 123
+    assert payload["delayed_market_exit_exit_attempt_count"] == 2
+    assert payload["delayed_market_exit_cleared"] is True
+
+
+def test_record_flat_accepts_unknown_extra_fields(tmp_path: Path) -> None:
+    """record_flat stores unknown extra fields in the FLAT payload."""
+    journal = LiveTradeJournal(
+        path=tmp_path / "events.jsonl",
+        summary_path=tmp_path / "summary.jsonl",
+    )
+    journal.record_flat(
+        position_id="pos-unk-1",
+        symbol="ETH-USDT-SWAP",
+        side="SHORT",
+        cash_before_position=2000.0,
+        cash_after=1950.0,
+        equity_after=1950.0,
+        reason="sl_hit",
+        layers=1,
+        avg_entry_price=3100.0,
+        last_tp_price=None,
+        custom_field="abc",
+    )
+
+    events = journal.load_events()
+    assert len(events) == 1
+    assert events[0].payload["custom_field"] == "abc"
+
+
+def test_record_flat_preserves_existing_payload_fields(tmp_path: Path) -> None:
+    """record_flat still writes all standard payload fields even when extra is passed."""
+    journal = LiveTradeJournal(
+        path=tmp_path / "events.jsonl",
+        summary_path=tmp_path / "summary.jsonl",
+    )
+    journal.record_flat(
+        position_id="pos-std-1",
+        symbol="ETH-USDT-SWAP",
+        side="LONG",
+        cash_before_position=1000.0,
+        cash_after=1100.0,
+        equity_after=1100.0,
+        reason="tp_hit",
+        layers=2,
+        avg_entry_price=3000.0,
+        last_tp_price=3200.0,
+        last_partial_tp_price=3100.0,
+        last_tp_plan="THREE_STAGE",
+        partial_tp_consumed=True,
+        trend_runner_exit_reason="runner_tp_hit",
+        delayed_market_exit_was_armed=False,
+    )
+
+    events = journal.load_events()
+    assert len(events) == 1
+    payload = events[0].payload
+
+    # Standard fields preserved
+    assert payload["symbol"] == "ETH-USDT-SWAP"
+    assert payload["side"] == "LONG"
+    assert payload["cash_before_position"] == 1000.0
+    assert payload["cash_after"] == 1100.0
+    assert payload["equity_after"] == 1100.0
+    assert payload["flat_reason"] == "tp_hit"
+    assert payload["layers"] == 2
+    assert payload["avg_entry_price"] == 3000.0
+    assert payload["last_tp_price"] == 3200.0
+    assert payload["last_partial_tp_price"] == 3100.0
+    assert payload["last_tp_plan"] == "THREE_STAGE"
+    assert payload["partial_tp_consumed"] is True
+    assert payload["trend_runner_exit_reason"] == "runner_tp_hit"
+
+    # PnL computed correctly
+    assert payload["realized_pnl_usdt_est"] == 100.0
+    assert payload["realized_pnl_pct_est"] == 10.0
+
+    # Extra field also present
+    assert payload["delayed_market_exit_was_armed"] is False

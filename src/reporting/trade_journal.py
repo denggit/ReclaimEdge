@@ -517,33 +517,33 @@ class LiveTradeJournal:
             last_tp_plan: str = "SINGLE",
             partial_tp_consumed: bool = False,
             trend_runner_exit_reason: str | None = None,
+            **extra: Any,
     ) -> None:
         pnl = None
         pnl_pct = None
         if cash_before_position is not None and cash_after is not None:
             pnl = cash_after - cash_before_position
             pnl_pct = pnl / cash_before_position * 100 if cash_before_position else None
-        self.append(
-            "FLAT",
-            {
-                "symbol": symbol,
-                "side": side,
-                "cash_before_position": cash_before_position,
-                "cash_after": cash_after,
-                "equity_after": equity_after,
-                "realized_pnl_usdt_est": pnl,
-                "realized_pnl_pct_est": pnl_pct,
-                "flat_reason": reason,
-                "layers": layers,
-                "avg_entry_price": avg_entry_price,
-                "last_tp_price": last_tp_price,
-                "last_partial_tp_price": last_partial_tp_price,
-                "last_tp_plan": last_tp_plan,
-                "partial_tp_consumed": partial_tp_consumed,
-                "trend_runner_exit_reason": trend_runner_exit_reason,
-            },
-            position_id=position_id,
-        )
+        payload: dict[str, Any] = {
+            "symbol": symbol,
+            "side": side,
+            "cash_before_position": cash_before_position,
+            "cash_after": cash_after,
+            "equity_after": equity_after,
+            "realized_pnl_usdt_est": pnl,
+            "realized_pnl_pct_est": pnl_pct,
+            "flat_reason": reason,
+            "layers": layers,
+            "avg_entry_price": avg_entry_price,
+            "last_tp_price": last_tp_price,
+            "last_partial_tp_price": last_partial_tp_price,
+            "last_tp_plan": last_tp_plan,
+            "partial_tp_consumed": partial_tp_consumed,
+            "trend_runner_exit_reason": trend_runner_exit_reason,
+        }
+        if extra:
+            payload.update(extra)
+        self.append("FLAT", payload, position_id=position_id)
 
     def record_rolling_loss_guard(
             self,

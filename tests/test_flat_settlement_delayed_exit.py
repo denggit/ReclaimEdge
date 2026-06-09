@@ -15,6 +15,7 @@ import asyncio
 import time
 import unittest
 from decimal import Decimal
+from pathlib import Path
 from unittest import mock
 
 import pytest
@@ -22,6 +23,7 @@ import pytest
 from src.execution.trader import PositionSnapshot
 from src.live import runtime_types as live_runtime_types
 from src.live.account_sync.flat_settlement_phase import (
+    finalize_account_sync_flat_settlement_phase,
     prepare_account_sync_flat_settlement_phase,
 )
 from src.live.account_sync import flat_balance as live_flat_balance
@@ -493,6 +495,86 @@ class TestDmeFailedClearsOnFlatWithRollingLossGuard:
             "Non-clearable halt must be preserved when rolling_loss_guard is present"
         )
         assert updated_state.halt_reason == "some_critical_non_clearable_halt"
+
+
+# ── Test: finalize flat settlement with DME fields does not raise ───────
+
+class TestFinalizeFlatSettlementRecordFlatPayloadWithDmeDoesNotRaise:
+    """Integration test: finalize_account_sync_flat_settlement_phase with
+    delayed_market_exit_* fields in record_flat_payload must not raise
+    TypeError and must complete state_store.clear().
+    """
+
+    @pytest.mark.asyncio
+    async def test_finalize_with_dme_fields_does_not_raise(self, tmp_path: Path) -> None:
+        from src.reporting.live_state_store import LiveStateStore
+        from src.reporting.trade_journal import LiveTradeJournal
+
+        journal = LiveTradeJournal(
+            path=tmp_path / "events.jsonl",
+            summary_path=tmp_path / "summary.jsonl",
+        )
+        state_file = tmp_path / "live_state.json"
+        state_file.write_text('{"position_id": "pos-1"}')
+        state_store = LiveStateStore(path=state_file)
+
+        record_flat_payload: dict[str, object] = {
+            "position_id": "pos-finalize-1",
+            "symbol": "ETH-USDT-SWAP",
+            "side": "LONG",
+            "cash_before_position": 1000.0,
+            "cash_after": 1050.0,
+            "equity_after": 1050.0,
+            "reason": "tp_hit",
+            "layers": 1,
+            "avg_entry_price": 3000.0,
+            "last_tp_price": 3100.0,
+            "last_tp_plan": "SINGLE",
+            "partial_tp_consumed": False,
+            "trend_runner_exit_reason": None,
+            # DME extra fields that caused TypeError before fix
+            "delayed_market_exit_was_armed": True,
+            "delayed_market_exit_reason": "core_tp_place_failed",
+            "delayed_market_exit_status": "FAILED",
+            "delayed_market_exit_executed_ts_ms": 123,
+            "delayed_market_exit_exit_attempt_count": 2,
+            "delayed_market_exit_cleared": True,
+        }
+
+        execution_state = live_runtime_types.ExecutionState("pos-finalize-1", 1000.0)
+
+        # This must not raise TypeError
+        await finalize_account_sync_flat_settlement_phase(
+            state_lock=asyncio.Lock(),
+            execution_state=execution_state,
+            journal=journal,
+            email_sender=None,
+            state_store=state_store,
+            rolling_loss_guard=None,
+            record_flat_payload=record_flat_payload,
+            pending_flat_payload=None,
+            flat_previous_halt_reason=None,
+            clear_state=True,
+        )
+
+        # state_store.clear() must have been called — file no longer exists
+        assert not state_file.exists(), (
+            "state_store.clear() must execute after record_flat, file should be deleted"
+        )
+
+        # Journal must contain FLAT event with DME fields
+        events = journal.load_events()
+        assert len(events) == 1
+        assert events[0].event_type == "FLAT"
+        assert events[0].position_id == "pos-finalize-1"
+
+        payload = events[0].payload
+        assert payload["delayed_market_exit_was_armed"] is True
+        assert payload["delayed_market_exit_reason"] == "core_tp_place_failed"
+        assert payload["delayed_market_exit_status"] == "FAILED"
+        assert payload["delayed_market_exit_executed_ts_ms"] == 123
+        assert payload["delayed_market_exit_exit_attempt_count"] == 2
+        assert payload["delayed_market_exit_cleared"] is True
 
 
 if __name__ == "__main__":
