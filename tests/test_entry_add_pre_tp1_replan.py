@@ -1125,5 +1125,131 @@ class TestDegradeDisabledClearsOldSingle(unittest.TestCase):
         self.assertEqual(intent.tp_plan, "THREE_STAGE_RUNNER")
 
 
+# ── Test M: non-Three-Stage, age 4h, old SINGLE → cleared ────────────
+
+
+class TestNonThreeStageOldSingleCleared(unittest.TestCase):
+    """Non-Three-Stage + age 4h + old_degrade_stage="SINGLE" → cleared."""
+
+    def test_non_three_stage_age_4h_old_single_cleared(self) -> None:
+        ts_ms = BASE_TS_MS
+        age_4h = 4 * 3600
+        first_entry_ts_ms = ts_ms - age_4h * 1000
+
+        config = BollCvdReclaimStrategyConfig(
+            three_stage_runner_enabled=False,
+            middle_runner_enabled=False,
+            middle_bucket_split_enabled=False,
+            tp_boll_enabled=True,
+            tp_min_net_profit_pct=0.004,
+            three_stage_pre_tp1_degrade_enabled=True,
+            three_stage_pre_tp1_middle_runner_after_seconds=10800,
+            three_stage_pre_tp1_single_after_seconds=21600,
+        )
+        strategy = BollCvdReclaimStrategy(config, _sizer())
+
+        _setup_strategy_for_add(
+            strategy=strategy,
+            first_entry_ts_ms=first_entry_ts_ms,
+            avg_entry_notional=1980.0,
+            eth_qty=1.0,
+            side="LONG",
+            old_degrade_stage="SINGLE",
+            old_degraded_ts_ms=first_entry_ts_ms + 60_000,
+        )
+        strategy.state.three_stage_runner_enabled_for_position = False
+
+        boll = _boll(
+            middle=2000.0,
+            upper=2100.0,
+            lower=1900.0,
+            tp_middle=2008.0,
+            tp_upper=2110.0,
+            tp_lower=1890.0,
+        )
+        cvd = _cvd()
+
+        coord = _coordinator(strategy)
+        intent = coord.open_position(
+            side="LONG",
+            intent_type="ADD_LONG",
+            price=1970.0,
+            ts_ms=ts_ms,
+            boll=boll,
+            cvd=cvd,
+            reason="test_non_three_stage_age_4h_old_single_cleared",
+        )
+
+        # Old SINGLE must be cleared
+        self.assertIsNone(strategy.state.three_stage_pre_tp1_degrade_stage)
+        self.assertEqual(strategy.state.three_stage_pre_tp1_degraded_ts_ms, 0)
+
+        # Must NOT be MIDDLE_RUNNER
+        self.assertNotEqual(intent.tp_plan, "MIDDLE_RUNNER")
+
+
+# ── Test N: non-Three-Stage, age 7h, old MIDDLE_RUNNER → cleared ──────
+
+
+class TestNonThreeStageOldMiddleRunnerCleared(unittest.TestCase):
+    """Non-Three-Stage + age 7h + old_degrade_stage="MIDDLE_RUNNER" → cleared."""
+
+    def test_non_three_stage_age_7h_old_middle_runner_cleared(self) -> None:
+        ts_ms = BASE_TS_MS
+        age_7h = 7 * 3600
+        first_entry_ts_ms = ts_ms - age_7h * 1000
+
+        config = BollCvdReclaimStrategyConfig(
+            three_stage_runner_enabled=False,
+            middle_runner_enabled=False,
+            middle_bucket_split_enabled=False,
+            tp_boll_enabled=True,
+            tp_min_net_profit_pct=0.004,
+            three_stage_pre_tp1_degrade_enabled=True,
+            three_stage_pre_tp1_middle_runner_after_seconds=10800,
+            three_stage_pre_tp1_single_after_seconds=21600,
+        )
+        strategy = BollCvdReclaimStrategy(config, _sizer())
+
+        _setup_strategy_for_add(
+            strategy=strategy,
+            first_entry_ts_ms=first_entry_ts_ms,
+            avg_entry_notional=1980.0,
+            eth_qty=1.0,
+            side="LONG",
+            old_degrade_stage="MIDDLE_RUNNER",
+            old_degraded_ts_ms=first_entry_ts_ms + 60_000,
+        )
+        strategy.state.three_stage_runner_enabled_for_position = False
+
+        boll = _boll(
+            middle=2000.0,
+            upper=2100.0,
+            lower=1900.0,
+            tp_middle=2008.0,
+            tp_upper=2110.0,
+            tp_lower=1890.0,
+        )
+        cvd = _cvd()
+
+        coord = _coordinator(strategy)
+        intent = coord.open_position(
+            side="LONG",
+            intent_type="ADD_LONG",
+            price=1970.0,
+            ts_ms=ts_ms,
+            boll=boll,
+            cvd=cvd,
+            reason="test_non_three_stage_age_7h_old_middle_runner_cleared",
+        )
+
+        # Old MIDDLE_RUNNER must be cleared
+        self.assertIsNone(strategy.state.three_stage_pre_tp1_degrade_stage)
+        self.assertEqual(strategy.state.three_stage_pre_tp1_degraded_ts_ms, 0)
+
+        # Plan should be chosen by normal logic, not forced by pre-TP1 cap
+        self.assertEqual(intent.tp_plan, "SINGLE")
+
+
 if __name__ == "__main__":
     unittest.main()

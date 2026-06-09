@@ -255,6 +255,8 @@ class EntryAddFlowCoordinator:
         ts_ms: int,
         next_layer: int,
         three_stage_replan_cap_applicable: bool,
+        pre_replan_tp_plan: str | None,
+        pre_replan_three_stage_enabled_for_position: bool,
     ) -> None:
         """Re-compute the pre-TP1 degrade cap based on current position age.
 
@@ -324,8 +326,8 @@ class EntryAddFlowCoordinator:
                 strategy.config.three_stage_pre_tp1_single_after_seconds,
                 three_stage_replan_cap_applicable,
                 strategy.config.three_stage_runner_enabled,
-                getattr(strategy.state, "tp_plan", None),
-                getattr(strategy.state, "three_stage_runner_enabled_for_position", None),
+                pre_replan_tp_plan,
+                pre_replan_three_stage_enabled_for_position,
             )
 
     # ------------------------------------------------------------------
@@ -407,6 +409,8 @@ class EntryAddFlowCoordinator:
             ts_ms=ts_ms,
             next_layer=next_layer,
             three_stage_replan_cap_applicable=three_stage_replan_cap_applicable,
+            pre_replan_tp_plan=pre_replan_tp_plan,
+            pre_replan_three_stage_enabled_for_position=pre_replan_three_stage_enabled_for_position,
         )
 
         tp_price, tp_mode = strategy._select_tp_price(side, boll)
