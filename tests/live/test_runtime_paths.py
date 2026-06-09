@@ -229,3 +229,27 @@ class TestFrozen:
         paths = RuntimePaths(runtime_dir=Path("runtime"), inst_id="ETH-USDT-SWAP")
         with pytest.raises(Exception):  # FrozenInstanceError is internal
             paths.state_file = Path("hacked")  # type: ignore[misc]
+
+
+# ============================================================================
+# B02 guard – prevent accidental live‑entry wiring
+# ============================================================================
+
+
+def test_b02_does_not_touch_live_entry() -> None:
+    """B02 only gives LiveStateStore symbol‑path support.
+
+    Wiring RuntimePaths into the live entry point is a **B05** task.
+    This test fails if anyone accidentally adds RuntimePaths references
+    to ``scripts/run_boll_cvd_live.py`` before B05 is ready.
+    """
+    source = Path("scripts/run_boll_cvd_live.py").read_text(encoding="utf-8")
+    assert "RuntimePaths(" not in source, (
+        "B02 must not wire RuntimePaths into run_boll_cvd_live.py"
+    )
+    assert "build_runtime_paths(" not in source, (
+        "B02 must not wire build_runtime_paths into run_boll_cvd_live.py"
+    )
+    assert "from_runtime_paths(" not in source, (
+        "B02 must not wire from_runtime_paths into run_boll_cvd_live.py"
+    )

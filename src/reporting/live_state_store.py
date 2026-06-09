@@ -5,9 +5,22 @@ import os
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from src.position_management.sidecar.model import trim_sidecar_legs_for_state
+
+class StatePathProvider(Protocol):
+    """Structural interface for any object that exposes a symbol‑scoped ``state_file`` path.
+
+    This protocol lets :class:`LiveStateStore` accept a :class:`RuntimePaths`
+    instance **without** importing ``src.live.runtime_paths``, keeping the
+    reporting layer decoupled from the live layer.
+    """
+
+    @property
+    def state_file(self) -> Path:
+        ...
+
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_STATE_PATH = ROOT / "data" / "trade_journal" / "live_state.json"
@@ -154,6 +167,21 @@ class LiveStateStore:
         if not self.path.is_absolute():
             self.path = ROOT / self.path
         self.path.parent.mkdir(parents=True, exist_ok=True)
+
+    @classmethod
+    def from_runtime_paths(cls, runtime_paths: StatePathProvider) -> "LiveStateStore":
+        """Create a state store using a symbol‑scoped ``RuntimePaths.state_file``.
+
+        This does **not** read ``LIVE_STATE_PATH`` env, does **not** migrate
+        legacy state files, and does **not** fall back to
+        :data:`DEFAULT_STATE_PATH`.  It delegates entirely to the supplied
+        path provider.
+
+        Because this calls ``cls(path=...)``, the store's parent directory
+        is created automatically — that is the store's existing behaviour,
+        not a behaviour of the path provider.
+        """
+        return cls(path=runtime_paths.state_file)
 
     def load(self) -> LivePositionState | None:
         if not self.path.exists():

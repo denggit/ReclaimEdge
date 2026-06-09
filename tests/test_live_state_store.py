@@ -4,7 +4,15 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from src.reporting.live_state_store import LiveStateStore
+import pytest
+
+from src.live.runtime_paths import RuntimePaths
+from src.reporting.live_state_store import (
+    DEFAULT_STATE_PATH,
+    LivePositionState,
+    LiveStateStore,
+    ROOT,
+)
 from src.strategies.boll_cvd_reclaim_strategy import StrategyPositionState
 
 
@@ -166,6 +174,93 @@ class LiveStateStoreTest(unittest.TestCase):
             self.assertEqual(loaded.add_freeze_penalty_count, 2)
             self.assertEqual(loaded.three_stage_pre_tp1_degrade_stage, "MIDDLE_RUNNER")
             self.assertEqual(loaded.three_stage_pre_tp1_degraded_ts_ms, 10_800_001)
+
+
+# ===========================================================================
+# B02 – RuntimePaths integration (pytest‑style, uses fixtures)
+# ===========================================================================
+
+
+def test_default_state_store_path_unchanged() -> None:
+    """``DEFAULT_STATE_PATH`` still points to the legacy single‑coin path."""
+    assert DEFAULT_STATE_PATH == ROOT / "data" / "trade_journal" / "live_state.json"
+
+
+def test_env_live_state_path_still_overrides_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``LIVE_STATE_PATH`` env var overrides ``DEFAULT_STATE_PATH``."""
+    custom = tmp_path / "custom_state.json"
+    monkeypatch.setenv("LIVE_STATE_PATH", str(custom))
+    store = LiveStateStore()
+    assert store.path == custom
+
+
+def test_explicit_path_still_wins_over_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Explicit ``path=`` wins over ``LIVE_STATE_PATH`` env."""
+    monkeypatch.setenv("LIVE_STATE_PATH", str(tmp_path / "env_state.json"))
+    explicit = tmp_path / "explicit_state.json"
+    store = LiveStateStore(path=explicit)
+    assert store.path == explicit
+
+
+def test_from_runtime_paths_uses_symbol_scoped_state_file(
+    tmp_path: Path,
+) -> None:
+    """``from_runtime_paths`` delegates to ``RuntimePaths.state_file``."""
+    runtime_paths = RuntimePaths(
+        runtime_dir=tmp_path / "runtime", inst_id="ETH-USDT-SWAP",
+    )
+    store = LiveStateStore.from_runtime_paths(runtime_paths)
+    expected = tmp_path / "runtime" / "state" / "live_state_ETH-USDT-SWAP.json"
+    assert store.path == expected
+
+
+def test_symbol_scoped_state_store_save_load_clear_roundtrip(
+    tmp_path: Path,
+) -> None:
+    """Full save → load → clear cycle via ``from_runtime_paths``."""
+    runtime_paths = RuntimePaths(
+        runtime_dir=tmp_path / "runtime", inst_id="ETH-USDT-SWAP",
+    )
+    store = LiveStateStore.from_runtime_paths(runtime_paths)
+
+    state = LivePositionState(
+        position_id="ETH-USDT-SWAP:LONG:1:test",
+        symbol="ETH-USDT-SWAP",
+        side="LONG",
+        layers=2,
+        avg_entry_price=1680.0,
+    )
+    store.save(state)
+
+    loaded = store.load()
+    assert loaded is not None
+    assert loaded.position_id == state.position_id
+    assert loaded.symbol == "ETH-USDT-SWAP"
+    assert loaded.layers == 2
+    assert store.path.exists()
+
+    store.clear()
+    assert not store.path.exists()
+
+
+def test_from_runtime_paths_accepts_btc_for_path_only(
+    tmp_path: Path,
+) -> None:
+    """Path builder is generic — BTC symbol works for path generation only.
+
+    This does NOT enable BTC live trading, create a TOML, or modify the
+    validator.  It only proves that the path builder is symbol‑agnostic.
+    """
+    runtime_paths = RuntimePaths(
+        runtime_dir=tmp_path / "runtime", inst_id="BTC-USDT-SWAP",
+    )
+    store = LiveStateStore.from_runtime_paths(runtime_paths)
+    expected = tmp_path / "runtime" / "state" / "live_state_BTC-USDT-SWAP.json"
+    assert store.path == expected
 
 
 if __name__ == "__main__":
