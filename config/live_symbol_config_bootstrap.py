@@ -1,17 +1,18 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-Live entrypoint symbol-config bootstrapper (A07).
+Live entrypoint symbol-config bootstrapper (A07 / A08).
 
-Provides a single pure-startup helper that chooses between the legacy
-``.env``-based config path and the new TOML-based symbol config path,
-controlled by ``RECLAIM_USE_SYMBOL_TOML``.
+Provides a single pure-startup helper that builds runtime config objects
+for the live entrypoint.  As of A08 the **default** path is the TOML-based
+symbol config; the legacy ``.env``-based path is retained as an explicit
+opt-out (``RECLAIM_USE_SYMBOL_TOML=false``).
 
 Design rules
 ------------
 * Startup-only – never call from tick / worker / strategy loop.
-* No file I/O outside the single TOML load (and only when the feature flag
-  is enabled).
+* No file I/O outside the single TOML load (and only when the TOML path
+  is active).
 * No network I/O.
 * No logging / print.
 * No threads / async tasks.
@@ -116,15 +117,14 @@ def build_live_symbol_runtime_configs(
     Behaviour is controlled by ``RECLAIM_USE_SYMBOL_TOML`` (read via
     *env* or ``os.environ``):
 
-    * **Legacy path** (default, ``RECLAIM_USE_SYMBOL_TOML`` unset or
-      ``false``): all config objects are created via their respective
-      ``.from_env()`` class-methods — exactly as the current live
-      entrypoint does today.
+    * **TOML path** (default, ``RECLAIM_USE_SYMBOL_TOML`` unset or
+      ``true``): the ETH TOML file is loaded, validated and mapped.
+      ``account_equity_usdt`` overrides ``dry_run_equity_usdt`` when
+      provided (preserving current live-startup account-equity semantics).
 
-    * **TOML path** (``RECLAIM_USE_SYMBOL_TOML=true``): the ETH TOML
-      file is loaded, validated and mapped.  ``account_equity_usdt``
-      overrides ``dry_run_equity_usdt`` when provided (preserving current
-      live-startup account-equity semantics).
+    * **Legacy path** (``RECLAIM_USE_SYMBOL_TOML=false``): all config
+      objects are created via their respective ``.from_env()``
+      class-methods — exactly as the live entrypoint did before A08.
 
     Parameters
     ----------
@@ -151,56 +151,56 @@ def build_live_symbol_runtime_configs(
     # -- 1. Load env-runtime config (this reads *env* OR os.environ) -----------
     env_runtime = load_env_runtime_config(env)
 
-    # -- 2. Legacy path --------------------------------------------------------
-    if not env_runtime.use_symbol_toml:
-        with _temporary_environ(env):
-            monitor = BollBandBreakoutMonitorConfig.from_env()
-            cvd = CvdTrackerConfig.from_env()
-            strategy = BollCvdReclaimStrategyConfig.from_env()
-            if account_equity_usdt is not None:
-                position_sizer = SimplePositionSizerConfig.from_account_equity(
-                    account_equity_usdt
-                )
-            else:
-                position_sizer = SimplePositionSizerConfig.from_env()
+    # -- 2. TOML path (default as of A08) -----------------------------------
+    if env_runtime.use_symbol_toml:
+        # Gate: only ETH-USDT-SWAP is allowed for now.
+        if env_runtime.symbols != ("ETH-USDT-SWAP",):
+            raise ValueError(
+                "RECLAIM_USE_SYMBOL_TOML=true currently only supports "
+                'RECLAIM_SYMBOLS="ETH-USDT-SWAP". '
+                f"Got: {env_runtime.symbols!r}"
+            )
+
+        symbol_config = load_symbol_config_from_dir(
+            env_runtime.symbol_config_dir,
+            "ETH-USDT-SWAP",
+        )
+        validate_symbol_config(symbol_config)
+        mapped = map_symbol_config(symbol_config)
+
+        position_sizer = mapped.position_sizer
+        if account_equity_usdt is not None:
+            position_sizer = replace(
+                mapped.position_sizer,
+                dry_run_equity_usdt=account_equity_usdt,
+            )
 
         return LiveSymbolRuntimeConfigs(
             env_runtime=env_runtime,
-            symbol_config=None,
-            monitor=monitor,
-            cvd=cvd,
-            strategy=strategy,
+            symbol_config=symbol_config,
+            monitor=mapped.monitor,
+            cvd=mapped.cvd,
+            strategy=mapped.strategy,
             position_sizer=position_sizer,
         )
 
-    # -- 3. TOML path ----------------------------------------------------------
-    # Gate: only ETH-USDT-SWAP is allowed for now.
-    if env_runtime.symbols != ("ETH-USDT-SWAP",):
-        raise ValueError(
-            "RECLAIM_USE_SYMBOL_TOML=true currently only supports "
-            'RECLAIM_SYMBOLS="ETH-USDT-SWAP". '
-            f"Got: {env_runtime.symbols!r}"
-        )
-
-    symbol_config = load_symbol_config_from_dir(
-        env_runtime.symbol_config_dir,
-        "ETH-USDT-SWAP",
-    )
-    validate_symbol_config(symbol_config)
-    mapped = map_symbol_config(symbol_config)
-
-    position_sizer = mapped.position_sizer
-    if account_equity_usdt is not None:
-        position_sizer = replace(
-            mapped.position_sizer,
-            dry_run_equity_usdt=account_equity_usdt,
-        )
+    # -- 3. Legacy path (explicit opt-out: RECLAIM_USE_SYMBOL_TOML=false) ---
+    with _temporary_environ(env):
+        monitor = BollBandBreakoutMonitorConfig.from_env()
+        cvd = CvdTrackerConfig.from_env()
+        strategy = BollCvdReclaimStrategyConfig.from_env()
+        if account_equity_usdt is not None:
+            position_sizer = SimplePositionSizerConfig.from_account_equity(
+                account_equity_usdt
+            )
+        else:
+            position_sizer = SimplePositionSizerConfig.from_env()
 
     return LiveSymbolRuntimeConfigs(
         env_runtime=env_runtime,
-        symbol_config=symbol_config,
-        monitor=mapped.monitor,
-        cvd=mapped.cvd,
-        strategy=mapped.strategy,
+        symbol_config=None,
+        monitor=monitor,
+        cvd=cvd,
+        strategy=strategy,
         position_sizer=position_sizer,
     )

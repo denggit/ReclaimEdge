@@ -29,35 +29,56 @@ _SYMBOLS_DIR = _PROJECT_ROOT / "config" / "symbols"
 
 
 # ---------------------------------------------------------------------------
-# 1. test_default_uses_env_path
+# 1. test_default_loads_eth_toml
 # ---------------------------------------------------------------------------
 
 
-def test_default_uses_env_path() -> None:
-    """Default behaviour: env={} → use_symbol_toml=False, from_env() path."""
-    result = build_live_symbol_runtime_configs(env={})
+def test_default_loads_eth_toml() -> None:
+    """Default (A08): env={} → use_symbol_toml=True, loads ETH TOML, maps all
+    configs, and applies account_equity_usdt override."""
+    result = build_live_symbol_runtime_configs(
+        env={},
+        account_equity_usdt=5000.0,
+    )
 
-    assert result.symbol_config is None
-    assert result.env_runtime.use_symbol_toml is False
+    assert result.env_runtime.use_symbol_toml is True
+    assert result.symbol_config is not None
+    assert result.symbol_config.inst_id == "ETH-USDT-SWAP"
 
-    # monitor was built via BollBandBreakoutMonitorConfig.from_env()
+    assert result.position_sizer.dry_run_equity_usdt == 5000.0
+    assert result.strategy.three_stage_runner_enabled is True
+    assert result.strategy.three_stage_tp2_use_structure_boll is True
+
+    # monitor was mapped from TOML
     assert isinstance(result.monitor, BollBandBreakoutMonitorConfig)
     assert result.monitor.inst_id == "ETH-USDT-SWAP"
 
-    # cvd was built via CvdTrackerConfig.from_env()
+    # cvd was mapped from TOML
     assert isinstance(result.cvd, CvdTrackerConfig)
-    assert result.cvd.fast_window_seconds == 5.0
 
-    # strategy was built via BollCvdReclaimStrategyConfig.from_env()
-    assert isinstance(result.strategy, BollCvdReclaimStrategyConfig)
-
-    # position_sizer was built via SimplePositionSizerConfig.from_env()
+    # position_sizer was mapped from TOML (with account equity override)
     assert isinstance(result.position_sizer, SimplePositionSizerConfig)
-    assert result.position_sizer.layer_multiplier_step == 0.15
 
 
 # ---------------------------------------------------------------------------
-# 2. test_toml_flag_loads_eth_toml
+# 2. test_explicit_false_uses_legacy_env_path
+# ---------------------------------------------------------------------------
+
+
+def test_explicit_false_uses_legacy_env_path() -> None:
+    """Explicit RECLAIM_USE_SYMBOL_TOML=false → legacy .env path."""
+    result = build_live_symbol_runtime_configs(
+        env={"RECLAIM_USE_SYMBOL_TOML": "false"},
+        account_equity_usdt=5000.0,
+    )
+
+    assert result.env_runtime.use_symbol_toml is False
+    assert result.symbol_config is None
+    assert result.position_sizer.dry_run_equity_usdt == 5000.0
+
+
+# ---------------------------------------------------------------------------
+# 3. test_toml_flag_loads_eth_toml
 # ---------------------------------------------------------------------------
 
 
@@ -83,7 +104,7 @@ def test_toml_flag_loads_eth_toml() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 3. test_toml_flag_uses_account_equity_override
+# 4. test_toml_flag_uses_account_equity_override
 # ---------------------------------------------------------------------------
 
 
@@ -104,7 +125,7 @@ def test_toml_flag_uses_account_equity_override() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 4. test_toml_flag_rejects_btc_symbols_for_now
+# 5. test_toml_flag_rejects_btc_symbols_for_now
 # ---------------------------------------------------------------------------
 
 
@@ -121,7 +142,7 @@ def test_toml_flag_rejects_btc_symbols_for_now() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 5. test_toml_flag_missing_file_fails_fast
+# 6. test_toml_flag_missing_file_fails_fast
 # ---------------------------------------------------------------------------
 
 
@@ -138,7 +159,7 @@ def test_toml_flag_missing_file_fails_fast(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 6. test_env_path_does_not_load_toml
+# 7. test_env_path_does_not_load_toml
 # ---------------------------------------------------------------------------
 
 
@@ -159,7 +180,7 @@ def test_env_path_does_not_load_toml(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 7. test_import_has_no_side_effects
+# 8. test_import_has_no_side_effects
 # ---------------------------------------------------------------------------
 
 
@@ -175,7 +196,7 @@ def test_import_has_no_side_effects() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 8. test_env_mapping_restores_os_environ_after_error
+# 9. test_env_mapping_restores_os_environ_after_error
 # ---------------------------------------------------------------------------
 
 
@@ -210,7 +231,7 @@ def test_env_mapping_restores_os_environ_after_error() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 9. test_temporary_environ_noop_when_env_is_none
+# 10. test_temporary_environ_noop_when_env_is_none
 # ---------------------------------------------------------------------------
 
 
@@ -224,14 +245,14 @@ def test_temporary_environ_noop_when_env_is_none() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 10. test_account_equity_env_path
+# 11. test_account_equity_env_path
 # ---------------------------------------------------------------------------
 
 
 def test_account_equity_env_path() -> None:
     """Legacy path with account_equity_usdt uses from_account_equity."""
     result = build_live_symbol_runtime_configs(
-        env={},
+        env={"RECLAIM_USE_SYMBOL_TOML": "false"},
         account_equity_usdt=5000.0,
     )
 
@@ -243,7 +264,7 @@ def test_account_equity_env_path() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 11. test_legacy_path_account_equity_does_not_read_dry_run_equity
+# 12. test_legacy_path_account_equity_does_not_read_dry_run_equity
 # ---------------------------------------------------------------------------
 
 

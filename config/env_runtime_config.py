@@ -193,7 +193,7 @@ def load_env_runtime_config(
     runtime_dir_raw = _get(env, "RECLAIM_RUNTIME_DIR", "runtime")
     runtime_dir = Path(runtime_dir_raw)
 
-    use_symbol_toml = _parse_bool(env, "RECLAIM_USE_SYMBOL_TOML", default=False)
+    use_symbol_toml = _parse_bool(env, "RECLAIM_USE_SYMBOL_TOML", default=True)
 
     # -- OKX credentials -------------------------------------------------------
     okx_api_key = _get(env, "OKX_API_KEY")

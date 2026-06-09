@@ -35,9 +35,9 @@ class TestDefaultEnvRuntimeConfig:
         cfg = load_env_runtime_config({})
         assert cfg.runtime_dir == Path("runtime")
 
-    def test_use_symbol_toml_default(self) -> None:
+    def test_use_symbol_toml_defaults_true(self) -> None:
         cfg = load_env_runtime_config({})
-        assert cfg.use_symbol_toml is False
+        assert cfg.use_symbol_toml is True
 
     def test_email_enabled_default(self) -> None:
         cfg = load_env_runtime_config({})
@@ -136,6 +136,15 @@ class TestParseUseSymbolTomlFalseValues:
     @pytest.mark.parametrize("value", ["0", "false", "no", "off", "", "FALSE"])
     def test_false_value(self, value: str) -> None:
         cfg = load_env_runtime_config({"RECLAIM_USE_SYMBOL_TOML": value})
+        assert cfg.use_symbol_toml is False
+
+
+class TestExplicitFalseDisablesSymbolToml:
+    """Explicit ``RECLAIM_USE_SYMBOL_TOML=false`` must override the default of
+    ``True`` so users can still opt back into the legacy ``.env`` path."""
+
+    def test_explicit_false_disables_symbol_toml(self) -> None:
+        cfg = load_env_runtime_config({"RECLAIM_USE_SYMBOL_TOML": "false"})
         assert cfg.use_symbol_toml is False
 
 

@@ -62,6 +62,54 @@ from src.utils.log import get_logger  # noqa: E402
 logger = get_logger(__name__)
 
 
+def _assert_trader_matches_symbol_config(
+    trader: Trader,
+    runtime_configs: "LiveSymbolRuntimeConfigs",
+) -> None:
+    """Fail fast when the running Trader disagrees with the TOML symbol config.
+
+    On the **legacy .env path** ``runtime_configs.symbol_config`` is
+    ``None`` and this function is a no-op.
+
+    On the **TOML path** (default as of A08) we verify that the key
+    market-structure parameters the Trader initialised from ``.env`` match
+    what the TOML declares.  A mismatch here means the live session would
+    run with inconsistent leverage / tdMode / posSide — a dangerous state
+    that must be refused at startup.
+    """
+    symbol_config = runtime_configs.symbol_config
+    if symbol_config is None:
+        # Legacy .env path — nothing to cross-check.
+        return
+
+    errors: list[str] = []
+
+    if trader.symbol != symbol_config.symbol.inst_id:
+        errors.append(
+            f"inst_id: trader={trader.symbol!r} vs TOML={symbol_config.symbol.inst_id!r}"
+        )
+
+    if trader.td_mode != symbol_config.market.td_mode:
+        errors.append(
+            f"td_mode: trader={trader.td_mode!r} vs TOML={symbol_config.market.td_mode!r}"
+        )
+
+    if trader.pos_side_mode != symbol_config.market.pos_side_mode:
+        errors.append(
+            f"pos_side_mode: trader={trader.pos_side_mode!r} vs TOML={symbol_config.market.pos_side_mode!r}"
+        )
+
+    if str(trader.leverage) != str(symbol_config.capital.leverage):
+        errors.append(
+            f"leverage: trader={trader.leverage!r} vs TOML={symbol_config.capital.leverage!r}"
+        )
+
+    if errors:
+        raise RuntimeError(
+            "TOML/env trader config mismatch: " + "; ".join(errors)
+        )
+
+
 async def main() -> None:
     load_dotenv()
     if not live_config_helpers.live_trading_enabled():
@@ -79,6 +127,7 @@ async def main() -> None:
         runtime_configs = build_live_symbol_runtime_configs(
             account_equity_usdt=trader.account_equity_usdt,
         )
+        _assert_trader_matches_symbol_config(trader, runtime_configs)
         monitor_config = runtime_configs.monitor
         cvd_config = runtime_configs.cvd
         strategy_config = runtime_configs.strategy
