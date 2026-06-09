@@ -9,13 +9,11 @@ exists, can be loaded by the A02 loader, matches the Python-side
 
 from __future__ import annotations
 
-from decimal import Decimal
 from pathlib import Path
-
-import pytest
 
 from config.symbol_config import SymbolConfig
 from config.symbol_config_loader import load_symbol_config_from_dir
+from config.symbol_config_validator import validate_symbol_config
 
 # ---------------------------------------------------------------------------
 # Path helpers
@@ -130,7 +128,17 @@ def test_default_eth_toml_safety_switches() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 5. No BTC TOML created yet
+# 5. Validator acceptance
+# ---------------------------------------------------------------------------
+
+
+def test_default_eth_toml_passes_validator() -> None:
+    loaded = load_symbol_config_from_dir(str(_SYMBOLS_DIR), "ETH-USDT-SWAP")
+    validate_symbol_config(loaded)
+
+
+# ---------------------------------------------------------------------------
+# 6. No BTC TOML created yet
 # ---------------------------------------------------------------------------
 
 
