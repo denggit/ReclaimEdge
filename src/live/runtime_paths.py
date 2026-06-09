@@ -9,7 +9,7 @@ import re
 # Sanitization
 # ---------------------------------------------------------------------------
 
-_SAFE_SLUG_RE = re.compile(r"^[A-Za-z0-9_*-]+$")
+_SAFE_SLUG_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 
 def sanitize_inst_id(inst_id: str) -> str:
@@ -20,7 +20,7 @@ def sanitize_inst_id(inst_id: str) -> str:
     * Input must be a non-empty ``str`` whose stripped form is non-empty.
     * Slashes (``/``, ``\\``), dots used as path segments (``"."``, ``".."``),
       and any form of ``..`` path-traversal are **rejected unconditionally**.
-    * The slug may only contain ``A-Z a-z 0-9 _ - *``.
+    * The slug may only contain ``A-Z a-z 0-9 _ - .``.
 
     Returns
     -------
@@ -53,7 +53,7 @@ def sanitize_inst_id(inst_id: str) -> str:
 
     if not _SAFE_SLUG_RE.match(inst_id):
         raise ValueError(
-            f"inst_id contains characters outside the safe set [A-Za-z0-9_*-]: {inst_id!r}"
+            f"inst_id contains characters outside the safe set [A-Za-z0-9_.-]: {inst_id!r}"
         )
 
     return inst_id

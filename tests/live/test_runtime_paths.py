@@ -42,6 +42,15 @@ class TestSanitizeInstId:
         with pytest.raises(ValueError):
             sanitize_inst_id(r"ETH\USDT")
 
+    def test_allows_single_dot_inside_symbol(self) -> None:
+        """``ETH.USDT-SWAP`` must be allowed — `.` is a safe character."""
+        assert sanitize_inst_id("ETH.USDT-SWAP") == "ETH.USDT-SWAP"
+
+    def test_rejects_asterisk(self) -> None:
+        """``ETH*USDT`` must be rejected — `*` is a glob/wildcard risk."""
+        with pytest.raises(ValueError, match=r"characters outside"):
+            sanitize_inst_id("ETH*USDT")
+
     def test_rejects_dot_segment(self) -> None:
         """``.`` must be rejected as a path‑traversal risk."""
         with pytest.raises(ValueError):
