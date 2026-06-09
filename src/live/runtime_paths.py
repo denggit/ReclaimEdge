@@ -79,6 +79,13 @@ class RuntimePaths:
     * ``journal_file`` — main trade event journal
     * ``trade_summary_file`` — trade summary journal
 
+    Report artifact paths (B04 — deterministic only, no IO):
+
+    * ``latest_daily_report_file`` — stable target for latest daily report
+    * ``latest_weekly_report_file`` — stable target for latest weekly report
+    * ``latest_summary_report_file`` — stable target for latest summary report
+    * ``report_index_file`` — symbol report index for parent/supervisor discovery
+
     Parameters
     ----------
     runtime_dir : Path
@@ -172,6 +179,44 @@ class RuntimePaths:
     @property
     def summary_reports_dir(self) -> Path:
         return self.reports_dir / "summary"
+
+    # Report artifact file paths ------------------------------------------
+
+    @property
+    def latest_daily_report_file(self) -> Path:
+        """Stable target path for the latest daily report artifact.
+
+        This is a **deterministic path only** — B04 does not write this file.
+        Future B05/B06 may use it as the output destination for daily HTML
+        reports.
+        """
+        return self.daily_reports_dir / "latest.html"
+
+    @property
+    def latest_weekly_report_file(self) -> Path:
+        """Stable target path for the latest weekly report artifact.
+
+        This is a **deterministic path only** — B04 does not write this file.
+        """
+        return self.weekly_reports_dir / "latest.html"
+
+    @property
+    def latest_summary_report_file(self) -> Path:
+        """Stable target path for the latest overall summary report artifact.
+
+        This is a **deterministic path only** — B04 does not write this file.
+        """
+        return self.summary_reports_dir / "latest.html"
+
+    @property
+    def report_index_file(self) -> Path:
+        """Stable target path for the symbol report index.
+
+        Future parent/supervisor processes can read ``index.json`` to
+        discover available report artifacts for this symbol.  B04 does
+        **not** write this file.
+        """
+        return self.reports_dir / "index.json"
 
     # Legacy (single‑coin) paths for future B06 migration ------------------
     # These match the *current* filenames used in the reporting layer so that

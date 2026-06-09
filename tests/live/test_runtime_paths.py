@@ -135,6 +135,26 @@ class TestRuntimePathsForETH:
             "runtime/reports/ETH-USDT-SWAP/summary"
         )
 
+    def test_latest_daily_report_file(self, paths: RuntimePaths) -> None:
+        assert paths.latest_daily_report_file == Path(
+            "runtime/reports/ETH-USDT-SWAP/daily/latest.html"
+        )
+
+    def test_latest_weekly_report_file(self, paths: RuntimePaths) -> None:
+        assert paths.latest_weekly_report_file == Path(
+            "runtime/reports/ETH-USDT-SWAP/weekly/latest.html"
+        )
+
+    def test_latest_summary_report_file(self, paths: RuntimePaths) -> None:
+        assert paths.latest_summary_report_file == Path(
+            "runtime/reports/ETH-USDT-SWAP/summary/latest.html"
+        )
+
+    def test_report_index_file(self, paths: RuntimePaths) -> None:
+        assert paths.report_index_file == Path(
+            "runtime/reports/ETH-USDT-SWAP/index.json"
+        )
+
 
 class TestRuntimePathsDoesNotCreateDirectories:
     """RuntimePaths is a pure path-builder — no filesystem side effects."""
@@ -158,6 +178,10 @@ class TestRuntimePathsDoesNotCreateDirectories:
         _ = paths.daily_reports_dir
         _ = paths.weekly_reports_dir
         _ = paths.summary_reports_dir
+        _ = paths.latest_daily_report_file
+        _ = paths.latest_weekly_report_file
+        _ = paths.latest_summary_report_file
+        _ = paths.report_index_file
 
         assert not runtime_dir.exists(), (
             "RuntimePaths must not create directories"
@@ -183,6 +207,9 @@ class TestRuntimePathsAcceptsOtherSafeSymbols:
         )
         assert paths.heartbeat_file == Path(
             "runtime/heartbeats/BTC-USDT-SWAP.heartbeat.json"
+        )
+        assert paths.report_index_file == Path(
+            "runtime/reports/BTC-USDT-SWAP/index.json"
         )
 
     def test_sol_usdt_swap(self) -> None:
@@ -280,4 +307,53 @@ def test_b03_does_not_touch_live_entry() -> None:
     )
     assert "journal_file" not in source, (
         "B03 must not wire journal_file into run_boll_cvd_live.py"
+    )
+
+
+# ============================================================================
+# B04 guard – prevent accidental live‑entry / report‑builder wiring
+# ============================================================================
+
+
+def test_b04_does_not_touch_live_entry() -> None:
+    """B04 only adds report path data structures.
+
+    Wiring SymbolReportPaths or report artifact paths into the live entry
+    point is a **B05** task.  This test fails if anyone accidentally adds
+    these references to ``scripts/run_boll_cvd_live.py`` before B05 is ready.
+    """
+    source = Path("scripts/run_boll_cvd_live.py").read_text(encoding="utf-8")
+    assert "SymbolReportPaths" not in source, (
+        "B04 must not wire SymbolReportPaths into run_boll_cvd_live.py"
+    )
+    assert "build_symbol_report_paths" not in source, (
+        "B04 must not wire build_symbol_report_paths into run_boll_cvd_live.py"
+    )
+    assert "latest_daily_report_file" not in source, (
+        "B04 must not wire latest_daily_report_file into run_boll_cvd_live.py"
+    )
+    assert "report_index_file" not in source, (
+        "B04 must not wire report_index_file into run_boll_cvd_live.py"
+    )
+
+
+def test_b04_does_not_make_daily_reporter_write_files() -> None:
+    """B04 does not change DailyTradeReporter to write files.
+
+    DailyTradeReporter continues to send HTML emails — it does NOT write
+    report artifacts to disk.  This test fails if anyone accidentally adds
+    file‑write calls to the reporter before B05/B06 is ready.
+    """
+    source = Path("src/reporting/daily_trade_reporter.py").read_text(encoding="utf-8")
+    assert "SymbolReportPaths" not in source, (
+        "B04 must not reference SymbolReportPaths in DailyTradeReporter"
+    )
+    assert "build_symbol_report_paths" not in source, (
+        "B04 must not reference build_symbol_report_paths in DailyTradeReporter"
+    )
+    assert ".write_text(" not in source, (
+        "B04 must not make DailyTradeReporter write files to disk"
+    )
+    assert ".open(" not in source, (
+        "B04 must not make DailyTradeReporter open files"
     )
