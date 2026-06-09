@@ -21,6 +21,7 @@ from src.live import config_helpers as live_config_helpers  # noqa: E402
 from src.live import queue_helpers as live_queue_helpers  # noqa: E402
 from src.live import runtime_types as live_runtime_types  # noqa: E402
 from src.live import time_utils as live_time_utils  # noqa: E402
+from src.live.live_app_config import LiveAppConfig  # noqa: E402
 from src.live.runtime_path_compat import handoff_legacy_runtime_files  # noqa: E402
 from src.live.runtime_paths import RuntimePaths  # noqa: E402
 from src.live.workers import account_position_sync_worker as account_position_sync_worker_module  # noqa: E402
@@ -116,6 +117,7 @@ async def main() -> None:
     load_dotenv()
     if not live_config_helpers.live_trading_enabled():
         raise RuntimeError("LIVE_TRADING is not true. Refusing to start live runner.")
+    app_config = LiveAppConfig.from_env()
 
     email_sender = EmailSender()
     trader = Trader()
@@ -268,20 +270,22 @@ async def main() -> None:
         trader_symbol=trader.symbol,
     )
     strategy_tick_queue: asyncio.Queue[MarketTickEvent] = asyncio.Queue(
-        maxsize=int(os.getenv("STRATEGY_TICK_QUEUE_MAXSIZE", "20000")))
+        maxsize=app_config.strategy_tick_queue_maxsize)
     execution_queue: asyncio.Queue[live_runtime_types.TradeCommand] = asyncio.Queue(
-        maxsize=int(os.getenv("EXECUTION_QUEUE_MAXSIZE", "1000")))
-    position_sync_seconds = float(os.getenv("POSITION_SYNC_SECONDS", "5"))
-    account_sync_seconds = float(os.getenv("ACCOUNT_SYNC_SECONDS", "60"))
-    cash_log_min_delta_usdt = float(os.getenv("ACCOUNT_LOG_MIN_DELTA_USDT", "0.01"))
-    market_tick_heartbeat_seconds = float(os.getenv("MARKET_TICK_HEARTBEAT_SECONDS", "60"))
-    account_snapshot_stale_warn_seconds = float(os.getenv("ACCOUNT_SNAPSHOT_STALE_WARN_SECONDS", "30"))
-    strategy_lag_warn_seconds = float(os.getenv("STRATEGY_TICK_LAG_WARN_SECONDS", "2"))
-    execution_backlog_log_seconds = float(os.getenv("EXECUTION_QUEUE_BACKLOG_LOG_SECONDS", "30"))
+        maxsize=app_config.execution_queue_maxsize)
+    position_sync_seconds = app_config.position_sync_seconds
+    account_sync_seconds = app_config.account_sync_seconds
+    cash_log_min_delta_usdt = app_config.cash_log_min_delta_usdt
+    market_tick_heartbeat_seconds = app_config.market_tick_heartbeat_seconds
+    account_snapshot_stale_warn_seconds = app_config.account_snapshot_stale_warn_seconds
+    strategy_lag_warn_seconds = app_config.strategy_tick_lag_warn_seconds
+    execution_backlog_log_seconds = app_config.execution_queue_backlog_log_seconds
 
     async def daily_report_loop() -> None:
-        raw_time = os.getenv("DAILY_REPORT_TIME", "09:00")
-        hour, minute = live_time_utils.parse_daily_report_time(raw_time)
+        daily_report_config = app_config.daily_report
+        raw_time = daily_report_config.raw_time
+        hour = daily_report_config.hour
+        minute = daily_report_config.minute
         logger.info("Daily trade report loop started | DAILY_REPORT_TIME=%s", raw_time)
         while True:
             target = live_time_utils.next_daily_report_time(hour, minute)
@@ -301,19 +305,17 @@ async def main() -> None:
                 logger.exception("Daily trade report loop failed")
 
     async def weekly_summary_loop() -> None:
-        enabled = os.getenv("WEEKLY_SUMMARY_ENABLED", "true").strip().lower() in {"1", "true", "yes", "y", "on"}
+        weekly_config = app_config.weekly_summary
+        enabled = weekly_config.enabled
         if not enabled:
             logger.info("Weekly overall summary loop disabled")
             return
 
-        raw_time = os.getenv("WEEKLY_SUMMARY_TIME", "10:00")
-        raw_weekday = os.getenv("WEEKLY_SUMMARY_WEEKDAY", "0")
-        compact_after_success = os.getenv("WEEKLY_COMPACT_AFTER_SUCCESS", "false").strip().lower() in {"1", "true",
-                                                                                                       "yes", "y", "on"}
-        hour, minute = live_time_utils.parse_weekly_report_time(raw_time)
-        weekday = int(raw_weekday)
-        if weekday < 0 or weekday > 6:
-            raise ValueError(f"Invalid WEEKLY_SUMMARY_WEEKDAY={raw_weekday}")
+        raw_time = weekly_config.raw_time
+        compact_after_success = weekly_config.compact_after_success
+        weekday = weekly_config.weekday
+        hour = weekly_config.hour
+        minute = weekly_config.minute
 
         logger.info(
             "Weekly compaction config | WEEKLY_COMPACT_AFTER_SUCCESS=%s risk=enable_only_after_summary_merge_verified",
