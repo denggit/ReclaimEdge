@@ -254,6 +254,7 @@ class EntryAddFlowCoordinator:
         *,
         ts_ms: int,
         next_layer: int,
+        three_stage_replan_cap_applicable: bool,
     ) -> None:
         """Re-compute the pre-TP1 degrade cap based on current position age.
 
@@ -265,6 +266,12 @@ class EntryAddFlowCoordinator:
         those guards are correct for tick updates but wrong for
         position-replan after a position-size increase.
 
+        **Scope guard**: the 3h/6h degrade cap is a Three-Stage
+        lifecycle concept.  When ``three_stage_replan_cap_applicable``
+        is False the degrade stage is unconditionally cleared so that
+        non-Three-Stage strategies are never erroneously capped to
+        MIDDLE_RUNNER or SINGLE.
+
         Rules (all based on ``first_entry_ts_ms``, which is never
         reset by an add):
 
@@ -273,8 +280,9 @@ class EntryAddFlowCoordinator:
           →  degrade_stage = "MIDDLE_RUNNER"
         * age ≥ single_after_seconds  →  degrade_stage = "SINGLE"
 
-        When ``three_stage_pre_tp1_degrade_enabled`` is False the
-        degrade stage is unconditionally cleared.
+        When ``three_stage_pre_tp1_degrade_enabled`` is False or
+        ``three_stage_replan_cap_applicable`` is False the degrade
+        stage is unconditionally cleared.
         """
         strategy = self.strategy
         old_stage = strategy.state.three_stage_pre_tp1_degrade_stage
@@ -283,7 +291,10 @@ class EntryAddFlowCoordinator:
         age_seconds = strategy._three_stage_pre_tp1_age_seconds(ts_ms)
 
         new_stage: str | None = None
-        if strategy.config.three_stage_pre_tp1_degrade_enabled:
+        if (
+            three_stage_replan_cap_applicable
+            and strategy.config.three_stage_pre_tp1_degrade_enabled
+        ):
             if age_seconds >= strategy.config.three_stage_pre_tp1_single_after_seconds:
                 new_stage = "SINGLE"
             elif age_seconds >= strategy.config.three_stage_pre_tp1_middle_runner_after_seconds:
@@ -297,7 +308,11 @@ class EntryAddFlowCoordinator:
                 "THREE_STAGE_PRE_TP1_DEGRADE_REFRESHED_BEFORE_POSITION_REPLAN | "
                 "next_layer=%s old_stage=%s new_stage=%s old_degraded_ts_ms=%s "
                 "new_degraded_ts_ms=%s age_seconds=%.1f first_entry_ts_ms=%s "
-                "middle_after_seconds=%s single_after_seconds=%s",
+                "middle_after_seconds=%s single_after_seconds=%s "
+                "three_stage_replan_cap_applicable=%s "
+                "three_stage_runner_enabled=%s "
+                "pre_replan_tp_plan=%s "
+                "pre_replan_three_stage_enabled_for_position=%s",
                 next_layer,
                 old_stage,
                 new_stage,
@@ -307,6 +322,10 @@ class EntryAddFlowCoordinator:
                 strategy.state.first_entry_ts_ms,
                 strategy.config.three_stage_pre_tp1_middle_runner_after_seconds,
                 strategy.config.three_stage_pre_tp1_single_after_seconds,
+                three_stage_replan_cap_applicable,
+                strategy.config.three_stage_runner_enabled,
+                getattr(strategy.state, "tp_plan", None),
+                getattr(strategy.state, "three_stage_runner_enabled_for_position", None),
             )
 
     # ------------------------------------------------------------------
@@ -358,6 +377,15 @@ class EntryAddFlowCoordinator:
             strategy.state.last_add_skip_log_ts_ms = 0
         strategy.state.side = side
         strategy._update_position_cost(price, size.eth_qty)
+
+        # ── Capture pre-reset state for Three-Stage lifecycle gate ───────
+        # Must be captured BEFORE _reset_three_stage_runner_state() which
+        # clears three_stage_runner_enabled_for_position.
+        pre_replan_tp_plan = strategy.state.tp_plan
+        pre_replan_three_stage_enabled_for_position = (
+            strategy.state.three_stage_runner_enabled_for_position
+        )
+
         strategy.state.partial_tp_consumed = False
         strategy._reset_near_tp_state()
         strategy._reset_middle_runner_state()
@@ -368,9 +396,17 @@ class EntryAddFlowCoordinator:
             reason="position_replan_before_tp_selection",
         )
 
+        # ── Pre-TP1 age cap only applies to Three-Stage lifecycle ────────
+        three_stage_replan_cap_applicable = (
+            strategy.config.three_stage_runner_enabled
+            or pre_replan_three_stage_enabled_for_position
+            or pre_replan_tp_plan == "THREE_STAGE_RUNNER"
+        )
+
         self._refresh_pre_tp1_degrade_stage_before_position_replan(
             ts_ms=ts_ms,
             next_layer=next_layer,
+            three_stage_replan_cap_applicable=three_stage_replan_cap_applicable,
         )
 
         tp_price, tp_mode = strategy._select_tp_price(side, boll)

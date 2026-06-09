@@ -761,10 +761,7 @@ class TestOrderSpecRegression(unittest.TestCase):
             middle_bucket_split=split,
         )
         labels = [s.label for s in decision.specs]
-        self.assertIn("tp1_middle_fast", labels)
-        self.assertIn("tp1_middle_slow", labels)
-        self.assertIn("tp2_outer", labels)
-        self.assertEqual(len(decision.specs), 3)
+        self.assertEqual(labels, ["tp1_middle_fast", "tp1_middle_slow", "tp2_outer"])
 
     def test_g2_middle_runner_with_split(self) -> None:
         """MIDDLE_RUNNER + middle_bucket_split → middle_fast/slow/runner."""
@@ -789,10 +786,7 @@ class TestOrderSpecRegression(unittest.TestCase):
             middle_bucket_split=split,
         )
         labels = [s.label for s in decision.specs]
-        self.assertIn("middle_fast", labels)
-        self.assertIn("middle_slow", labels)
-        self.assertIn("runner", labels)
-        self.assertEqual(len(decision.specs), 3)
+        self.assertEqual(labels, ["middle_fast", "middle_slow", "runner"])
 
     def test_g3_single(self) -> None:
         """SINGLE plan → one 'final' order spec."""
@@ -818,6 +812,317 @@ class TestOrderSpecRegression(unittest.TestCase):
         labels = [s.label for s in decision.specs]
         self.assertEqual(labels, ["final"])
         self.assertEqual(len(decision.specs), 1)
+
+
+# ── Test H: non-Three-Stage strategy, age 4h → NOT capped to MIDDLE_RUNNER ──
+
+
+class TestNonThreeStageNotCappedToMiddleRunner(unittest.TestCase):
+    """age ≥ 3h must NOT force MIDDLE_RUNNER when Three-Stage is not active."""
+
+    def test_age_4h_non_three_stage_no_middle_runner_cap(self) -> None:
+        ts_ms = BASE_TS_MS
+        age_4h = 4 * 3600
+        first_entry_ts_ms = ts_ms - age_4h * 1000
+
+        config = BollCvdReclaimStrategyConfig(
+            three_stage_runner_enabled=False,
+            middle_runner_enabled=False,
+            middle_bucket_split_enabled=False,
+            tp_boll_enabled=True,
+            tp_min_net_profit_pct=0.004,
+            three_stage_pre_tp1_degrade_enabled=True,
+            three_stage_pre_tp1_middle_runner_after_seconds=10800,
+            three_stage_pre_tp1_single_after_seconds=21600,
+        )
+        strategy = BollCvdReclaimStrategy(config, _sizer())
+
+        _setup_strategy_for_add(
+            strategy=strategy,
+            first_entry_ts_ms=first_entry_ts_ms,
+            avg_entry_notional=1980.0,
+            eth_qty=1.0,
+            side="LONG",
+            old_degrade_stage=None,
+            old_degraded_ts_ms=0,
+        )
+        strategy.state.three_stage_runner_enabled_for_position = False
+
+        boll = _boll(
+            middle=2000.0,
+            upper=2100.0,
+            lower=1900.0,
+            tp_middle=2008.0,
+            tp_upper=2110.0,
+            tp_lower=1890.0,
+        )
+        cvd = _cvd()
+
+        coord = _coordinator(strategy)
+        intent = coord.open_position(
+            side="LONG",
+            intent_type="ADD_LONG",
+            price=1970.0,
+            ts_ms=ts_ms,
+            boll=boll,
+            cvd=cvd,
+            reason="test_age_4h_non_three_stage_no_middle_runner_cap",
+        )
+
+        # Must NOT be degraded to MIDDLE_RUNNER by pre-TP1 age cap
+        self.assertIsNone(strategy.state.three_stage_pre_tp1_degrade_stage)
+        self.assertEqual(strategy.state.three_stage_pre_tp1_degraded_ts_ms, 0)
+        self.assertNotEqual(intent.tp_plan, "MIDDLE_RUNNER")
+        self.assertNotEqual(strategy.state.tp_plan, "MIDDLE_RUNNER")
+
+        # With layers=2, split_tp_min_layers=4, middle_runner off,
+        # three_stage_runner off → SINGLE
+        self.assertEqual(intent.tp_plan, "SINGLE")
+
+
+# ── Test I: non-Three-Stage strategy, age 7h → NOT forced SINGLE by pre-TP1 cap ──
+
+
+class TestNonThreeStageNotCappedToSingle(unittest.TestCase):
+    """age ≥ 6h must NOT write SINGLE into degrade_stage for non-Three-Stage."""
+
+    def test_age_7h_non_three_stage_no_single_cap(self) -> None:
+        ts_ms = BASE_TS_MS
+        age_7h = 7 * 3600
+        first_entry_ts_ms = ts_ms - age_7h * 1000
+
+        config = BollCvdReclaimStrategyConfig(
+            three_stage_runner_enabled=False,
+            middle_runner_enabled=False,
+            middle_bucket_split_enabled=False,
+            tp_boll_enabled=True,
+            tp_min_net_profit_pct=0.004,
+            three_stage_pre_tp1_degrade_enabled=True,
+            three_stage_pre_tp1_middle_runner_after_seconds=10800,
+            three_stage_pre_tp1_single_after_seconds=21600,
+        )
+        strategy = BollCvdReclaimStrategy(config, _sizer())
+
+        _setup_strategy_for_add(
+            strategy=strategy,
+            first_entry_ts_ms=first_entry_ts_ms,
+            avg_entry_notional=1980.0,
+            eth_qty=1.0,
+            side="LONG",
+            old_degrade_stage=None,
+            old_degraded_ts_ms=0,
+        )
+        strategy.state.three_stage_runner_enabled_for_position = False
+
+        boll = _boll(
+            middle=2000.0,
+            upper=2100.0,
+            lower=1900.0,
+            tp_middle=2008.0,
+            tp_upper=2110.0,
+            tp_lower=1890.0,
+        )
+        cvd = _cvd()
+
+        coord = _coordinator(strategy)
+        intent = coord.open_position(
+            side="LONG",
+            intent_type="ADD_LONG",
+            price=1970.0,
+            ts_ms=ts_ms,
+            boll=boll,
+            cvd=cvd,
+            reason="test_age_7h_non_three_stage_no_single_cap",
+        )
+
+        # Must NOT write SINGLE into degrade_stage (it's a Three-Stage-only field)
+        self.assertIsNone(strategy.state.three_stage_pre_tp1_degrade_stage)
+        self.assertEqual(strategy.state.three_stage_pre_tp1_degraded_ts_ms, 0)
+
+        # Plan is chosen by normal logic, not by pre-TP1 cap
+        self.assertEqual(intent.tp_plan, "SINGLE")
+
+
+# ── Test J: Three-Stage strategy, age 4h → still capped to MIDDLE_RUNNER ──
+
+
+class TestThreeStageStillCappedMiddleRunner(unittest.TestCase):
+    """Confirm test C semantics are preserved: Three-Stage + age 4h → MIDDLE_RUNNER."""
+
+    def test_three_stage_age_4h_still_middle_runner(self) -> None:
+        ts_ms = BASE_TS_MS
+        age_4h = 4 * 3600
+        first_entry_ts_ms = ts_ms - age_4h * 1000
+
+        config = BollCvdReclaimStrategyConfig(
+            three_stage_runner_enabled=True,
+            middle_bucket_split_enabled=True,
+            middle_runner_enabled=True,
+            tp_boll_enabled=True,
+            tp_min_net_profit_pct=0.004,
+            three_stage_pre_tp1_degrade_enabled=True,
+            three_stage_pre_tp1_middle_runner_after_seconds=10800,
+            three_stage_pre_tp1_single_after_seconds=21600,
+        )
+        strategy = BollCvdReclaimStrategy(config, _sizer())
+
+        _setup_strategy_for_add(
+            strategy=strategy,
+            first_entry_ts_ms=first_entry_ts_ms,
+            avg_entry_notional=1980.0,
+            eth_qty=1.0,
+            side="LONG",
+            old_degrade_stage="SINGLE",
+            old_degraded_ts_ms=first_entry_ts_ms + 60_000,
+        )
+
+        boll = _boll(
+            middle=2000.0,
+            upper=2100.0,
+            lower=1900.0,
+            tp_middle=2008.0,
+            tp_upper=2110.0,
+            tp_lower=1890.0,
+        )
+        cvd = _cvd()
+
+        coord = _coordinator(strategy)
+        intent = coord.open_position(
+            side="LONG",
+            intent_type="ADD_LONG",
+            price=1970.0,
+            ts_ms=ts_ms,
+            boll=boll,
+            cvd=cvd,
+            reason="test_three_stage_age_4h_still_middle_runner",
+        )
+
+        self.assertEqual(strategy.state.three_stage_pre_tp1_degrade_stage, "MIDDLE_RUNNER")
+        self.assertEqual(intent.tp_plan, "MIDDLE_RUNNER")
+        self.assertNotEqual(intent.tp_plan, "THREE_STAGE_RUNNER")
+        self.assertIsNone(intent.three_stage_tp2_price)
+
+
+# ── Test K: Three-Stage strategy, age 7h → still capped to SINGLE ──
+
+
+class TestThreeStageStillCappedSingle(unittest.TestCase):
+    """Confirm test D semantics are preserved: Three-Stage + age 7h → SINGLE."""
+
+    def test_three_stage_age_7h_still_single(self) -> None:
+        ts_ms = BASE_TS_MS
+        age_7h = 7 * 3600
+        first_entry_ts_ms = ts_ms - age_7h * 1000
+
+        config = BollCvdReclaimStrategyConfig(
+            three_stage_runner_enabled=True,
+            middle_bucket_split_enabled=True,
+            middle_runner_enabled=True,
+            tp_boll_enabled=True,
+            tp_min_net_profit_pct=0.004,
+            three_stage_pre_tp1_degrade_enabled=True,
+            three_stage_pre_tp1_middle_runner_after_seconds=10800,
+            three_stage_pre_tp1_single_after_seconds=21600,
+        )
+        strategy = BollCvdReclaimStrategy(config, _sizer())
+
+        _setup_strategy_for_add(
+            strategy=strategy,
+            first_entry_ts_ms=first_entry_ts_ms,
+            avg_entry_notional=1980.0,
+            eth_qty=1.0,
+            side="LONG",
+            old_degrade_stage="SINGLE",
+            old_degraded_ts_ms=first_entry_ts_ms + 60_000,
+        )
+
+        boll = _boll(
+            middle=2000.0,
+            upper=2100.0,
+            lower=1900.0,
+            tp_middle=2008.0,
+            tp_upper=2110.0,
+            tp_lower=1890.0,
+        )
+        cvd = _cvd()
+
+        coord = _coordinator(strategy)
+        intent = coord.open_position(
+            side="LONG",
+            intent_type="ADD_LONG",
+            price=1970.0,
+            ts_ms=ts_ms,
+            boll=boll,
+            cvd=cvd,
+            reason="test_three_stage_age_7h_still_single",
+        )
+
+        self.assertEqual(strategy.state.three_stage_pre_tp1_degrade_stage, "SINGLE")
+        self.assertEqual(intent.tp_plan, "SINGLE")
+        self.assertNotEqual(intent.tp_plan, "THREE_STAGE_RUNNER")
+        self.assertNotEqual(intent.tp_plan, "MIDDLE_RUNNER")
+
+
+# ── Test L: degrade disabled clears old SINGLE (Three-Stage config) ──
+
+
+class TestDegradeDisabledClearsOldSingle(unittest.TestCase):
+    """When three_stage_pre_tp1_degrade_enabled=False, old SINGLE must be cleared."""
+
+    def test_degrade_disabled_clears_old_single(self) -> None:
+        ts_ms = BASE_TS_MS
+        age_7h = 7 * 3600
+        first_entry_ts_ms = ts_ms - age_7h * 1000
+
+        config = BollCvdReclaimStrategyConfig(
+            three_stage_runner_enabled=True,
+            middle_bucket_split_enabled=True,
+            tp_boll_enabled=True,
+            tp_min_net_profit_pct=0.004,
+            three_stage_pre_tp1_degrade_enabled=False,
+            three_stage_pre_tp1_middle_runner_after_seconds=10800,
+            three_stage_pre_tp1_single_after_seconds=21600,
+            middle_runner_enabled=False,
+        )
+        strategy = BollCvdReclaimStrategy(config, _sizer())
+
+        _setup_strategy_for_add(
+            strategy=strategy,
+            first_entry_ts_ms=first_entry_ts_ms,
+            avg_entry_notional=1980.0,
+            eth_qty=1.0,
+            side="LONG",
+            old_degrade_stage="SINGLE",
+            old_degraded_ts_ms=first_entry_ts_ms + 60_000,
+        )
+
+        boll = _boll(
+            middle=2000.0,
+            upper=2100.0,
+            lower=1900.0,
+            tp_middle=2008.0,
+            tp_upper=2110.0,
+            tp_lower=1890.0,
+        )
+        cvd = _cvd()
+
+        coord = _coordinator(strategy)
+        intent = coord.open_position(
+            side="LONG",
+            intent_type="ADD_LONG",
+            price=1970.0,
+            ts_ms=ts_ms,
+            boll=boll,
+            cvd=cvd,
+            reason="test_degrade_disabled_clears_old_single",
+        )
+
+        # Old SINGLE must be cleared
+        self.assertIsNone(strategy.state.three_stage_pre_tp1_degrade_stage)
+        self.assertEqual(strategy.state.three_stage_pre_tp1_degraded_ts_ms, 0)
+
+        # Three-Stage Runner should be allowed (age cap disabled + profit sufficient)
+        self.assertEqual(intent.tp_plan, "THREE_STAGE_RUNNER")
 
 
 if __name__ == "__main__":
