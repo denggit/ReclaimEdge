@@ -155,10 +155,11 @@ def test_entry_installs_signal_handlers() -> None:
 # ============================================================================
 
 
-def test_supervisor_has_heartbeat_but_no_restart_btc_email() -> None:
+def test_supervisor_has_heartbeat_and_restart_but_no_btc_email() -> None:
     source = _read(_PROJECT_ROOT / "src" / "live" / "supervisor" / "reclaim_supervisor.py")
 
     # D07 wires heartbeat detection — these must be present.
+    # D07b adds restart policy — these are now allowed.
     allowed = [
         "HeartbeatMonitor",
         "HeartbeatStatus",
@@ -166,16 +167,19 @@ def test_supervisor_has_heartbeat_but_no_restart_btc_email() -> None:
         "RuntimePaths",
         "check_heartbeat_once",
         "maybe_check_heartbeat",
+        "RestartPolicy",
+        "RestartPolicyConfig",
+        "restart_policy",
+        "restart_on_child_exit",
+        "restart_on_bad_heartbeat",
     ]
     for token in allowed:
         assert token in source, (
-            f"D07 reclaim_supervisor.py must contain {token!r}"
+            f"D07b reclaim_supervisor.py must contain {token!r}"
         )
 
-    # Forbidden: restart, BTC, multi-symbol, trading modules, email.
+    # Forbidden: BTC, multi-symbol, trading modules, email.
     forbidden = [
-        "restart",
-        "relaunch",
         "RECLAIM_SYMBOLS",
         "BTC-USDT-SWAP",
         "SymbolWorkerApp",
@@ -185,12 +189,12 @@ def test_supervisor_has_heartbeat_but_no_restart_btc_email() -> None:
     ]
     for token in forbidden:
         assert token not in source, (
-            f"D07 reclaim_supervisor.py must NOT contain {token!r}"
+            f"D07b reclaim_supervisor.py must NOT contain {token!r}"
         )
 
     # BTC token must not appear anywhere.
     assert "BTC" not in source, (
-        "D07 reclaim_supervisor.py must NOT contain BTC"
+        "D07b reclaim_supervisor.py must NOT contain BTC"
     )
 
 

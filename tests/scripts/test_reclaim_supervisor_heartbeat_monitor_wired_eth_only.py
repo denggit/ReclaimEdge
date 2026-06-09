@@ -33,10 +33,15 @@ def test_reclaim_supervisor_now_imports_heartbeat_monitor() -> None:
         "heartbeat_file",
         "check_heartbeat_once",
         "maybe_check_heartbeat",
+        # D07b wires restart policy — must be present.
+        "RestartPolicy",
+        "RestartPolicyConfig",
+        "_restart_child_after_exit_once",
+        "_restart_child_after_bad_heartbeat_once",
     ]
     for token in required:
         assert token in source, (
-            f"D07 reclaim_supervisor.py must contain {token!r}"
+            f"D07b reclaim_supervisor.py must contain {token!r}"
         )
 
     forbidden = [
@@ -44,12 +49,12 @@ def test_reclaim_supervisor_now_imports_heartbeat_monitor() -> None:
     ]
     for token in forbidden:
         assert token not in source, (
-            f"D07 reclaim_supervisor.py must NOT contain {token!r}"
+            f"D07b reclaim_supervisor.py must NOT contain {token!r}"
         )
 
     # BTC symbol must not appear.
     assert "BTC" not in source, (
-        "D07 reclaim_supervisor.py must NOT contain BTC"
+        "D07b reclaim_supervisor.py must NOT contain BTC"
     )
 
 

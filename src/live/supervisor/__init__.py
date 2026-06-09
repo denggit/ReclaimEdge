@@ -10,6 +10,11 @@ from src.live.supervisor.heartbeat_monitor import (
     HeartbeatMonitorConfig,
     HeartbeatStatus,
 )
+from src.live.supervisor.restart_policy import (
+    RestartDecision,
+    RestartPolicy,
+    RestartPolicyConfig,
+)
 from src.live.supervisor.signal_handlers import (
     SignalHandlerInstallResult,
     install_supervisor_signal_handlers,
@@ -26,6 +31,9 @@ __all__ = [
     "HeartbeatMonitor",
     "HeartbeatMonitorConfig",
     "HeartbeatStatus",
+    "RestartDecision",
+    "RestartPolicy",
+    "RestartPolicyConfig",
     "SignalHandlerInstallResult",
     "install_supervisor_signal_handlers",
 ]

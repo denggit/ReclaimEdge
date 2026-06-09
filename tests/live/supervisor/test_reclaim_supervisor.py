@@ -23,6 +23,7 @@ from src.live.supervisor.reclaim_supervisor import (
     SupervisorHealthEvent,
     SupervisorShutdownResult,
 )
+from src.live.supervisor.restart_policy import RestartPolicyConfig
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 _SUPERVISOR_SOURCE_PATH = (
@@ -228,6 +229,11 @@ def test_default_config() -> None:
     assert config.heartbeat_startup_grace_seconds == 20.0
     assert config.stop_on_child_exit is True
     assert config.stop_on_bad_heartbeat is True
+    assert config.restart_on_child_exit is True
+    assert config.restart_on_bad_heartbeat is True
+    assert config.bad_heartbeat_restart_terminate_timeout_seconds == 10.0
+    assert config.restart_policy.enabled is True
+    assert config.restart_policy.max_restarts == 3
 
 
 # ============================================================================
@@ -619,49 +625,59 @@ def test_health_events_initially_empty() -> None:
 # ============================================================================
 
 
-def test_check_child_exit_once_running_no_event() -> None:
+@pytest.mark.asyncio
+async def test_check_child_exit_once_running_no_event() -> None:
     supervisor = ReclaimSupervisor()
     fake_child = FakeChildProcess(supervisor.build_child_spec(), running=True)
     supervisor._child = fake_child  # type: ignore[assignment]
     fake_child.started = True
 
-    result = supervisor.check_child_exit_once()
-    assert result is None
+    result = await supervisor.check_child_exit_once()
+    assert result is False
     assert not supervisor.stop_requested
     assert len(supervisor.health_events) == 0
 
 
-def test_check_child_exit_once_exited_records_event_and_requests_stop() -> None:
-    supervisor = ReclaimSupervisor()
-    fake_child = FakeChildProcess(supervisor.build_child_spec(), running=False, returncode=1)
-    supervisor._child = fake_child  # type: ignore[assignment]
-    fake_child.started = True
-
-    event = supervisor.check_child_exit_once()
-    assert event is not None
-    assert event.event_type == "CHILD_EXITED"
-    assert event.returncode == 1
-    assert supervisor.stop_requested is True
-    assert len(supervisor.health_events) == 1
-    assert supervisor.health_events[0].event_type == "CHILD_EXITED"
-
-
-def test_check_child_exit_once_exited_no_stop_when_disabled() -> None:
-    config = ReclaimSupervisorConfig(stop_on_child_exit=False)
+@pytest.mark.asyncio
+async def test_check_child_exit_once_exited_records_event_and_requests_stop() -> None:
+    """With restart disabled, child exit records event and requests stop (D07 behaviour preserved)."""
+    config = ReclaimSupervisorConfig(
+        restart_policy=RestartPolicyConfig(enabled=False),
+        stop_on_child_exit=True,
+    )
     supervisor = ReclaimSupervisor(config=config)
     fake_child = FakeChildProcess(supervisor.build_child_spec(), running=False, returncode=1)
     supervisor._child = fake_child  # type: ignore[assignment]
     fake_child.started = True
 
-    event = supervisor.check_child_exit_once()
-    assert event is not None
-    assert event.event_type == "CHILD_EXITED"
+    result = await supervisor.check_child_exit_once()
+    assert result is True
+    assert supervisor.stop_requested is True
+    assert len(supervisor.health_events) >= 1
+    assert supervisor.health_events[0].event_type == "CHILD_EXITED"
+
+
+@pytest.mark.asyncio
+async def test_check_child_exit_once_exited_no_stop_when_disabled() -> None:
+    config = ReclaimSupervisorConfig(
+        restart_policy=RestartPolicyConfig(enabled=False),
+        stop_on_child_exit=False,
+    )
+    supervisor = ReclaimSupervisor(config=config)
+    fake_child = FakeChildProcess(supervisor.build_child_spec(), running=False, returncode=1)
+    supervisor._child = fake_child  # type: ignore[assignment]
+    fake_child.started = True
+
+    result = await supervisor.check_child_exit_once()
+    assert result is True
     assert supervisor.stop_requested is False
 
 
-def test_check_child_exit_once_no_child_returns_none() -> None:
+@pytest.mark.asyncio
+async def test_check_child_exit_once_no_child_returns_none() -> None:
     supervisor = ReclaimSupervisor()
-    assert supervisor.check_child_exit_once() is None
+    result = await supervisor.check_child_exit_once()
+    assert result is False
 
 
 # ============================================================================
@@ -669,27 +685,30 @@ def test_check_child_exit_once_no_child_returns_none() -> None:
 # ============================================================================
 
 
-def test_check_heartbeat_once_fresh_no_event(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_check_heartbeat_once_fresh_no_event(tmp_path: Path) -> None:
     config = ReclaimSupervisorConfig(project_root=tmp_path, runtime_dir=tmp_path / "runtime")
     supervisor = ReclaimSupervisor(config=config)
     hb_path = supervisor.heartbeat_path
     now_ms = int(time.time() * 1000)
     _write_heartbeat(hb_path, now_ms)
 
-    status = supervisor.check_heartbeat_once(now_monotonic=100.0)
+    status = await supervisor.check_heartbeat_once(now_monotonic=100.0)
     assert status is not None
     assert status.fresh is True
     assert len(supervisor.health_events) == 0
     assert supervisor.stop_requested is False
 
 
-def test_check_heartbeat_disabled_returns_none() -> None:
+@pytest.mark.asyncio
+async def test_check_heartbeat_disabled_returns_none() -> None:
     config = ReclaimSupervisorConfig(heartbeat_check_enabled=False)
     supervisor = ReclaimSupervisor(config=config)
-    assert supervisor.check_heartbeat_once() is None
+    assert await supervisor.check_heartbeat_once() is None
 
 
-def test_check_heartbeat_missing_inside_startup_grace_no_stop(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_check_heartbeat_missing_inside_startup_grace_no_stop(tmp_path: Path) -> None:
     config = ReclaimSupervisorConfig(
         heartbeat_startup_grace_seconds=20.0,
         project_root=tmp_path,
@@ -699,15 +718,19 @@ def test_check_heartbeat_missing_inside_startup_grace_no_stop(tmp_path: Path) ->
     supervisor._child_started_monotonic = 100.0
 
     # heartbeat path does not exist → missing
-    status = supervisor.check_heartbeat_once(now_monotonic=110.0)
+    status = await supervisor.check_heartbeat_once(now_monotonic=110.0)
     assert status is not None
     assert status.missing is True
     assert len(supervisor.health_events) == 0
     assert supervisor.stop_requested is False
 
 
-def test_check_heartbeat_missing_after_grace_records_event_and_requests_stop(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_check_heartbeat_missing_after_grace_records_event_and_requests_stop(tmp_path: Path) -> None:
+    """With restart disabled, bad heartbeat after grace records event and requests stop."""
     config = ReclaimSupervisorConfig(
+        restart_policy=RestartPolicyConfig(enabled=False),
+        restart_on_bad_heartbeat=False,
         heartbeat_startup_grace_seconds=20.0,
         project_root=tmp_path,
         runtime_dir=tmp_path / "runtime",
@@ -716,7 +739,7 @@ def test_check_heartbeat_missing_after_grace_records_event_and_requests_stop(tmp
     supervisor._child_started_monotonic = 100.0
 
     # now is 130 = 30s after start, grace is 20s → grace expired
-    status = supervisor.check_heartbeat_once(now_monotonic=130.0)
+    status = await supervisor.check_heartbeat_once(now_monotonic=130.0)
     assert status is not None
     assert status.missing is True
     assert len(supervisor.health_events) == 1
@@ -724,8 +747,12 @@ def test_check_heartbeat_missing_after_grace_records_event_and_requests_stop(tmp
     assert supervisor.stop_requested is True
 
 
-def test_check_heartbeat_stale_after_grace_records_event(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_check_heartbeat_stale_after_grace_records_event(tmp_path: Path) -> None:
+    """With restart disabled, stale heartbeat after grace records event and requests stop."""
     config = ReclaimSupervisorConfig(
+        restart_policy=RestartPolicyConfig(enabled=False),
+        restart_on_bad_heartbeat=False,
         heartbeat_startup_grace_seconds=20.0,
         heartbeat_default_stale_after_seconds=30.0,
         project_root=tmp_path,
@@ -739,7 +766,7 @@ def test_check_heartbeat_stale_after_grace_records_event(tmp_path: Path) -> None
     old_ms = int(time.time() * 1000) - 120_000
     _write_heartbeat(hb_path, old_ms)
 
-    status = supervisor.check_heartbeat_once(now_monotonic=130.0)
+    status = await supervisor.check_heartbeat_once(now_monotonic=130.0)
     assert status is not None
     assert status.stale is True
     assert status.fresh is False
@@ -748,8 +775,12 @@ def test_check_heartbeat_stale_after_grace_records_event(tmp_path: Path) -> None
     assert supervisor.stop_requested is True
 
 
-def test_check_heartbeat_invalid_after_grace_records_event(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_check_heartbeat_invalid_after_grace_records_event(tmp_path: Path) -> None:
+    """With restart disabled, invalid heartbeat after grace records event and requests stop."""
     config = ReclaimSupervisorConfig(
+        restart_policy=RestartPolicyConfig(enabled=False),
+        restart_on_bad_heartbeat=False,
         heartbeat_startup_grace_seconds=20.0,
         project_root=tmp_path,
         runtime_dir=tmp_path / "runtime",
@@ -760,7 +791,7 @@ def test_check_heartbeat_invalid_after_grace_records_event(tmp_path: Path) -> No
     hb_path = supervisor.heartbeat_path
     _write_invalid_heartbeat(hb_path)
 
-    status = supervisor.check_heartbeat_once(now_monotonic=130.0)
+    status = await supervisor.check_heartbeat_once(now_monotonic=130.0)
     assert status is not None
     assert status.invalid is True
     assert len(supervisor.health_events) == 1
@@ -768,8 +799,11 @@ def test_check_heartbeat_invalid_after_grace_records_event(tmp_path: Path) -> No
     assert supervisor.stop_requested is True
 
 
-def test_check_heartbeat_bad_no_stop_when_disabled(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_check_heartbeat_bad_no_stop_when_disabled(tmp_path: Path) -> None:
     config = ReclaimSupervisorConfig(
+        restart_policy=RestartPolicyConfig(enabled=False),
+        restart_on_bad_heartbeat=False,
         stop_on_bad_heartbeat=False,
         heartbeat_startup_grace_seconds=20.0,
         project_root=tmp_path,
@@ -778,7 +812,7 @@ def test_check_heartbeat_bad_no_stop_when_disabled(tmp_path: Path) -> None:
     supervisor = ReclaimSupervisor(config=config)
     supervisor._child_started_monotonic = 100.0
 
-    status = supervisor.check_heartbeat_once(now_monotonic=130.0)
+    status = await supervisor.check_heartbeat_once(now_monotonic=130.0)
     assert status is not None
     assert status.missing is True
     assert len(supervisor.health_events) == 1
@@ -786,7 +820,8 @@ def test_check_heartbeat_bad_no_stop_when_disabled(tmp_path: Path) -> None:
     assert supervisor.stop_requested is False
 
 
-def test_maybe_check_heartbeat_respects_interval(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_maybe_check_heartbeat_respects_interval(tmp_path: Path) -> None:
     config = ReclaimSupervisorConfig(
         heartbeat_check_interval_seconds=5.0,
         project_root=tmp_path,
@@ -800,7 +835,7 @@ def test_maybe_check_heartbeat_respects_interval(tmp_path: Path) -> None:
     _write_heartbeat(hb_path, now_ms)
 
     # First call at monotonic 100.0 — should read and cache.
-    status1 = supervisor.maybe_check_heartbeat(now_monotonic=100.0)
+    status1 = await supervisor.maybe_check_heartbeat(now_monotonic=100.0)
     assert status1 is not None
     assert status1.fresh is True
     assert supervisor._last_heartbeat_check_monotonic == 100.0
@@ -811,22 +846,23 @@ def test_maybe_check_heartbeat_respects_interval(tmp_path: Path) -> None:
     _write_heartbeat(hb_path, old_ms)
 
     # Second call at monotonic 102.0 — within interval, should return cached fresh status.
-    status2 = supervisor.maybe_check_heartbeat(now_monotonic=102.0)
+    status2 = await supervisor.maybe_check_heartbeat(now_monotonic=102.0)
     assert status2 is status1  # same cached object
     assert status2.fresh is True
     assert supervisor._last_heartbeat_check_monotonic == 100.0  # unchanged
 
     # Third call at monotonic 106.0 — beyond interval, reads stale file.
-    status3 = supervisor.maybe_check_heartbeat(now_monotonic=106.0)
+    status3 = await supervisor.maybe_check_heartbeat(now_monotonic=106.0)
     assert status3 is not None
     assert status3.fresh is False
     assert supervisor._last_heartbeat_check_monotonic == 106.0
 
 
-def test_maybe_check_heartbeat_disabled_returns_none() -> None:
+@pytest.mark.asyncio
+async def test_maybe_check_heartbeat_disabled_returns_none() -> None:
     config = ReclaimSupervisorConfig(heartbeat_check_enabled=False)
     supervisor = ReclaimSupervisor(config=config)
-    assert supervisor.maybe_check_heartbeat(now_monotonic=100.0) is None
+    assert await supervisor.maybe_check_heartbeat(now_monotonic=100.0) is None
 
 
 def test_last_heartbeat_status_property() -> None:
@@ -849,7 +885,11 @@ def test_heartbeat_in_startup_grace_no_child_started() -> None:
 
 @pytest.mark.asyncio
 async def test_run_forever_child_exit_stops_loop_without_heartbeat_check() -> None:
-    config = ReclaimSupervisorConfig(poll_interval_seconds=0.01)
+    """With restart disabled, child exit triggers stop (D07 behaviour preserved)."""
+    config = ReclaimSupervisorConfig(
+        poll_interval_seconds=0.01,
+        restart_policy=RestartPolicyConfig(enabled=False),
+    )
     supervisor = ReclaimSupervisor(config=config)
     fake_child = ExitingAfterStartFake(supervisor.build_child_spec(), returncode=7)
 
@@ -873,17 +913,15 @@ async def test_run_forever_child_exit_stops_loop_without_heartbeat_check() -> No
     assert supervisor.shutdown_result.child_running_before_shutdown is False
     assert supervisor.shutdown_result.terminate_attempted is False
 
-    # Heartbeat monitor may have been called 0 or 1 times, but only if called
-    # before the child exit was detected.  The important thing is that the loop
-    # exited after detecting child exit — not that heartbeat was never called.
-
 
 @pytest.mark.asyncio
 async def test_run_forever_bad_heartbeat_stops_loop_and_shutdowns_child() -> None:
+    """With restart disabled, bad heartbeat triggers stop (D07 behaviour preserved)."""
     config = ReclaimSupervisorConfig(
         poll_interval_seconds=0.01,
         heartbeat_startup_grace_seconds=0.01,  # very short grace for test
         heartbeat_check_interval_seconds=0.01,  # check every loop iteration
+        restart_policy=RestartPolicyConfig(enabled=False),
     )
     supervisor = ReclaimSupervisor(config=config)
     fake_child = FakeChildProcess(supervisor.build_child_spec(), running=True)
@@ -937,14 +975,221 @@ async def test_run_forever_fresh_heartbeat_keeps_running_until_request_stop() ->
 
 
 # ============================================================================
+# D07b — restart policy tests
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_child_exit_restarts_child_when_policy_allows() -> None:
+    """Child exit with restart policy allowed → new child started, events recorded."""
+    config = ReclaimSupervisorConfig(
+        restart_policy=RestartPolicyConfig(max_restarts=3, cooldown_seconds=0, window_seconds=600.0),
+        restart_on_child_exit=True,
+    )
+    supervisor = ReclaimSupervisor(config=config)
+
+    # Create a fake child that simulates first child exited.
+    fake_exited = FakeChildProcess(supervisor.build_child_spec(), running=False, returncode=1)
+    fake_exited.started = True
+    supervisor._child = fake_exited  # type: ignore[assignment]
+
+    # Mock create_child_process to return a fresh FakeChildProcess.
+    new_child = FakeChildProcess(supervisor.build_child_spec(), running=True)
+    supervisor.create_child_process = lambda: new_child  # type: ignore[method-assign]
+
+    result = await supervisor.check_child_exit_once()
+    assert result is True
+    assert not supervisor.stop_requested
+    assert supervisor.restart_policy.restart_count_in_window == 1
+    assert new_child.started is True
+
+    events = supervisor.health_events
+    event_types = [e.event_type for e in events]
+    assert "CHILD_EXITED" in event_types
+    assert "CHILD_RESTART_REQUESTED" in event_types
+    assert "CHILD_RESTARTED" in event_types
+
+
+@pytest.mark.asyncio
+async def test_child_exit_max_restarts_exceeded_requests_stop() -> None:
+    """When max restarts exceeded, child exit suppresses restart and requests stop."""
+    config = ReclaimSupervisorConfig(
+        restart_policy=RestartPolicyConfig(max_restarts=1, cooldown_seconds=0, window_seconds=600.0),
+        restart_on_child_exit=True,
+        stop_on_child_exit=True,
+    )
+    supervisor = ReclaimSupervisor(config=config)
+    # Use current monotonic so the entry is NOT pruned by the evaluate inside
+    # check_child_exit_once → _restart_child_after_exit_once.
+    supervisor._restart_policy.record_restart(now_monotonic=time.monotonic())
+
+    fake_exited = FakeChildProcess(supervisor.build_child_spec(), running=False, returncode=1)
+    fake_exited.started = True
+    supervisor._child = fake_exited  # type: ignore[assignment]
+
+    # Safety: mock create_child_process so a real subprocess is never started.
+    supervisor.create_child_process = lambda: FakeChildProcess(supervisor.build_child_spec(), running=True)  # type: ignore[method-assign]
+
+    result = await supervisor.check_child_exit_once()
+    assert result is True
+    assert supervisor.stop_requested is True
+
+    event_types = [e.event_type for e in supervisor.health_events]
+    assert "CHILD_EXITED" in event_types
+    assert "CHILD_RESTART_SUPPRESSED" in event_types
+
+
+@pytest.mark.asyncio
+async def test_child_exit_restart_disabled_falls_back_to_stop() -> None:
+    """When restart_on_child_exit=False and stop_on_child_exit=True, exit stops."""
+    config = ReclaimSupervisorConfig(
+        restart_policy=RestartPolicyConfig(enabled=False),
+        restart_on_child_exit=False,
+        stop_on_child_exit=True,
+    )
+    supervisor = ReclaimSupervisor(config=config)
+
+    fake_exited = FakeChildProcess(supervisor.build_child_spec(), running=False, returncode=1)
+    fake_exited.started = True
+    supervisor._child = fake_exited  # type: ignore[assignment]
+
+    result = await supervisor.check_child_exit_once()
+    assert result is True
+    assert supervisor.stop_requested is True
+
+
+@pytest.mark.asyncio
+async def test_bad_heartbeat_restarts_child_after_grace() -> None:
+    """Bad heartbeat with restart allowed → old child terminated, new child started."""
+    config = ReclaimSupervisorConfig(
+        restart_policy=RestartPolicyConfig(max_restarts=3, cooldown_seconds=0, window_seconds=600.0),
+        restart_on_bad_heartbeat=True,
+        heartbeat_startup_grace_seconds=0.01,  # minimal grace for test
+    )
+    supervisor = ReclaimSupervisor(config=config)
+
+    base = time.monotonic()
+    old_child = FakeChildProcess(supervisor.build_child_spec(), running=True)
+    old_child.started = True
+    supervisor._child = old_child  # type: ignore[assignment]
+    supervisor._child_started_monotonic = base - 30.0  # well past grace
+
+    stale_status = _fake_heartbeat_status(status="stale", fresh=False, stale=True, age_seconds=99.0)
+    supervisor._heartbeat_monitor = FailingHeartbeatMonitor(stale_status)  # type: ignore[assignment]
+
+    new_child = FakeChildProcess(supervisor.build_child_spec(), running=True)
+    supervisor.create_child_process = lambda: new_child  # type: ignore[method-assign]
+
+    status = await supervisor.check_heartbeat_once(now_monotonic=base)
+    assert status is not None
+    assert supervisor.restart_policy.restart_count_in_window == 1
+    assert old_child.terminated is True
+    assert new_child.started is True
+    assert not supervisor.stop_requested
+
+    event_types = [e.event_type for e in supervisor.health_events]
+    assert "HEARTBEAT_STALE" in event_types
+    assert "CHILD_TERMINATE_FOR_RESTART_REQUESTED" in event_types
+    assert "CHILD_TERMINATED_FOR_RESTART" in event_types
+    assert "CHILD_RESTARTED" in event_types
+
+
+@pytest.mark.asyncio
+async def test_bad_heartbeat_restart_max_exceeded_requests_stop() -> None:
+    """When max restarts exceeded, bad heartbeat suppresses restart and requests stop."""
+    config = ReclaimSupervisorConfig(
+        restart_policy=RestartPolicyConfig(max_restarts=1, cooldown_seconds=0, window_seconds=600.0),
+        restart_on_bad_heartbeat=True,
+        stop_on_bad_heartbeat=True,
+        heartbeat_startup_grace_seconds=0.01,  # minimal grace for test
+    )
+    supervisor = ReclaimSupervisor(config=config)
+    base = time.monotonic()
+    # Use consistent timestamps so entry is within window during evaluation.
+    supervisor._restart_policy.record_restart(now_monotonic=base - 1.0)
+
+    old_child = FakeChildProcess(supervisor.build_child_spec(), running=True)
+    old_child.started = True
+    supervisor._child = old_child  # type: ignore[assignment]
+    supervisor._child_started_monotonic = base - 30.0  # well past grace
+
+    stale_status = _fake_heartbeat_status(status="stale", fresh=False, stale=True, age_seconds=99.0)
+    supervisor._heartbeat_monitor = FailingHeartbeatMonitor(stale_status)  # type: ignore[assignment]
+    # Safety: mock create_child_process so a real subprocess is never started.
+    supervisor.create_child_process = lambda: FakeChildProcess(supervisor.build_child_spec(), running=True)  # type: ignore[method-assign]
+
+    status = await supervisor.check_heartbeat_once(now_monotonic=base)
+    assert status is not None
+    assert supervisor.stop_requested is True
+
+    event_types = [e.event_type for e in supervisor.health_events]
+    assert "CHILD_RESTART_SUPPRESSED" in event_types
+
+
+@pytest.mark.asyncio
+async def test_run_forever_child_exit_restart_skips_heartbeat_same_loop() -> None:
+    """After restart in a loop iteration, heartbeat is not checked in the same iteration."""
+    config = ReclaimSupervisorConfig(
+        poll_interval_seconds=0.01,
+        heartbeat_check_interval_seconds=0.01,
+        restart_policy=RestartPolicyConfig(max_restarts=3, cooldown_seconds=0, window_seconds=600.0),
+        restart_on_child_exit=True,
+    )
+    supervisor = ReclaimSupervisor(config=config)
+
+    fake_child = ExitingAfterStartFake(supervisor.build_child_spec(), returncode=7)
+    new_child = FakeChildProcess(supervisor.build_child_spec(), running=True)
+    child_factory = [fake_child, new_child]
+    call_count = [0]
+
+    def factory() -> FakeChildProcess:
+        result = child_factory[call_count[0]]
+        call_count[0] += 1
+        return result
+
+    supervisor.create_child_process = factory  # type: ignore[method-assign]
+
+    # Spy heartbeat monitor — should NOT be called during restart iteration.
+    spy_monitor = CountingHeartbeatMonitor()
+    supervisor._heartbeat_monitor = spy_monitor  # type: ignore[assignment]
+
+    task = asyncio.create_task(supervisor.run_forever())
+    # Let the loop run for a few iterations — it should restart and keep running.
+    await asyncio.sleep(0.08)
+    supervisor.request_stop()
+    await asyncio.wait_for(task, timeout=1.0)
+
+    # The restarted child should have been started.
+    assert new_child.started is True
+    # Should have a CHILD_RESTARTED event.
+    event_types = [e.event_type for e in supervisor.health_events]
+    assert "CHILD_RESTARTED" in event_types
+
+
+@pytest.mark.asyncio
+async def test_restart_policy_property_accessible() -> None:
+    """RestartPolicy is accessible and properly initialized."""
+    supervisor = ReclaimSupervisor()
+    rp = supervisor.restart_policy
+    assert rp.config.enabled is True
+    assert rp.config.max_restarts == 3
+    assert rp.restart_count_in_window == 0
+
+
+def test_config_invalid_bad_heartbeat_restart_timeout_raises() -> None:
+    with pytest.raises(ValueError, match="bad_heartbeat_restart_terminate_timeout_seconds must be > 0"):
+        ReclaimSupervisorConfig(bad_heartbeat_restart_terminate_timeout_seconds=0)
+
+
+# ============================================================================
 # D07 source guard — check imports and forbidden tokens
 # ============================================================================
 
 
-def test_source_allows_heartbeat_monitor_and_child_process() -> None:
+def test_source_allows_heartbeat_monitor_and_child_process_and_restart() -> None:
     source = _supervisor_source()
 
-    # D07 must wire HeartbeatMonitor.
+    # D07 must wire HeartbeatMonitor.  D07b adds restart_policy.
     allowed = [
         "HeartbeatMonitor",
         "HeartbeatStatus",
@@ -959,19 +1204,25 @@ def test_source_allows_heartbeat_monitor_and_child_process() -> None:
         "_heartbeat_in_startup_grace",
         "SupervisorHealthEvent",
         "scripts/run_symbol_worker.py",
+        "RestartPolicy",
+        "RestartPolicyConfig",
+        "restart_policy",
+        "restart_on_child_exit",
+        "restart_on_bad_heartbeat",
+        "_restart_child_after_exit_once",
+        "_restart_child_after_bad_heartbeat_once",
     ]
     for token in allowed:
         assert token in source, (
-            f"D07 reclaim_supervisor.py must contain {token!r}"
+            f"D07b reclaim_supervisor.py must contain {token!r}"
         )
 
 
-def test_source_no_restart_or_btc_or_email() -> None:
+def test_source_no_btc_or_email_or_trading() -> None:
     source = _supervisor_source()
 
+    # D07b allows "restart" tokens — intentionally removed from this list.
     forbidden = [
-        "restart",
-        "relaunch",
         "RECLAIM_SYMBOLS",
         "BTC-USDT-SWAP",
         "EmailSender",
@@ -992,13 +1243,12 @@ def test_source_no_restart_or_btc_or_email() -> None:
     ]
     for token in forbidden:
         assert token not in source, (
-            f"D07 reclaim_supervisor.py must NOT contain {token!r}"
+            f"D07b reclaim_supervisor.py must NOT contain {token!r}"
         )
 
     # BTC symbol should not appear outside of child_name default.
-    # But child_name="ETH-USDT-SWAP" contains a dash, let's be precise.
     assert "BTC" not in source, (
-        "D07 reclaim_supervisor.py must NOT contain BTC"
+        "D07b reclaim_supervisor.py must NOT contain BTC"
     )
 
 
@@ -1022,6 +1272,7 @@ def test_supervisor_loop_logs_are_not_spammy() -> None:
     )
 
     # The while loop body must NOT contain logger.info — no per-tick spam.
+    # logger.error and logger.debug are allowed for exit/heartbeat/restart events.
     lines = source.splitlines()
     inside_while = False
     for line in lines:
@@ -1032,7 +1283,6 @@ def test_supervisor_loop_logs_are_not_spammy() -> None:
         if inside_while:
             if stripped.startswith("except ") or stripped.startswith("finally "):
                 break
-            # D07: logger.error is allowed for CHILD_EXITED / HEARTBEAT_BAD
             assert "logger.info" not in stripped, (
                 f"reclaim_supervisor.py while loop must not log info inside the loop — found: {stripped!r}"
             )

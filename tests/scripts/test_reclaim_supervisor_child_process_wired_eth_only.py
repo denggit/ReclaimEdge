@@ -31,6 +31,9 @@ def test_reclaim_supervisor_imports_child_process() -> None:
         "build_child_spec",
         "create_child_process",
         "scripts/run_symbol_worker.py",
+        # D07b allows restart_policy in supervisor.
+        "RestartPolicy",
+        "RestartPolicyConfig",
     ]
     for token in required:
         assert token in source, (

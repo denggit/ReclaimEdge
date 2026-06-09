@@ -10,6 +10,7 @@ from src.live import time_utils as live_time_utils
 from src.live.runtime_paths import RuntimePaths
 from src.live.supervisor.child_process import ChildProcess, ChildProcessSnapshot, ChildProcessSpec
 from src.live.supervisor.heartbeat_monitor import HeartbeatMonitor, HeartbeatMonitorConfig, HeartbeatStatus
+from src.live.supervisor.restart_policy import RestartDecision, RestartPolicy, RestartPolicyConfig
 from src.utils.log import get_logger
 
 logger = get_logger(__name__)
@@ -43,8 +44,9 @@ class SupervisorShutdownResult:
 class SupervisorHealthEvent:
     """Immutable record of a supervisor health observation.
 
-    Captures child exit and heartbeat problems for downstream consumers
-    (logging, future outbox).  Never writes to disk — stays in memory.
+    Captures child exit, heartbeat problems, and restart decisions for
+    downstream consumers (logging, future outbox).  Never writes to disk —
+    stays in memory.
     """
 
     event_type: str
@@ -55,6 +57,9 @@ class SupervisorHealthEvent:
     heartbeat_status: str | None = None
     heartbeat_age_seconds: float | None = None
     heartbeat_error: str | None = None
+    restart_reason: str | None = None
+    restart_count_in_window: int | None = None
+    restart_suppressed_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -72,6 +77,10 @@ class ReclaimSupervisorConfig:
     stop_on_child_exit: bool = True
     stop_on_bad_heartbeat: bool = True
     heartbeat_startup_grace_seconds: float = 20.0
+    restart_policy: RestartPolicyConfig = field(default_factory=RestartPolicyConfig)
+    restart_on_child_exit: bool = True
+    restart_on_bad_heartbeat: bool = True
+    bad_heartbeat_restart_terminate_timeout_seconds: float = 10.0
 
     def __post_init__(self) -> None:
         if self.poll_interval_seconds <= 0:
@@ -88,6 +97,8 @@ class ReclaimSupervisorConfig:
             raise ValueError("heartbeat_default_stale_after_seconds must be > 0")
         if self.heartbeat_startup_grace_seconds <= 0:
             raise ValueError("heartbeat_startup_grace_seconds must be > 0")
+        if self.bad_heartbeat_restart_terminate_timeout_seconds <= 0:
+            raise ValueError("bad_heartbeat_restart_terminate_timeout_seconds must be > 0")
         object.__setattr__(self, "project_root", Path(self.project_root))
         object.__setattr__(self, "worker_script", Path(self.worker_script))
         object.__setattr__(self, "runtime_dir", Path(self.runtime_dir))
@@ -108,6 +119,7 @@ class ReclaimSupervisor:
         self._last_heartbeat_status: HeartbeatStatus | None = None
         self._health_events: list[SupervisorHealthEvent] = []
         self._child_started_monotonic: float | None = None
+        self._restart_policy = RestartPolicy(self._config.restart_policy)
 
     @classmethod
     def from_env(cls) -> "ReclaimSupervisor":
@@ -149,6 +161,10 @@ class ReclaimSupervisor:
     @property
     def health_events(self) -> tuple[SupervisorHealthEvent, ...]:
         return tuple(self._health_events)
+
+    @property
+    def restart_policy(self) -> RestartPolicy:
+        return self._restart_policy
 
     def request_stop(self) -> None:
         if not self._stop_requested:
@@ -193,6 +209,9 @@ class ReclaimSupervisor:
         event_type: str,
         snapshot: ChildProcessSnapshot | None,
         heartbeat_status: HeartbeatStatus | None = None,
+        restart_reason: str | None = None,
+        restart_count_in_window: int | None = None,
+        restart_suppressed_reason: str | None = None,
     ) -> SupervisorHealthEvent:
         event = SupervisorHealthEvent(
             event_type=event_type,
@@ -203,6 +222,9 @@ class ReclaimSupervisor:
             heartbeat_status=heartbeat_status.status if heartbeat_status is not None else None,
             heartbeat_age_seconds=heartbeat_status.age_seconds if heartbeat_status is not None else None,
             heartbeat_error=heartbeat_status.error if heartbeat_status is not None else None,
+            restart_reason=restart_reason,
+            restart_count_in_window=restart_count_in_window,
+            restart_suppressed_reason=restart_suppressed_reason,
         )
         self._health_events.append(event)
         return event
@@ -211,23 +233,226 @@ class ReclaimSupervisor:
     # child exit detection
     # ------------------------------------------------------------------
 
-    def check_child_exit_once(self) -> SupervisorHealthEvent | None:
+    async def check_child_exit_once(self) -> bool:
+        """Check whether the current child has exited.
+
+        Returns ``True`` when a restart or cooldown was handled (caller should
+        skip heartbeat this iteration).  Returns ``False`` otherwise.
+        """
         if self._child is None:
-            return None
+            return False
         snapshot = self._child.snapshot()
-        if snapshot.started and not snapshot.running and snapshot.returncode is not None:
-            event = self._append_health_event(event_type="CHILD_EXITED", snapshot=snapshot)
-            logger.error(
-                "RECLAIM_SUPERVISOR_CHILD_EXITED | child=%s pid=%s returncode=%s stop_on_child_exit=%s",
-                snapshot.name,
-                snapshot.pid,
-                snapshot.returncode,
-                self._config.stop_on_child_exit,
-            )
+        if not (snapshot.started and not snapshot.running and snapshot.returncode is not None):
+            return False
+
+        event = self._append_health_event(event_type="CHILD_EXITED", snapshot=snapshot)
+        logger.error(
+            "RECLAIM_SUPERVISOR_CHILD_EXITED | child=%s pid=%s returncode=%s",
+            snapshot.name,
+            snapshot.pid,
+            snapshot.returncode,
+        )
+
+        if self._config.restart_on_child_exit:
+            restarted = await self._restart_child_after_exit_once(reason="child_exit")
+            if restarted:
+                return True
+            # If not restarted due to cooldown, return True so caller skips
+            # heartbeat this iteration (avoids double-processing).
+            decision = self._restart_policy.evaluate(now_monotonic=time.monotonic())
+            if decision.reason == "cooldown":
+                return True
+            # disabled / max exceeded / max_restarts_zero → fall through to stop
             if self._config.stop_on_child_exit:
                 self.request_stop()
-            return event
-        return None
+            return True
+
+        if self._config.stop_on_child_exit:
+            self.request_stop()
+        return True
+
+    # ------------------------------------------------------------------
+    # restart helpers
+    # ------------------------------------------------------------------
+
+    async def _restart_child_after_exit_once(
+        self,
+        *,
+        reason: str,
+        now_monotonic: float | None = None,
+    ) -> bool:
+        """Evaluate restart policy and restart the child if allowed.
+
+        Returns ``True`` if the child was restarted, ``False`` otherwise.
+        """
+        now = time.monotonic() if now_monotonic is None else now_monotonic
+        decision = self._restart_policy.evaluate(now_monotonic=now)
+
+        if not decision.allowed:
+            # cooldown: do NOT request stop, just wait for next cycle
+            if decision.reason == "cooldown":
+                logger.debug(
+                    "RECLAIM_SUPERVISOR_CHILD_RESTART_SUPPRESSED | child=%s reason=%s "
+                    "restart_count_in_window=%s cooldown_next_allowed=%s",
+                    self._config.child_name,
+                    decision.reason,
+                    decision.restart_count_in_window,
+                    decision.next_allowed_monotonic,
+                )
+                return False
+
+            # max exceeded / disabled / max_restarts_zero → suppressed
+            self._append_health_event(
+                event_type="CHILD_RESTART_SUPPRESSED",
+                snapshot=None,
+                restart_reason=decision.reason,
+                restart_count_in_window=decision.restart_count_in_window,
+                restart_suppressed_reason=decision.reason,
+            )
+            logger.error(
+                "RECLAIM_SUPERVISOR_CHILD_RESTART_SUPPRESSED | child=%s reason=%s "
+                "restart_count_in_window=%s",
+                self._config.child_name,
+                decision.reason,
+                decision.restart_count_in_window,
+            )
+            return False
+
+        # Allowed: request restart
+        self._append_health_event(
+            event_type="CHILD_RESTART_REQUESTED",
+            snapshot=None,
+            restart_reason=reason,
+            restart_count_in_window=decision.restart_count_in_window,
+        )
+
+        child = self.create_child_process()
+        await child.start()
+        self._child = child
+        self._child_started_monotonic = now
+        self._last_heartbeat_status = None
+        self._restart_policy.record_restart(now_monotonic=now)
+
+        snapshot = child.snapshot()
+        self._append_health_event(
+            event_type="CHILD_RESTARTED",
+            snapshot=snapshot,
+            restart_reason=reason,
+            restart_count_in_window=self._restart_policy.restart_count_in_window,
+        )
+        logger.warning(
+            "RECLAIM_SUPERVISOR_CHILD_RESTARTED | child=%s pid=%s reason=%s "
+            "restart_count_in_window=%s",
+            snapshot.name,
+            snapshot.pid,
+            reason,
+            self._restart_policy.restart_count_in_window,
+        )
+        return True
+
+    async def _restart_child_after_bad_heartbeat_once(
+        self,
+        *,
+        heartbeat_status: HeartbeatStatus,
+        reason: str,
+        now_monotonic: float | None = None,
+    ) -> bool:
+        """Evaluate restart policy, terminate the old child, and restart.
+
+        Returns ``True`` if the child was restarted, ``False`` otherwise.
+        """
+        now = time.monotonic() if now_monotonic is None else now_monotonic
+        decision = self._restart_policy.evaluate(now_monotonic=now)
+
+        if not decision.allowed:
+            # cooldown: do NOT request stop, return False for caller to handle
+            if decision.reason == "cooldown":
+                logger.debug(
+                    "RECLAIM_SUPERVISOR_CHILD_RESTART_SUPPRESSED | child=%s reason=%s "
+                    "restart_count_in_window=%s cooldown_next_allowed=%s",
+                    self._config.child_name,
+                    decision.reason,
+                    decision.restart_count_in_window,
+                    decision.next_allowed_monotonic,
+                )
+                return False
+
+            self._append_health_event(
+                event_type="CHILD_RESTART_SUPPRESSED",
+                snapshot=None,
+                heartbeat_status=heartbeat_status,
+                restart_reason=decision.reason,
+                restart_count_in_window=decision.restart_count_in_window,
+                restart_suppressed_reason=decision.reason,
+            )
+            logger.error(
+                "RECLAIM_SUPERVISOR_CHILD_RESTART_SUPPRESSED | child=%s reason=%s "
+                "restart_count_in_window=%s",
+                self._config.child_name,
+                decision.reason,
+                decision.restart_count_in_window,
+            )
+            return False
+
+        # Allowed: terminate old child first
+        self._append_health_event(
+            event_type="CHILD_TERMINATE_FOR_RESTART_REQUESTED",
+            snapshot=self._child.snapshot() if self._child is not None else None,
+            heartbeat_status=heartbeat_status,
+            restart_reason=reason,
+            restart_count_in_window=decision.restart_count_in_window,
+        )
+        logger.warning(
+            "RECLAIM_SUPERVISOR_CHILD_TERMINATE_FOR_RESTART_REQUESTED | child=%s reason=%s",
+            self._config.child_name,
+            reason,
+        )
+
+        if self._child is not None and self._child.snapshot().running:
+            try:
+                await self._child.terminate()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.error(
+                    "RECLAIM_SUPERVISOR_CHILD_TERMINATE_FAILED | name=%s pid=%s error=%s",
+                    self._config.child_name,
+                    self._child.pid,
+                    f"{type(exc).__name__}: {exc}",
+                )
+
+        self._append_health_event(
+            event_type="CHILD_TERMINATED_FOR_RESTART",
+            snapshot=self._child.snapshot() if self._child is not None else None,
+            heartbeat_status=heartbeat_status,
+            restart_reason=reason,
+            restart_count_in_window=decision.restart_count_in_window,
+        )
+
+        # Start new child
+        child = self.create_child_process()
+        await child.start()
+        self._child = child
+        self._child_started_monotonic = now
+        self._last_heartbeat_status = None
+        self._restart_policy.record_restart(now_monotonic=now)
+
+        snapshot = child.snapshot()
+        self._append_health_event(
+            event_type="CHILD_RESTARTED",
+            snapshot=snapshot,
+            restart_reason=reason,
+            restart_count_in_window=self._restart_policy.restart_count_in_window,
+        )
+        logger.warning(
+            "RECLAIM_SUPERVISOR_CHILD_RESTARTED | child=%s pid=%s reason=%s "
+            "restart_count_in_window=%s",
+            snapshot.name,
+            snapshot.pid,
+            reason,
+            self._restart_policy.restart_count_in_window,
+        )
+        return True
 
     # ------------------------------------------------------------------
     # heartbeat detection
@@ -239,7 +464,7 @@ class ReclaimSupervisor:
         now = time.monotonic() if now_monotonic is None else now_monotonic
         return now - self._child_started_monotonic < self._config.heartbeat_startup_grace_seconds
 
-    def check_heartbeat_once(self, *, now_monotonic: float | None = None) -> HeartbeatStatus | None:
+    async def check_heartbeat_once(self, *, now_monotonic: float | None = None) -> HeartbeatStatus | None:
         if not self._config.heartbeat_check_enabled:
             return None
 
@@ -267,32 +492,51 @@ class ReclaimSupervisor:
             else "HEARTBEAT_INVALID"
         )
         snapshot = self._child.snapshot() if self._child is not None else None
-        event = self._append_health_event(
+        self._append_health_event(
             event_type=event_type,
             snapshot=snapshot,
             heartbeat_status=status,
         )
         logger.error(
-            "RECLAIM_SUPERVISOR_HEARTBEAT_BAD | child=%s heartbeat_status=%s path=%s age_seconds=%s error=%s stop_on_bad_heartbeat=%s",
+            "RECLAIM_SUPERVISOR_HEARTBEAT_BAD | child=%s heartbeat_status=%s path=%s age_seconds=%s error=%s",
             self._config.child_name,
             status.status,
             status.path,
             status.age_seconds,
             status.error,
-            self._config.stop_on_bad_heartbeat,
         )
+
+        if self._config.restart_on_bad_heartbeat:
+            restarted = await self._restart_child_after_bad_heartbeat_once(
+                heartbeat_status=status,
+                reason=status.status,
+                now_monotonic=now_monotonic,
+            )
+            if restarted:
+                return status
+            # Check if cooldown suppressed
+            decision = self._restart_policy.evaluate(
+                now_monotonic=time.monotonic() if now_monotonic is None else now_monotonic
+            )
+            if decision.reason == "cooldown":
+                return status
+            # disabled / max exceeded → fall through to stop
+            if self._config.stop_on_bad_heartbeat:
+                self.request_stop()
+            return status
+
         if self._config.stop_on_bad_heartbeat:
             self.request_stop()
         return status
 
-    def maybe_check_heartbeat(self, *, now_monotonic: float | None = None) -> HeartbeatStatus | None:
+    async def maybe_check_heartbeat(self, *, now_monotonic: float | None = None) -> HeartbeatStatus | None:
         if not self._config.heartbeat_check_enabled:
             return None
         now = time.monotonic() if now_monotonic is None else now_monotonic
         if self._last_heartbeat_check_monotonic > 0 and now - self._last_heartbeat_check_monotonic < self._config.heartbeat_check_interval_seconds:
             return self._last_heartbeat_status
         self._last_heartbeat_check_monotonic = now
-        return self.check_heartbeat_once(now_monotonic=now)
+        return await self.check_heartbeat_once(now_monotonic=now)
 
     # ------------------------------------------------------------------
     # shutdown
@@ -371,10 +615,15 @@ class ReclaimSupervisor:
             )
             while not self._stop_requested:
                 await asyncio.sleep(self._config.poll_interval_seconds)
-                self.check_child_exit_once()
+                # Check child exit first; if restarted or cooldown-handled,
+                # skip heartbeat this iteration to avoid double-processing.
+                handled = await self.check_child_exit_once()
                 if self._stop_requested:
                     break
-                self.maybe_check_heartbeat()
+                if handled:
+                    self._last_heartbeat_check_monotonic = time.monotonic()
+                    continue
+                await self.maybe_check_heartbeat()
         except asyncio.CancelledError:
             logger.info("RECLAIM_SUPERVISOR_CANCELLED")
             raise
