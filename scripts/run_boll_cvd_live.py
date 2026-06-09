@@ -6,6 +6,7 @@ import os
 import sys
 import time
 from pathlib import Path
+from dataclasses import replace
 
 from dotenv import load_dotenv
 
@@ -67,9 +68,11 @@ async def main() -> None:
     if not live_config_helpers.live_trading_enabled():
         raise RuntimeError("LIVE_TRADING is not true. Refusing to start live runner.")
 
-    _runtime = build_live_symbol_runtime_configs()
-    monitor_config = _runtime.monitor
-    cvd_config = _runtime.cvd
+    runtime_configs = build_live_symbol_runtime_configs()
+    monitor_config = runtime_configs.monitor
+    cvd_config = runtime_configs.cvd
+    strategy_config = runtime_configs.strategy
+    position_sizer_config = runtime_configs.position_sizer
     email_sender = EmailSender()
     journal = LiveTradeJournal()
     rolling_loss_guard = RollingLossGuard.from_env()
@@ -79,9 +82,12 @@ async def main() -> None:
     await trader.start()
     try:
         await trader.initialize()
-        _runtime_eq = build_live_symbol_runtime_configs(account_equity_usdt=trader.account_equity_usdt)
-        sizer = SimplePositionSizer(_runtime_eq.position_sizer)
-        strategy = BollCvdShockReclaimStrategy(_runtime_eq.strategy, sizer)
+        position_sizer_config = replace(
+            position_sizer_config,
+            dry_run_equity_usdt=trader.account_equity_usdt,
+        )
+        sizer = SimplePositionSizer(position_sizer_config)
+        strategy = BollCvdShockReclaimStrategy(strategy_config, sizer)
         startup_position = await trader.fetch_position_snapshot()
         startup_cash = await live_flat_balance.fetch_usdt_cash_balance(trader)
         rolling_loss_guard.load_or_initialize(live_time_utils.utc_ms(), trader.account_equity_usdt)
