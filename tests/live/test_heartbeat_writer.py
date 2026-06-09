@@ -167,6 +167,68 @@ class TestRunUntilCancelledDisabled:
 
 
 # ============================================================================
+# HeartbeatWriter — write_status_once (D06b)
+# ============================================================================
+
+
+class TestHeartbeatWriterWriteStatusOnce:
+    def test_write_status_once_stopping(self, tmp_path: Path) -> None:
+        """write_status_once('stopping') must write a heartbeat with status=stopping."""
+        config = HeartbeatWriterConfig(enabled=True)
+        runtime_paths = RuntimePaths(tmp_path / "runtime", "ETH-USDT-SWAP")
+        writer = HeartbeatWriter(
+            runtime_paths=runtime_paths,
+            config=config,
+            clock_ms=lambda: 123456789,
+            pid_provider=lambda: 42,
+        )
+        writer.write_status_once("stopping")
+        payload = json.loads(runtime_paths.heartbeat_file.read_text(encoding="utf-8"))
+        assert payload["status"] == "stopping"
+        assert payload["sequence"] == 1
+
+    def test_write_status_once_stopped(self, tmp_path: Path) -> None:
+        """write_status_once('stopped') must write a heartbeat with status=stopped."""
+        config = HeartbeatWriterConfig(enabled=True)
+        runtime_paths = RuntimePaths(tmp_path / "runtime", "ETH-USDT-SWAP")
+        writer = HeartbeatWriter(
+            runtime_paths=runtime_paths,
+            config=config,
+            clock_ms=lambda: 123456789,
+            pid_provider=lambda: 42,
+        )
+        writer.write_status_once("stopped")
+        payload = json.loads(runtime_paths.heartbeat_file.read_text(encoding="utf-8"))
+        assert payload["status"] == "stopped"
+
+    def test_write_status_once_disabled_noop(self, tmp_path: Path) -> None:
+        """write_status_once must be a no-op when the writer is disabled."""
+        runtime_paths = RuntimePaths(tmp_path / "runtime", "ETH-USDT-SWAP")
+        writer = HeartbeatWriter(runtime_paths=runtime_paths)
+        writer.write_status_once("stopping")
+        assert not runtime_paths.heartbeat_file.exists()
+
+    def test_write_status_once_failure_does_not_raise(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """write_status_once must not raise on failure — it degrades silently."""
+        config = HeartbeatWriterConfig(enabled=True)
+        runtime_paths = RuntimePaths(tmp_path / "runtime", "ETH-USDT-SWAP")
+        writer = HeartbeatWriter(
+            runtime_paths=runtime_paths,
+            config=config,
+        )
+
+        def _fail_write(*args: object, **kwargs: object) -> None:
+            raise OSError("disk full")
+
+        monkeypatch.setattr(writer, "write_once", _fail_write)
+
+        # Must not raise
+        writer.write_status_once("stopping")
+
+
+# ============================================================================
 # HeartbeatWriter — failure degrade (C06b)
 # ============================================================================
 

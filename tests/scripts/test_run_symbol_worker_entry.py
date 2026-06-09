@@ -43,20 +43,23 @@ def test_run_symbol_worker_exists() -> None:
 
 
 def test_run_symbol_worker_is_thin_entry() -> None:
-    """D01 thin entry must contain load_dotenv, live_trading_enabled,
+    """D06b thin entry must contain load_dotenv, live_trading_enabled,
+    WorkerShutdownController, signal handler installation,
     SymbolWorkerApp.from_env, await app.run, and asyncio.run(main)."""
     source = _new_entry_source()
 
     required = [
         "load_dotenv()",
         "live_config_helpers.live_trading_enabled()",
-        "SymbolWorkerApp.from_env()",
+        "WorkerShutdownController()",
+        "install_symbol_worker_signal_handlers",
+        "SymbolWorkerApp.from_env(shutdown_controller=shutdown_controller)",
         "await app.run()",
         "asyncio.run(main())",
     ]
     for token in required:
         assert token in source, (
-            f"D01 run_symbol_worker.py must contain {token!r}"
+            f"D06b run_symbol_worker.py must contain {token!r}"
         )
 
 

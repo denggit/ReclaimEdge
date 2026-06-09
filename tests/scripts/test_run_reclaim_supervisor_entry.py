@@ -195,8 +195,9 @@ def test_existing_entries_not_modified_or_cross_imported() -> None:
     )
 
     # run_symbol_worker.py must still be the future child entrypoint.
-    assert "SymbolWorkerApp.from_env()" in symbol_worker_source, (
-        "run_symbol_worker.py must still call SymbolWorkerApp.from_env()"
+    # D06b: from_env may receive shutdown_controller=shutdown_controller
+    assert "SymbolWorkerApp.from_env(" in symbol_worker_source, (
+        "run_symbol_worker.py must still call SymbolWorkerApp.from_env(...)"
     )
     assert "await app.run()" in symbol_worker_source, (
         "run_symbol_worker.py must still call await app.run()"

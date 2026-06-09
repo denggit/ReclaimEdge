@@ -74,6 +74,16 @@ class LiveAppConfig:
     daily_report: DailyReportConfig
     weekly_summary: WeeklySummaryConfig
     heartbeat: LiveHeartbeatConfig
+    # ── D06b: graceful shutdown ────────────────────────────────────────
+    symbol_worker_shutdown_drain_timeout_seconds: float = 10.0
+    symbol_worker_shutdown_save_state_enabled: bool = True
+    symbol_worker_shutdown_heartbeat_enabled: bool = True
+
+    def __post_init__(self) -> None:
+        if self.symbol_worker_shutdown_drain_timeout_seconds <= 0:
+            raise ValueError(
+                "symbol_worker_shutdown_drain_timeout_seconds must be > 0"
+            )
 
     @classmethod
     def from_env(cls) -> "LiveAppConfig":
@@ -117,5 +127,14 @@ class LiveAppConfig:
                 enabled=_env_bool("SYMBOL_WORKER_HEARTBEAT_ENABLED", True),
                 interval_seconds=_env_float("SYMBOL_WORKER_HEARTBEAT_INTERVAL_SECONDS", 10.0),
                 stale_after_seconds=_env_float("SYMBOL_WORKER_HEARTBEAT_STALE_AFTER_SECONDS", 30.0),
+            ),
+            symbol_worker_shutdown_drain_timeout_seconds=_env_float(
+                "SYMBOL_WORKER_SHUTDOWN_DRAIN_TIMEOUT_SECONDS", 10.0
+            ),
+            symbol_worker_shutdown_save_state_enabled=_env_bool(
+                "SYMBOL_WORKER_SHUTDOWN_SAVE_STATE_ENABLED", True
+            ),
+            symbol_worker_shutdown_heartbeat_enabled=_env_bool(
+                "SYMBOL_WORKER_SHUTDOWN_HEARTBEAT_ENABLED", True
             ),
         )

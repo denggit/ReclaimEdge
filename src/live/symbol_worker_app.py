@@ -17,6 +17,13 @@ from src.live.startup_recovery import basic_restore as startup_basic_restore
 from src.live.startup_recovery import order_recovery as startup_order_recovery
 from src.live.startup_recovery import trust_validation as startup_trust_validation
 from src.live.symbol_worker_factory import SymbolWorkerFactory
+from src.live.symbol_worker_shutdown_runtime import (
+    _begin_symbol_worker_drain,
+    _cancel_runtime_tasks,
+    _save_state_on_shutdown,
+    _wait_for_shutdown,
+)
+from src.live.worker_shutdown import WorkerShutdownController
 from src.live.workers import account_position_sync_worker as account_position_sync_worker_module
 from src.live.workers import execution_worker as execution_worker_module
 from src.live.workers import strategy_tick_worker as strategy_tick_worker_module
@@ -87,12 +94,19 @@ def _assert_trader_matches_symbol_config(
 class SymbolWorkerApp:
     app_config: LiveAppConfig
     factory: SymbolWorkerFactory
+    shutdown_controller: WorkerShutdownController | None = None
 
     @classmethod
-    def from_env(cls, *, factory: SymbolWorkerFactory | None = None) -> "SymbolWorkerApp":
+    def from_env(
+        cls,
+        *,
+        factory: SymbolWorkerFactory | None = None,
+        shutdown_controller: WorkerShutdownController | None = None,
+    ) -> "SymbolWorkerApp":
         return cls(
             app_config=LiveAppConfig.from_env(),
             factory=factory or SymbolWorkerFactory(),
+            shutdown_controller=shutdown_controller,
         )
 
     async def run(self) -> None:
@@ -355,52 +369,136 @@ class SymbolWorkerApp:
             config=monitor_config,
             tick_handlers=[on_market_tick],
         )
+
+        # ── D06b: graceful shutdown controller ─────────────────────────
+        shutdown_controller = self.shutdown_controller or WorkerShutdownController()
+
         try:
-            await asyncio.gather(
-                account_position_sync_worker_module.account_position_sync_worker(
-                    state_lock=state_lock,
-                    account_snapshot=account_snapshot,
-                    execution_state=execution_state,
-                    trader=trader,
-                    sizer=sizer,
-                    strategy=strategy,
-                    journal=journal,
-                    state_store=state_store,
-                    position_sync_seconds=position_sync_seconds,
-                    account_sync_seconds=account_sync_seconds,
-                    cash_log_min_delta_usdt=cash_log_min_delta_usdt,
-                    rolling_loss_guard=rolling_loss_guard,
-                    email_sender=email_sender,
+            # Build task list preserving the C05 gather order:
+            # account → strategy → execution → daily_report → weekly_summary
+            # → heartbeat (if enabled) → monitor
+            tasks: list[asyncio.Task] = [
+                asyncio.ensure_future(
+                    account_position_sync_worker_module.account_position_sync_worker(
+                        state_lock=state_lock,
+                        account_snapshot=account_snapshot,
+                        execution_state=execution_state,
+                        trader=trader,
+                        sizer=sizer,
+                        strategy=strategy,
+                        journal=journal,
+                        state_store=state_store,
+                        position_sync_seconds=position_sync_seconds,
+                        account_sync_seconds=account_sync_seconds,
+                        cash_log_min_delta_usdt=cash_log_min_delta_usdt,
+                        rolling_loss_guard=rolling_loss_guard,
+                        email_sender=email_sender,
+                    )
                 ),
-                strategy_tick_worker_module.strategy_tick_worker(
-                    strategy_tick_queue=strategy_tick_queue,
-                    execution_queue=execution_queue,
-                    state_lock=state_lock,
-                    account_snapshot=account_snapshot,
-                    execution_state=execution_state,
-                    cvd=cvd,
-                    strategy=strategy,
-                    heartbeat_seconds=market_tick_heartbeat_seconds,
-                    account_stale_warn_seconds=account_snapshot_stale_warn_seconds,
-                    strategy_lag_warn_seconds=strategy_lag_warn_seconds,
+                asyncio.ensure_future(
+                    strategy_tick_worker_module.strategy_tick_worker(
+                        strategy_tick_queue=strategy_tick_queue,
+                        execution_queue=execution_queue,
+                        state_lock=state_lock,
+                        account_snapshot=account_snapshot,
+                        execution_state=execution_state,
+                        cvd=cvd,
+                        strategy=strategy,
+                        heartbeat_seconds=market_tick_heartbeat_seconds,
+                        account_stale_warn_seconds=account_snapshot_stale_warn_seconds,
+                        strategy_lag_warn_seconds=strategy_lag_warn_seconds,
+                    )
                 ),
-                execution_worker_module.execution_worker(
-                    execution_queue=execution_queue,
-                    state_lock=state_lock,
-                    execution_state=execution_state,
-                    account_snapshot=account_snapshot,
-                    trader=trader,
-                    strategy=strategy,
-                    journal=journal,
-                    state_store=state_store,
-                    email_sender=email_sender,
-                    backlog_log_seconds=execution_backlog_log_seconds,
-                    sidecar_skip_first_layer=sizer.config.sidecar_skip_first_layer,
+                asyncio.ensure_future(
+                    execution_worker_module.execution_worker(
+                        execution_queue=execution_queue,
+                        state_lock=state_lock,
+                        execution_state=execution_state,
+                        account_snapshot=account_snapshot,
+                        trader=trader,
+                        strategy=strategy,
+                        journal=journal,
+                        state_store=state_store,
+                        email_sender=email_sender,
+                        backlog_log_seconds=execution_backlog_log_seconds,
+                        sidecar_skip_first_layer=sizer.config.sidecar_skip_first_layer,
+                    )
                 ),
-                daily_report_loop(),
-                weekly_summary_loop(),
-                heartbeat_writer.run_until_cancelled(),
-                monitor.run_forever(),
+                asyncio.ensure_future(daily_report_loop()),
+                asyncio.ensure_future(weekly_summary_loop()),
+            ]
+            # Only add heartbeat to the FIRST_COMPLETED wait when it is
+            # enabled — a disabled heartbeat returns immediately, which
+            # would falsely trigger the shutdown path.
+            if heartbeat_writer.config.enabled:
+                tasks.append(
+                    asyncio.ensure_future(heartbeat_writer.run_until_cancelled())
+                )
+            tasks.append(asyncio.ensure_future(monitor.run_forever()))
+
+            shutdown_task = asyncio.ensure_future(
+                _wait_for_shutdown(shutdown_controller)
             )
+
+            done, pending = await asyncio.wait(
+                [*tasks, shutdown_task],
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+
+            if shutdown_task in done:
+                # ── Graceful shutdown path ─────────────────────────────
+                await _begin_symbol_worker_drain(
+                    execution_state=execution_state,
+                    state_lock=state_lock,
+                    reason=shutdown_controller.reason or "unknown",
+                )
+
+                # Best-effort: save strategy state for restart recovery
+                if self.app_config.symbol_worker_shutdown_save_state_enabled:
+                    await _save_state_on_shutdown(
+                        execution_state=execution_state,
+                        strategy=strategy,
+                        trader_symbol=trader.symbol,
+                        state_store=state_store,
+                    )
+
+                # Best-effort: write stopping heartbeat
+                if (
+                    self.app_config.symbol_worker_shutdown_heartbeat_enabled
+                    and heartbeat_writer.config.enabled
+                ):
+                    heartbeat_writer.write_status_once("stopping")
+
+                # Cancel remaining runtime tasks with bounded grace
+                await _cancel_runtime_tasks(
+                    pending - {shutdown_task},
+                    timeout=self.app_config.symbol_worker_shutdown_drain_timeout_seconds,
+                )
+
+                # Best-effort: write stopped heartbeat before exit
+                if (
+                    self.app_config.symbol_worker_shutdown_heartbeat_enabled
+                    and heartbeat_writer.config.enabled
+                ):
+                    heartbeat_writer.write_status_once("stopped")
+
+                logger.warning("SYMBOL_WORKER_SHUTDOWN_COMPLETE")
+            else:
+                # ── Unexpected task exit (existing behaviour) ──────────
+                shutdown_task.cancel()
+                for task in pending - {shutdown_task}:
+                    if not task.done():
+                        task.cancel()
+                # Wait for cancellation to propagate
+                await asyncio.gather(
+                    shutdown_task, *(pending - {shutdown_task}),
+                    return_exceptions=True,
+                )
+                # Propagate the first exception from the unexpectedly
+                # completed task, preserving the existing gather semantics.
+                for task in done:
+                    exc = task.exception()
+                    if exc is not None:
+                        raise exc
         finally:
             await trader.close()

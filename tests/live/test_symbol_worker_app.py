@@ -146,7 +146,11 @@ def test_symbol_worker_app_run_has_expected_runtime_order() -> None:
         "async def daily_report_loop",
         "async def weekly_summary_loop",
         "factory.create_monitor(",
-        "asyncio.gather(",
+        # D06b: tasks created via asyncio.ensure_future in order:
+        # account → strategy → execution → daily → weekly → heartbeat → monitor
+        "account_position_sync_worker_module.account_position_sync_worker(",
+        "strategy_tick_worker_module.strategy_tick_worker(",
+        "execution_worker_module.execution_worker(",
         "heartbeat_writer.run_until_cancelled(",
         "monitor.run_forever()",
         "await trader.close()",
@@ -317,17 +321,16 @@ def test_symbol_worker_app_heartbeat_order() -> None:
 
 
 # ============================================================================
-# 11. test_symbol_worker_app_does_not_create_heartbeat_task
+# 11. test_symbol_worker_app_allows_task_creation_for_shutdown
 # ============================================================================
 
 
-def test_symbol_worker_app_does_not_create_heartbeat_task() -> None:
-    """SymbolWorkerApp must NOT use asyncio.create_task or heartbeat_task
-    to start the heartbeat."""
+def test_symbol_worker_app_allows_task_creation_for_shutdown() -> None:
+    """SymbolWorkerApp may use asyncio.ensure_future for the D06b shutdown
+    task management, but must NOT create a dedicated heartbeat_task."""
     source = _app_source()
 
     forbidden = [
-        "asyncio.create_task(",
         "heartbeat_task",
     ]
     for token in forbidden:

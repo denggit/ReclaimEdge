@@ -161,6 +161,20 @@ class HeartbeatWriter:
             sequence=self._sequence,
         )
 
+    def write_status_once(self, status: str) -> None:
+        """Best-effort status-only write.  Silently degrades on failure.
+
+        D06b: This is used during graceful shutdown to write ``"stopping"``
+        and ``"stopped"`` heartbeat payloads without blocking the drain
+        sequence on a disk write failure.
+        """
+        try:
+            self.write_once(status=status)
+        except Exception:
+            logger.warning(
+                "HEARTBEAT_STATUS_WRITE_FAILED | status=%s", status
+            )
+
     async def run_until_cancelled(
         self,
         *,
