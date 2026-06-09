@@ -188,3 +188,49 @@ def test_eth_toml_documents_wired_and_pending_fields() -> None:
 
 def test_no_btc_symbol_toml_created() -> None:
     assert not (_PROJECT_ROOT / "config" / "symbols" / "BTC-USDT-SWAP.toml").exists()
+
+
+# ---------------------------------------------------------------------------
+# Helper: extract active (non-comment) key=value from .env.example
+# ---------------------------------------------------------------------------
+
+
+def _active_env_value(text: str, key: str) -> str:
+    """Return the value of a non-commented ``KEY=value`` line.
+
+    Fails if zero or more than one active line matches.
+    """
+    prefix = f"{key}="
+    matches: list[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped.startswith(prefix):
+            matches.append(stripped[len(prefix) :])
+    assert len(matches) == 1, (
+        f"Expected exactly one active {key}= line, got {matches!r}"
+    )
+    return matches[0]
+
+
+# ---------------------------------------------------------------------------
+# 11. .env.example Trader values must match ETH TOML (consistency guard)
+# ---------------------------------------------------------------------------
+
+
+def test_env_example_trader_values_match_eth_toml() -> None:
+    """The .env.example active Trader lines must match the ETH TOML so that
+    the A08 TOML/env consistency check passes on first copy-paste."""
+    env_text = _read(".env.example")
+    eth_config = load_symbol_config(
+        _PROJECT_ROOT / "config" / "symbols" / "ETH-USDT-SWAP.toml"
+    )
+
+    assert _active_env_value(env_text, "OKX_INST_ID") == eth_config.symbol.inst_id
+    assert _active_env_value(env_text, "OKX_TD_MODE") == eth_config.market.td_mode
+    assert (
+        _active_env_value(env_text, "OKX_POS_SIDE_MODE")
+        == eth_config.market.pos_side_mode
+    )
+    assert _active_env_value(env_text, "LEVERAGE") == str(eth_config.capital.leverage)
