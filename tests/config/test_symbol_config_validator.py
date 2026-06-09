@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-import dataclasses
 from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
@@ -14,11 +13,8 @@ import pytest
 from config.symbol_config import (
     SymbolConfig,
     SymbolIdentityConfig,
-    SymbolSidecarConfig,
-    SymbolTpConfig,
     SymbolRiskConfig,
-    SymbolMarketConfig,
-    SymbolRuntimeConfig,
+    SymbolTpConfig,
 )
 from config.symbol_config_loader import load_symbol_config_from_dir
 from config.symbol_config_validator import (
@@ -176,4 +172,87 @@ def test_rejects_invalid_market_precision() -> None:
         ),
     )
     with pytest.raises(SymbolConfigValidationError, match="price_precision"):
+        validate_symbol_config(config)
+
+
+# ---------------------------------------------------------------------------
+# 8. Int-type rejection (bool / str passed to int fields)
+# ---------------------------------------------------------------------------
+
+
+def test_rejects_bool_for_capital_max_layers() -> None:
+    """bool must be rejected for int field max_layers."""
+    config = replace(
+        SymbolConfig.default_eth(),
+        capital=replace(
+            SymbolConfig.default_eth().capital,
+            max_layers=True,  # type: ignore[arg-type]
+        ),
+    )
+    with pytest.raises(SymbolConfigValidationError, match="max_layers"):
+        validate_symbol_config(config)
+
+
+def test_rejects_string_for_market_boll_window() -> None:
+    """str must be rejected for int field boll_window."""
+    config = replace(
+        SymbolConfig.default_eth(),
+        market=replace(
+            SymbolConfig.default_eth().market,
+            boll_window="20",  # type: ignore[arg-type]
+        ),
+    )
+    with pytest.raises(SymbolConfigValidationError, match="boll_window"):
+        validate_symbol_config(config)
+
+
+def test_rejects_bool_for_entry_add_freeze_seconds() -> None:
+    """bool must be rejected for int field add_freeze_seconds."""
+    config = replace(
+        SymbolConfig.default_eth(),
+        entry=replace(
+            SymbolConfig.default_eth().entry,
+            add_freeze_seconds=True,  # type: ignore[arg-type]
+        ),
+    )
+    with pytest.raises(SymbolConfigValidationError, match="add_freeze_seconds"):
+        validate_symbol_config(config)
+
+
+def test_rejects_bool_for_sidecar_max_legs() -> None:
+    """bool must be rejected for int field max_legs."""
+    config = replace(
+        SymbolConfig.default_eth(),
+        sidecar=replace(
+            SymbolConfig.default_eth().sidecar,
+            max_legs=True,  # type: ignore[arg-type]
+        ),
+    )
+    with pytest.raises(SymbolConfigValidationError, match="max_legs"):
+        validate_symbol_config(config)
+
+
+def test_rejects_string_for_runtime_strategy_tick_queue_maxsize() -> None:
+    """str must be rejected for int field strategy_tick_queue_maxsize."""
+    config = replace(
+        SymbolConfig.default_eth(),
+        runtime=replace(
+            SymbolConfig.default_eth().runtime,
+            strategy_tick_queue_maxsize="20000",  # type: ignore[arg-type]
+        ),
+    )
+    with pytest.raises(SymbolConfigValidationError, match="strategy_tick_queue_maxsize"):
+        validate_symbol_config(config)
+
+
+def test_rejects_bool_for_execution_max_order_retries() -> None:
+    """bool must be rejected for int field max_order_retries."""
+    config = replace(
+        SymbolConfig.default_eth(),
+        execution=replace(
+            SymbolConfig.default_eth().execution,
+            max_order_retries=True,  # type: ignore[arg-type]
+        ),
+    )
+    with pytest.raises(SymbolConfigValidationError, match="max_order_retries"):
         validate_symbol_config(config)

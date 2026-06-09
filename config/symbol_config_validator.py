@@ -70,12 +70,35 @@ def _ensure_pct_open_closed(
         _fail(section, field, f"must be between 0 and 1, got {value}")
 
 
-def _ensure_positive_int(section: str, field: str, value: int) -> None:
-    """*value* must be a positive int (> 0)."""
-    if not isinstance(value, int):
+def _ensure_int(section: str, field: str, value: object) -> None:
+    """*value* must be a strict ``int`` (``bool`` is rejected)."""
+    if type(value) is not int:
         _fail(section, field, f"expected int, got {type(value).__name__}")
-    if value <= 0:
+
+
+def _ensure_non_negative_int(
+    section: str, field: str, value: object
+) -> None:
+    """*value* must be a strict ``int`` and >= 0."""
+    _ensure_int(section, field, value)
+    if value < 0:  # type: ignore[operator]  # guarded by _ensure_int
+        _fail(section, field, f"must be >= 0, got {value}")
+
+
+def _ensure_positive_int(section: str, field: str, value: object) -> None:
+    """*value* must be a strict ``int`` and > 0."""
+    _ensure_int(section, field, value)
+    if value <= 0:  # type: ignore[operator]  # guarded by _ensure_int
         _fail(section, field, f"must be > 0, got {value}")
+
+
+def _ensure_int_at_least(
+    section: str, field: str, value: object, minimum: int
+) -> None:
+    """*value* must be a strict ``int`` and >= *minimum*."""
+    _ensure_int(section, field, value)
+    if value < minimum:  # type: ignore[operator]  # guarded by _ensure_int
+        _fail(section, field, f"must be >= {minimum}, got {value}")
 
 
 def _ensure_bool(section: str, field: str, value: Any) -> None:
@@ -134,14 +157,12 @@ def _validate_market(config: SymbolConfig) -> None:
     _ensure_positive_decimal(sec, "contract_precision", m.contract_precision)
     _ensure_positive_decimal(sec, "price_precision", m.price_precision)
 
-    if m.boll_window < 2:
-        _fail(sec, "boll_window", f"must be >= 2, got {m.boll_window}")
+    _ensure_int_at_least(sec, "boll_window", m.boll_window, 2)
 
     _ensure_positive_decimal(sec, "boll_std_multiplier", m.boll_std_multiplier)
     _ensure_pct_open_closed(sec, "boll_distance_threshold_pct", m.boll_distance_threshold_pct)
 
-    if m.tp_boll_window < 2:
-        _fail(sec, "tp_boll_window", f"must be >= 2, got {m.tp_boll_window}")
+    _ensure_int_at_least(sec, "tp_boll_window", m.tp_boll_window, 2)
 
 
 def _validate_capital(config: SymbolConfig) -> None:
@@ -157,8 +178,7 @@ def _validate_capital(config: SymbolConfig) -> None:
 
     _ensure_positive_decimal(sec, "leverage", c.leverage)
 
-    if c.max_layers < 1:
-        _fail(sec, "max_layers", f"must be >= 1, got {c.max_layers}")
+    _ensure_int_at_least(sec, "max_layers", c.max_layers, 1)
 
     _ensure_non_negative_decimal(sec, "layer_multiplier_step", c.layer_multiplier_step)
 
@@ -168,12 +188,8 @@ def _validate_entry(config: SymbolConfig) -> None:
     sec = "entry"
 
     _ensure_pct_open_closed(sec, "add_gap_pct", e.add_gap_pct)
-
-    if e.add_freeze_seconds < 0:
-        _fail(sec, "add_freeze_seconds", f"must be >= 0, got {e.add_freeze_seconds}")
-
-    if e.alert_freeze_seconds < 0:
-        _fail(sec, "alert_freeze_seconds", f"must be >= 0, got {e.alert_freeze_seconds}")
+    _ensure_non_negative_int(sec, "add_freeze_seconds", e.add_freeze_seconds)
+    _ensure_non_negative_int(sec, "alert_freeze_seconds", e.alert_freeze_seconds)
 
 
 def _validate_cvd(config: SymbolConfig) -> None:
@@ -270,14 +286,10 @@ def _validate_sidecar(config: SymbolConfig) -> None:
 
     _ensure_pct_open_closed(sec, "tp_pct", sc.tp_pct)
     _ensure_bool(sec, "skip_first_layer", sc.skip_first_layer)
-
-    if sc.max_legs < 0:
-        _fail(sec, "max_legs", f"must be >= 0, got {sc.max_legs}")
+    _ensure_non_negative_int(sec, "max_legs", sc.max_legs)
 
     _ensure_positive_decimal(sec, "order_status_check_seconds", sc.order_status_check_seconds)
-
-    if sc.tp_place_retry_count < 0:
-        _fail(sec, "tp_place_retry_count", f"must be >= 0, got {sc.tp_place_retry_count}")
+    _ensure_non_negative_int(sec, "tp_place_retry_count", sc.tp_place_retry_count)
 
     if not isinstance(sc.tp_place_retry_interval_seconds, Decimal):
         _fail(sec, "tp_place_retry_interval_seconds", f"expected Decimal, got {type(sc.tp_place_retry_interval_seconds).__name__}")
@@ -321,13 +333,12 @@ def _validate_risk(config: SymbolConfig) -> None:
             f"must be <= rolling_loss_warn_pct ({r.rolling_loss_warn_pct})",
         )
 
-    if r.order_failure_market_exit_delay_seconds < 1800:
-        _fail(
-            sec,
-            "order_failure_market_exit_delay_seconds",
-            f"must be >= 1800 (30-minute human window), "
-            f"got {r.order_failure_market_exit_delay_seconds}",
-        )
+    _ensure_int_at_least(
+        sec,
+        "order_failure_market_exit_delay_seconds",
+        r.order_failure_market_exit_delay_seconds,
+        1800,
+    )
 
 
 def _validate_execution(config: SymbolConfig) -> None:
@@ -339,19 +350,15 @@ def _validate_execution(config: SymbolConfig) -> None:
     if ex.private_write_min_interval_seconds < Decimal("0"):
         _fail(sec, "private_write_min_interval_seconds", f"must be >= 0, got {ex.private_write_min_interval_seconds}")
 
-    if ex.max_order_retries < 0:
-        _fail(sec, "max_order_retries", f"must be >= 0, got {ex.max_order_retries}")
+    _ensure_non_negative_int(sec, "max_order_retries", ex.max_order_retries)
 
 
 def _validate_runtime(config: SymbolConfig) -> None:
     rt = config.runtime
     sec = "runtime"
 
-    if rt.strategy_tick_queue_maxsize < 1000:
-        _fail(sec, "strategy_tick_queue_maxsize", f"must be >= 1000, got {rt.strategy_tick_queue_maxsize}")
-
-    if rt.execution_queue_maxsize < 100:
-        _fail(sec, "execution_queue_maxsize", f"must be >= 100, got {rt.execution_queue_maxsize}")
+    _ensure_int_at_least(sec, "strategy_tick_queue_maxsize", rt.strategy_tick_queue_maxsize, 1000)
+    _ensure_int_at_least(sec, "execution_queue_maxsize", rt.execution_queue_maxsize, 100)
 
     _ensure_positive_decimal(sec, "position_sync_seconds", rt.position_sync_seconds)
     _ensure_positive_decimal(sec, "account_sync_seconds", rt.account_sync_seconds)
