@@ -1,0 +1,149 @@
+# ===========================================================================
+# BTC-USDT-SWAP per-symbol configuration (DISABLED)
+# ===========================================================================
+#
+# ⚠️  BTC config is disabled.
+# ⚠️  Do not enable before portfolio-level risk guards are implemented.
+# ⚠️  This file is for config validation / future dry-run only.
+#
+# A08+ wiring status:
+#   - This TOML is the default source for wired per-symbol live strategy
+#     parameters.
+#   - Not every declared field is wired into live runtime yet.
+#   - Fields marked "wired" affect live when RECLAIM_USE_SYMBOL_TOML=true.
+#   - Fields marked "pending" are loaded/validated but not consumed by live
+#     yet.
+#   - Do not assume a field changes runtime behavior unless it is marked
+#     wired here or documented in docs/configuration.md.
+#
+# Decimal fields are written as strings to avoid TOML float ambiguity.
+# ===========================================================================
+
+[symbol]
+# inst_id: wired for monitor and TOML/env consistency check.
+inst_id = "BTC-USDT-SWAP"
+# enabled: MUST remain false until portfolio-level risk guards are in place.
+enabled = false
+# live_trading: MUST remain false; real live gate remains LIVE_TRADING in .env.
+live_trading = false
+
+[market]
+# bar, boll_window, boll_std_multiplier, boll_distance_threshold_pct,
+# tp_boll_window: wired to BollBandBreakoutMonitorConfig.
+bar = "15m"
+# td_mode, pos_side_mode: checked against Trader env; Trader still reads .env.
+td_mode = "isolated"
+pos_side_mode = "net"
+# BTC instrument metadata (OKX BTC-USDT-SWAP public instruments):
+#   ctVal = 0.01, lotSz = 0.01, minSz = 0.01, tickSz = 0.1
+contract_value = "0.01"
+min_contracts = "0.01"
+contract_precision = "0.01"
+price_precision = "0.1"
+boll_window = 20
+boll_std_multiplier = "2.0"
+boll_distance_threshold_pct = "0.005"
+tp_boll_window = 15
+# min_outside_pct: wired to strategy min_outside_pct; legacy env name BOLL_MIN_OUTSIDE_PCT.
+min_outside_pct = "0.0005"
+
+[capital]
+# layer_margin_pct, leverage, max_layers, layer_multiplier_step: wired to
+# SimplePositionSizerConfig and strategy config.
+dry_run_equity_usdt = "1000"
+layer_margin_pct = "0.06"
+leverage = "15"
+max_layers = 10
+layer_multiplier_step = "0.15"
+
+[entry]
+# add_gap_pct: wired to strategy add_layer_gap_pct.
+add_gap_pct = "0.003"
+# add_freeze_seconds: pending; current live add-freeze behavior still comes
+# from existing strategy defaults/env path until explicitly wired.
+add_freeze_seconds = 3600
+# first_add_block_seconds / add_min_interval_seconds: wired to strategy add
+# timing gates.
+first_add_block_seconds = 3600
+add_min_interval_seconds = 1800
+# alert_freeze_seconds: wired to monitor alert cooldown only; NOT a live
+# trade entry gate.  Keep here only for backward schema compatibility;
+# future config cleanup may move it to [monitor] or [alert].
+alert_freeze_seconds = 3600
+
+[cvd]
+# All fields wired to CvdTrackerConfig.
+fast_window_seconds = "5"
+price_stall_seconds = "2"
+price_stall_tolerance_pct = "0.0005"
+burst_window_seconds = "3"
+burst_baseline_seconds = "60"
+burst_min_move_ratio = "2.5"
+burst_min_volume_ratio = "2.0"
+burst_min_abs_range_pct = "0.0015"
+
+[tp]
+# Listed fields wired to BollCvdReclaimStrategyConfig.
+tp_min_net_profit_pct = "0.004"
+tp_boll_enabled = true
+three_stage_runner_enabled = true
+three_stage_tp1_ratio = "0.80"
+three_stage_tp2_ratio = "0.10"
+three_stage_runner_ratio = "0.10"
+three_stage_tp2_use_structure_boll = true
+middle_runner_enabled = false
+# split_tp_enabled: wired; keep false when Three-Stage Runner / Middle
+# Bucket Split is the intended TP path.
+split_tp_enabled = false
+
+[middle_bucket_split]
+# SAFETY: disabled for BTC until portfolio-level risk guards are in place.
+enabled = false
+fast_ratio = "0.70"
+fast_sl_enabled = true
+fast_sl_fee_buffer_pct = "0.001"
+
+[sidecar]
+# SAFETY: disabled for BTC until portfolio-level risk guards are in place.
+enabled = false
+margin_pct = "0.02"
+tp_pct = "0.0044"
+skip_first_layer = true
+max_legs = 12
+order_status_check_seconds = "5"
+# tp_place_retry_count, tp_place_retry_interval_seconds,
+# tp_place_retry_backoff_multiplier, tp_rate_limit_fail_action:
+# pending / validated safety fields; not fully wired through live execution
+# yet.  Keep tp_rate_limit_fail_action = "HALT_ONLY".
+tp_place_retry_count = 3
+tp_place_retry_interval_seconds = "0.8"
+tp_place_retry_backoff_multiplier = "1.5"
+tp_rate_limit_fail_action = "HALT_ONLY"
+
+[risk]
+# Pending.  Current RollingLossGuard and DME safety still use existing
+# env/runtime paths.  order_failure_market_exit_delay_seconds remains
+# validated for safety, but verify runtime wiring before relying on TOML
+# changes.
+rolling_loss_guard_enabled = true
+rolling_loss_warn_pct = "0.50"
+rolling_loss_soft_halt_pct = "0.10"
+order_failure_market_exit_delay_seconds = 1800
+
+[execution]
+# Pending.  Current private write limiter / retry behavior still use
+# existing env/runtime code paths.
+private_write_min_interval_seconds = "0.6"
+max_order_retries = 3
+
+[runtime]
+# Pending until B phase.  Current live queue/sync/heartbeat values are
+# still read from .env in scripts/run_boll_cvd_live.py.
+strategy_tick_queue_maxsize = 20000
+execution_queue_maxsize = 1000
+position_sync_seconds = "5"
+account_sync_seconds = "60"
+market_tick_heartbeat_seconds = "300"
+account_snapshot_stale_warn_seconds = "30"
+strategy_tick_lag_warn_seconds = "2"
+execution_backlog_log_seconds = "30"

@@ -129,6 +129,26 @@ class TestLoadSymbolConfigFromDir:
         with pytest.raises(ValueError, match="mismatch"):
             load_symbol_config_from_dir(tmp_path, "ETH-USDT-SWAP")
 
+    def test_load_btc_from_dir(self, tmp_path: Path) -> None:
+        """BTC-USDT-SWAP.toml can be loaded from dir, inst_id correct, enabled false."""
+        toml = """\
+            [symbol]
+            inst_id = "BTC-USDT-SWAP"
+            enabled = false
+            live_trading = false
+
+            [market]
+            contract_value = "0.01"
+            min_contracts = "0.01"
+            contract_precision = "0.01"
+            price_precision = "0.1"
+            """
+        _write_toml(tmp_path, "BTC-USDT-SWAP.toml", toml)
+        config = load_symbol_config_from_dir(tmp_path, "BTC-USDT-SWAP")
+        assert config.inst_id == "BTC-USDT-SWAP"
+        assert config.symbol.enabled is False
+        assert config.symbol.live_trading is False
+
     def test_missing_file_raises_file_not_found(self, tmp_path: Path) -> None:
         missing = tmp_path / "missing.toml"
         with pytest.raises(FileNotFoundError):

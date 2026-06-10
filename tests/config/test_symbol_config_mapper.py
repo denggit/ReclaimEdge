@@ -197,9 +197,9 @@ def test_loaded_eth_toml_maps_successfully() -> None:
 
 def test_mapper_rejects_invalid_symbol_config() -> None:
     """Any mapper must raise SymbolConfigValidationError on an invalid config."""
-    # Build a config that is clearly invalid — BTC-USDT-SWAP is not yet supported.
+    # Build a config that is clearly invalid — SOL-USDT-SWAP is not supported.
     invalid = SymbolConfig(
-        symbol=SymbolIdentityConfig(inst_id="BTC-USDT-SWAP"),
+        symbol=SymbolIdentityConfig(inst_id="SOL-USDT-SWAP"),
     )
     with pytest.raises(SymbolConfigValidationError):
         to_boll_monitor_config(invalid)
@@ -213,3 +213,20 @@ def test_mapper_rejects_invalid_symbol_config() -> None:
         to_trader_config_preview(invalid)
     with pytest.raises(SymbolConfigValidationError):
         map_symbol_config(invalid)
+
+
+# ---------------------------------------------------------------------------
+# 10. BTC mapper — preview only (F03)
+# ---------------------------------------------------------------------------
+
+
+def test_btc_mapper_preview_only() -> None:
+    """BTC config can be mapped for preview only; no Trader wiring."""
+    config = load_symbol_config_from_dir(str(_SYMBOLS_DIR), "BTC-USDT-SWAP")
+    mapped = map_symbol_config(config)
+    assert isinstance(mapped, MappedSymbolConfigs)
+    assert mapped.trader_preview.inst_id == "BTC-USDT-SWAP"
+    assert mapped.trader_preview.contract_value == Decimal("0.01")
+    assert mapped.trader_preview.contract_precision == Decimal("0.01")
+    assert mapped.trader_preview.min_contracts == Decimal("0.01")
+    assert mapped.trader_preview.live_trading is False

@@ -182,12 +182,30 @@ def test_eth_toml_documents_wired_and_pending_fields() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 10. No BTC symbol TOML created
+# 10. BTC symbol TOML exists but is disabled (F03)
 # ---------------------------------------------------------------------------
 
 
-def test_no_btc_symbol_toml_created() -> None:
-    assert not (_PROJECT_ROOT / "config" / "symbols" / "BTC-USDT-SWAP.toml").exists()
+def test_btc_symbol_toml_exists_but_disabled() -> None:
+    """BTC-USDT-SWAP.toml exists (F03) but must be disabled."""
+    btc_toml = _PROJECT_ROOT / "config" / "symbols" / "BTC-USDT-SWAP.toml"
+    assert btc_toml.exists(), f"Expected {btc_toml} to exist (F03 adds disabled BTC config)."
+    text = btc_toml.read_text(encoding="utf-8")
+    # Check that [symbol] section has enabled=false and live_trading=false.
+    # Must use line-level checks to avoid matching tp_boll_enabled, etc.
+    lines = text.splitlines()
+    assert any(line.strip() == "enabled = false" for line in lines), (
+        "BTC TOML [symbol] must contain 'enabled = false'"
+    )
+    assert any(line.strip() == "live_trading = false" for line in lines), (
+        "BTC TOML [symbol] must contain 'live_trading = false'"
+    )
+    assert not any(line.strip() == "enabled = true" for line in lines), (
+        "BTC TOML [symbol] must NOT contain 'enabled = true'"
+    )
+    assert not any(line.strip() == "live_trading = true" for line in lines), (
+        "BTC TOML [symbol] must NOT contain 'live_trading = true'"
+    )
 
 
 # ---------------------------------------------------------------------------

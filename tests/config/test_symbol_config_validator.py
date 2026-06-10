@@ -51,11 +51,11 @@ def test_loaded_eth_toml_is_valid() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_rejects_non_eth_inst_id_for_now() -> None:
-    """Only ETH-USDT-SWAP inst_id is allowed at this stage."""
+def test_rejects_unsupported_inst_id() -> None:
+    """Only ETH-USDT-SWAP and BTC-USDT-SWAP inst_ids are allowed at this stage."""
     config = replace(
         SymbolConfig.default_eth(),
-        symbol=SymbolIdentityConfig(inst_id="BTC-USDT-SWAP"),
+        symbol=SymbolIdentityConfig(inst_id="SOL-USDT-SWAP"),
     )
     with pytest.raises(SymbolConfigValidationError, match="symbol.*inst_id"):
         validate_symbol_config(config)
@@ -312,4 +312,88 @@ def test_rejects_non_bool_for_tp_split_tp_enabled() -> None:
         ),
     )
     with pytest.raises(SymbolConfigValidationError, match="split_tp_enabled"):
+        validate_symbol_config(config)
+
+
+# ---------------------------------------------------------------------------
+# 10. BTC-USDT-SWAP validator rules (F03)
+# ---------------------------------------------------------------------------
+
+
+def test_disabled_btc_config_passes() -> None:
+    """A disabled BTC config passes validator."""
+    config = replace(
+        SymbolConfig.default_eth(),
+        symbol=SymbolIdentityConfig(
+            inst_id="BTC-USDT-SWAP",
+            enabled=False,
+            live_trading=False,
+        ),
+        market=replace(
+            SymbolConfig.default_eth().market,
+            contract_value=Decimal("0.01"),
+            min_contracts=Decimal("0.01"),
+            contract_precision=Decimal("0.01"),
+            price_precision=Decimal("0.1"),
+        ),
+    )
+    # Should not raise.
+    validate_symbol_config(config)
+
+
+def test_btc_enabled_true_fails() -> None:
+    """BTC enabled=True must be rejected."""
+    config = replace(
+        SymbolConfig.default_eth(),
+        symbol=SymbolIdentityConfig(
+            inst_id="BTC-USDT-SWAP",
+            enabled=True,
+            live_trading=False,
+        ),
+    )
+    with pytest.raises(SymbolConfigValidationError) as exc_info:
+        validate_symbol_config(config)
+    msg = str(exc_info.value)
+    assert "BTC-USDT-SWAP" in msg
+    assert "enabled" in msg.lower()
+
+
+def test_btc_live_trading_true_fails() -> None:
+    """BTC live_trading=True must be rejected."""
+    config = replace(
+        SymbolConfig.default_eth(),
+        symbol=SymbolIdentityConfig(
+            inst_id="BTC-USDT-SWAP",
+            enabled=False,
+            live_trading=True,
+        ),
+    )
+    with pytest.raises(SymbolConfigValidationError) as exc_info:
+        validate_symbol_config(config)
+    msg = str(exc_info.value)
+    assert "BTC-USDT-SWAP" in msg
+    assert "live_trading" in msg.lower()
+
+
+def test_unsupported_symbol_sol_fails() -> None:
+    """SOL-USDT-SWAP (unsupported) must be rejected."""
+    config = replace(
+        SymbolConfig.default_eth(),
+        symbol=SymbolIdentityConfig(inst_id="SOL-USDT-SWAP"),
+    )
+    with pytest.raises(SymbolConfigValidationError, match="unsupported"):
+        validate_symbol_config(config)
+
+
+def test_eth_live_trading_true_still_fails() -> None:
+    """ETH live_trading=True must still be rejected — real live gate is .env."""
+    config = replace(
+        SymbolConfig.default_eth(),
+        symbol=SymbolIdentityConfig(
+            inst_id="ETH-USDT-SWAP",
+            enabled=True,
+            live_trading=True,
+        ),
+    )
+    with pytest.raises(SymbolConfigValidationError, match="live_trading"):
         validate_symbol_config(config)

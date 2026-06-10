@@ -143,12 +143,51 @@ def test_default_eth_toml_passes_validator() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 6. No BTC TOML created yet
+# 6. BTC TOML — exists but disabled (F03)
 # ---------------------------------------------------------------------------
 
 
-def test_no_btc_toml_created_yet() -> None:
-    """A03 only adds ETH — BTC-USDT-SWAP.toml must NOT exist yet."""
-    assert (
-        not _BTC_TOML.exists()
-    ), f"{_BTC_TOML} must not exist; A03 only creates ETH TOML."
+def test_btc_toml_exists_but_disabled() -> None:
+    """BTC-USDT-SWAP.toml must exist, but enabled and live_trading must be False."""
+    assert _BTC_TOML.is_file(), (
+        f"Expected {_BTC_TOML} to exist (F03 adds disabled BTC config)."
+    )
+    config = load_symbol_config_from_dir(str(_SYMBOLS_DIR), "BTC-USDT-SWAP")
+    assert config.inst_id == "BTC-USDT-SWAP"
+    assert config.symbol.enabled is False
+    assert config.symbol.live_trading is False
+    assert config.is_enabled is False
+    assert config.is_live_trading_enabled is False
+
+
+def test_btc_toml_market_metadata() -> None:
+    """BTC TOML must carry correct OKX instrument metadata."""
+    config = load_symbol_config_from_dir(str(_SYMBOLS_DIR), "BTC-USDT-SWAP")
+    assert config.market.contract_value == Decimal("0.01")
+    assert config.market.min_contracts == Decimal("0.01")
+    assert config.market.contract_precision == Decimal("0.01")
+    assert config.market.price_precision == Decimal("0.1")
+
+
+def test_btc_toml_safety_switches() -> None:
+    """BTC safety-critical fields must be locked down."""
+    config = load_symbol_config_from_dir(str(_SYMBOLS_DIR), "BTC-USDT-SWAP")
+
+    # middle_bucket_split and sidecar must be disabled for BTC.
+    assert config.middle_bucket_split.enabled is False
+    assert config.sidecar.enabled is False
+
+    # three_stage_tp2 must use structure Boll.
+    assert config.tp.three_stage_tp2_use_structure_boll is True
+
+    # tp_rate_limit_fail_action must be HALT_ONLY.
+    assert config.sidecar.tp_rate_limit_fail_action == "HALT_ONLY"
+
+    # order_failure_market_exit_delay must be >= 1800.
+    assert config.risk.order_failure_market_exit_delay_seconds >= 1800
+
+
+def test_btc_toml_passes_validator() -> None:
+    """Disabled BTC config must pass validator without error."""
+    config = load_symbol_config_from_dir(str(_SYMBOLS_DIR), "BTC-USDT-SWAP")
+    validate_symbol_config(config)

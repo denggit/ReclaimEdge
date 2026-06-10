@@ -112,6 +112,13 @@ def _ensure_bool(section: str, field: str, value: Any) -> None:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Supported symbols at this stage
+# ---------------------------------------------------------------------------
+
+SUPPORTED_SYMBOLS_AT_THIS_STAGE: set[str] = {"ETH-USDT-SWAP", "BTC-USDT-SWAP"}
+
+
 def _validate_symbol(config: SymbolConfig) -> None:
     s = config.symbol
     sec = "symbol"
@@ -119,24 +126,54 @@ def _validate_symbol(config: SymbolConfig) -> None:
     if not isinstance(s.inst_id, str) or not s.inst_id.strip():
         _fail(sec, "inst_id", f"must be a non-empty string, got {s.inst_id!r}")
 
-    # For now, only ETH-USDT-SWAP is supported.
-    if s.inst_id != "ETH-USDT-SWAP":
+    # Only allow explicitly supported symbols.
+    if s.inst_id not in SUPPORTED_SYMBOLS_AT_THIS_STAGE:
         _fail(
             sec,
             "inst_id",
-            f"only 'ETH-USDT-SWAP' is supported at this stage, "
-            f"got {s.inst_id!r}",
+            f"unsupported symbol {s.inst_id!r}; "
+            f"only {sorted(SUPPORTED_SYMBOLS_AT_THIS_STAGE)!r} "
+            f"are allowed at this stage",
         )
 
     _ensure_bool(sec, "enabled", s.enabled)
     _ensure_bool(sec, "live_trading", s.live_trading)
 
-    if s.live_trading is True and s.inst_id != "ETH-USDT-SWAP":
-        _fail(
-            sec,
-            "live_trading",
-            "live_trading may only be True for 'ETH-USDT-SWAP' at this stage",
-        )
+    # ------------------------------------------------------------------
+    # ETH-USDT-SWAP rules
+    # ------------------------------------------------------------------
+    if s.inst_id == "ETH-USDT-SWAP":
+        # live_trading must stay false — real live gate remains LIVE_TRADING
+        # in .env.
+        if s.live_trading is True:
+            _fail(
+                sec,
+                "live_trading",
+                "live_trading must be False for ETH-USDT-SWAP; "
+                "real live gate is LIVE_TRADING in .env",
+            )
+
+    # ------------------------------------------------------------------
+    # BTC-USDT-SWAP rules
+    # ------------------------------------------------------------------
+    if s.inst_id == "BTC-USDT-SWAP":
+        # BTC must stay disabled until portfolio-level risk guards exist.
+        if s.enabled is True:
+            _fail(
+                sec,
+                "enabled",
+                "BTC-USDT-SWAP enabled must be false; "
+                "do not enable before portfolio-level risk guards "
+                "are implemented",
+            )
+        # BTC live_trading must be false.
+        if s.live_trading is True:
+            _fail(
+                sec,
+                "live_trading",
+                "BTC-USDT-SWAP live_trading must be false; "
+                "real live gate is LIVE_TRADING in .env",
+            )
 
 
 def _validate_market(config: SymbolConfig) -> None:
