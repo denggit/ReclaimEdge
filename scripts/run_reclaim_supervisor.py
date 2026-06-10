@@ -20,6 +20,7 @@ from src.live.supervisor import (  # noqa: E402
     AlertPolicy,
     SupervisorEmailPublisher,
     SupervisorEventPipeline,
+    WorkerEventOutboxRetention,
 )
 from src.utils.email_sender import EmailSender  # noqa: E402
 
@@ -47,11 +48,17 @@ def build_parent_event_pipeline(supervisor: ReclaimSupervisor) -> SupervisorEven
     email_sender = EmailSender()
     publisher = SupervisorEmailPublisher(email_sender=email_sender)
 
+    retention = WorkerEventOutboxRetention(
+        outbox_path=runtime_paths.worker_event_outbox_file,
+        cursor_path=runtime_paths.state_dir / f"worker_event_cursor_{runtime_paths.symbol_slug}.json",
+    )
+
     return SupervisorEventPipeline(
         reader=reader,
         deduper=deduper,
         publisher=publisher,
         alert_policy=AlertPolicy(),
+        outbox_retention=retention,
     )
 
 

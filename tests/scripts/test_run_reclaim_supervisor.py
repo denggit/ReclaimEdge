@@ -388,3 +388,74 @@ def test_main_does_not_send_real_email(monkeypatch: pytest.MonkeyPatch) -> None:
     assert FakeEmailSender.instance_count >= 1, (
         "EmailSender must be constructed (fail‑fast for missing email config)"
     )
+
+
+# ============================================================================
+# E07: Retention wiring tests
+# ============================================================================
+
+
+def test_build_pipeline_has_retention(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """build_parent_event_pipeline must wire WorkerEventOutboxRetention into the pipeline."""
+    monkeypatch.setattr(
+        "scripts.run_reclaim_supervisor.EmailSender", FakeEmailSender
+    )
+
+    from src.live.supervisor.reclaim_supervisor import ReclaimSupervisor, ReclaimSupervisorConfig
+    from src.live.supervisor.supervisor_event_pipeline import SupervisorEventPipeline
+    from src.live.supervisor.outbox_retention import WorkerEventOutboxRetention
+    from scripts.run_reclaim_supervisor import build_parent_event_pipeline
+
+    config = ReclaimSupervisorConfig(
+        project_root=tmp_path,
+        runtime_dir=Path("runtime"),
+    )
+    supervisor = ReclaimSupervisor(config=config)
+    pipeline = build_parent_event_pipeline(supervisor)
+
+    assert isinstance(pipeline, SupervisorEventPipeline)
+    assert hasattr(pipeline, "_outbox_retention"), (
+        "pipeline must have _outbox_retention attribute"
+    )
+    assert pipeline._outbox_retention is not None
+    assert isinstance(pipeline._outbox_retention, WorkerEventOutboxRetention)
+
+
+def test_retention_source_guard() -> None:
+    """run_reclaim_supervisor.py must contain WorkerEventOutboxRetention and outbox_retention=."""
+    source = _entry_source()
+
+    required = [
+        "WorkerEventOutboxRetention",
+        "outbox_retention=",
+    ]
+    for token in required:
+        assert token in source, (
+            f"E07 run_reclaim_supervisor.py must contain {token!r}"
+        )
+
+
+def test_retention_no_forbidden_tokens() -> None:
+    """E07 run_reclaim_supervisor.py must NOT contain env/retention-control tokens."""
+    source = _entry_source()
+
+    forbidden = [
+        "OUTBOX_RETENTION_MAX_BYTES",
+        "OUTBOX_RETENTION_KEEP_ARCHIVES",
+        "os.environ",
+    ]
+    for token in forbidden:
+        assert token not in source, (
+            f"E07 run_reclaim_supervisor.py must NOT contain {token!r}"
+        )
+
+
+def test_main_wiring_still_intact() -> None:
+    """main() must still contain: build pipeline, install handlers, run_forever."""
+    source = _entry_source()
+    # build_parent_event_pipeline call
+    assert "build_parent_event_pipeline(" in source
+    # install_supervisor_signal_handlers call
+    assert "install_supervisor_signal_handlers(" in source
+    # run_forever call
+    assert "run_forever()" in source

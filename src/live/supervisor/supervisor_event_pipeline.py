@@ -13,6 +13,9 @@ from src.live.supervisor.child_event_reader import (
     ChildEventReadResult,
     ChildEventReader,
 )
+from src.utils.log import get_logger
+
+logger = get_logger(__name__)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -91,6 +94,23 @@ class SupervisorAlertPublisher(Protocol):
     async def publish_alert(self, alert: SupervisorAlert) -> bool: ...
 
 
+class OutboxRetentionManager(Protocol):
+    """Protocol for outbox retention / rotation.
+
+    Implementations must return an object with at least ``rotated`` and
+    ``reason`` attributes.  The pipeline only calls this after processing;
+    it never inspects the return value beyond logging.
+    """
+
+    def rotate_if_processed(
+        self,
+        *,
+        cursor_offset: int,
+        reached_eof: bool,
+        now_ms: int | None = None,
+    ) -> object: ...
+
+
 # ---------------------------------------------------------------------------
 # SupervisorEventPipeline
 # ---------------------------------------------------------------------------
@@ -134,6 +154,7 @@ class SupervisorEventPipeline:
         publisher: SupervisorAlertPublisher,
         alert_policy: AlertPolicy | None = None,
         max_alerts_per_cycle: int = 100,
+        outbox_retention: OutboxRetentionManager | None = None,
     ) -> None:
         # -- reader -----------------------------------------------------------
         if not hasattr(reader, "read_new_events"):
@@ -181,6 +202,7 @@ class SupervisorEventPipeline:
         self._publisher = publisher
         self._alert_policy = alert_policy
         self._max_alerts_per_cycle = max_alerts_per_cycle
+        self._outbox_retention = outbox_retention
 
     # ------------------------------------------------------------------
     # process_once
@@ -228,6 +250,8 @@ class SupervisorEventPipeline:
 
         events_seen = len(result.events)
         read_errors_seen = len(result.errors)
+        reader_cursor_offset = result.cursor_offset
+        reader_reached_eof = result.reached_eof
 
         # -- counters ---------------------------------------------------------
         alerts_built = 0
@@ -310,6 +334,17 @@ class SupervisorEventPipeline:
                 publish_failures += 1
                 continue
             alerts_published += 1
+
+        # -- outbox retention (after processing, before return) ---------------
+        if self._outbox_retention is not None:
+            try:
+                self._outbox_retention.rotate_if_processed(
+                    cursor_offset=reader_cursor_offset,
+                    reached_eof=reader_reached_eof,
+                    now_ms=now_ms,
+                )
+            except Exception:
+                logger.exception("SUPERVISOR_OUTBOX_RETENTION_FAILED")
 
         return SupervisorEventPipelineResult(
             events_seen=events_seen,

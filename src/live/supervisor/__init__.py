@@ -45,6 +45,10 @@ from src.live.supervisor.supervisor_email_publisher import (
     AsyncMailSender,
     SupervisorEmailPublisher,
 )
+from src.live.supervisor.outbox_retention import (
+    WorkerEventOutboxRetention,
+    OutboxRetentionResult,
+)
 
 __all__ = [
     "ReclaimSupervisor",
@@ -78,4 +82,6 @@ __all__ = [
     "DEFAULT_SUPPRESSED_RUNTIME_EVENT_TYPES",
     "AsyncMailSender",
     "SupervisorEmailPublisher",
+    "WorkerEventOutboxRetention",
+    "OutboxRetentionResult",
 ]

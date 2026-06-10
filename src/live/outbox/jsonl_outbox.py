@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import time
@@ -20,6 +21,10 @@ class JsonlOutboxEvent:
             "event_type": self.event_type,
             "payload": self.payload,
         }
+
+
+def _lock_path_for(path: Path) -> Path:
+    return path.with_suffix(path.suffix + ".lock")
 
 
 class JsonlOutbox:
@@ -48,11 +53,17 @@ class JsonlOutbox:
     def append_event(self, event: JsonlOutboxEvent) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         line = json.dumps(event.to_json_object(), ensure_ascii=False, sort_keys=True)
-        with self.path.open("a", encoding="utf-8") as fh:
-            fh.write(line)
-            fh.write("\n")
-            fh.flush()
-            os.fsync(fh.fileno())
+        lock_path = _lock_path_for(self.path)
+        with lock_path.open("a", encoding="utf-8") as lock_fh:
+            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
+            try:
+                with self.path.open("a", encoding="utf-8") as fh:
+                    fh.write(line)
+                    fh.write("\n")
+                    fh.flush()
+                    os.fsync(fh.fileno())
+            finally:
+                fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
 
     def read_events(self) -> list[JsonlOutboxEvent]:
         if not self.path.exists():

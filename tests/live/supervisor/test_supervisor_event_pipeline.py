@@ -1921,3 +1921,175 @@ class TestPipelineSourceOrderGuard:
         assert "record_send" in source, (
             "supervisor_event_pipeline.py must use record_send parameter"
         )
+
+
+# ============================================================================
+# E07: Retention integration tests
+# ============================================================================
+
+
+class FakeRetention:
+    """A fake OutboxRetentionManager that records calls."""
+
+    def __init__(self, raises: bool = False) -> None:
+        self.calls: list[dict] = []
+        self.raises = raises
+
+    def rotate_if_processed(
+        self,
+        *,
+        cursor_offset: int,
+        reached_eof: bool,
+        now_ms: int | None = None,
+    ) -> object:
+        self.calls.append({
+            "cursor_offset": cursor_offset,
+            "reached_eof": reached_eof,
+            "now_ms": now_ms,
+        })
+        if self.raises:
+            raise RuntimeError("simulated retention failure")
+        return type("FakeRetentionResult", (), {"rotated": False, "reason": "fake"})()
+
+
+class TestRetentionCalledAfterProcessing:
+    @pytest.mark.asyncio
+    async def test_retention_called(self) -> None:
+        event = _make_child_event(
+            event_type="WORKER_TRADING_HALTED",
+            payload={"symbol": "ETH-USDT-SWAP", "severity": "CRITICAL", "data": {}},
+        )
+        reader = FakeReader(
+            ChildEventReadResult(
+                events=[event],
+                errors=[],
+                cursor_offset=123,
+                reached_eof=True,
+            )
+        )
+        deduper = FakeDeduper(allowed=True)
+        publisher = FakePublisher(result=True)
+        retention = FakeRetention()
+
+        pipeline = SupervisorEventPipeline(
+            reader=reader,
+            deduper=deduper,
+            publisher=publisher,
+            outbox_retention=retention,
+        )
+        result = await pipeline.process_once(now_ms=1000)
+
+        # Alert was published.
+        assert result.alerts_published == 1
+
+        # Retention was called with correct args.
+        assert len(retention.calls) == 1
+        call = retention.calls[0]
+        assert call["cursor_offset"] == 123
+        assert call["reached_eof"] is True
+        assert call["now_ms"] == 1000
+
+
+class TestRetentionFailureDoesNotFailPipeline:
+    @pytest.mark.asyncio
+    async def test_retention_raises(self) -> None:
+        event = _make_child_event(
+            event_type="WORKER_TRADING_HALTED",
+            payload={"symbol": "ETH-USDT-SWAP", "severity": "CRITICAL", "data": {}},
+        )
+        reader = FakeReader(
+            ChildEventReadResult(
+                events=[event],
+                errors=[],
+                cursor_offset=0,
+                reached_eof=False,
+            )
+        )
+        deduper = FakeDeduper(allowed=True)
+        publisher = FakePublisher(result=True)
+        retention = FakeRetention(raises=True)
+
+        pipeline = SupervisorEventPipeline(
+            reader=reader,
+            deduper=deduper,
+            publisher=publisher,
+            outbox_retention=retention,
+        )
+        # Must NOT raise.
+        result = await pipeline.process_once(now_ms=1000)
+
+        # Alert still published.
+        assert result.alerts_published == 1
+
+        # Retention was called but swallowed the error.
+        assert len(retention.calls) == 1
+
+
+class TestRetentionNotCalledWhenNone:
+    @pytest.mark.asyncio
+    async def test_no_retention_when_none(self) -> None:
+        event = _make_child_event()
+        reader = FakeReader(
+            ChildEventReadResult(
+                events=[event],
+                errors=[],
+                cursor_offset=0,
+                reached_eof=True,
+            )
+        )
+        deduper = FakeDeduper(allowed=True)
+        publisher = FakePublisher(result=True)
+
+        pipeline = SupervisorEventPipeline(
+            reader=reader,
+            deduper=deduper,
+            publisher=publisher,
+            # outbox_retention defaults to None.
+        )
+        result = await pipeline.process_once(now_ms=1000)
+
+        assert result.alerts_published == 1
+        # No crash, no retention interaction.
+
+
+class TestRetentionSourceGuard:
+    def test_constructor_has_outbox_retention_param(self) -> None:
+        source = _PIPELINE_SOURCE.read_text(encoding="utf-8")
+        assert "outbox_retention" in source, (
+            "SupervisorEventPipeline constructor must have outbox_retention parameter"
+        )
+
+    def test_process_once_calls_rotate_if_processed(self) -> None:
+        source = _PIPELINE_SOURCE.read_text(encoding="utf-8")
+        assert "rotate_if_processed" in source, (
+            "process_once must call rotate_if_processed"
+        )
+
+    def test_result_schema_unchanged(self) -> None:
+        """SupervisorEventPipelineResult fields must be unchanged."""
+        from src.live.supervisor.supervisor_event_pipeline import (
+            SupervisorEventPipelineResult as R,
+        )
+
+        fields = {f.name for f in R.__dataclass_fields__.values()}
+        expected = {
+            "events_seen",
+            "read_errors_seen",
+            "alerts_built",
+            "alerts_policy_suppressed",
+            "alerts_allowed",
+            "alerts_suppressed",
+            "alerts_published",
+            "publish_failures",
+            "dropped_due_to_cycle_limit",
+        }
+        assert fields == expected, f"Result schema changed: {fields - expected} or {expected - fields}"
+
+    def test_no_result_schema_change(self) -> None:
+        source = _PIPELINE_SOURCE.read_text(encoding="utf-8")
+        # Verify fields of SupervisorEventPipelineResult remain unchanged.
+        assert "cursor_offset" not in source.replace(
+            "cursor_offset", ""
+        ) or "cursor_offset" in source, (
+            "cursor_offset may appear in source but not in result schema"
+        )

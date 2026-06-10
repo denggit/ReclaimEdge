@@ -118,3 +118,26 @@ class TestJsonlOutboxSourceHasNoRuntimeSideEffectImports:
         ]
         for token in forbidden:
             assert token not in source, f"jsonl_outbox.py must not import/use {token}"
+
+
+class TestJsonlOutboxLockSourceGuard:
+    def test_contains_fcntl_flock(self) -> None:
+        source_path = (
+            Path(__file__).parents[3] / "src" / "live" / "outbox" / "jsonl_outbox.py"
+        )
+        source = source_path.read_text()
+        assert "fcntl.flock" in source, "jsonl_outbox.py must contain fcntl.flock"
+
+    def test_contains_lock_suffix(self) -> None:
+        source_path = (
+            Path(__file__).parents[3] / "src" / "live" / "outbox" / "jsonl_outbox.py"
+        )
+        source = source_path.read_text()
+        assert ".lock" in source, "jsonl_outbox.py append_event must contain .lock"
+
+    def test_append_event_still_fsync(self) -> None:
+        source_path = (
+            Path(__file__).parents[3] / "src" / "live" / "outbox" / "jsonl_outbox.py"
+        )
+        source = source_path.read_text()
+        assert "os.fsync" in source, "jsonl_outbox.py append_event must still contain os.fsync"
