@@ -29,6 +29,12 @@ from src.live.supervisor.alert_deduper import (
     AlertDedupeDecision,
     AlertDeduper,
 )
+from src.live.supervisor.supervisor_event_pipeline import (
+    SupervisorAlert,
+    SupervisorAlertPublisher,
+    SupervisorEventPipeline,
+    SupervisorEventPipelineResult,
+)
 
 __all__ = [
     "ReclaimSupervisor",
@@ -52,4 +58,8 @@ __all__ = [
     "ChildEventReader",
     "AlertDedupeDecision",
     "AlertDeduper",
+    "SupervisorAlert",
+    "SupervisorAlertPublisher",
+    "SupervisorEventPipeline",
+    "SupervisorEventPipelineResult",
 ]
