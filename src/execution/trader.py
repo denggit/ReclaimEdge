@@ -15,6 +15,45 @@ from src.utils.log import get_logger
 logger = get_logger(__name__)
 
 
+def parse_allowed_live_symbols(raw: str | None) -> tuple[str, ...]:
+    """Parse RECLAIM_ALLOWED_LIVE_SYMBOLS into a deduplicated tuple.
+
+    Rules:
+    - ``None`` or blank → ``("ETH-USDT-SWAP",)``
+    - Comma‑separated, whitespace stripped, empty tokens dropped
+    - Preserves order, removes duplicates
+    - ``"*"`` anywhere → ValueError (wildcard disallowed)
+    - Internal whitespace in a symbol → ValueError
+    - Empty result after parsing → ``("ETH-USDT-SWAP",)``
+    """
+    if raw is None or raw.strip() == "":
+        return ("ETH-USDT-SWAP",)
+
+    if "*" in raw:
+        raise ValueError("Wildcard '*' is not allowed in RECLAIM_ALLOWED_LIVE_SYMBOLS")
+
+    parts = [p.strip() for p in raw.split(",")]
+    parts = [p for p in parts if p]
+
+    if not parts:
+        return ("ETH-USDT-SWAP",)
+
+    for p in parts:
+        if not isinstance(p, str) or not p:
+            raise ValueError(f"Invalid symbol in RECLAIM_ALLOWED_LIVE_SYMBOLS: {p!r}")
+        if " " in p:
+            raise ValueError(f"Symbol must not contain whitespace: {p!r}")
+
+    seen: set[str] = set()
+    result: list[str] = []
+    for p in parts:
+        if p not in seen:
+            seen.add(p)
+            result.append(p)
+
+    return tuple(result)
+
+
 @dataclass(frozen=True)
 class LiveTradeResult:
     ok: bool
@@ -66,9 +105,14 @@ class Trader:
     """
 
     def __init__(self) -> None:
-        self.symbol = os.getenv("OKX_INST_ID", "ETH-USDT-SWAP")
-        if self.symbol != "ETH-USDT-SWAP":
-            raise RuntimeError("Live trader only supports ETH-USDT-SWAP for now.")
+        self.symbol = os.getenv("OKX_INST_ID", "ETH-USDT-SWAP").strip() or "ETH-USDT-SWAP"
+        self.allowed_live_symbols = parse_allowed_live_symbols(os.getenv("RECLAIM_ALLOWED_LIVE_SYMBOLS"))
+
+        if self.symbol not in self.allowed_live_symbols:
+            raise RuntimeError(
+                "Live trader symbol is not allowed by RECLAIM_ALLOWED_LIVE_SYMBOLS: "
+                f"symbol={self.symbol!r} allowed={self.allowed_live_symbols!r}"
+            )
 
         self.base_url = os.getenv("OKX_BASE_URL", "https://www.okx.com")
         self.td_mode = os.getenv("OKX_TD_MODE", "isolated")
@@ -144,7 +188,7 @@ class Trader:
         position = await self.fetch_position_snapshot()
         self.position_contracts = position.contracts
         logger.warning(
-            "LIVE trader initialized | symbol=%s td_mode=%s leverage=%s equity=%.4f existing_side=%s existing_contracts=%s existing_avg=%.4f contract_multiplier=%s min_contracts=%s",
+            "LIVE trader initialized | symbol=%s td_mode=%s leverage=%s equity=%.4f existing_side=%s existing_contracts=%s existing_avg=%.4f contract_multiplier=%s min_contracts=%s allowed_live_symbols=%s",
             self.symbol,
             self.td_mode,
             self.leverage,
@@ -154,6 +198,7 @@ class Trader:
             position.avg_entry_price,
             self.contract_multiplier,
             self.min_contracts,
+            self.allowed_live_symbols,
         )
 
     async def execute_intent(self, intent: TradeIntent) -> LiveTradeResult:

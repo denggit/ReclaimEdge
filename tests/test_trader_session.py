@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import sys
 import types
 import unittest
@@ -45,6 +46,113 @@ class FakeSession:
 
     async def close(self) -> None:
         self.closed = True
+
+
+from src.execution.trader import parse_allowed_live_symbols  # noqa: E402
+
+
+class ParseAllowedLiveSymbolsTest(unittest.TestCase):
+    """Unit tests for the pure helper."""
+
+    def test_none_returns_default(self) -> None:
+        self.assertEqual(parse_allowed_live_symbols(None), ("ETH-USDT-SWAP",))
+
+    def test_empty_string_returns_default(self) -> None:
+        self.assertEqual(parse_allowed_live_symbols(""), ("ETH-USDT-SWAP",))
+
+    def test_single_eth(self) -> None:
+        self.assertEqual(parse_allowed_live_symbols("ETH-USDT-SWAP"), ("ETH-USDT-SWAP",))
+
+    def test_multiple_comma_separated(self) -> None:
+        self.assertEqual(
+            parse_allowed_live_symbols("ETH-USDT-SWAP, BTC-USDT-SWAP"),
+            ("ETH-USDT-SWAP", "BTC-USDT-SWAP"),
+        )
+
+    def test_dedup_keeps_first(self) -> None:
+        self.assertEqual(
+            parse_allowed_live_symbols("ETH-USDT-SWAP,ETH-USDT-SWAP"),
+            ("ETH-USDT-SWAP",),
+        )
+
+    def test_wildcard_raises_value_error(self) -> None:
+        with self.assertRaises(ValueError):
+            parse_allowed_live_symbols("*")
+
+    def test_internal_whitespace_raises_value_error(self) -> None:
+        with self.assertRaises(ValueError):
+            parse_allowed_live_symbols("ETH USDT SWAP")
+
+    def test_blank_with_spaces_returns_default(self) -> None:
+        self.assertEqual(parse_allowed_live_symbols("   "), ("ETH-USDT-SWAP",))
+
+    def test_trailing_comma_handled(self) -> None:
+        self.assertEqual(
+            parse_allowed_live_symbols("ETH-USDT-SWAP,"),
+            ("ETH-USDT-SWAP",),
+        )
+
+
+class TraderAllowlistIntegrationTest(unittest.TestCase):
+    """Integration tests for the Trader live-symbol gate (no OKX requests)."""
+
+    def setUp(self) -> None:
+        # Save original environ so we can restore it.
+        self._original_env = dict(os.environ)
+
+    def tearDown(self) -> None:
+        os.environ.clear()
+        os.environ.update(self._original_env)
+
+    @staticmethod
+    def _fake_okx_config() -> dict[str, str]:
+        return {"api_key": "fake-key", "secret_key": "fake-secret", "passphrase": "fake-pass"}
+
+    @staticmethod
+    def _trader_module():
+        return sys.modules["src.execution.trader"]
+
+    def test_default_env_allows_eth_only(self) -> None:
+        """OKX_INST_ID unset, RECLAIM_ALLOWED_LIVE_SYMBOLS unset → ETH only."""
+        env = {
+            "LIVE_TRADING": "true",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            with patch.object(self._trader_module(), "OKX_CONFIG", self._fake_okx_config()):
+                t = self._trader_module().Trader()
+                self.assertEqual(t.symbol, "ETH-USDT-SWAP")
+                self.assertEqual(t.allowed_live_symbols, ("ETH-USDT-SWAP",))
+
+    def test_non_allowlisted_symbol_rejected(self) -> None:
+        """BTC requested but not in allowlist → RuntimeError with correct message."""
+        env = {
+            "OKX_INST_ID": "BTC-USDT-SWAP",
+            # RECLAIM_ALLOWED_LIVE_SYMBOLS intentionally unset
+        }
+        with patch.dict(os.environ, env, clear=True):
+            with self.assertRaises(RuntimeError) as ctx:
+                self._trader_module().Trader()
+            msg = str(ctx.exception)
+            self.assertIn("BTC-USDT-SWAP", msg)
+            self.assertIn("RECLAIM_ALLOWED_LIVE_SYMBOLS", msg)
+
+    def test_explicit_allowlist_passes_symbol_gate_for_btc(self) -> None:
+        """BTC explicitly allowlisted → Trader passes symbol gate (no OKX calls)."""
+        env = {
+            "OKX_INST_ID": "BTC-USDT-SWAP",
+            "RECLAIM_ALLOWED_LIVE_SYMBOLS": "ETH-USDT-SWAP,BTC-USDT-SWAP",
+            "LIVE_TRADING": "true",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            with patch.object(self._trader_module(), "OKX_CONFIG", self._fake_okx_config()):
+                t = self._trader_module().Trader()
+                self.assertEqual(t.symbol, "BTC-USDT-SWAP")
+                self.assertEqual(
+                    t.allowed_live_symbols,
+                    ("ETH-USDT-SWAP", "BTC-USDT-SWAP"),
+                )
+                # Prove we didn't initialize or call OKX
+                self.assertFalse(hasattr(t, "account_equity_usdt") and t.account_equity_usdt != 0.0)
 
 
 class TraderSessionTest(unittest.IsolatedAsyncioTestCase):
