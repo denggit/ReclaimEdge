@@ -19,6 +19,12 @@ from src.live.supervisor.signal_handlers import (
     SignalHandlerInstallResult,
     install_supervisor_signal_handlers,
 )
+from src.live.supervisor.child_event_reader import (
+    ChildEvent,
+    ChildEventReadError,
+    ChildEventReadResult,
+    ChildEventReader,
+)
 
 __all__ = [
     "ReclaimSupervisor",
@@ -36,4 +42,8 @@ __all__ = [
     "RestartPolicyConfig",
     "SignalHandlerInstallResult",
     "install_supervisor_signal_handlers",
+    "ChildEvent",
+    "ChildEventReadError",
+    "ChildEventReadResult",
+    "ChildEventReader",
 ]
