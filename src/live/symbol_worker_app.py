@@ -330,6 +330,7 @@ class SymbolWorkerApp:
                 now_ms=live_time_utils.utc_ms(),
                 journal=journal,
                 email_sender=email_sender,
+                worker_event_emitter=worker_event_emitter,
             )
             runner_live_helpers.apply_three_stage_startup_safety_gate(
                 strategy=strategy,
@@ -487,6 +488,7 @@ class SymbolWorkerApp:
                     cash_log_min_delta_usdt=cash_log_min_delta_usdt,
                     rolling_loss_guard=rolling_loss_guard,
                     email_sender=email_sender,
+                    worker_event_emitter=worker_event_emitter,
                 )
             )
             strategy_task = asyncio.ensure_future(

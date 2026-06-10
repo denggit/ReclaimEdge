@@ -437,6 +437,46 @@ class TestE05hRequiredImports:
         )
 
 
+# ============================================================================
+# E06: source guard — worker_event_emitter wired to account worker and startup
+# ============================================================================
+
+
+class TestE06WorkerEventEmitterWiring:
+    def test_account_worker_call_passes_worker_event_emitter(self) -> None:
+        source = _app_source()
+        # The account_position_sync_worker(...) call must include
+        # worker_event_emitter=worker_event_emitter.
+        assert "worker_event_emitter=worker_event_emitter" in source, (
+            "symbol_worker_app.py must pass worker_event_emitter to "
+            "account_position_sync_worker"
+        )
+
+    def test_startup_rolling_loss_passes_worker_event_emitter(self) -> None:
+        source = _app_source()
+        # apply_rolling_loss_guard_startup_state call must include
+        # worker_event_emitter=worker_event_emitter.
+        assert (
+            "apply_rolling_loss_guard_startup_state" in source
+        ), "symbol_worker_app.py must call apply_rolling_loss_guard_startup_state"
+        # Verify the call passes worker_event_emitter.
+        # The call site is in the startup_recovery try block; we check that
+        # the source contains the keyword argument.
+        lines = source.splitlines()
+        found = False
+        for i, line in enumerate(lines):
+            if "apply_rolling_loss_guard_startup_state(" in line:
+                # Check the next ~10 lines for worker_event_emitter=
+                block = "\n".join(lines[i : i + 12])
+                if "worker_event_emitter=worker_event_emitter" in block:
+                    found = True
+                    break
+        assert found, (
+            "apply_rolling_loss_guard_startup_state call must pass "
+            "worker_event_emitter=worker_event_emitter"
+        )
+
+
 class TestE05hForbiddenTokens:
     def test_no_supervisor_imports(self) -> None:
         source = _app_source()

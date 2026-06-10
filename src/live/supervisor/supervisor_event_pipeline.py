@@ -30,6 +30,7 @@ LIFECYCLE_EVENT_TYPES = frozenset(
         "WORKER_DRAIN_STARTED",
         "WORKER_DRAIN_COMPLETED",
         "WORKER_DRAIN_TIMEOUT",
+        "WORKER_ROLLING_LOSS_GUARD",
     }
 )
 
@@ -443,8 +444,13 @@ def _build_child_event_body(
     reason: str | None,
     ts_ms: int | None,
     source_path: str | None,
+    data: dict[str, Any] | None = None,
 ) -> str:
-    """Build an HTML body for a child event alert."""
+    """Build an HTML body for a child event alert.
+
+    If *data* is a non-empty dict, up to 20 of its keys are rendered as an
+    additional data table with HTML-escaped, truncated values.
+    """
     parts: list[str] = [
         "<html><body>",
         "<table>",
@@ -461,8 +467,23 @@ def _build_child_event_body(
             f"<td>{html.escape(source_path if source_path is not None else '-')}</td></tr>"
         ),
         "</table>",
-        "</body></html>",
     ]
+    if isinstance(data, dict) and data:
+        parts.append("<br/><table>")
+        parts.append(
+            "<tr><th colspan=\"2\" style=\"text-align:left;\"><b>Data</b></th></tr>"
+        )
+        for i, (key, val) in enumerate(data.items()):
+            if i >= 20:
+                break
+            key_str = html.escape(str(key))
+            val_str = html.escape(str(val))[:300] if val is not None else "-"
+            parts.append(
+                f"<tr><td style=\"padding-right:16px;\">"
+                f"{key_str}</td><td>{val_str}</td></tr>"
+            )
+        parts.append("</table>")
+    parts.append("</body></html>")
     return "".join(parts)
 
 
@@ -507,6 +528,8 @@ def _build_alert_from_child_event(event: ChildEvent) -> SupervisorAlert:
     symbol = _extract_symbol(payload)
     severity = _extract_severity(payload)
     reason = _extract_reason(payload)
+    raw_data = payload.get("data")
+    data: dict[str, Any] | None = raw_data if isinstance(raw_data, dict) else None
     subject = _build_subject(symbol, severity, event.event_type)
     body = _build_child_event_body(
         symbol=symbol,
@@ -515,6 +538,7 @@ def _build_alert_from_child_event(event: ChildEvent) -> SupervisorAlert:
         reason=reason,
         ts_ms=event.ts_ms,
         source_path=event.source_path,
+        data=data,
     )
     return SupervisorAlert(
         symbol=symbol,

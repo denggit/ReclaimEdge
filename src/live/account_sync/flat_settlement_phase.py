@@ -227,6 +227,7 @@ async def finalize_account_sync_flat_settlement_phase(
         pending_flat_payload: dict[str, Any] | None,
         flat_previous_halt_reason: str | None,
         clear_state: bool,
+        worker_event_emitter: object | None = None,
 ) -> None:
     if record_flat_payload is not None:
         record_flat_payload.pop("near_tp_protective_sl_order_id", None)
@@ -297,6 +298,7 @@ async def finalize_account_sync_flat_settlement_phase(
                     email_sender=email_sender,
                     payload=payload,
                     email_enabled=rolling_loss_guard.config.email_enabled and not critical_halt_preserved,
+                    worker_event_emitter=worker_event_emitter,
                 )
 
     if clear_state:

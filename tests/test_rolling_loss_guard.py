@@ -32,8 +32,11 @@ from src.risk.rolling_loss_guard import (  # noqa: E402
     RollingLossGuard,
     RollingLossGuardConfig,
 )
+from src.live.outbox.worker_event_emitter import WORKER_ROLLING_LOSS_GUARD  # noqa: E402
 from src.risk.rolling_loss_live import (  # noqa: E402
     apply_rolling_loss_guard_startup_state,
+    record_and_notify_rolling_loss_guard,
+    rolling_loss_guard_event_severity,
     rolling_loss_guard_payload,
     rolling_loss_guard_state_payload,
     rolling_loss_halt_reason,
@@ -779,6 +782,212 @@ def test_from_runtime_paths_load_or_initialize_writes_runtime_risk_file(
     assert runtime_paths.rolling_loss_guard_state_file.exists()
     old_path = tmp_path / "data" / "trade_journal" / "rolling_loss_guard_state.json"
     assert not old_path.exists()
+
+
+# ============================================================================
+# E06: outbox-first record_and_notify_rolling_loss_guard
+# ============================================================================
+
+
+class FakeWorkerEventEmitter:
+    """Fake emitter for testing outbox-first path."""
+
+    def __init__(self, raises: bool = False) -> None:
+        self.calls: list[dict] = []
+        self.raises = raises
+
+    def emit(self, event_type: str, payload: dict | None = None, *, severity: str = "INFO", ts_ms: int | None = None) -> None:
+        if self.raises:
+            raise RuntimeError("emit failed")
+        self.calls.append({
+            "event_type": event_type,
+            "payload": payload,
+            "severity": severity,
+            "ts_ms": ts_ms,
+        })
+
+
+class TestRecordAndNotifyOutboxFirst(unittest.IsolatedAsyncioTestCase):
+    def make_guard(self, root: Path, **overrides) -> RollingLossGuard:
+        values = {
+            "enabled": True,
+            "warn_pct": 0.50,
+            "soft_halt_pct": 0.15,
+            "soft_halt_hours": 6,
+            "hard_halt_pct": 0.20,
+            "hard_halt_hours": 12,
+            "email_enabled": True,
+            "event_time_tolerance_ms": 5000,
+        }
+        values.update(overrides)
+        return RollingLossGuard(root / "rolling_loss_guard_state.json", RollingLossGuardConfig(**values))
+
+    async def test_outbox_emit_called_email_not_called(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            guard = self.make_guard(Path(tmp))
+            guard.load_or_initialize(NOW_MS, 100.0)
+            decision = guard.evaluate_after_flat(now_ms=NOW_MS + 1, flat_equity=85.0, flat_event_id="flat-1")
+            payload = rolling_loss_guard_payload(decision.action, decision)
+
+            journal = FakeJournal()
+            email_sender = FakeEmailSender()
+            emitter = FakeWorkerEventEmitter()
+
+            await record_and_notify_rolling_loss_guard(
+                journal=journal,
+                email_sender=email_sender,
+                payload=payload,
+                email_enabled=True,
+                worker_event_emitter=emitter,
+            )
+
+            # Journal still recorded.
+            assert len(journal.rolling_loss_events) == 1
+            # Emitter called once.
+            assert len(emitter.calls) == 1
+            # Email NOT called.
+            assert len(email_sender.subjects) == 0
+
+    async def test_outbox_event_type_is_rolling_loss_guard(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            guard = self.make_guard(Path(tmp))
+            guard.load_or_initialize(NOW_MS, 100.0)
+            decision = guard.evaluate_after_flat(now_ms=NOW_MS + 1, flat_equity=85.0, flat_event_id="flat-1")
+            payload = rolling_loss_guard_payload(decision.action, decision)
+
+            journal = FakeJournal()
+            emitter = FakeWorkerEventEmitter()
+
+            await record_and_notify_rolling_loss_guard(
+                journal=journal,
+                email_sender=None,
+                payload=payload,
+                email_enabled=True,
+                worker_event_emitter=emitter,
+            )
+
+            assert emitter.calls[0]["event_type"] == WORKER_ROLLING_LOSS_GUARD
+
+    async def test_severity_warn_maps_to_warning(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            guard = self.make_guard(Path(tmp), warn_pct=0.05, soft_halt_pct=0.15, hard_halt_pct=0.50)
+            guard.load_or_initialize(NOW_MS, 100.0)
+            decision = guard.evaluate_after_flat(now_ms=NOW_MS + 1, flat_equity=90.0, flat_event_id="flat-1")
+            payload = rolling_loss_guard_payload(decision.action, decision)
+
+            journal = FakeJournal()
+            emitter = FakeWorkerEventEmitter()
+
+            await record_and_notify_rolling_loss_guard(
+                journal=journal,
+                email_sender=None,
+                payload=payload,
+                email_enabled=True,
+                worker_event_emitter=emitter,
+            )
+
+            assert emitter.calls[0]["severity"] == "WARNING"
+
+    async def test_severity_hard_halt_maps_to_critical(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            guard = self.make_guard(Path(tmp))
+            guard.load_or_initialize(NOW_MS, 100.0)
+            decision = guard.evaluate_after_flat(now_ms=NOW_MS + 1, flat_equity=80.0, flat_event_id="flat-1")
+            payload = rolling_loss_guard_payload(decision.action, decision)
+
+            journal = FakeJournal()
+            emitter = FakeWorkerEventEmitter()
+
+            await record_and_notify_rolling_loss_guard(
+                journal=journal,
+                email_sender=None,
+                payload=payload,
+                email_enabled=True,
+                worker_event_emitter=emitter,
+            )
+
+            assert emitter.calls[0]["severity"] == "CRITICAL"
+
+    async def test_emit_raises_does_not_crash_and_no_email_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            guard = self.make_guard(Path(tmp))
+            guard.load_or_initialize(NOW_MS, 100.0)
+            decision = guard.evaluate_after_flat(now_ms=NOW_MS + 1, flat_equity=80.0, flat_event_id="flat-1")
+            payload = rolling_loss_guard_payload(decision.action, decision)
+
+            journal = FakeJournal()
+            email_sender = FakeEmailSender()
+            emitter = FakeWorkerEventEmitter(raises=True)
+
+            # Must NOT raise.
+            await record_and_notify_rolling_loss_guard(
+                journal=journal,
+                email_sender=email_sender,
+                payload=payload,
+                email_enabled=True,
+                worker_event_emitter=emitter,
+            )
+
+            # Journal still recorded.
+            assert len(journal.rolling_loss_events) == 1
+            # No email fallback (outbox-first: emit failure does NOT fall back to child email).
+            assert len(email_sender.subjects) == 0
+
+    async def test_emitter_none_uses_legacy_email_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            guard = self.make_guard(Path(tmp))
+            guard.load_or_initialize(NOW_MS, 100.0)
+            decision = guard.evaluate_after_flat(now_ms=NOW_MS + 1, flat_equity=80.0, flat_event_id="flat-1")
+            payload = rolling_loss_guard_payload(decision.action, decision)
+
+            journal = FakeJournal()
+            email_sender = FakeEmailSender()
+
+            await record_and_notify_rolling_loss_guard(
+                journal=journal,
+                email_sender=email_sender,
+                payload=payload,
+                email_enabled=True,
+                worker_event_emitter=None,
+            )
+
+            # Journal recorded.
+            assert len(journal.rolling_loss_events) == 1
+            # Legacy email called.
+            assert len(email_sender.subjects) == 1
+
+    async def test_email_disabled_no_emit_no_email(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            guard = self.make_guard(Path(tmp))
+            guard.load_or_initialize(NOW_MS, 100.0)
+            decision = guard.evaluate_after_flat(now_ms=NOW_MS + 1, flat_equity=80.0, flat_event_id="flat-1")
+            payload = rolling_loss_guard_payload(decision.action, decision)
+
+            journal = FakeJournal()
+            email_sender = FakeEmailSender()
+            emitter = FakeWorkerEventEmitter()
+
+            await record_and_notify_rolling_loss_guard(
+                journal=journal,
+                email_sender=email_sender,
+                payload=payload,
+                email_enabled=False,
+                worker_event_emitter=emitter,
+            )
+
+            # Journal recorded.
+            assert len(journal.rolling_loss_events) == 1
+            # No emit.
+            assert len(emitter.calls) == 0
+            # No email.
+            assert len(email_sender.subjects) == 0
+
+    def test_rolling_loss_guard_event_severity_mapping(self) -> None:
+        assert rolling_loss_guard_event_severity("WARN") == "WARNING"
+        assert rolling_loss_guard_event_severity("SOFT_HALT") == "ERROR"
+        assert rolling_loss_guard_event_severity("HARD_HALT") == "CRITICAL"
+        assert rolling_loss_guard_event_severity("RESUME") == "INFO"
+        assert rolling_loss_guard_event_severity("UNKNOWN") == "INFO"
 
 
 if __name__ == "__main__":

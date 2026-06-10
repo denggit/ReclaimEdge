@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import html
-from typing import Any
+from typing import Any, Protocol
 
 from src.live import time_utils as live_time_utils
+from src.live.outbox.worker_event_emitter import WORKER_ROLLING_LOSS_GUARD
 from src.live.runtime_types import ExecutionState
 from src.reporting.trade_journal import LiveTradeJournal
 from src.risk.rolling_loss_guard import RollingLossGuard, RollingLossGuardDecision
@@ -11,6 +12,36 @@ from src.utils.email_sender import EmailSender
 from src.utils.log import get_logger
 
 logger = get_logger(__name__)
+
+
+class RollingLossEventEmitter(Protocol):
+    """Protocol for a worker event emitter that can write to the outbox.
+
+    Must have an ``emit`` method matching the signature of
+    :meth:`WorkerEventEmitter.emit`.
+    """
+
+    def emit(
+        self,
+        event_type: str,
+        payload: dict[str, Any] | None = None,
+        *,
+        severity: str = "INFO",
+        ts_ms: int | None = None,
+    ) -> Any: ...
+
+
+def rolling_loss_guard_event_severity(action: str) -> str:
+    """Map a rolling loss guard action to a standard event severity."""
+    if action == "WARN":
+        return "WARNING"
+    if action == "SOFT_HALT":
+        return "ERROR"
+    if action == "HARD_HALT":
+        return "CRITICAL"
+    if action == "RESUME":
+        return "INFO"
+    return "INFO"
 
 
 def rolling_loss_halt_reason(action: str) -> str | None:
@@ -123,7 +154,19 @@ async def record_and_notify_rolling_loss_guard(
         email_sender: EmailSender | None,
         payload: dict[str, Any],
         email_enabled: bool,
+        worker_event_emitter: RollingLossEventEmitter | None = None,
 ) -> None:
+    """Record a rolling loss guard event and notify via outbox (preferred) or email.
+
+    When *worker_event_emitter* is provided the event is routed through the
+    worker event outbox so the parent supervisor can deduplicate and publish
+    the email.  When *worker_event_emitter* is ``None`` the legacy direct
+    email path is used as a fallback.
+
+    Journal recording is always performed regardless of the notification
+    path.
+    """
+    # -- 1. journal record (always) ------------------------------------------
     if (
             payload.get("critical_halt_preserved") is not None
             or payload.get("existing_halt_reason") is not None
@@ -132,7 +175,30 @@ async def record_and_notify_rolling_loss_guard(
         journal.append("ROLLING_LOSS_GUARD", payload)
     else:
         journal.record_rolling_loss_guard(**payload)
-    if not email_enabled or email_sender is None:
+
+    if not email_enabled:
+        return
+
+    # -- 2. outbox-first path ------------------------------------------------
+    if worker_event_emitter is not None:
+        action = str(payload.get("action", "UNKNOWN"))
+        severity = rolling_loss_guard_event_severity(action)
+        try:
+            worker_event_emitter.emit(
+                WORKER_ROLLING_LOSS_GUARD,
+                dict(payload),
+                severity=severity,
+            )
+        except Exception:
+            logger.exception(
+                "ROLLING_LOSS_GUARD_OUTBOX_EMIT_FAILED | action=%s severity=%s",
+                action,
+                severity,
+            )
+        return
+
+    # -- 3. legacy direct email fallback -------------------------------------
+    if email_sender is None:
         return
     subject, content = build_rolling_loss_guard_email(str(payload["action"]), payload)
     try:
@@ -153,6 +219,7 @@ async def apply_rolling_loss_guard_startup_state(
         now_ms: int,
         journal: LiveTradeJournal,
         email_sender: EmailSender | None,
+        worker_event_emitter: RollingLossEventEmitter | None = None,
 ) -> None:
     if rolling_loss_guard.state is None or not rolling_loss_guard.state.enabled:
         return
@@ -184,4 +251,5 @@ async def apply_rolling_loss_guard_startup_state(
                 "startup_rolling_loss_cooldown_elapsed_and_account_flat",
             ),
             email_enabled=rolling_loss_guard.config.email_enabled,
+            worker_event_emitter=worker_event_emitter,
         )

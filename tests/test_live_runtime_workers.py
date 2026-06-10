@@ -12,6 +12,7 @@ import time
 import types
 import unittest
 from decimal import Decimal
+from pathlib import Path
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
@@ -3013,6 +3014,67 @@ class LiveRuntimeWorkerTest(unittest.IsolatedAsyncioTestCase):
         )
         warning_events = [e for e in journal.events if e[0] == "MIDDLE_RUNNER_ORDER_WARNING"]
         self.assertEqual(len(warning_events), 1, "MIDDLE_RUNNER_ORDER_WARNING journal event must be logged")
+
+
+# ============================================================================
+# E06: source guard — worker_event_emitter wired through account worker
+# ============================================================================
+
+
+class TestE06WorkerEventEmitterSourceGuard(unittest.TestCase):
+    def test_account_worker_signature_contains_worker_event_emitter(self) -> None:
+        import inspect
+        sig = inspect.signature(account_position_sync_worker)
+        assert "worker_event_emitter" in sig.parameters, (
+            "account_position_sync_worker must accept worker_event_emitter"
+        )
+
+    def test_account_worker_passes_worker_event_emitter_to_finalize(self) -> None:
+        source_path = (
+            Path(__file__).resolve().parent.parent
+            / "src" / "live" / "workers" / "account_position_sync_worker.py"
+        )
+        source = source_path.read_text()
+        assert "worker_event_emitter=worker_event_emitter" in source, (
+            "account_position_sync_worker must pass worker_event_emitter "
+            "to finalize_account_sync_flat_settlement_phase"
+        )
+
+    def test_account_worker_passes_worker_event_emitter_to_resume(self) -> None:
+        source_path = (
+            Path(__file__).resolve().parent.parent
+            / "src" / "live" / "workers" / "account_position_sync_worker.py"
+        )
+        source = source_path.read_text()
+        # The resume branch also calls record_and_notify_rolling_loss_guard
+        # with worker_event_emitter=worker_event_emitter.
+        # Verify there are two occurrences (one for finalize, one for resume).
+        count = source.count("worker_event_emitter=worker_event_emitter")
+        assert count >= 2, (
+            f"account_position_sync_worker must pass worker_event_emitter "
+            f"to both finalize and resume branches, found {count} occurrences"
+        )
+
+    def test_flat_settlement_finalize_signature_contains_worker_event_emitter(self) -> None:
+        from src.live.account_sync.flat_settlement_phase import (
+            finalize_account_sync_flat_settlement_phase,
+        )
+        import inspect
+        sig = inspect.signature(finalize_account_sync_flat_settlement_phase)
+        assert "worker_event_emitter" in sig.parameters, (
+            "finalize_account_sync_flat_settlement_phase must accept worker_event_emitter"
+        )
+
+    def test_flat_settlement_finalize_passes_worker_event_emitter(self) -> None:
+        source_path = (
+            Path(__file__).resolve().parent.parent
+            / "src" / "live" / "account_sync" / "flat_settlement_phase.py"
+        )
+        source = source_path.read_text()
+        assert "worker_event_emitter=worker_event_emitter" in source, (
+            "finalize_account_sync_flat_settlement_phase must pass "
+            "worker_event_emitter to record_and_notify_rolling_loss_guard"
+        )
 
 
 if __name__ == "__main__":

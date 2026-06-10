@@ -1449,7 +1449,7 @@ class TestAllLifecycleEventTypes:
         )
         result = await pipeline.process_once(now_ms=1000)
 
-        # All 10 lifecycle types are candidates.
+        # All lifecycle types are candidates.
         assert result.alerts_built == len(LIFECYCLE_EVENT_TYPES)
 
         # Policy suppresses normal lifecycle, allows critical ones.
@@ -1457,7 +1457,8 @@ class TestAllLifecycleEventTypes:
         #           DRAIN_TIMEOUT = 4
         # Suppressed: STARTED, STOPPING, STOPPED, STARTUP_RECOVERY_COMPLETED,
         #            DRAIN_STARTED, DRAIN_COMPLETED = 6
-        assert result.alerts_policy_suppressed == 6
+        # Severity-gated (INFO → suppressed): WORKER_ROLLING_LOSS_GUARD = 1
+        assert result.alerts_policy_suppressed == 7
         assert result.alerts_published == 4
 
         published_types = {a.event_type for a in publisher.alerts}
@@ -1467,6 +1468,170 @@ class TestAllLifecycleEventTypes:
         assert "WORKER_DRAIN_STARTED" not in published_types
         assert "WORKER_TRADING_HALTED" in published_types
         assert "WORKER_DRAIN_TIMEOUT" in published_types
+
+
+# ============================================================================
+# E06: WORKER_ROLLING_LOSS_GUARD pipeline tests
+# ============================================================================
+
+
+class TestRollingLossGuardWarningPublished:
+    @pytest.mark.asyncio
+    async def test_warning_builds_and_publishes_alert(self) -> None:
+        event = _make_child_event(
+            event_type="WORKER_ROLLING_LOSS_GUARD",
+            payload={
+                "symbol": "ETH-USDT-SWAP",
+                "severity": "WARNING",
+                "data": {
+                    "action": "WARN",
+                    "drawdown_pct": 0.15,
+                    "loss_usdt": 15.0,
+                    "threshold_pct": 0.10,
+                },
+            },
+        )
+        reader = FakeReader(ChildEventReadResult(events=[event], errors=[]))
+        deduper = FakeDeduper(allowed=True)
+        publisher = FakePublisher(result=True)
+
+        pipeline = SupervisorEventPipeline(
+            reader=reader,
+            deduper=deduper,
+            publisher=publisher,
+        )
+        result = await pipeline.process_once(now_ms=1000)
+
+        assert result.alerts_policy_suppressed == 0
+        assert result.alerts_published == 1
+        assert len(publisher.alerts) == 1
+
+        alert = publisher.alerts[0]
+        assert alert.event_type == "WORKER_ROLLING_LOSS_GUARD"
+        assert alert.severity == "WARNING"
+
+
+class TestRollingLossGuardInfoSuppressed:
+    @pytest.mark.asyncio
+    async def test_info_suppressed_by_policy(self) -> None:
+        event = _make_child_event(
+            event_type="WORKER_ROLLING_LOSS_GUARD",
+            payload={
+                "symbol": "ETH-USDT-SWAP",
+                "severity": "INFO",
+                "data": {"action": "RESUME"},
+            },
+        )
+        reader = FakeReader(ChildEventReadResult(events=[event], errors=[]))
+        deduper = FakeDeduper(allowed=True)
+        publisher = FakePublisher(result=True)
+
+        pipeline = SupervisorEventPipeline(
+            reader=reader,
+            deduper=deduper,
+            publisher=publisher,
+        )
+        result = await pipeline.process_once(now_ms=1000)
+
+        assert result.alerts_policy_suppressed == 1
+        assert result.alerts_published == 0
+        assert len(publisher.alerts) == 0
+
+
+class TestRollingLossGuardDataTableInBody:
+    @pytest.mark.asyncio
+    async def test_data_table_contains_key_fields(self) -> None:
+        event = _make_child_event(
+            event_type="WORKER_ROLLING_LOSS_GUARD",
+            payload={
+                "symbol": "ETH-USDT-SWAP",
+                "severity": "WARNING",
+                "data": {
+                    "action": "WARN",
+                    "drawdown_pct": 0.15,
+                    "loss_usdt": 15.0,
+                    "threshold_pct": 0.10,
+                    "reference_flat_equity": 100.0,
+                },
+            },
+        )
+        reader = FakeReader(ChildEventReadResult(events=[event], errors=[]))
+        deduper = FakeDeduper(allowed=True)
+        publisher = FakePublisher(result=True)
+
+        pipeline = SupervisorEventPipeline(
+            reader=reader,
+            deduper=deduper,
+            publisher=publisher,
+        )
+        await pipeline.process_once(now_ms=1000)
+
+        alert = publisher.alerts[0]
+        assert "Data</b></th>" in alert.body
+        assert "action" in alert.body
+        assert "drawdown_pct" in alert.body
+        assert "loss_usdt" in alert.body
+        assert "threshold_pct" in alert.body
+
+    @pytest.mark.asyncio
+    async def test_data_table_html_escapes(self) -> None:
+        event = _make_child_event(
+            event_type="WORKER_ROLLING_LOSS_GUARD",
+            payload={
+                "symbol": "ETH-USDT-SWAP",
+                "severity": "WARNING",
+                "data": {
+                    "action": "<script>alert(1)</script>",
+                    "reason": "test & check",
+                },
+            },
+        )
+        reader = FakeReader(ChildEventReadResult(events=[event], errors=[]))
+        deduper = FakeDeduper(allowed=True)
+        publisher = FakePublisher(result=True)
+
+        pipeline = SupervisorEventPipeline(
+            reader=reader,
+            deduper=deduper,
+            publisher=publisher,
+        )
+        await pipeline.process_once(now_ms=1000)
+
+        alert = publisher.alerts[0]
+        assert "<script>" not in alert.body
+        assert "&lt;script&gt;" in alert.body
+        assert "&amp;" in alert.body
+
+
+class TestRollingLossGuardCriticalPublished:
+    @pytest.mark.asyncio
+    async def test_critical_severity_published(self) -> None:
+        event = _make_child_event(
+            event_type="WORKER_ROLLING_LOSS_GUARD",
+            payload={
+                "symbol": "ETH-USDT-SWAP",
+                "severity": "CRITICAL",
+                "data": {
+                    "action": "HARD_HALT",
+                    "drawdown_pct": 0.20,
+                    "loss_usdt": 20.0,
+                },
+            },
+        )
+        reader = FakeReader(ChildEventReadResult(events=[event], errors=[]))
+        deduper = FakeDeduper(allowed=True)
+        publisher = FakePublisher(result=True)
+
+        pipeline = SupervisorEventPipeline(
+            reader=reader,
+            deduper=deduper,
+            publisher=publisher,
+        )
+        result = await pipeline.process_once(now_ms=1000)
+
+        assert result.alerts_published == 1
+        alert = publisher.alerts[0]
+        assert alert.severity == "CRITICAL"
 
 
 # ============================================================================

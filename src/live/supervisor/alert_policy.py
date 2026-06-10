@@ -32,6 +32,12 @@ DEFAULT_SUPPRESSED_RUNTIME_EVENT_TYPES = frozenset(
     }
 )
 
+DEFAULT_SEVERITY_GATED_RUNTIME_EVENT_TYPES = frozenset(
+    {
+        "WORKER_ROLLING_LOSS_GUARD",
+    }
+)
+
 # ---------------------------------------------------------------------------
 # Dataclass
 # ---------------------------------------------------------------------------
@@ -85,6 +91,10 @@ class AlertPolicy:
     suppressed_event_types : collection of str | None
         Event types that are always suppressed (normal lifecycle).
         Replaces the default set.
+    severity_gated_event_types : collection of str | None
+        Event types whose allow/deny decision is based on severity.
+        Only ``WARNING``, ``ERROR``, and ``CRITICAL`` severities are
+        allowed; ``INFO`` is suppressed.  Replaces the default set.
     allow_unknown_error_severity : bool
         If ``True``, unknown event types with severity ``ERROR`` or
         ``CRITICAL`` are allowed.  Default ``False``.
@@ -97,6 +107,9 @@ class AlertPolicy:
             frozenset[str] | set[str] | tuple[str, ...] | list[str] | None
         ) = None,
         suppressed_event_types: (
+            frozenset[str] | set[str] | tuple[str, ...] | list[str] | None
+        ) = None,
+        severity_gated_event_types: (
             frozenset[str] | set[str] | tuple[str, ...] | list[str] | None
         ) = None,
         allow_unknown_error_severity: bool = False,
@@ -124,16 +137,37 @@ class AlertPolicy:
                 suppressed_event_types, "suppressed_event_types"
             )
 
-        # -- overlap check ---------------------------------------------------
-        overlap = critical & suppressed
-        if overlap:
+        # -- resolve severity_gated set --------------------------------------
+        if severity_gated_event_types is None:
+            severity_gated = DEFAULT_SEVERITY_GATED_RUNTIME_EVENT_TYPES
+        else:
+            severity_gated = self._validate_event_type_collection(
+                severity_gated_event_types, "severity_gated_event_types"
+            )
+
+        # -- overlap checks --------------------------------------------------
+        overlap_critical_suppressed = critical & suppressed
+        if overlap_critical_suppressed:
             raise ValueError(
                 f"critical_event_types and suppressed_event_types must not "
-                f"overlap, got {sorted(overlap)!r}"
+                f"overlap, got {sorted(overlap_critical_suppressed)!r}"
+            )
+        overlap_critical_gated = critical & severity_gated
+        if overlap_critical_gated:
+            raise ValueError(
+                f"critical_event_types and severity_gated_event_types must not "
+                f"overlap, got {sorted(overlap_critical_gated)!r}"
+            )
+        overlap_suppressed_gated = suppressed & severity_gated
+        if overlap_suppressed_gated:
+            raise ValueError(
+                f"suppressed_event_types and severity_gated_event_types must not "
+                f"overlap, got {sorted(overlap_suppressed_gated)!r}"
             )
 
         self._critical = critical
         self._suppressed = suppressed
+        self._severity_gated = severity_gated
         self._allow_unknown_error_severity = allow_unknown_error_severity
 
     # ------------------------------------------------------------------
@@ -306,7 +340,26 @@ class AlertPolicy:
                 policy_reason="suppressed_normal_lifecycle",
             )
 
-        # -- 3. unknown + error severity -------------------------------------
+        # -- 3. severity-gated -----------------------------------------------
+        if event_type in self._severity_gated:
+            if severity in {"WARNING", "ERROR", "CRITICAL"}:
+                return AlertPolicyDecision(
+                    allowed=True,
+                    event_type=event_type,
+                    severity=severity,
+                    reason=reason,
+                    policy_reason="severity_gated_allowed",
+                )
+            else:
+                return AlertPolicyDecision(
+                    allowed=False,
+                    event_type=event_type,
+                    severity=severity,
+                    reason=reason,
+                    policy_reason="severity_gated_info_suppressed",
+                )
+
+        # -- 4. unknown + error severity -------------------------------------
         if self._allow_unknown_error_severity and severity in {"ERROR", "CRITICAL"}:
             return AlertPolicyDecision(
                 allowed=True,
@@ -316,7 +369,7 @@ class AlertPolicy:
                 policy_reason="unknown_error_severity",
             )
 
-        # -- 4. unknown ------------------------------------------------------
+        # -- 5. unknown ------------------------------------------------------
         return AlertPolicyDecision(
             allowed=False,
             event_type=event_type,

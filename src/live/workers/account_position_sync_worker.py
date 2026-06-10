@@ -47,6 +47,7 @@ async def account_position_sync_worker(
         cash_log_min_delta_usdt: float,
         rolling_loss_guard: RollingLossGuard | None = None,
         email_sender: EmailSender | None = None,
+        worker_event_emitter: object | None = None,
 ) -> None:
     last_account_sync = 0.0
     last_logged_cash = account_snapshot.cash
@@ -303,6 +304,7 @@ async def account_position_sync_worker(
                 pending_flat_payload=pending_flat_payload,
                 flat_previous_halt_reason=flat_previous_halt_reason,
                 clear_state=clear_state,
+                worker_event_emitter=worker_event_emitter,
             )
             if save_state_payload is not None:
                 position_id, strategy_state, cash_before_position = save_state_payload
@@ -337,6 +339,7 @@ async def account_position_sync_worker(
                         email_sender=email_sender,
                         payload=payload,
                         email_enabled=rolling_loss_guard.config.email_enabled,
+                        worker_event_emitter=worker_event_emitter,
                     )
                     logger.warning(
                         "ROLLING_DRAWDOWN_GUARD_RESUMED | trading_halted=false reference_flat_equity=%.4f drawdown_pct=%.6f",

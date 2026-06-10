@@ -13,6 +13,7 @@ from src.live.outbox.worker_event_emitter import (
     WORKER_EVENT_SEVERITIES,
     WORKER_EVENT_TYPES,
     WORKER_HEARTBEAT_WRITE_FAILED,
+    WORKER_ROLLING_LOSS_GUARD,
     WORKER_STARTED,
     WORKER_STARTUP_RECOVERY_COMPLETED,
     WORKER_STARTUP_RECOVERY_FAILED,
@@ -307,6 +308,7 @@ class TestConstants:
             WORKER_DRAIN_STARTED,
             WORKER_DRAIN_COMPLETED,
             WORKER_DRAIN_TIMEOUT,
+            WORKER_ROLLING_LOSS_GUARD,
         }
         assert required.issubset(WORKER_EVENT_TYPES)
 
@@ -315,6 +317,45 @@ class TestConstants:
 
     def test_worker_event_severities_is_frozenset(self) -> None:
         assert isinstance(WORKER_EVENT_SEVERITIES, frozenset)
+
+
+# ============================================================================
+# 14. WORKER_ROLLING_LOSS_GUARD emit
+# ============================================================================
+
+
+class TestRollingLossGuardEmit:
+    def test_emit_rolling_loss_guard_warning(self, tmp_path: Path) -> None:
+        outbox = JsonlOutbox(tmp_path / "events" / "out.jsonl")
+        emitter = WorkerEventEmitter(symbol="ETH-USDT-SWAP", outbox=outbox)
+        event = emitter.emit(
+            WORKER_ROLLING_LOSS_GUARD,
+            {"action": "WARN", "drawdown_pct": 0.15},
+            severity="WARNING",
+            ts_ms=1000,
+        )
+        assert event.event_type == WORKER_ROLLING_LOSS_GUARD
+        assert event.severity == "WARNING"
+        assert event.payload == {"action": "WARN", "drawdown_pct": 0.15}
+
+        events = outbox.read_events()
+        assert len(events) == 1
+        assert events[0].payload["severity"] == "WARNING"
+
+    def test_emit_rolling_loss_guard_critical(self, tmp_path: Path) -> None:
+        outbox = JsonlOutbox(tmp_path / "events" / "out.jsonl")
+        emitter = WorkerEventEmitter(symbol="ETH-USDT-SWAP", outbox=outbox)
+        event = emitter.emit(
+            WORKER_ROLLING_LOSS_GUARD,
+            {"action": "HARD_HALT", "drawdown_pct": 0.20},
+            severity="CRITICAL",
+            ts_ms=2000,
+        )
+        assert event.event_type == WORKER_ROLLING_LOSS_GUARD
+        assert event.severity == "CRITICAL"
+
+    def test_rolling_loss_guard_in_worker_event_types(self) -> None:
+        assert WORKER_ROLLING_LOSS_GUARD in WORKER_EVENT_TYPES
 
 
 # ============================================================================

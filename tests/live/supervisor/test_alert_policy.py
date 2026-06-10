@@ -7,6 +7,7 @@ import pytest
 
 from src.live.supervisor.alert_policy import (
     DEFAULT_CRITICAL_RUNTIME_EVENT_TYPES,
+    DEFAULT_SEVERITY_GATED_RUNTIME_EVENT_TYPES,
     DEFAULT_SUPPRESSED_RUNTIME_EVENT_TYPES,
     AlertPolicy,
     AlertPolicyDecision,
@@ -116,6 +117,61 @@ class TestDefaultSuppressesNormalLifecycle:
             event_type="WORKER_DRAIN_COMPLETED", severity="INFO"
         )
         assert decision.allowed is False
+
+
+# ============================================================================
+# E06: Severity-gated event types (WORKER_ROLLING_LOSS_GUARD)
+# ============================================================================
+
+
+class TestSeverityGatedRollingLossGuard:
+    def test_warning_allowed(self) -> None:
+        policy = AlertPolicy()
+        decision = policy.should_publish(
+            event_type="WORKER_ROLLING_LOSS_GUARD", severity="WARNING"
+        )
+        assert decision.allowed is True
+        assert decision.policy_reason == "severity_gated_allowed"
+
+    def test_error_allowed(self) -> None:
+        policy = AlertPolicy()
+        decision = policy.should_publish(
+            event_type="WORKER_ROLLING_LOSS_GUARD", severity="ERROR"
+        )
+        assert decision.allowed is True
+        assert decision.policy_reason == "severity_gated_allowed"
+
+    def test_critical_allowed(self) -> None:
+        policy = AlertPolicy()
+        decision = policy.should_publish(
+            event_type="WORKER_ROLLING_LOSS_GUARD", severity="CRITICAL"
+        )
+        assert decision.allowed is True
+        assert decision.policy_reason == "severity_gated_allowed"
+
+    def test_info_suppressed(self) -> None:
+        policy = AlertPolicy()
+        decision = policy.should_publish(
+            event_type="WORKER_ROLLING_LOSS_GUARD", severity="INFO"
+        )
+        assert decision.allowed is False
+        assert decision.policy_reason == "severity_gated_info_suppressed"
+
+    def test_worker_started_still_suppressed(self) -> None:
+        policy = AlertPolicy()
+        decision = policy.should_publish(
+            event_type="WORKER_STARTED", severity="INFO"
+        )
+        assert decision.allowed is False
+        assert decision.policy_reason == "suppressed_normal_lifecycle"
+
+    def test_worker_drain_timeout_still_allowed(self) -> None:
+        policy = AlertPolicy()
+        decision = policy.should_publish(
+            event_type="WORKER_DRAIN_TIMEOUT", severity="ERROR"
+        )
+        assert decision.allowed is True
+        assert decision.policy_reason == "critical_event_type"
 
 
 # ============================================================================
@@ -481,9 +537,23 @@ class TestDefaultConstants:
         }
         assert DEFAULT_SUPPRESSED_RUNTIME_EVENT_TYPES == expected
 
+    def test_severity_gated_set_contains_expected(self) -> None:
+        expected = {"WORKER_ROLLING_LOSS_GUARD"}
+        assert DEFAULT_SEVERITY_GATED_RUNTIME_EVENT_TYPES == expected
+
     def test_no_overlap_between_defaults(self) -> None:
-        overlap = (
+        overlap_cs = (
             DEFAULT_CRITICAL_RUNTIME_EVENT_TYPES
             & DEFAULT_SUPPRESSED_RUNTIME_EVENT_TYPES
         )
-        assert overlap == set()
+        assert overlap_cs == set()
+        overlap_cg = (
+            DEFAULT_CRITICAL_RUNTIME_EVENT_TYPES
+            & DEFAULT_SEVERITY_GATED_RUNTIME_EVENT_TYPES
+        )
+        assert overlap_cg == set()
+        overlap_sg = (
+            DEFAULT_SUPPRESSED_RUNTIME_EVENT_TYPES
+            & DEFAULT_SEVERITY_GATED_RUNTIME_EVENT_TYPES
+        )
+        assert overlap_sg == set()
