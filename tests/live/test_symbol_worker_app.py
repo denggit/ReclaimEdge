@@ -8,7 +8,10 @@ Trader, OKX connection, or websocket.
 
 from __future__ import annotations
 
+import logging
+import os
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -20,6 +23,51 @@ from src.live.live_app_config import (
 )
 from src.live.symbol_worker_app import SymbolWorkerApp
 from src.live.symbol_worker_factory import SymbolWorkerFactory
+
+
+# ---------------------------------------------------------------------------
+# Logging isolation — prevent test fake-errors from contaminating
+# the production logs/app.log.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True, scope="module")
+def _isolate_live_log_file(tmp_path_factory: Any) -> Any:
+    """Redirect all file-based logging to a temp directory so tests never
+    contaminate the production logs/app.log.
+
+    ``src.utils.log.setup_logging()`` runs at module-import time and
+    attaches a ``TimedRotatingFileHandler`` pointed at the real
+    ``logs/app.log``.  This fixture runs once *after* import, resets
+    the log subsystem, and re-routes file output to a temp directory.
+    """
+    from src.utils import log as log_module
+
+    test_log_dir = tmp_path_factory.mktemp("logs")
+    os.environ["LOG_DIR"] = str(test_log_dir)
+
+    # Reset the module-level guard so setup_logging() runs again.
+    log_module._setup_done = False
+
+    # Stop any running async queue listener.
+    log_module._stop_queue_listener()
+
+    # Remove every handler the root logger currently holds (the
+    # import-time handler that points at the real logs/app.log).
+    root = logging.getLogger()
+    for h in root.handlers[:]:
+        root.removeHandler(h)
+        try:
+            h.close()
+        except Exception:
+            pass
+
+    # Re-run setup with the patched environment.
+    log_module.setup_logging(None)
+
+    yield
+
+    # Teardown: stop the listener so temp files can be cleaned up.
+    log_module._stop_queue_listener()
 
 
 # ---------------------------------------------------------------------------
