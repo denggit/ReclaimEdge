@@ -25,6 +25,10 @@ from src.live.supervisor.child_event_reader import (
     ChildEventReadResult,
     ChildEventReader,
 )
+from src.live.supervisor.alert_deduper import (
+    AlertDedupeDecision,
+    AlertDeduper,
+)
 
 __all__ = [
     "ReclaimSupervisor",
@@ -46,4 +50,6 @@ __all__ = [
     "ChildEventReadError",
     "ChildEventReadResult",
     "ChildEventReader",
+    "AlertDedupeDecision",
+    "AlertDeduper",
 ]
