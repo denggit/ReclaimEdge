@@ -585,11 +585,12 @@ class TestResolveSelectedSymbolAndChildEnv:
 
         from scripts.run_reclaim_supervisor import _resolve_selected_symbol_and_child_env
 
-        selected, child_env = _resolve_selected_symbol_and_child_env()
+        selected, child_env, runtime_dir = _resolve_selected_symbol_and_child_env()
 
         assert selected == "ETH-USDT-SWAP"
         assert child_env["RECLAIM_SYMBOLS"] == "ETH-USDT-SWAP"
         assert child_env["OKX_INST_ID"] == "ETH-USDT-SWAP"
+        assert runtime_dir == Path("runtime")
 
     def test_eth_and_btc_skips_disabled_btc(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """RECLAIM_SYMBOLS=ETH,BTC with BTC disabled → selected ETH, child_env ETH only."""
@@ -601,12 +602,13 @@ class TestResolveSelectedSymbolAndChildEnv:
 
         from scripts.run_reclaim_supervisor import _resolve_selected_symbol_and_child_env
 
-        selected, child_env = _resolve_selected_symbol_and_child_env()
+        selected, child_env, runtime_dir = _resolve_selected_symbol_and_child_env()
 
         assert selected == "ETH-USDT-SWAP"
         assert child_env["RECLAIM_SYMBOLS"] == "ETH-USDT-SWAP"
         assert child_env["OKX_INST_ID"] == "ETH-USDT-SWAP"
         assert "BTC-USDT-SWAP" not in child_env["RECLAIM_SYMBOLS"]
+        assert isinstance(runtime_dir, Path)
 
     def test_btc_only_raises_runtime_error(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """RECLAIM_SYMBOLS=BTC only with BTC disabled → RuntimeError (no enabled)."""
@@ -627,11 +629,12 @@ class TestResolveSelectedSymbolAndChildEnv:
 
         from scripts.run_reclaim_supervisor import _resolve_selected_symbol_and_child_env
 
-        selected, child_env = _resolve_selected_symbol_and_child_env()
+        selected, child_env, runtime_dir = _resolve_selected_symbol_and_child_env()
 
         assert selected == "ETH-USDT-SWAP"
         assert child_env["RECLAIM_SYMBOLS"] == "ETH-USDT-SWAP"
         assert child_env["OKX_INST_ID"] == "ETH-USDT-SWAP"
+        assert isinstance(runtime_dir, Path)
 
     def test_legacy_toml_disabled_with_btc_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """RECLAIM_USE_SYMBOL_TOML=false with ETH,BTC → RuntimeError."""
@@ -657,11 +660,12 @@ class TestResolveSelectedSymbolAndChildEnv:
         from src.live.supervisor.reclaim_supervisor import ReclaimSupervisor, ReclaimSupervisorConfig
         from dataclasses import replace
 
-        selected, child_env = _resolve_selected_symbol_and_child_env()
+        selected, child_env, runtime_dir = _resolve_selected_symbol_and_child_env()
         base_supervisor = ReclaimSupervisor.from_env()
         supervisor_config = replace(
             base_supervisor.config,
             child_name=selected,
+            runtime_dir=runtime_dir,
             child_env=child_env,
         )
 
@@ -669,3 +673,148 @@ class TestResolveSelectedSymbolAndChildEnv:
         assert supervisor_config.child_env is not None
         assert supervisor_config.child_env["RECLAIM_SYMBOLS"] == "ETH-USDT-SWAP"
         assert supervisor_config.child_env["OKX_INST_ID"] == "ETH-USDT-SWAP"
+
+
+# ============================================================================
+# F04b — runtime_dir from EnvRuntimeConfig applied to supervisor config
+# ============================================================================
+
+
+class TestRuntimeDirAppliedToSupervisorConfig:
+    """F04b: RECLAIM_RUNTIME_DIR must be applied to supervisor config."""
+
+    def test_main_applies_custom_runtime_dir(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """main() must pass RECLAIM_RUNTIME_DIR into supervisor_config."""
+        custom_runtime = tmp_path / "custom_runtime"
+        _write_minimal_toml(tmp_path, "ETH-USDT-SWAP", enabled=True)
+
+        monkeypatch.setenv("RECLAIM_SYMBOLS", "ETH-USDT-SWAP")
+        monkeypatch.setenv("RECLAIM_SYMBOL_CONFIG_DIR", str(tmp_path))
+        monkeypatch.setenv("RECLAIM_RUNTIME_DIR", str(custom_runtime))
+        monkeypatch.setattr(
+            "scripts.run_reclaim_supervisor.live_config_helpers.live_trading_enabled",
+            lambda: True,
+        )
+        _patch_entry_load_dotenv(monkeypatch)
+
+        # Capture the supervisor config passed to build_parent_event_pipeline.
+        captured_config: object | None = None
+
+        def fake_build_pipeline(supervisor: object) -> object:
+            nonlocal captured_config
+            captured_config = supervisor.config
+            # Return a sentinel pipeline that duck-types correctly.
+            sentinel = type("SentinelPipeline", (), {})()
+            sentinel.process_once = lambda: None  # type: ignore[attr-defined]
+            return sentinel
+
+        monkeypatch.setattr(
+            "scripts.run_reclaim_supervisor.build_parent_event_pipeline",
+            fake_build_pipeline,
+        )
+
+        async def fake_run_forever(self: object) -> None:
+            pass
+
+        monkeypatch.setattr(
+            "src.live.supervisor.reclaim_supervisor.ReclaimSupervisor.run_forever",
+            fake_run_forever,
+        )
+
+        from scripts.run_reclaim_supervisor import main
+        import asyncio
+
+        asyncio.run(main())
+
+        assert captured_config is not None, (
+            "build_parent_event_pipeline must be called"
+        )
+        assert hasattr(captured_config, "runtime_dir"), (
+            "supervisor config must have runtime_dir"
+        )
+        assert captured_config.runtime_dir == custom_runtime, (
+            f"Expected runtime_dir={custom_runtime}, "
+            f"got {captured_config.runtime_dir}"
+        )
+
+    def test_main_uses_default_runtime_dir(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When RECLAIM_RUNTIME_DIR is not set, main() uses the default."""
+        _write_minimal_toml(tmp_path, "ETH-USDT-SWAP", enabled=True)
+
+        monkeypatch.setenv("RECLAIM_SYMBOLS", "ETH-USDT-SWAP")
+        monkeypatch.setenv("RECLAIM_SYMBOL_CONFIG_DIR", str(tmp_path))
+        monkeypatch.setattr(
+            "scripts.run_reclaim_supervisor.live_config_helpers.live_trading_enabled",
+            lambda: True,
+        )
+        _patch_entry_load_dotenv(monkeypatch)
+
+        captured_config: object | None = None
+
+        def fake_build_pipeline(supervisor: object) -> object:
+            nonlocal captured_config
+            captured_config = supervisor.config
+            sentinel = type("SentinelPipeline", (), {})()
+            sentinel.process_once = lambda: None  # type: ignore[attr-defined]
+            return sentinel
+
+        monkeypatch.setattr(
+            "scripts.run_reclaim_supervisor.build_parent_event_pipeline",
+            fake_build_pipeline,
+        )
+
+        async def fake_run_forever(self: object) -> None:
+            pass
+
+        monkeypatch.setattr(
+            "src.live.supervisor.reclaim_supervisor.ReclaimSupervisor.run_forever",
+            fake_run_forever,
+        )
+
+        from scripts.run_reclaim_supervisor import main
+        import asyncio
+
+        asyncio.run(main())
+
+        assert captured_config is not None
+        assert captured_config.runtime_dir == Path("runtime"), (
+            f"Expected default runtime_dir=Path('runtime'), "
+            f"got {captured_config.runtime_dir}"
+        )
+
+    def test_runtime_dir_in_resolve_return_value(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """_resolve_selected_symbol_and_child_env must return runtime_dir."""
+        custom_runtime = tmp_path / "my_runtime"
+        _write_minimal_toml(tmp_path, "ETH-USDT-SWAP", enabled=True)
+
+        monkeypatch.setenv("RECLAIM_SYMBOLS", "ETH-USDT-SWAP")
+        monkeypatch.setenv("RECLAIM_SYMBOL_CONFIG_DIR", str(tmp_path))
+        monkeypatch.setenv("RECLAIM_RUNTIME_DIR", str(custom_runtime))
+
+        from scripts.run_reclaim_supervisor import _resolve_selected_symbol_and_child_env
+
+        selected, child_env, runtime_dir = _resolve_selected_symbol_and_child_env()
+
+        assert selected == "ETH-USDT-SWAP"
+        assert runtime_dir == custom_runtime
+
+
+# ============================================================================
+# F04b — source guard
+# ============================================================================
+
+
+def test_source_guard_f04b_runtime_dir_in_replace() -> None:
+    """F04b: run_reclaim_supervisor.py must apply runtime_dir in replace()."""
+    source = _entry_source()
+
+    assert "runtime_dir=runtime_dir" in source, (
+        "F04b run_reclaim_supervisor.py must pass runtime_dir=env_runtime.runtime_dir "
+        "to replace()"
+    )

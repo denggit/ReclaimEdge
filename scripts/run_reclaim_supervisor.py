@@ -70,13 +70,14 @@ def build_parent_event_pipeline(supervisor: ReclaimSupervisor) -> SupervisorEven
     )
 
 
-def _resolve_selected_symbol_and_child_env() -> tuple[str, dict[str, str]]:
+def _resolve_selected_symbol_and_child_env() -> tuple[str, dict[str, str], Path]:
     """Resolve which single symbol the supervisor should launch.
 
     Returns:
-        (selected_symbol, child_env) where *child_env* overrides
-        ``RECLAIM_SYMBOLS`` and ``OKX_INST_ID`` in the child process so
-        that only the selected symbol is visible.
+        (selected_symbol, child_env, runtime_dir) where *child_env*
+        overrides ``RECLAIM_SYMBOLS`` and ``OKX_INST_ID`` in the child
+        process so that only the selected symbol is visible, and
+        *runtime_dir* comes from ``RECLAIM_RUNTIME_DIR``.
 
     Raises:
         RuntimeError: If no enabled symbols are found, or more than one
@@ -99,10 +100,11 @@ def _resolve_selected_symbol_and_child_env() -> tuple[str, dict[str, str]]:
         }
         logger.info(
             "RECLAIM_SUPERVISOR_SYMBOL_SELECTION | legacy_toml_disabled "
-            "selected=%s",
+            "selected=%s runtime_dir=%s",
             selected,
+            env_runtime.runtime_dir,
         )
-        return selected, child_env
+        return selected, child_env, env_runtime.runtime_dir
 
     # -- TOML path: select enabled symbols from config files ---------------
     selection = select_enabled_supervisor_symbols(
@@ -125,7 +127,7 @@ def _resolve_selected_symbol_and_child_env() -> tuple[str, dict[str, str]]:
         "RECLAIM_SYMBOLS": selected,
         "OKX_INST_ID": selected,
     }
-    return selected, child_env
+    return selected, child_env, env_runtime.runtime_dir
 
 
 async def main() -> None:
@@ -133,13 +135,14 @@ async def main() -> None:
     if not live_config_helpers.live_trading_enabled():
         raise RuntimeError("LIVE_TRADING is not true. Refusing to start reclaim supervisor.")
 
-    selected_symbol, child_env = _resolve_selected_symbol_and_child_env()
+    selected_symbol, child_env, runtime_dir = _resolve_selected_symbol_and_child_env()
 
     # Build supervisor config with the selected symbol and child env override.
     base_supervisor = ReclaimSupervisor.from_env()
     supervisor_config = replace(
         base_supervisor.config,
         child_name=selected_symbol,
+        runtime_dir=runtime_dir,
         child_env=child_env,
     )
 
