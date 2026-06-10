@@ -232,7 +232,7 @@ class AlertDeduper:
 
         if entry is not None and isinstance(entry, dict):
             raw_last = entry.get("last_sent_ts_ms")
-            if isinstance(raw_last, int) and raw_last >= 0:
+            if type(raw_last) is int and raw_last >= 0:
                 last_sent_ts_ms = raw_last
 
         if last_sent_ts_ms is None:
@@ -258,7 +258,7 @@ class AlertDeduper:
         if self._cooldown_seconds == 0:
             allowed = True
             send_count = entry.get("send_count", 1) if isinstance(entry, dict) else 1
-            if isinstance(send_count, int) and send_count > 0:
+            if type(send_count) is int and send_count > 0:
                 send_count += 1
             else:
                 send_count = 1
@@ -294,7 +294,7 @@ class AlertDeduper:
             # Cooldown expired: allow.
             allowed = True
             send_count = entry.get("send_count", 1) if isinstance(entry, dict) else 1
-            if isinstance(send_count, int) and send_count > 0:
+            if type(send_count) is int and send_count > 0:
                 send_count += 1
             else:
                 send_count = 1
@@ -400,9 +400,14 @@ class AlertDeduper:
     def _load_state(self) -> dict[str, Any]:
         """Load dedupe state from the atomic JSON file.
 
-        Missing or invalid state is treated as empty — never raises.
+        Missing, malformed, or invalid state is treated as empty — never
+        raises.  A corrupt state file must not take down the supervisor
+        control plane.
         """
-        raw = read_json_or_none(self._state_path)
+        try:
+            raw = read_json_or_none(self._state_path)
+        except Exception:
+            return {}
         if raw is None:
             return {}
         if not isinstance(raw, dict):
@@ -456,7 +461,7 @@ class AlertDeduper:
 
             # -- 2. remove entries with invalid last_sent_ts_ms -----------------
             raw_last = entry.get("last_sent_ts_ms")
-            if not isinstance(raw_last, int) or raw_last < 0:
+            if type(raw_last) is not int or raw_last < 0:
                 continue
 
             # -- trim reason_preview --------------------------------------------

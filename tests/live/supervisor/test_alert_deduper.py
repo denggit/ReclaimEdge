@@ -477,6 +477,147 @@ class TestInvalidStateFileTreatedAsEmpty:
 
 
 # ============================================================================
+# E04b: malformed JSON state treated as empty
+# ============================================================================
+
+
+class TestMalformedJsonStateTreatedAsEmpty:
+    def test_malformed_json_state_treated_as_empty(self, tmp_path: Path) -> None:
+        state_path = tmp_path / "state.json"
+        # Write malformed JSON directly (bypass atomic_json which would write valid JSON).
+        state_path.write_text("{bad json", encoding="utf-8")
+
+        deduper = AlertDeduper(state_path=state_path)
+        decision = deduper.should_send(
+            symbol="ETH-USDT-SWAP",
+            event_type="WORKER_STARTED",
+            now_ms=1000,
+        )
+
+        # Must not raise and must allow.
+        assert decision.allowed is True
+
+        # State file must be rewritten as valid JSON.
+        state = read_json_or_none(state_path)
+        assert isinstance(state, dict)
+        assert "entries" in state
+
+
+# ============================================================================
+# E04b: bool last_sent_ts_ms treated as invalid
+# ============================================================================
+
+
+class TestBoolLastSentTsMsTreatedAsInvalid:
+    def test_bool_last_sent_ts_ms_treated_as_invalid(self, tmp_path: Path) -> None:
+        import hashlib
+
+        state_path = tmp_path / "state.json"
+
+        reason_hash = hashlib.sha256(b"halt").hexdigest()[:16]
+        dedupe_key = f"ETH-USDT-SWAP|WORKER_STARTED|INFO|{reason_hash}"
+
+        bad_state = {
+            "version": 1,
+            "updated_ts_ms": 1,
+            "entries": {
+                dedupe_key: {
+                    "last_sent_ts_ms": True,
+                    "symbol": "ETH-USDT-SWAP",
+                    "event_type": "WORKER_STARTED",
+                    "severity": "INFO",
+                    "reason_preview": None,
+                    "send_count": 1,
+                }
+            },
+        }
+        write_json_atomic(state_path, bad_state)
+
+        deduper = AlertDeduper(
+            state_path=state_path,
+            cooldown_seconds=60,
+        )
+        decision = deduper.should_send(
+            symbol="ETH-USDT-SWAP",
+            event_type="WORKER_STARTED",
+            reason="halt",
+            now_ms=1000,
+        )
+
+        # Bool last_sent_ts_ms is invalid → treated as new key → allowed.
+        assert decision.allowed is True
+        assert decision.last_sent_ts_ms is None
+
+        # State entry must now have a real int last_sent_ts_ms.
+        state = read_json_or_none(state_path)
+        entry = state["entries"][dedupe_key]
+        assert isinstance(entry["last_sent_ts_ms"], int)
+        assert entry["last_sent_ts_ms"] == 1000
+        assert type(entry["last_sent_ts_ms"]) is int
+
+
+# ============================================================================
+# E04b: bool send_count does not propagate
+# ============================================================================
+
+
+class TestBoolSendCountDoesNotPropagate:
+    def test_bool_send_count_does_not_propagate(self, tmp_path: Path) -> None:
+        import hashlib
+
+        state_path = tmp_path / "state.json"
+
+        reason_hash = hashlib.sha256(b"halt").hexdigest()[:16]
+        dedupe_key = f"ETH-USDT-SWAP|WORKER_STARTED|INFO|{reason_hash}"
+
+        bad_state = {
+            "version": 1,
+            "updated_ts_ms": 1,
+            "entries": {
+                dedupe_key: {
+                    "last_sent_ts_ms": 1000,
+                    "symbol": "ETH-USDT-SWAP",
+                    "event_type": "WORKER_STARTED",
+                    "severity": "INFO",
+                    "reason_preview": None,
+                    "send_count": True,
+                }
+            },
+        }
+        write_json_atomic(state_path, bad_state)
+
+        # cooldown_seconds=1, so 3000 > 1000 + 1000 → cooldown expired → allowed.
+        deduper = AlertDeduper(
+            state_path=state_path,
+            cooldown_seconds=1,
+        )
+        deduper.should_send(
+            symbol="ETH-USDT-SWAP",
+            event_type="WORKER_STARTED",
+            reason="halt",
+            now_ms=3000,
+        )
+
+        state = read_json_or_none(state_path)
+        entry = state["entries"][dedupe_key]
+
+        # send_count must be int (reset to 1 since True is invalid).
+        assert isinstance(entry["send_count"], int)
+        assert type(entry["send_count"]) is int
+        # Bool True was treated as invalid → reset to 1 → then incremented to 2? No.
+        # The logic: type(True) is int → False, so else branch → send_count = 1.
+        # Then send_count += 1 doesn't happen because the else branch sets it to 1 directly.
+        # Actually wait: in the cooldown-expired branch:
+        #   send_count = entry.get("send_count", 1)  # True
+        #   if type(send_count) is int and send_count > 0:  # False, True is not int type
+        #       send_count += 1
+        #   else:
+        #       send_count = 1  # reset to 1, NOT incremented
+        # So send_count should be 1 (reset, not incremented from previous).
+        assert entry["send_count"] == 1
+
+
+# ============================================================================
 # 16. invalid entries pruned
 # ============================================================================
 
@@ -515,6 +656,14 @@ class TestInvalidEntriesPruned:
                     "reason_preview": None,
                     "send_count": 1,
                 },
+                "BAD_LAST_BOOL|KEY|INFO|4444": {
+                    "last_sent_ts_ms": True,
+                    "symbol": "X",
+                    "event_type": "Y",
+                    "severity": "INFO",
+                    "reason_preview": None,
+                    "send_count": 1,
+                },
                 "MAYBE_VALID|KEY|INFO|3333": {
                     "last_sent_ts_ms": 2000,
                     "symbol": "ETH-USDT-SWAP",
@@ -542,6 +691,7 @@ class TestInvalidEntriesPruned:
         assert "NOT_DICT|KEY|INFO|0000" not in entries
         assert "BAD_LAST_STR|KEY|INFO|1111" not in entries
         assert "BAD_LAST_NEG|KEY|INFO|2222" not in entries
+        assert "BAD_LAST_BOOL|KEY|INFO|4444" not in entries
 
         # Valid entry should still exist.
         assert "MAYBE_VALID|KEY|INFO|3333" in entries
