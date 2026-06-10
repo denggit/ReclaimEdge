@@ -41,6 +41,10 @@ from src.live.supervisor.alert_policy import (
     AlertPolicy,
     AlertPolicyDecision,
 )
+from src.live.supervisor.supervisor_email_publisher import (
+    AsyncMailSender,
+    SupervisorEmailPublisher,
+)
 
 __all__ = [
     "ReclaimSupervisor",
@@ -72,4 +76,6 @@ __all__ = [
     "AlertPolicyDecision",
     "DEFAULT_CRITICAL_RUNTIME_EVENT_TYPES",
     "DEFAULT_SUPPRESSED_RUNTIME_EVENT_TYPES",
+    "AsyncMailSender",
+    "SupervisorEmailPublisher",
 ]
