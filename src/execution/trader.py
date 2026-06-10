@@ -41,7 +41,7 @@ def parse_allowed_live_symbols(raw: str | None) -> tuple[str, ...]:
     for p in parts:
         if not isinstance(p, str) or not p:
             raise ValueError(f"Invalid symbol in RECLAIM_ALLOWED_LIVE_SYMBOLS: {p!r}")
-        if " " in p:
+        if any(ch.isspace() for ch in p):
             raise ValueError(f"Symbol must not contain whitespace: {p!r}")
 
     seen: set[str] = set()

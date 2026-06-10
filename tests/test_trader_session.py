@@ -83,6 +83,14 @@ class ParseAllowedLiveSymbolsTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             parse_allowed_live_symbols("ETH USDT SWAP")
 
+    def test_tab_whitespace_raises_value_error(self) -> None:
+        with self.assertRaises(ValueError):
+            parse_allowed_live_symbols("ETH\tUSDT-SWAP")
+
+    def test_newline_whitespace_raises_value_error(self) -> None:
+        with self.assertRaises(ValueError):
+            parse_allowed_live_symbols("ETH\nUSDT-SWAP")
+
     def test_blank_with_spaces_returns_default(self) -> None:
         self.assertEqual(parse_allowed_live_symbols("   "), ("ETH-USDT-SWAP",))
 
