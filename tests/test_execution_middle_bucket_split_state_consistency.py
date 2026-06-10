@@ -1512,3 +1512,232 @@ class TestEntryJournalSkipsPlannedWhenFinalFullSize:
         # Verify THREE_STAGE_RUNNER_PLANNED was NOT written
         journal_events = [c[0][0] for c in processor.journal.append.call_args_list]
         assert "THREE_STAGE_RUNNER_PLANNED" not in journal_events
+
+
+# ── POST_TP1_TP2_ONLY: no-degrade tests ──────────────────────────────────
+
+class TestPostTp1Tp2OnlyNoDegrade:
+    """Verify that POST_TP1_TP2_ONLY does NOT trigger degrade or state clear.
+
+    When the classifier returns (True, None, "POST_TP1_TP2_ONLY"),
+    _maybe_clear_middle_bucket_split_after_execution_result must return
+    False and leave Three-Stage post-TP1 state intact.
+    """
+
+    def _make_processor(self):
+        from unittest import mock
+        import asyncio
+
+        from src.live.workers.execution_command_processor import (
+            ExecutionCommandProcessor,
+        )
+        from src.strategies.boll_cvd_reclaim_strategy import StrategyPositionState
+
+        processor = ExecutionCommandProcessor.__new__(ExecutionCommandProcessor)
+        processor.state_lock = asyncio.Lock()
+        processor.strategy = mock.MagicMock()
+        processor.strategy.state = StrategyPositionState()
+        processor.journal = mock.MagicMock()
+        processor.journal.append = mock.MagicMock()
+        processor.execution_state = mock.MagicMock()
+        processor.account_snapshot = mock.MagicMock()
+        processor.trader = mock.MagicMock()
+        processor.state_store = mock.MagicMock()
+        processor.email_sender = mock.MagicMock()
+        processor._background_tasks = set()
+        return processor
+
+    def _make_result(self, **kwargs):
+        from src.execution.trader import LiveTradeResult
+
+        defaults = dict(
+            ok=True, action="UPDATE_TP", order_id=None,
+            tp_order_id="tp-123", contracts="10", tp_price="1700.0",
+            message="test",
+        )
+        defaults.update(kwargs)
+        return LiveTradeResult(**defaults)
+
+    def test_post_tp1_tp2_only_does_not_degrade(self):
+        """When actual_order_mode=POST_TP1_TP2_ONLY with split_executed=True,
+        _maybe_clear_middle_bucket_split_after_execution_result returns False
+        and preserves all Three-Stage post-TP1 state."""
+        processor = self._make_processor()
+        state = processor.strategy.state
+
+        # Set up full Three-Stage post-TP1 waiting-TP2 state
+        state.tp_plan = "THREE_STAGE_RUNNER"
+        state.middle_bucket_split_active = True
+        state.three_stage_tp1_consumed = True
+        state.three_stage_tp2_consumed = False
+        state.three_stage_tp1_price = 3050.0
+        state.three_stage_tp2_price = 3200.0
+        state.three_stage_post_tp1_protective_sl_price = 2995.0
+        state.three_stage_post_tp1_protective_sl_order_id = "sl-order-123"
+        state.three_stage_post_tp1_protected = True
+        state.three_stage_tp1_ratio = 0.70
+        state.three_stage_tp2_ratio = 0.20
+        state.three_stage_runner_ratio = 0.10
+
+        result = self._make_result(
+            middle_bucket_split_executed=True,
+            middle_bucket_split_disabled_reason=None,
+            middle_bucket_split_actual_order_mode="POST_TP1_TP2_ONLY",
+            tp_order_id="tp2-outer-order",
+            tp_order_ids=("tp2-outer-order",),
+        )
+
+        changed = processor._maybe_clear_middle_bucket_split_after_execution_result(
+            result=result,
+            current_position_id="pos-1",
+        )
+
+        # Must return False — no state modification
+        assert changed is False
+
+        # All Three-Stage post-TP1 state preserved
+        assert state.tp_plan == "THREE_STAGE_RUNNER"
+        assert state.middle_bucket_split_active is True
+        assert state.three_stage_tp1_consumed is True
+        assert state.three_stage_tp2_consumed is False
+        assert state.three_stage_tp1_price == 3050.0
+        assert state.three_stage_tp2_price == 3200.0
+        assert state.three_stage_post_tp1_protective_sl_price == 2995.0
+        assert state.three_stage_post_tp1_protective_sl_order_id == "sl-order-123"
+        assert state.three_stage_post_tp1_protected is True
+
+        # Config ratios preserved
+        assert state.three_stage_tp1_ratio == 0.70
+        assert state.three_stage_tp2_ratio == 0.20
+        assert state.three_stage_runner_ratio == 0.10
+
+        # No journal events written
+        processor.journal.append.assert_not_called()
+
+    def test_existing_final_full_size_still_degrades(self):
+        """Regression: FINAL_FULL_SIZE still triggers degrade to SINGLE."""
+        processor = self._make_processor()
+        state = processor.strategy.state
+        state.tp_plan = "THREE_STAGE_RUNNER"
+        state.three_stage_tp1_price = 3050.0
+        state.three_stage_tp2_price = 3200.0
+        state.three_stage_tp1_consumed = True
+        state.three_stage_post_tp1_protective_sl_price = 2995.0
+        state.middle_bucket_split_active = True
+
+        result = self._make_result(
+            middle_bucket_split_executed=False,
+            middle_bucket_split_disabled_reason="split_order_placement_failed_fallback_final",
+            middle_bucket_split_actual_order_mode="FINAL_FULL_SIZE",
+            tp_order_id="final-order",
+            tp_order_ids=("final-order",),
+        )
+
+        changed = processor._maybe_clear_middle_bucket_split_after_execution_result(
+            result=result,
+            current_position_id="pos-1",
+        )
+
+        assert changed is True
+        assert state.tp_plan == "SINGLE"
+        assert state.middle_bucket_split_active is False
+        assert state.three_stage_tp1_price is None
+        assert state.three_stage_tp2_price is None
+
+    def test_existing_unknown_structure_still_alerts(self):
+        """Regression: unknown labels still trigger FINAL_FULL_SIZE fallback."""
+        processor = self._make_processor()
+        state = processor.strategy.state
+        state.tp_plan = "THREE_STAGE_RUNNER"
+        state.middle_bucket_split_active = True
+
+        result = self._make_result(
+            middle_bucket_split_executed=False,
+            middle_bucket_split_disabled_reason="split_unknown_order_structure_fallback_final",
+            middle_bucket_split_actual_order_mode="FINAL_FULL_SIZE",
+            tp_order_id="final-order",
+            tp_order_ids=("final-order",),
+        )
+
+        changed = processor._maybe_clear_middle_bucket_split_after_execution_result(
+            result=result,
+            current_position_id="pos-1",
+        )
+
+        assert changed is True
+        assert state.tp_plan == "SINGLE"
+        assert state.middle_bucket_split_active is False
+
+
+# ── order_specs post-TP1 TP2-only integration test ───────────────────────
+
+class TestOrderSpecsPostTp1Tp2OnlyIntegration:
+    """Verify that build_take_profit_order_specs with post-TP1 waiting-TP2
+    params produces labels=["tp2_outer"] and the classifier recognizes it
+    as POST_TP1_TP2_ONLY without triggering unknown or FINAL_FULL_SIZE."""
+
+    def test_post_tp1_tp2_only_specs_and_classifier_integration(self):
+        from decimal import Decimal
+
+        from src.execution.order_specs import (
+            MiddleBucketSplitOrderInput,
+            build_take_profit_order_specs,
+        )
+        from src.execution.tp_sl_core_tp_manager import (
+            _classify_middle_bucket_split_actual_order_mode,
+        )
+
+        # Build split input (active split for TP1 phase)
+        split = MiddleBucketSplitOrderInput(
+            active=True,
+            fast_price=1650.0,
+            slow_price=1640.0,
+            effective_price=1647.0,
+            middle_bucket_ratio=Decimal("0.70"),
+            fast_ratio_of_bucket=Decimal("0.70"),
+            slow_ratio_of_bucket=Decimal("0.30"),
+            fast_total_ratio=Decimal("0.49"),
+            slow_total_ratio=Decimal("0.21"),
+        )
+
+        # Post-TP1 waiting-TP2: tp1 consumed, tp2 not consumed
+        decision = build_take_profit_order_specs(
+            position_contracts=Decimal("100"),
+            min_contracts=Decimal("1"),
+            contract_precision=Decimal("1"),
+            tp_plan="THREE_STAGE_RUNNER",
+            final_tp_price=1700.0,
+            partial_tp_price=None,
+            partial_tp_ratio=Decimal("0"),
+            partial_tp_consumed=False,
+            middle_runner_active=False,
+            three_stage_tp1_price=1647.0,  # TP1 already consumed, but price needed
+            three_stage_tp2_price=1618.07,
+            three_stage_tp1_ratio=Decimal("0.70"),
+            three_stage_tp2_ratio=Decimal("0.10"),
+            three_stage_tp1_consumed=True,  # post-TP1
+            three_stage_tp2_consumed=False,  # waiting TP2
+            three_stage_runner_ratio=Decimal("0.10"),
+            middle_bucket_split=split,
+        )
+
+        # Build specs list matching _classify input format
+        specs = [(spec.label, spec.contracts, spec.price) for spec in decision.specs]
+        labels = {label for label, _contracts, _price in specs}
+
+        # Must produce only tp2_outer
+        assert labels == {"tp2_outer"}
+
+        # Classifier must return POST_TP1_TP2_ONLY
+        executed, reason, mode = _classify_middle_bucket_split_actual_order_mode(
+            split_was_active=True,
+            specs=specs,
+            split_disabled_reason=None,
+        )
+        assert executed is True
+        assert reason is None
+        assert mode == "POST_TP1_TP2_ONLY"
+
+        # Must NOT trigger unknown
+        assert mode != "FINAL_FULL_SIZE"
+        assert reason != "split_unknown_order_structure_fallback_final"

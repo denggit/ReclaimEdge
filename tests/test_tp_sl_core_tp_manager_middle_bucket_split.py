@@ -499,6 +499,36 @@ class TestClassifierDirect:
         assert reason == "split_unknown_order_structure_fallback_final"
         assert mode == "FINAL_FULL_SIZE"
 
+    def test_post_tp1_tp2_only_order_structure(self):
+        """labels={"tp2_outer"} with split_was_active=True → POST_TP1_TP2_ONLY.
+
+        This is the Three-Stage post-TP1 waiting-TP2 phase where only the
+        tp2_outer order is placed.  It is a legitimate structure that must
+        NOT trigger unknown fallback or degrade to SINGLE.
+        """
+        executed, reason, mode = self._classify(
+            split_was_active=True,
+            labels=["tp2_outer"],
+        )
+        assert executed is True
+        assert reason is None
+        assert mode == "POST_TP1_TP2_ONLY"
+
+    def test_post_tp1_tp2_only_with_reason_preserves_none(self):
+        """Even if split_disabled_reason is passed, POST_TP1_TP2_ONLY ignores it.
+
+        The split_disabled_reason is irrelevant for this mode — the order
+        structure is intentional, not a fallback.
+        """
+        executed, reason, mode = self._classify(
+            split_was_active=True,
+            labels=["tp2_outer"],
+            reason="some_other_reason",
+        )
+        assert executed is True
+        assert reason is None
+        assert mode == "POST_TP1_TP2_ONLY"
+
     def test_unknown_labels_preserves_existing_reason(self):
         """Unknown labels with existing reason preserves it."""
         executed, reason, mode = self._classify(

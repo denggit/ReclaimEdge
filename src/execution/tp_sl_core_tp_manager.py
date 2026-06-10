@@ -70,6 +70,16 @@ def _classify_middle_bucket_split_actual_order_mode(
         reason = split_disabled_reason or "split_fallback_unsplit_middle_bucket"
         return False, reason, "UNSPLIT_MIDDLE_BUCKET"
 
+    # ── POST_TP1_TP2_ONLY: Three-Stage after TP1 consumed, only TP2 order remains ─
+    if labels == {"tp2_outer"}:
+        logger.info(
+            "MIDDLE_BUCKET_SPLIT_POST_TP1_TP2_ONLY_ORDER_STRUCTURE | "
+            "split_was_active=true labels=%s action=keep_three_stage_state "
+            "state_order_consistent=true",
+            sorted(labels),
+        )
+        return True, None, "POST_TP1_TP2_ONLY"
+
     # ── Unknown / safety fallback ──────────────────────────────────────
     logger.warning(
         "MIDDLE_BUCKET_SPLIT_UNKNOWN_ORDER_STRUCTURE | "
