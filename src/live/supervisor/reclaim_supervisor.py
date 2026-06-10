@@ -102,8 +102,16 @@ class ReclaimSupervisorConfig:
 
 
 class ReclaimSupervisor:
-    def __init__(self, *, config: ReclaimSupervisorConfig | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        config: ReclaimSupervisorConfig | None = None,
+        event_pipeline: object | None = None,
+    ) -> None:
+        if event_pipeline is not None and not hasattr(event_pipeline, "process_once"):
+            raise ValueError("event_pipeline must have 'process_once' attribute")
         self._config = config or ReclaimSupervisorConfig()
+        self._event_pipeline: object | None = event_pipeline
         self._started_at_ms: int | None = None
         self._stop_requested = False
         self._child: ChildProcess | None = None
@@ -126,6 +134,10 @@ class ReclaimSupervisor:
     @property
     def config(self) -> ReclaimSupervisorConfig:
         return self._config
+
+    @property
+    def event_pipeline(self) -> object | None:
+        return self._event_pipeline
 
     @property
     def started_at_ms(self) -> int | None:
@@ -571,6 +583,39 @@ class ReclaimSupervisor:
             return self._last_heartbeat_status
         self._last_heartbeat_check_monotonic = now
         return await self.check_heartbeat_once(now_monotonic=now)
+
+    # ------------------------------------------------------------------
+    # event pipeline
+    # ------------------------------------------------------------------
+
+    async def process_child_events_once(self) -> object | None:
+        """Call the injected event pipeline's ``process_once``, if configured.
+
+        Returns the result object on success, or ``None`` when no pipeline
+        is configured or when ``process_once`` raises an unexpected error.
+
+        ``asyncio.CancelledError`` is **not** caught — it propagates so the
+        supervisor's cancellation handling can clean up correctly.
+        """
+        if self._event_pipeline is None:
+            return None
+
+        try:
+            return await self._event_pipeline.process_once()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error(
+                "RECLAIM_SUPERVISOR_EVENT_PIPELINE_FAILED | child=%s error=%s",
+                self._config.child_name,
+                f"{type(exc).__name__}: {exc}",
+            )
+            self._append_health_event(
+                event_type="EVENT_PIPELINE_FAILED",
+                snapshot=self._child.snapshot() if self._child is not None else None,
+                restart_suppressed_reason=f"{type(exc).__name__}: {exc}",
+            )
+            return None
 
     # ------------------------------------------------------------------
     # shutdown

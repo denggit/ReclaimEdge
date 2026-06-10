@@ -217,6 +217,30 @@ class FailingHeartbeatMonitor:
         return self._status
 
 
+class FakeEventPipeline:
+    """Fake event pipeline for testing event_pipeline injection.
+
+    Supports configurable result, exception raising, and call counting.
+    ``asyncio.CancelledError`` is raised directly so callers can verify
+    propagation behaviour.
+    """
+
+    def __init__(
+        self,
+        result: object | None = None,
+        raises: Exception | None = None,
+    ) -> None:
+        self.result = result if result is not None else object()
+        self.raises = raises
+        self.calls = 0
+
+    async def process_once(self) -> object:
+        self.calls += 1
+        if self.raises is not None:
+            raise self.raises
+        return self.result
+
+
 # ============================================================================
 # 1. test_default_config
 # ============================================================================
@@ -1265,6 +1289,90 @@ async def test_restart_policy_property_accessible() -> None:
 
 
 # ============================================================================
+# E05f-b — event_pipeline injection and process_child_events_once
+# ============================================================================
+
+
+def test_event_pipeline_injected() -> None:
+    pipeline = FakeEventPipeline()
+    supervisor = ReclaimSupervisor(event_pipeline=pipeline)
+    assert supervisor.event_pipeline is pipeline
+
+
+def test_event_pipeline_without_process_once_raises() -> None:
+    class BadPipeline:
+        pass
+
+    with pytest.raises(ValueError, match="event_pipeline must have 'process_once' attribute"):
+        ReclaimSupervisor(event_pipeline=BadPipeline())
+
+
+@pytest.mark.asyncio
+async def test_process_child_events_once_without_pipeline_returns_none() -> None:
+    supervisor = ReclaimSupervisor()
+    result = await supervisor.process_child_events_once()
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_process_child_events_once_calls_pipeline() -> None:
+    expected = object()
+    pipeline = FakeEventPipeline(result=expected)
+    supervisor = ReclaimSupervisor(event_pipeline=pipeline)
+
+    result = await supervisor.process_child_events_once()
+
+    assert result is expected
+    assert pipeline.calls == 1
+    assert supervisor.health_events == ()
+    assert supervisor.stop_requested is False
+
+
+@pytest.mark.asyncio
+async def test_process_child_events_once_pipeline_error_records_health_event() -> None:
+    pipeline = FakeEventPipeline(raises=RuntimeError("boom"))
+    supervisor = ReclaimSupervisor(event_pipeline=pipeline)
+
+    result = await supervisor.process_child_events_once()
+
+    assert result is None
+    assert pipeline.calls == 1
+    assert supervisor.stop_requested is False
+    events = supervisor.health_events
+    assert len(events) == 1
+    assert events[0].event_type == "EVENT_PIPELINE_FAILED"
+    assert "RuntimeError: boom" in (events[0].restart_suppressed_reason or "")
+
+
+@pytest.mark.asyncio
+async def test_process_child_events_once_cancelled_error_propagates() -> None:
+    pipeline = FakeEventPipeline(raises=asyncio.CancelledError())
+    supervisor = ReclaimSupervisor(event_pipeline=pipeline)
+
+    with pytest.raises(asyncio.CancelledError):
+        await supervisor.process_child_events_once()
+
+    assert pipeline.calls == 1
+    assert supervisor.health_events == ()
+
+
+@pytest.mark.asyncio
+async def test_run_forever_does_not_call_event_pipeline_yet() -> None:
+    config = ReclaimSupervisorConfig(poll_interval_seconds=0.01)
+    pipeline = FakeEventPipeline()
+    supervisor = ReclaimSupervisor(config=config, event_pipeline=pipeline)
+    fake_child = FakeChildProcess(supervisor.build_child_spec(), running=True)
+    supervisor.create_child_process = lambda: fake_child  # type: ignore[method-assign]
+
+    task = asyncio.create_task(supervisor.run_forever())
+    await asyncio.sleep(0.03)
+    supervisor.request_stop()
+    await asyncio.wait_for(task, timeout=1.0)
+
+    assert pipeline.calls == 0
+
+
+# ============================================================================
 # D07 source guard — check imports and forbidden tokens
 # ============================================================================
 
@@ -1294,6 +1402,9 @@ def test_source_allows_heartbeat_monitor_and_child_process_and_restart() -> None
         "restart_on_bad_heartbeat",
         "_restart_child_after_exit_once",
         "_restart_child_after_bad_heartbeat_once",
+        "event_pipeline",
+        "process_child_events_once",
+        "EVENT_PIPELINE_FAILED",
     ]
     for token in allowed:
         assert token in source, (
@@ -1310,6 +1421,8 @@ def test_source_no_btc_or_email_or_trading() -> None:
         "BTC-USDT-SWAP",
         "EmailSender",
         "send_email",
+        "SupervisorEmailPublisher",
+        "src.utils.email_sender",
         "SymbolWorkerApp",
         "Trader",
         "account_position_sync_worker",
