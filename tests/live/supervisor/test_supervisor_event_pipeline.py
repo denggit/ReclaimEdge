@@ -286,8 +286,9 @@ class TestPublisherFalseCountsFailure:
         )
         result = await pipeline.process_once(now_ms=1000)
 
-        assert result.publish_failures == 1
+        assert result.alerts_allowed == 1
         assert result.alerts_published == 0
+        assert result.publish_failures == 1
 
 
 # ============================================================================
@@ -313,8 +314,41 @@ class TestPublisherExceptionIsCaught:
         # Must NOT raise.
         result = await pipeline.process_once(now_ms=1000)
 
-        assert result.publish_failures == 1
+        assert result.alerts_allowed == 1
         assert result.alerts_published == 0
+        assert result.publish_failures == 1
+
+
+# ============================================================================
+# E05a-c: suppressed alert is not counted as allowed
+# ============================================================================
+
+
+class TestSuppressedAlertNotCountedAllowed:
+    @pytest.mark.asyncio
+    async def test_suppressed_not_allowed(self) -> None:
+        """When deduper disallows, alerts_allowed must stay 0."""
+        event = _make_child_event(
+            event_type="WORKER_STARTED",
+            payload={"symbol": "ETH-USDT-SWAP", "severity": "INFO", "data": {}},
+        )
+        reader = FakeReader(
+            ChildEventReadResult(events=[event], errors=[])
+        )
+        deduper = FakeDeduper(allowed=False)
+        publisher = FakePublisher(result=True)
+
+        pipeline = SupervisorEventPipeline(
+            reader=reader,
+            deduper=deduper,
+            publisher=publisher,
+        )
+        result = await pipeline.process_once(now_ms=1000)
+
+        assert result.alerts_suppressed == 1
+        assert result.alerts_allowed == 0
+        assert result.alerts_published == 0
+        assert result.publish_failures == 0
 
 
 # ============================================================================

@@ -231,11 +231,13 @@ class SupervisorEventPipeline:
             )
             if suppressed:
                 alerts_suppressed += 1
-            elif failed:
-                publish_failures += 1
-            else:
+                continue
+            if allowed:
                 alerts_allowed += 1
-                alerts_published += 1
+            if failed:
+                publish_failures += 1
+                continue
+            alerts_published += 1
 
         # -- stream read errors -----------------------------------------------
         for error in result.errors:
@@ -250,11 +252,13 @@ class SupervisorEventPipeline:
             )
             if suppressed:
                 alerts_suppressed += 1
-            elif failed:
-                publish_failures += 1
-            else:
+                continue
+            if allowed:
                 alerts_allowed += 1
-                alerts_published += 1
+            if failed:
+                publish_failures += 1
+                continue
+            alerts_published += 1
 
         return SupervisorEventPipelineResult(
             events_seen=events_seen,
@@ -278,8 +282,12 @@ class SupervisorEventPipeline:
     ) -> tuple[bool, bool, bool]:
         """Dedupe and publish a single alert.
 
-        Returns ``(allowed, suppressed, failed)`` — exactly one will be
-        ``True``.
+        Returns ``(allowed, suppressed, failed)``:
+
+        * ``(False, True, False)`` — deduper suppressed the alert.
+        * ``(True, False, False)`` — deduper allowed and publisher succeeded.
+        * ``(True, False, True)`` — deduper allowed but publisher failed
+          (returned ``False`` or raised).
         """
         decision = self._deduper.should_send(
             symbol=alert.symbol,
@@ -296,10 +304,10 @@ class SupervisorEventPipeline:
         try:
             ok = await self._publisher.publish_alert(alert)
         except Exception:
-            return False, False, True
+            return True, False, True
 
         if not ok:
-            return False, False, True
+            return True, False, True
 
         return True, False, False
 
