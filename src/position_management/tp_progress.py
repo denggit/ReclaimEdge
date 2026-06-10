@@ -58,9 +58,13 @@ def mark_partial_tp_consumed_if_position_reduced(strategy: BollCvdReclaimStrateg
 
 def mark_middle_runner_active_if_position_reduced(strategy: BollCvdReclaimStrategy, position: PositionSnapshot) -> bool:
     state = strategy.state
-    # Gate: when middle bucket split is active and slow hasn't consumed yet,
-    # split progress owns the path — do NOT run old Middle Runner progress
-    if getattr(state, "middle_bucket_split_active", False) and not getattr(state, "middle_bucket_split_slow_consumed", False):
+    # Gate: when middle bucket split is active and full bucket NOT yet done
+    # (both legs consumed), split progress owns the path — do NOT run old
+    # Middle Runner progress.  slow_consumed alone is not enough (out-of-order).
+    if getattr(state, "middle_bucket_split_active", False) and not (
+        getattr(state, "middle_bucket_split_fast_consumed", False)
+        and getattr(state, "middle_bucket_split_slow_consumed", False)
+    ):
         return False
     if not getattr(state, "middle_runner_pending", False):
         return False
@@ -153,9 +157,13 @@ def mark_middle_runner_active_if_position_reduced(strategy: BollCvdReclaimStrate
 def mark_three_stage_progress_if_position_reduced(strategy: BollCvdReclaimStrategy, position: PositionSnapshot,
                                                   ts_ms: int) -> str | None:
     state = strategy.state
-    # Gate: when middle bucket split is active and slow hasn't consumed yet,
-    # split progress owns the path — do NOT run old Three-Stage progress
-    if getattr(state, "middle_bucket_split_active", False) and not getattr(state, "middle_bucket_split_slow_consumed", False):
+    # Gate: when middle bucket split is active and full bucket NOT yet done
+    # (both legs consumed), split progress owns the path — do NOT run old
+    # Three-Stage progress.  slow_consumed alone is not enough (out-of-order).
+    if getattr(state, "middle_bucket_split_active", False) and not (
+        getattr(state, "middle_bucket_split_fast_consumed", False)
+        and getattr(state, "middle_bucket_split_slow_consumed", False)
+    ):
         return None
     if not getattr(state, "three_stage_runner_enabled_for_position", False):
         return None
@@ -281,10 +289,13 @@ def mark_middle_bucket_split_progress_if_position_reduced(
 ) -> str | None:
     """Detect fast/slow fills when middle bucket split is active.
 
+    Supports out-of-order fills (fast-first, slow-first, or simultaneous).
+
     Returns:
-        "MIDDLE_BUCKET_FAST"  — fast leg (BOLL15) filled
-        "MIDDLE_BUCKET_SLOW"  — slow leg (BOLL20) filled (full middle bucket filled)
-        None                  — no split-related progress detected
+        "MIDDLE_BUCKET_FAST"       — only fast leg (BOLL15) newly filled
+        "MIDDLE_BUCKET_SLOW_ONLY"  — only slow leg (BOLL20) newly filled (out-of-order)
+        "MIDDLE_BUCKET_FULL"       — both legs filled (full middle bucket TP1 done)
+        None                       — no split-related progress detected
     """
     state = strategy.state
     if not getattr(state, "middle_bucket_split_active", False):
@@ -301,15 +312,94 @@ def mark_middle_bucket_split_progress_if_position_reduced(
     fast_consumed = bool(getattr(state, "middle_bucket_split_fast_consumed", False))
     slow_consumed = bool(getattr(state, "middle_bucket_split_slow_consumed", False))
 
+    # Slow total ratio: prefer explicit field, else derive from bucket - fast
+    slow_total_ratio = float(getattr(state, "middle_bucket_split_slow_total_ratio", 0.0) or 0.0)
+    if slow_total_ratio <= 0:
+        slow_total_ratio = max(0.0, middle_bucket_ratio - fast_total_ratio)
+
     after_fast_ratio = max(0.0, 1.0 - fast_total_ratio)
-    after_middle_bucket_ratio = max(0.0, 1.0 - middle_bucket_ratio)
+    after_slow_ratio = max(0.0, 1.0 - slow_total_ratio)
+    after_full_ratio = max(0.0, 1.0 - middle_bucket_ratio)
+
     fast_tolerance = max(0.02, fast_total_ratio * 0.05, 0.000001)
-    full_tp1_tolerance = max(0.02, middle_bucket_ratio * 0.05, 0.000001)
+    slow_tolerance = max(0.02, slow_total_ratio * 0.05, 0.000001)
+    full_tolerance = max(0.02, middle_bucket_ratio * 0.05, 0.000001)
 
     event: str | None = None
 
-    # ── Fast leg fill detection ───────────────────────────────────────
-    if not fast_consumed and not slow_consumed and remaining_ratio <= after_fast_ratio + fast_tolerance:
+    # ── 1. Already both consumed → no progress ────────────────────────
+    if fast_consumed and slow_consumed:
+        return None
+
+    # ── 2. Full TP1 bucket completed (both legs filled) ───────────────
+    #    Check FIRST to handle simultaneous fills correctly.
+    #    Also catches: fast-after-slow, slow-after-fast.
+    if remaining_ratio <= after_full_ratio + full_tolerance:
+        fast_consumed_before = fast_consumed
+        slow_consumed_before = slow_consumed
+
+        # Determine the exit price for the newly-filled portion
+        if fast_consumed_before and not slow_consumed_before:
+            # slow after fast — newly filled leg is slow
+            exit_price = getattr(state, "middle_bucket_split_slow_price", None)
+        elif slow_consumed_before and not fast_consumed_before:
+            # fast after slow — newly filled leg is fast
+            exit_price = getattr(state, "middle_bucket_split_fast_price", None)
+        else:
+            # Both filled same round — use effective price for full bucket
+            exit_price = getattr(state, "middle_bucket_split_effective_price", None)
+
+        position_cost_runtime.record_core_position_reduction_exit(
+            state,
+            position,
+            exit_price=exit_price,
+            fee_buffer_pct=strategy.config.breakeven_fee_buffer_pct,
+        )
+        state.middle_bucket_split_fast_consumed = True
+        state.middle_bucket_split_slow_consumed = True
+        state.middle_bucket_split_add_disabled = True
+
+        tp_plan = getattr(state, "tp_plan", "SINGLE")
+        if tp_plan == "THREE_STAGE_RUNNER":
+            state.three_stage_tp1_consumed = True
+            state.partial_tp_consumed = True
+        elif tp_plan == "MIDDLE_RUNNER":
+            state.middle_runner_pending = False
+            state.middle_runner_active = True
+            state.middle_runner_add_disabled = True
+            state.partial_tp_consumed = True
+            state.partial_tp_price = None
+            state.partial_tp_ratio = 0.0
+            state.tp_plan = "SINGLE"
+            if hasattr(strategy, "_reset_middle_runner_sl_time_tighten_state"):
+                strategy._reset_middle_runner_sl_time_tighten_state()
+            if hasattr(strategy, "_seed_runner_sl_time_tighten_activation_candle"):
+                strategy._seed_runner_sl_time_tighten_activation_candle(
+                    target="middle_runner",
+                    candle_ts_ms=int(getattr(strategy.state, "last_tp_update_candle_ts_ms", 0) or 0),
+                )
+
+        event = "MIDDLE_BUCKET_FULL"
+        logger.warning(
+            "MIDDLE_BUCKET_SPLIT_FULL_TP1_FILLED | side=%s "
+            "fast_consumed_before=%s slow_consumed_before=%s "
+            "fast_consumed_after=True slow_consumed_after=True "
+            "remaining_ratio=%.6f after_full_ratio=%.6f "
+            "fast_price=%s slow_price=%s effective_price=%s tp_plan=%s",
+            state.side,
+            fast_consumed_before,
+            slow_consumed_before,
+            remaining_ratio,
+            after_full_ratio,
+            getattr(state, "middle_bucket_split_fast_price", None),
+            getattr(state, "middle_bucket_split_slow_price", None),
+            getattr(state, "middle_bucket_split_effective_price", None),
+            tp_plan,
+        )
+        return event
+
+    # ── 3. Fast leg fill (only fast, slow not yet filled) ─────────────
+    if not fast_consumed and remaining_ratio <= after_fast_ratio + fast_tolerance:
         position_cost_runtime.record_core_position_reduction_exit(
             state,
             position,
@@ -344,8 +434,8 @@ def mark_middle_bucket_split_progress_if_position_reduced(
         )
         return event
 
-    # ── Slow leg fill detection ───────────────────────────────────────
-    if fast_consumed and not slow_consumed and remaining_ratio <= after_middle_bucket_ratio + full_tp1_tolerance:
+    # ── 4. Slow leg fill (only slow, fast not yet — out-of-order) ─────
+    if not slow_consumed and remaining_ratio <= after_slow_ratio + slow_tolerance:
         position_cost_runtime.record_core_position_reduction_exit(
             state,
             position,
@@ -353,59 +443,32 @@ def mark_middle_bucket_split_progress_if_position_reduced(
             fee_buffer_pct=strategy.config.breakeven_fee_buffer_pct,
         )
         state.middle_bucket_split_slow_consumed = True
+        state.middle_bucket_split_add_disabled = True
+        # Compute partial protective SL for slow-only fill
+        # Reusing calculate_fast_protective_sl as partial split SL candidate
+        from src.strategies.middle_bucket_split import calculate_fast_protective_sl
+        partial_sl = calculate_fast_protective_sl(
+            side=state.side,
+            avg_entry_price=float(state.avg_entry_price or 0.0),
+            fee_buffer_pct=float(strategy.config.middle_bucket_split_fast_sl_fee_buffer_pct),
+        )
+        state.middle_bucket_split_fast_sl_price = partial_sl
+        event = "MIDDLE_BUCKET_SLOW_ONLY"
         logger.warning(
-            "MIDDLE_BUCKET_SLOW_FILLED | side=%s old_qty=%.8f new_qty=%.8f remaining_ratio=%.6f "
-            "middle_bucket_ratio=%.4f after_middle_bucket_ratio=%.6f tolerance=%.6f "
-            "slow_price=%s",
+            "MIDDLE_BUCKET_SLOW_ONLY_FILLED | side=%s old_qty=%.8f new_qty=%.8f remaining_ratio=%.6f "
+            "slow_total_ratio=%.4f after_slow_ratio=%.6f tolerance=%.6f "
+            "slow_price=%s partial_sl_price=%s avg_entry=%.4f add_disabled=true",
             state.side,
             total_entry_qty,
             position.eth_qty,
             remaining_ratio,
-            middle_bucket_ratio,
-            after_middle_bucket_ratio,
-            full_tp1_tolerance,
+            slow_total_ratio,
+            after_slow_ratio,
+            slow_tolerance,
             getattr(state, "middle_bucket_split_slow_price", None),
+            partial_sl,
+            float(state.avg_entry_price or 0.0),
         )
-
-        # Determine which plan we're in to activate the appropriate post-TP1 state
-        tp_plan = getattr(state, "tp_plan", "SINGLE")
-        if tp_plan == "THREE_STAGE_RUNNER":
-            state.three_stage_tp1_consumed = True
-            state.partial_tp_consumed = True
-            logger.warning(
-                "MIDDLE_BUCKET_SPLIT_FULL_TP1_FILLED | side=%s plan=THREE_STAGE_RUNNER "
-                "fast_price=%s slow_price=%s fast_sl_price=%s "
-                "tp1_consumed=true",
-                state.side,
-                getattr(state, "middle_bucket_split_fast_price", None),
-                getattr(state, "middle_bucket_split_slow_price", None),
-                getattr(state, "middle_bucket_split_fast_sl_price", None),
-            )
-        elif tp_plan == "MIDDLE_RUNNER":
-            state.middle_runner_pending = False
-            state.middle_runner_active = True
-            state.middle_runner_add_disabled = True
-            state.partial_tp_consumed = True
-            state.partial_tp_price = None
-            state.partial_tp_ratio = 0.0
-            state.tp_plan = "SINGLE"
-            if hasattr(strategy, "_reset_middle_runner_sl_time_tighten_state"):
-                strategy._reset_middle_runner_sl_time_tighten_state()
-            if hasattr(strategy, "_seed_runner_sl_time_tighten_activation_candle"):
-                strategy._seed_runner_sl_time_tighten_activation_candle(
-                    target="middle_runner",
-                    candle_ts_ms=int(getattr(strategy.state, "last_tp_update_candle_ts_ms", 0) or 0),
-                )
-            logger.warning(
-                "MIDDLE_BUCKET_SPLIT_FULL_TP1_FILLED | side=%s plan=MIDDLE_RUNNER "
-                "fast_price=%s slow_price=%s fast_sl_price=%s "
-                "middle_runner_active=true",
-                state.side,
-                getattr(state, "middle_bucket_split_fast_price", None),
-                getattr(state, "middle_bucket_split_slow_price", None),
-                getattr(state, "middle_bucket_split_fast_sl_price", None),
-            )
-        event = "MIDDLE_BUCKET_SLOW"
         return event
 
     return None
@@ -420,6 +483,12 @@ def append_middle_bucket_split_journal_events(
     position_id = payload.get("position_id")
     if event == "MIDDLE_BUCKET_FAST":
         journal.append("MIDDLE_BUCKET_FAST_FILLED", dict(payload), position_id=position_id)
-    if event == "MIDDLE_BUCKET_SLOW":
+    elif event == "MIDDLE_BUCKET_SLOW_ONLY":
+        journal.append("MIDDLE_BUCKET_SLOW_ONLY_FILLED", dict(payload), position_id=position_id)
+    elif event == "MIDDLE_BUCKET_FULL":
+        journal.append("MIDDLE_BUCKET_SPLIT_FULL_TP1_FILLED", dict(payload), position_id=position_id)
+        journal.append("MIDDLE_BUCKET_SPLIT_COMPLETED", dict(payload), position_id=position_id)
+    elif event == "MIDDLE_BUCKET_SLOW":
+        # Legacy compatibility for old code paths
         journal.append("MIDDLE_BUCKET_SLOW_FILLED", dict(payload), position_id=position_id)
         journal.append("MIDDLE_BUCKET_SPLIT_COMPLETED", dict(payload), position_id=position_id)

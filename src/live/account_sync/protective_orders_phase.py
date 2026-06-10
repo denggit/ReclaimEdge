@@ -20,6 +20,7 @@ from src.live.alerts.halt_alerts import (
 )
 from src.live.halt_modes import resolve_halt_mode
 from src.position_management import runner_live_helpers
+from src.position_management.protective_sl_strength import should_replace_sl
 from src.reporting.live_state_store import LiveStateStore
 from src.reporting.trade_journal import LiveTradeJournal
 from src.strategies.boll_cvd_reclaim_strategy import StrategyPositionState
@@ -168,7 +169,56 @@ async def run_account_sync_protective_orders_phase(
         sl_order_id = None
         sl_ok = False
         sl_message = "protective_sl_price_missing"
-        if sl_price is not None and three_stage_post_tp1_sl_payload.get("side") is not None:
+        side = three_stage_post_tp1_sl_payload.get("side")
+        old_sl_order_id = three_stage_post_tp1_sl_payload.get("old_sl_order_id")
+
+        # ── No-loosen check: only replace existing SL if candidate is stronger ──
+        existing_sl_price: float | None = getattr(strategy.state, "three_stage_post_tp1_protective_sl_price", None)
+        if existing_sl_price is None:
+            existing_sl_price = getattr(strategy.state, "middle_bucket_split_fast_sl_price", None)
+        candidate_sl_price: float | None = float(sl_price) if sl_price is not None else None
+
+        _should_replace = should_replace_sl(
+            side=side,
+            existing_sl_price=existing_sl_price,
+            candidate_sl_price=candidate_sl_price,
+        )
+
+        if not _should_replace and existing_sl_price is not None and old_sl_order_id:
+            # Existing SL is stronger or equal — keep it, skip new placement
+            async with state_lock:
+                strategy.state.three_stage_post_tp1_protective_sl_price = existing_sl_price
+                strategy.state.three_stage_post_tp1_protective_sl_order_id = old_sl_order_id
+                strategy.state.three_stage_post_tp1_protected = True
+                save_state_payload = (execution_state.current_position_id, copy.deepcopy(strategy.state),
+                                      execution_state.cash_before_position)
+            logger.warning(
+                "PROTECTIVE_SL_KEEP_EXISTING_STRONGER | target=three_stage_post_tp1 "
+                "side=%s existing_sl=%.4f candidate_sl=%s chosen_sl=%.4f "
+                "old_sl_order_id=%s reason=no_loosen",
+                side,
+                existing_sl_price,
+                candidate_sl_price,
+                existing_sl_price,
+                old_sl_order_id,
+            )
+            if hasattr(journal, "append"):
+                journal.append(
+                    "PROTECTIVE_SL_KEEP_EXISTING_STRONGER",
+                    {
+                        "position_id": three_stage_post_tp1_sl_payload.get("position_id"),
+                        "target": "three_stage_post_tp1",
+                        "side": side,
+                        "existing_sl": existing_sl_price,
+                        "candidate_sl": candidate_sl_price,
+                        "chosen_sl": existing_sl_price,
+                        "old_sl_order_id": old_sl_order_id,
+                        "reason": "no_loosen",
+                    },
+                    position_id=three_stage_post_tp1_sl_payload.get("position_id"),
+                )
+            # Skip to end — do NOT place new SL, do NOT trigger DME
+        elif sl_price is not None and side is not None:
             try:
                 sl_ok, sl_order_id, sl_message = await trader.place_three_stage_post_tp1_protective_stop_with_retries(
                     three_stage_post_tp1_sl_payload["side"],
@@ -234,87 +284,170 @@ async def run_account_sync_protective_orders_phase(
                 sl_order_id,
             )
         else:
-            # ── Risk control: protective SL failed → delayed market exit (NO immediate exit) ──
-            side = three_stage_post_tp1_sl_payload.get("side")
-            core_contracts = three_stage_post_tp1_sl_payload.get("core_contracts")
-            net_contracts = three_stage_post_tp1_sl_payload.get("net_contracts")
-            sl_contracts = three_stage_post_tp1_sl_payload.get("contracts")
-            halt_reason = "three_stage_post_tp1_sl_failed_delayed_market_exit_armed"
-            position_id = three_stage_post_tp1_sl_payload.get("position_id")
-
-            async with state_lock:
-                arm_payload = dme.arm_delayed_market_exit(
-                    strategy_state=strategy.state,
-                    execution_state=execution_state,
-                    position_id=position_id,
-                    side=side or "UNKNOWN",
-                    reason=halt_reason,
-                    context="three_stage_post_tp1_protective_sl_failed",
-                    source_event="THREE_STAGE_POST_TP1_PROTECTIVE_SL_FAILED",
-                    now_ms=int(time.time() * 1000),
-                    error=sl_message,
+            # ── candidate None but existing SL valid → keep existing, skip DME ──
+            if candidate_sl_price is None and existing_sl_price is not None and old_sl_order_id:
+                async with state_lock:
+                    strategy.state.three_stage_post_tp1_protective_sl_price = existing_sl_price
+                    strategy.state.three_stage_post_tp1_protective_sl_order_id = old_sl_order_id
+                    strategy.state.three_stage_post_tp1_protected = True
+                    save_state_payload = (execution_state.current_position_id, copy.deepcopy(strategy.state),
+                                          execution_state.cash_before_position)
+                logger.warning(
+                    "PROTECTIVE_SL_KEEP_EXISTING_STRONGER | target=three_stage_post_tp1 "
+                    "side=%s existing_sl=%.4f candidate_sl=None chosen_sl=%.4f "
+                    "old_sl_order_id=%s reason=candidate_missing_keep_existing",
+                    side,
+                    existing_sl_price,
+                    existing_sl_price,
+                    old_sl_order_id,
                 )
+                if hasattr(journal, "append"):
+                    journal.append(
+                        "PROTECTIVE_SL_KEEP_EXISTING_STRONGER",
+                        {
+                            "position_id": three_stage_post_tp1_sl_payload.get("position_id"),
+                            "target": "three_stage_post_tp1",
+                            "side": side,
+                            "existing_sl": existing_sl_price,
+                            "candidate_sl": None,
+                            "chosen_sl": existing_sl_price,
+                            "old_sl_order_id": old_sl_order_id,
+                            "reason": "candidate_missing_keep_existing",
+                        },
+                        position_id=three_stage_post_tp1_sl_payload.get("position_id"),
+                    )
+            else:
+                # ── Risk control: protective SL failed → delayed market exit (NO immediate exit) ──
+                _dme_side = three_stage_post_tp1_sl_payload.get("side")
+                _dme_core_contracts = three_stage_post_tp1_sl_payload.get("core_contracts")
+                _dme_net_contracts = three_stage_post_tp1_sl_payload.get("net_contracts")
+                _dme_sl_contracts = three_stage_post_tp1_sl_payload.get("contracts")
+                _dme_halt_reason = "three_stage_post_tp1_sl_failed_delayed_market_exit_armed"
+                _dme_position_id = three_stage_post_tp1_sl_payload.get("position_id")
 
-            state_store.save(
-                LiveStateStore.from_strategy_state(
-                    position_id=execution_state.current_position_id,
+                async with state_lock:
+                    arm_payload = dme.arm_delayed_market_exit(
+                        strategy_state=strategy.state,
+                        execution_state=execution_state,
+                        position_id=_dme_position_id,
+                        side=_dme_side or "UNKNOWN",
+                        reason=_dme_halt_reason,
+                        context="three_stage_post_tp1_protective_sl_failed",
+                        source_event="THREE_STAGE_POST_TP1_PROTECTIVE_SL_FAILED",
+                        now_ms=int(time.time() * 1000),
+                        error=sl_message,
+                    )
+
+                state_store.save(
+                    LiveStateStore.from_strategy_state(
+                        position_id=execution_state.current_position_id,
+                        symbol=trader.symbol,
+                        strategy_state=strategy.state,
+                        cash_before_position=execution_state.cash_before_position,
+                    )
+                )
+                if hasattr(journal, "append"):
+                    journal.append(
+                        "THREE_STAGE_POST_TP1_PROTECTIVE_SL_FAILED",
+                        {
+                            "position_id": _dme_position_id,
+                            "side": _dme_side,
+                            "protective_sl_price": sl_price,
+                            "reason": sl_message,
+                            "trading_halted": True,
+                            "halt_reason": _dme_halt_reason,
+                            "retry_config": "NEAR_TP_PROTECTIVE_SL_RETRY_COUNT/NEAR_TP_PROTECTIVE_SL_RETRY_INTERVAL_SECONDS",
+                            "market_exit_attempted": False,
+                            "delayed_market_exit_armed": True,
+                            "core_contracts": str(_dme_core_contracts) if _dme_core_contracts is not None else None,
+                            "net_contracts": str(_dme_net_contracts) if _dme_net_contracts is not None else None,
+                            "sl_contracts": str(_dme_sl_contracts) if _dme_sl_contracts is not None else None,
+                            "manual_intervention_required": True,
+                            **arm_payload,
+                        },
+                        position_id=_dme_position_id,
+                    )
+                logger.error(
+                    "THREE_STAGE_POST_TP1_PROTECTIVE_SL_FAILED | position_id=%s side=%s sl_price=%s sl_message=%s delayed_market_exit_armed=true core_contracts=%s net_contracts=%s sl_contracts=%s manual_intervention_required=true",
+                    _dme_position_id,
+                    _dme_side,
+                    sl_price,
+                    sl_message,
+                    _dme_core_contracts,
+                    _dme_net_contracts,
+                    _dme_sl_contracts,
+                )
+                await _send_protective_orders_halt_alert(
+                    email_sender=email_sender,
+                    halt_alert_deduper=halt_alert_deduper,
                     symbol=trader.symbol,
-                    strategy_state=strategy.state,
-                    cash_before_position=execution_state.cash_before_position,
+                    position_id=_dme_position_id,
+                    halt_reason=_dme_halt_reason,
+                    side=_dme_side,
+                    manual_intervention_required=True,
+                    message=(
+                        f"Three-stage post-TP1 protective SL failed: {sl_message}. "
+                        f"Delayed market exit armed (30 min countdown). NO immediate market exit."
+                    ),
+                    extra={"sl_price": str(sl_price), "delayed_market_exit_armed": True},
                 )
-            )
-            if hasattr(journal, "append"):
-                journal.append(
-                    "THREE_STAGE_POST_TP1_PROTECTIVE_SL_FAILED",
-                    {
-                        "position_id": position_id,
-                        "side": side,
-                        "protective_sl_price": sl_price,
-                        "reason": sl_message,
-                        "trading_halted": True,
-                        "halt_reason": halt_reason,
-                        "retry_config": "NEAR_TP_PROTECTIVE_SL_RETRY_COUNT/NEAR_TP_PROTECTIVE_SL_RETRY_INTERVAL_SECONDS",
-                        "market_exit_attempted": False,
-                        "delayed_market_exit_armed": True,
-                        "core_contracts": str(core_contracts) if core_contracts is not None else None,
-                        "net_contracts": str(net_contracts) if net_contracts is not None else None,
-                        "sl_contracts": str(sl_contracts) if sl_contracts is not None else None,
-                        "manual_intervention_required": True,
-                        **arm_payload,
-                    },
-                    position_id=position_id,
-                )
-            logger.error(
-                "THREE_STAGE_POST_TP1_PROTECTIVE_SL_FAILED | position_id=%s side=%s sl_price=%s sl_message=%s delayed_market_exit_armed=true core_contracts=%s net_contracts=%s sl_contracts=%s manual_intervention_required=true",
-                position_id,
-                side,
-                sl_price,
-                sl_message,
-                core_contracts,
-                net_contracts,
-                sl_contracts,
-            )
-            await _send_protective_orders_halt_alert(
-                email_sender=email_sender,
-                halt_alert_deduper=halt_alert_deduper,
-                symbol=trader.symbol,
-                position_id=position_id,
-                halt_reason=halt_reason,
-                side=side,
-                manual_intervention_required=True,
-                message=(
-                    f"Three-stage post-TP1 protective SL failed: {sl_message}. "
-                    f"Delayed market exit armed (30 min countdown). NO immediate market exit."
-                ),
-                extra={"sl_price": str(sl_price), "delayed_market_exit_armed": True},
-            )
     middle_runner_activation_recorded = False
     if middle_runner_sl_payload is not None:
         sl_price = middle_runner_sl_payload.get("protective_sl_price")
         sl_order_id = None
         sl_ok = False
         sl_message = "protective_sl_price_missing"
-        if sl_price is not None and middle_runner_sl_payload.get("side") is not None:
+        mr_side = middle_runner_sl_payload.get("side")
+        mr_old_sl_order_id = middle_runner_sl_payload.get("old_sl_order_id")
+
+        # ── No-loosen check: only replace existing SL if candidate is stronger ──
+        mr_existing_sl_price: float | None = getattr(strategy.state, "middle_runner_protective_sl_price", None)
+        if mr_existing_sl_price is None:
+            mr_existing_sl_price = getattr(strategy.state, "middle_bucket_split_fast_sl_price", None)
+        mr_candidate_sl_price: float | None = float(sl_price) if sl_price is not None else None
+
+        _mr_should_replace = should_replace_sl(
+            side=mr_side,
+            existing_sl_price=mr_existing_sl_price,
+            candidate_sl_price=mr_candidate_sl_price,
+        )
+
+        if not _mr_should_replace and mr_existing_sl_price is not None and mr_old_sl_order_id:
+            # Existing SL is stronger or equal — keep it, skip new placement
+            async with state_lock:
+                strategy.state.middle_runner_protective_sl_price = mr_existing_sl_price
+                strategy.state.middle_runner_protective_sl_order_id = mr_old_sl_order_id
+                if middle_runner_sl_payload.get("reason") == "partial_size_mismatch_degraded":
+                    strategy.state.middle_runner_size_mismatch_protected = True
+                save_state_payload = (execution_state.current_position_id, copy.deepcopy(strategy.state),
+                                      execution_state.cash_before_position)
+            logger.warning(
+                "PROTECTIVE_SL_KEEP_EXISTING_STRONGER | target=middle_runner "
+                "side=%s existing_sl=%.4f candidate_sl=%s chosen_sl=%.4f "
+                "old_sl_order_id=%s reason=no_loosen",
+                mr_side,
+                mr_existing_sl_price,
+                mr_candidate_sl_price,
+                mr_existing_sl_price,
+                mr_old_sl_order_id,
+            )
+            if hasattr(journal, "append"):
+                journal.append(
+                    "PROTECTIVE_SL_KEEP_EXISTING_STRONGER",
+                    {
+                        "position_id": middle_runner_sl_payload.get("position_id"),
+                        "target": "middle_runner",
+                        "side": mr_side,
+                        "existing_sl": mr_existing_sl_price,
+                        "candidate_sl": mr_candidate_sl_price,
+                        "chosen_sl": mr_existing_sl_price,
+                        "old_sl_order_id": mr_old_sl_order_id,
+                        "reason": "no_loosen",
+                    },
+                    position_id=middle_runner_sl_payload.get("position_id"),
+                )
+            # Skip to end — do NOT place new SL, do NOT trigger DME
+        elif sl_price is not None and mr_side is not None:
             try:
                 sl_ok, sl_order_id, sl_message = await trader.place_middle_runner_protective_stop_with_retries(
                     middle_runner_sl_payload["side"],
@@ -381,56 +514,90 @@ async def run_account_sync_protective_orders_phase(
                 sl_order_id,
             )
         else:
-            side = middle_runner_sl_payload.get("side")
-            halt_reason = "middle_runner_sl_failed_delayed_market_exit_armed"
-            position_id = middle_runner_sl_payload.get("position_id")
+            # ── candidate None but existing SL valid → keep existing, skip DME ──
+            if mr_candidate_sl_price is None and mr_existing_sl_price is not None and mr_old_sl_order_id:
+                async with state_lock:
+                    strategy.state.middle_runner_protective_sl_price = mr_existing_sl_price
+                    strategy.state.middle_runner_protective_sl_order_id = mr_old_sl_order_id
+                    if middle_runner_sl_payload.get("reason") == "partial_size_mismatch_degraded":
+                        strategy.state.middle_runner_size_mismatch_protected = True
+                    save_state_payload = (execution_state.current_position_id, copy.deepcopy(strategy.state),
+                                          execution_state.cash_before_position)
+                logger.warning(
+                    "PROTECTIVE_SL_KEEP_EXISTING_STRONGER | target=middle_runner "
+                    "side=%s existing_sl=%.4f candidate_sl=None chosen_sl=%.4f "
+                    "old_sl_order_id=%s reason=candidate_missing_keep_existing",
+                    mr_side,
+                    mr_existing_sl_price,
+                    mr_existing_sl_price,
+                    mr_old_sl_order_id,
+                )
+                if hasattr(journal, "append"):
+                    journal.append(
+                        "PROTECTIVE_SL_KEEP_EXISTING_STRONGER",
+                        {
+                            "position_id": middle_runner_sl_payload.get("position_id"),
+                            "target": "middle_runner",
+                            "side": mr_side,
+                            "existing_sl": mr_existing_sl_price,
+                            "candidate_sl": None,
+                            "chosen_sl": mr_existing_sl_price,
+                            "old_sl_order_id": mr_old_sl_order_id,
+                            "reason": "candidate_missing_keep_existing",
+                        },
+                        position_id=middle_runner_sl_payload.get("position_id"),
+                    )
+            else:
+                _mr_dme_side = middle_runner_sl_payload.get("side")
+                _mr_dme_halt_reason = "middle_runner_sl_failed_delayed_market_exit_armed"
+                _mr_dme_position_id = middle_runner_sl_payload.get("position_id")
 
-            async with state_lock:
-                arm_payload = dme.arm_delayed_market_exit(
-                    strategy_state=strategy.state,
-                    execution_state=execution_state,
-                    position_id=position_id,
-                    side=side or "UNKNOWN",
-                    reason=halt_reason,
-                    context="middle_runner_protective_sl_failed",
-                    source_event="MIDDLE_RUNNER_ORDER_WARNING",
-                    now_ms=int(time.time() * 1000),
-                    error=sl_message,
+                async with state_lock:
+                    arm_payload = dme.arm_delayed_market_exit(
+                        strategy_state=strategy.state,
+                        execution_state=execution_state,
+                        position_id=_mr_dme_position_id,
+                        side=_mr_dme_side or "UNKNOWN",
+                        reason=_mr_dme_halt_reason,
+                        context="middle_runner_protective_sl_failed",
+                        source_event="MIDDLE_RUNNER_ORDER_WARNING",
+                        now_ms=int(time.time() * 1000),
+                        error=sl_message,
+                    )
+                if hasattr(journal, "append"):
+                    journal.append(
+                        "MIDDLE_RUNNER_ORDER_WARNING",
+                        {
+                            "side": _mr_dme_side,
+                            "protective_sl_price": sl_price,
+                            "reason": f"protective_sl_failed:{sl_message}",
+                            "delayed_market_exit_armed": True,
+                            "halt_reason": _mr_dme_halt_reason,
+                            **arm_payload,
+                        },
+                        position_id=_mr_dme_position_id,
+                    )
+                logger.error(
+                    "MIDDLE_RUNNER_ORDER_WARNING | reason=protective_sl_failed side=%s sl_price=%s sl_message=%s delayed_market_exit_armed=true halt_reason=%s",
+                    _mr_dme_side,
+                    sl_price,
+                    sl_message,
+                    _mr_dme_halt_reason,
                 )
-            if hasattr(journal, "append"):
-                journal.append(
-                    "MIDDLE_RUNNER_ORDER_WARNING",
-                    {
-                        "side": side,
-                        "protective_sl_price": sl_price,
-                        "reason": f"protective_sl_failed:{sl_message}",
-                        "delayed_market_exit_armed": True,
-                        "halt_reason": halt_reason,
-                        **arm_payload,
-                    },
-                    position_id=position_id,
+                await _send_protective_orders_halt_alert(
+                    email_sender=email_sender,
+                    halt_alert_deduper=halt_alert_deduper,
+                    symbol=trader.symbol,
+                    position_id=_mr_dme_position_id,
+                    halt_reason=_mr_dme_halt_reason,
+                    side=_mr_dme_side,
+                    manual_intervention_required=True,
+                    message=(
+                        f"Middle runner protective SL failed: {sl_message}. "
+                        f"Delayed market exit armed (30 min countdown). NO immediate market exit."
+                    ),
+                    extra={"sl_price": str(sl_price), "delayed_market_exit_armed": True},
                 )
-            logger.error(
-                "MIDDLE_RUNNER_ORDER_WARNING | reason=protective_sl_failed side=%s sl_price=%s sl_message=%s delayed_market_exit_armed=true halt_reason=%s",
-                side,
-                sl_price,
-                sl_message,
-                halt_reason,
-            )
-            await _send_protective_orders_halt_alert(
-                email_sender=email_sender,
-                halt_alert_deduper=halt_alert_deduper,
-                symbol=trader.symbol,
-                position_id=position_id,
-                halt_reason=halt_reason,
-                side=side,
-                manual_intervention_required=True,
-                message=(
-                    f"Middle runner protective SL failed: {sl_message}. "
-                    f"Delayed market exit armed (30 min countdown). NO immediate market exit."
-                ),
-                extra={"sl_price": str(sl_price), "delayed_market_exit_armed": True},
-            )
     if (
             middle_runner_activation_payload is not None
             and not middle_runner_activation_recorded
@@ -471,114 +638,162 @@ async def run_account_sync_protective_orders_phase(
             enabled=enabled,
         )
 
+        # ── No-loosen check: only replace existing fast SL if candidate is stronger ──
+        _mbf_existing_sl: float | None = getattr(strategy.state, "middle_bucket_split_fast_sl_price", None)
+        _mbf_candidate_sl: float | None = (
+            float(decision.sl_price) if decision.sl_price is not None
+            else float(fast_sl_price) if fast_sl_price is not None
+            else None
+        )
+        _mbf_should_replace = should_replace_sl(
+            side=side,
+            existing_sl_price=_mbf_existing_sl,
+            candidate_sl_price=_mbf_candidate_sl,
+        )
+
         if decision.action == "PLACE_SL" and side is not None:
-            # Cancel old fast SL if exists
-            if old_sl_order_id:
-                await trader.cancel_middle_bucket_fast_protective_stop(old_sl_order_id)
-            net_contracts = middle_bucket_split_fast_protection_payload.get("net_contracts")
-            sl_ok, sl_order_id, sl_message = (False, None, "side_missing")
-            if net_contracts and float(net_contracts or 0) > 0:
-                try:
-                    sl_ok, sl_order_id, sl_message = await trader.place_middle_bucket_fast_protective_stop_with_retries(
-                        side,
-                        net_contracts,
-                        float(decision.sl_price or fast_sl_price or 0.0),
-                        retry_count=int(os.getenv("NEAR_TP_PROTECTIVE_SL_RETRY_COUNT", "3")),
-                        retry_interval_seconds=float(os.getenv("NEAR_TP_PROTECTIVE_SL_RETRY_INTERVAL_SECONDS", "1")),
-                    )
-                except Exception as exc:
-                    sl_ok = False
-                    sl_order_id = None
-                    sl_message = f"trader_exception: {type(exc).__name__}: {exc}"
-            if sl_ok:
+            # ── No-loosen: keep existing stronger SL ──
+            if not _mbf_should_replace and _mbf_existing_sl is not None and old_sl_order_id:
                 async with state_lock:
-                    strategy.state.middle_bucket_split_fast_sl_order_id = sl_order_id
-                    strategy.state.middle_bucket_split_fast_sl_price = float(decision.sl_price or fast_sl_price or 0.0)
+                    strategy.state.middle_bucket_split_fast_sl_price = _mbf_existing_sl
+                    strategy.state.middle_bucket_split_fast_sl_order_id = old_sl_order_id
                     strategy.state.middle_bucket_split_fast_sl_protected = True
                     save_state_payload = (execution_state.current_position_id, copy.deepcopy(strategy.state),
                                           execution_state.cash_before_position)
+                logger.warning(
+                    "PROTECTIVE_SL_KEEP_EXISTING_STRONGER | target=middle_bucket_split_partial "
+                    "side=%s existing_sl=%.4f candidate_sl=%s chosen_sl=%.4f "
+                    "old_sl_order_id=%s reason=no_loosen",
+                    side,
+                    _mbf_existing_sl,
+                    _mbf_candidate_sl,
+                    _mbf_existing_sl,
+                    old_sl_order_id,
+                )
                 if hasattr(journal, "append"):
                     journal.append(
-                        "MIDDLE_BUCKET_FAST_PROTECTIVE_SL_PLACED",
+                        "PROTECTIVE_SL_KEEP_EXISTING_STRONGER",
                         {
                             "position_id": middle_bucket_split_fast_protection_payload.get("position_id"),
+                            "target": "middle_bucket_split_partial",
                             "side": side,
-                            "fast_sl_price": decision.sl_price,
-                            "sl_order_id": sl_order_id,
-                            "avg_entry_price": avg_entry,
-                            "current_price": current_price,
-                            "current_price_source": middle_bucket_split_fast_protection_payload.get(
-                                "current_price_source"),
-                            "reason": "middle_bucket_fast_filled_protect",
+                            "existing_sl": _mbf_existing_sl,
+                            "candidate_sl": _mbf_candidate_sl,
+                            "chosen_sl": _mbf_existing_sl,
+                            "old_sl_order_id": old_sl_order_id,
+                            "reason": "no_loosen",
                         },
                         position_id=middle_bucket_split_fast_protection_payload.get("position_id"),
                     )
-                logger.warning(
-                    "MIDDLE_BUCKET_FAST_PROTECTIVE_SL_PLACED | position_id=%s side=%s fast_sl_price=%.4f sl_order_id=%s avg_entry=%.4f current_price=%.4f",
-                    middle_bucket_split_fast_protection_payload.get("position_id"),
-                    side,
-                    decision.sl_price,
-                    sl_order_id,
-                    avg_entry,
-                    current_price,
-                )
             else:
-                # SL placement failed → delayed market exit (NO immediate exit)
-                halt_reason = "middle_bucket_fast_sl_failed_delayed_market_exit_armed"
-                position_id = middle_bucket_split_fast_protection_payload.get("position_id")
+                # Cancel old fast SL if exists (only when placing new SL)
+                if old_sl_order_id:
+                    await trader.cancel_middle_bucket_fast_protective_stop(old_sl_order_id)
+                net_contracts = middle_bucket_split_fast_protection_payload.get("net_contracts")
+                sl_ok, sl_order_id, sl_message = (False, None, "side_missing")
+                if net_contracts and float(net_contracts or 0) > 0:
+                    try:
+                        sl_ok, sl_order_id, sl_message = await trader.place_middle_bucket_fast_protective_stop_with_retries(
+                            side,
+                            net_contracts,
+                            float(decision.sl_price or fast_sl_price or 0.0),
+                            retry_count=int(os.getenv("NEAR_TP_PROTECTIVE_SL_RETRY_COUNT", "3")),
+                            retry_interval_seconds=float(os.getenv("NEAR_TP_PROTECTIVE_SL_RETRY_INTERVAL_SECONDS", "1")),
+                        )
+                    except Exception as exc:
+                        sl_ok = False
+                        sl_order_id = None
+                        sl_message = f"trader_exception: {type(exc).__name__}: {exc}"
+                if sl_ok:
+                    async with state_lock:
+                        strategy.state.middle_bucket_split_fast_sl_order_id = sl_order_id
+                        strategy.state.middle_bucket_split_fast_sl_price = float(decision.sl_price or fast_sl_price or 0.0)
+                        strategy.state.middle_bucket_split_fast_sl_protected = True
+                        save_state_payload = (execution_state.current_position_id, copy.deepcopy(strategy.state),
+                                              execution_state.cash_before_position)
+                    if hasattr(journal, "append"):
+                        journal.append(
+                            "MIDDLE_BUCKET_FAST_PROTECTIVE_SL_PLACED",
+                            {
+                                "position_id": middle_bucket_split_fast_protection_payload.get("position_id"),
+                                "side": side,
+                                "fast_sl_price": decision.sl_price,
+                                "sl_order_id": sl_order_id,
+                                "avg_entry_price": avg_entry,
+                                "current_price": current_price,
+                                "current_price_source": middle_bucket_split_fast_protection_payload.get(
+                                    "current_price_source"),
+                                "reason": middle_bucket_split_fast_protection_payload.get(
+                                    "reason", "middle_bucket_fast_filled_protect"),
+                            },
+                            position_id=middle_bucket_split_fast_protection_payload.get("position_id"),
+                        )
+                    logger.warning(
+                        "MIDDLE_BUCKET_FAST_PROTECTIVE_SL_PLACED | position_id=%s side=%s fast_sl_price=%.4f sl_order_id=%s avg_entry=%.4f current_price=%.4f",
+                        middle_bucket_split_fast_protection_payload.get("position_id"),
+                        side,
+                        decision.sl_price,
+                        sl_order_id,
+                        avg_entry,
+                        current_price,
+                    )
+                else:
+                    # SL placement failed → delayed market exit (NO immediate exit)
+                    _mbf_halt_reason = "middle_bucket_fast_sl_failed_delayed_market_exit_armed"
+                    _mbf_position_id = middle_bucket_split_fast_protection_payload.get("position_id")
 
-                async with state_lock:
-                    arm_payload = dme.arm_delayed_market_exit(
-                        strategy_state=strategy.state,
-                        execution_state=execution_state,
-                        position_id=position_id,
-                        side=side or "UNKNOWN",
-                        reason=halt_reason,
-                        context="middle_bucket_fast_sl_failed",
-                        source_event="MIDDLE_BUCKET_FAST_PROTECTIVE_SL_FAILED",
-                        now_ms=int(time.time() * 1000),
-                        error=sl_message,
+                    async with state_lock:
+                        arm_payload = dme.arm_delayed_market_exit(
+                            strategy_state=strategy.state,
+                            execution_state=execution_state,
+                            position_id=_mbf_position_id,
+                            side=side or "UNKNOWN",
+                            reason=_mbf_halt_reason,
+                            context="middle_bucket_fast_sl_failed",
+                            source_event="MIDDLE_BUCKET_FAST_PROTECTIVE_SL_FAILED",
+                            now_ms=int(time.time() * 1000),
+                            error=sl_message,
+                        )
+                        strategy.state.middle_bucket_split_fast_sl_invalid_action_taken = "DELAYED_MARKET_EXIT"
+                    if hasattr(journal, "append"):
+                        journal.append(
+                            "MIDDLE_BUCKET_FAST_PROTECTIVE_SL_FAILED",
+                            {
+                                "position_id": _mbf_position_id,
+                                "side": side,
+                                "fast_sl_price": decision.sl_price,
+                                "reason": sl_message,
+                                "trading_halted": True,
+                                "halt_reason": _mbf_halt_reason,
+                                "market_exit_attempted": False,
+                                "delayed_market_exit_armed": True,
+                                "manual_intervention_required": True,
+                                **arm_payload,
+                            },
+                            position_id=_mbf_position_id,
+                        )
+                    logger.error(
+                        "MIDDLE_BUCKET_FAST_PROTECTIVE_SL_FAILED | position_id=%s side=%s sl_price=%s sl_message=%s delayed_market_exit_armed=true halt_reason=%s",
+                        _mbf_position_id,
+                        side,
+                        decision.sl_price,
+                        sl_message,
+                        _mbf_halt_reason,
                     )
-                    strategy.state.middle_bucket_split_fast_sl_invalid_action_taken = "DELAYED_MARKET_EXIT"
-                if hasattr(journal, "append"):
-                    journal.append(
-                        "MIDDLE_BUCKET_FAST_PROTECTIVE_SL_FAILED",
-                        {
-                            "position_id": position_id,
-                            "side": side,
-                            "fast_sl_price": decision.sl_price,
-                            "reason": sl_message,
-                            "trading_halted": True,
-                            "halt_reason": halt_reason,
-                            "market_exit_attempted": False,
-                            "delayed_market_exit_armed": True,
-                            "manual_intervention_required": True,
-                            **arm_payload,
-                        },
-                        position_id=position_id,
+                    await _send_protective_orders_halt_alert(
+                        email_sender=email_sender,
+                        halt_alert_deduper=halt_alert_deduper,
+                        symbol=trader.symbol,
+                        position_id=_mbf_position_id,
+                        halt_reason=_mbf_halt_reason,
+                        side=side,
+                        manual_intervention_required=True,
+                        message=(
+                            f"Middle bucket fast protective SL failed: {sl_message}. "
+                            f"Delayed market exit armed (30 min countdown). NO immediate market exit."
+                        ),
+                        extra={"sl_price": str(decision.sl_price), "delayed_market_exit_armed": True},
                     )
-                logger.error(
-                    "MIDDLE_BUCKET_FAST_PROTECTIVE_SL_FAILED | position_id=%s side=%s sl_price=%s sl_message=%s delayed_market_exit_armed=true halt_reason=%s",
-                    position_id,
-                    side,
-                    decision.sl_price,
-                    sl_message,
-                    halt_reason,
-                )
-                await _send_protective_orders_halt_alert(
-                    email_sender=email_sender,
-                    halt_alert_deduper=halt_alert_deduper,
-                    symbol=trader.symbol,
-                    position_id=position_id,
-                    halt_reason=halt_reason,
-                    side=side,
-                    manual_intervention_required=True,
-                    message=(
-                        f"Middle bucket fast protective SL failed: {sl_message}. "
-                        f"Delayed market exit armed (30 min countdown). NO immediate market exit."
-                    ),
-                    extra={"sl_price": str(decision.sl_price), "delayed_market_exit_armed": True},
-                )
 
         elif decision.action == "MARKET_EXIT" and side is not None:
             # ── Delayed market exit (NO immediate exit) ──────────────────
