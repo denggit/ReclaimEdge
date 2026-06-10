@@ -117,6 +117,11 @@ class TestRuntimePathsForETH:
             "runtime/events/ETH-USDT-SWAP.events.jsonl"
         )
 
+    def test_worker_event_outbox_file_eth(self, paths: RuntimePaths) -> None:
+        assert paths.worker_event_outbox_file == Path(
+            "runtime/events/worker_events_ETH-USDT-SWAP.jsonl"
+        )
+
     def test_log_file(self, paths: RuntimePaths) -> None:
         assert paths.log_file == Path("runtime/logs/ETH-USDT-SWAP.log")
 
@@ -183,6 +188,7 @@ class TestRuntimePathsDoesNotCreateDirectories:
         _ = paths.journal_file
         _ = paths.heartbeat_file
         _ = paths.events_file
+        _ = paths.worker_event_outbox_file
         _ = paths.log_file
         _ = paths.rolling_loss_guard_state_file
         _ = paths.daily_reports_dir
@@ -224,6 +230,9 @@ class TestRuntimePathsAcceptsOtherSafeSymbols:
         # rolling_loss_guard_state_file is account-level, NOT BTC-specific
         assert paths.rolling_loss_guard_state_file == Path(
             "runtime/risk/rolling_loss_guard_state.json"
+        )
+        assert paths.worker_event_outbox_file == Path(
+            "runtime/events/worker_events_BTC-USDT-SWAP.jsonl"
         )
 
     def test_sol_usdt_swap(self) -> None:

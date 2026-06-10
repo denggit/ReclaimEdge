@@ -173,6 +173,14 @@ class RuntimePaths:
         return self.events_dir / f"{self.symbol_slug}.events.jsonl"
 
     @property
+    def worker_event_outbox_file(self) -> Path:
+        """Worker event outbox JSONL path (E02).
+
+        Example: ``runtime/events/worker_events_ETH-USDT-SWAP.jsonl``.
+        """
+        return self.events_dir / f"worker_events_{self.symbol_slug}.jsonl"
+
+    @property
     def log_file(self) -> Path:
         return self.logs_dir / f"{self.symbol_slug}.log"
 
