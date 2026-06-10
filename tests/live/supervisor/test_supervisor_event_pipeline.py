@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 
 from src.live.supervisor.alert_deduper import AlertDedupeDecision, AlertDeduper
+from src.live.supervisor.alert_policy import AlertPolicyDecision
 from src.live.supervisor.child_event_reader import (
     ChildEvent,
     ChildEventReadError,
@@ -88,19 +90,40 @@ class FakePublisher:
         return self.result
 
 
+class FakePolicy:
+    """A fake AlertPolicy for testing.
+
+    Records all ``should_publish`` calls for inspection.
+    """
+
+    def __init__(self, allowed: bool = True) -> None:
+        self.allowed = allowed
+        self.calls: list[dict] = []
+
+    def should_publish(self, **kwargs) -> AlertPolicyDecision:
+        self.calls.append(kwargs)
+        return AlertPolicyDecision(
+            allowed=self.allowed,
+            event_type=kwargs["event_type"],
+            severity=kwargs["severity"],
+            reason=kwargs.get("reason"),
+            policy_reason="fake_allowed" if self.allowed else "fake_suppressed",
+        )
+
+
 # ============================================================================
 # Helpers
 # ============================================================================
 
 
 def _make_child_event(
-    event_type: str = "WORKER_STARTED",
+    event_type: str = "WORKER_TRADING_HALTED",
     payload: dict | None = None,
     ts_ms: int = 1000,
     source_path: str = "runtime/events/x.jsonl",
 ) -> ChildEvent:
     if payload is None:
-        payload = {"symbol": "ETH-USDT-SWAP", "severity": "INFO", "data": {}}
+        payload = {"symbol": "ETH-USDT-SWAP", "severity": "CRITICAL", "data": {}}
     return ChildEvent(
         ts_ms=ts_ms,
         event_type=event_type,
@@ -135,8 +158,8 @@ class TestProcessesLifecycleEvent:
     @pytest.mark.asyncio
     async def test_publishes_alert(self) -> None:
         event = _make_child_event(
-            event_type="WORKER_STARTED",
-            payload={"symbol": "ETH-USDT-SWAP", "severity": "INFO", "data": {}},
+            event_type="WORKER_TRADING_HALTED",
+            payload={"symbol": "ETH-USDT-SWAP", "severity": "CRITICAL", "data": {}},
         )
         reader = FakeReader(
             ChildEventReadResult(events=[event], errors=[])
@@ -153,6 +176,7 @@ class TestProcessesLifecycleEvent:
 
         assert result.events_seen == 1
         assert result.alerts_built == 1
+        assert result.alerts_policy_suppressed == 0
         assert result.alerts_allowed == 1
         assert result.alerts_published == 1
         assert result.alerts_suppressed == 0
@@ -161,9 +185,9 @@ class TestProcessesLifecycleEvent:
 
         alert = publisher.alerts[0]
         assert "ReclaimEdge" in alert.subject
-        assert "INFO" in alert.subject
+        assert "CRITICAL" in alert.subject
         assert "ETH-USDT-SWAP" in alert.subject
-        assert "WORKER_STARTED" in alert.subject
+        assert "WORKER_TRADING_HALTED" in alert.subject
 
 
 # ============================================================================
@@ -175,8 +199,8 @@ class TestSuppressesDuplicate:
     @pytest.mark.asyncio
     async def test_deduper_disallows(self) -> None:
         event = _make_child_event(
-            event_type="WORKER_STARTED",
-            payload={"symbol": "ETH-USDT-SWAP", "severity": "INFO", "data": {}},
+            event_type="WORKER_TRADING_HALTED",
+            payload={"symbol": "ETH-USDT-SWAP", "severity": "CRITICAL", "data": {}},
         )
         reader = FakeReader(
             ChildEventReadResult(events=[event], errors=[])
@@ -191,6 +215,7 @@ class TestSuppressesDuplicate:
         )
         result = await pipeline.process_once(now_ms=1000)
 
+        assert result.alerts_policy_suppressed == 0
         assert result.alerts_suppressed == 1
         assert result.alerts_published == 0
         assert len(publisher.alerts) == 0
@@ -329,8 +354,8 @@ class TestSuppressedAlertNotCountedAllowed:
     async def test_suppressed_not_allowed(self) -> None:
         """When deduper disallows, alerts_allowed must stay 0."""
         event = _make_child_event(
-            event_type="WORKER_STARTED",
-            payload={"symbol": "ETH-USDT-SWAP", "severity": "INFO", "data": {}},
+            event_type="WORKER_TRADING_HALTED",
+            payload={"symbol": "ETH-USDT-SWAP", "severity": "CRITICAL", "data": {}},
         )
         reader = FakeReader(
             ChildEventReadResult(events=[event], errors=[])
@@ -361,8 +386,8 @@ class TestMaxAlertsPerCycle:
     async def test_limits_processing(self) -> None:
         events = [
             _make_child_event(
-                event_type=f"WORKER_STARTED",
-                payload={"symbol": f"SYM-{i}", "severity": "INFO", "data": {}},
+                event_type="WORKER_TRADING_HALTED",
+                payload={"symbol": f"SYM-{i}", "severity": "CRITICAL", "data": {}},
                 source_path=f"path/{i}.jsonl",
             )
             for i in range(5)
@@ -397,6 +422,7 @@ class TestSeverityFallback:
     @pytest.mark.asyncio
     async def test_missing_severity(self) -> None:
         event = _make_child_event(
+            event_type="WORKER_TRADING_HALTED",
             payload={"symbol": "ETH-USDT-SWAP", "data": {}},
         )
         reader = FakeReader(
@@ -418,7 +444,10 @@ class TestSeverityFallback:
     @pytest.mark.asyncio
     async def test_whitespace_severity(self) -> None:
         event = _make_child_event(
-            payload={"symbol": "ETH-USDT-SWAP", "severity": "   ", "data": {}},
+            event_type="WORKER_TRADING_HALTED",
+            payload={
+                "symbol": "ETH-USDT-SWAP", "severity": "   ", "data": {}
+            },
         )
         reader = FakeReader(
             ChildEventReadResult(events=[event], errors=[])
@@ -446,7 +475,10 @@ class TestSeverityNormalized:
     @pytest.mark.asyncio
     async def test_uppercase(self) -> None:
         event = _make_child_event(
-            payload={"symbol": "ETH-USDT-SWAP", "severity": "warning", "data": {}},
+            event_type="WORKER_TRADING_HALTED",
+            payload={
+                "symbol": "ETH-USDT-SWAP", "severity": "warning", "data": {}
+            },
         )
         reader = FakeReader(
             ChildEventReadResult(events=[event], errors=[])
@@ -474,7 +506,8 @@ class TestSymbolFallback:
     @pytest.mark.asyncio
     async def test_missing_symbol(self) -> None:
         event = _make_child_event(
-            payload={"severity": "INFO", "data": {}},
+            event_type="WORKER_TRADING_HALTED",
+            payload={"severity": "CRITICAL", "data": {}},
         )
         reader = FakeReader(
             ChildEventReadResult(events=[event], errors=[])
@@ -502,7 +535,8 @@ class TestReasonExtraction:
     @pytest.mark.asyncio
     async def test_top_level_reason(self) -> None:
         event = _make_child_event(
-            payload={"symbol": "ETH", "severity": "ERROR", "reason": "abc"},
+            event_type="WORKER_TRADING_HALTED",
+            payload={"symbol": "ETH", "severity": "CRITICAL", "reason": "abc"},
         )
         reader = FakeReader(
             ChildEventReadResult(events=[event], errors=[])
@@ -523,6 +557,7 @@ class TestReasonExtraction:
     @pytest.mark.asyncio
     async def test_halt_reason(self) -> None:
         event = _make_child_event(
+            event_type="WORKER_TRADING_HALTED",
             payload={"symbol": "ETH", "halt_reason": "rolling_loss"},
         )
         reader = FakeReader(
@@ -544,6 +579,7 @@ class TestReasonExtraction:
     @pytest.mark.asyncio
     async def test_error_type_reason(self) -> None:
         event = _make_child_event(
+            event_type="WORKER_TRADING_HALTED",
             payload={"symbol": "ETH", "error_type": "BAD_JSON"},
         )
         reader = FakeReader(
@@ -565,6 +601,7 @@ class TestReasonExtraction:
     @pytest.mark.asyncio
     async def test_data_reason(self) -> None:
         event = _make_child_event(
+            event_type="WORKER_TRADING_HALTED",
             payload={"symbol": "ETH", "data": {"reason": "nested"}},
         )
         reader = FakeReader(
@@ -593,9 +630,10 @@ class TestHtmlEscaping:
     @pytest.mark.asyncio
     async def test_escaping(self) -> None:
         event = _make_child_event(
+            event_type="WORKER_TRADING_HALTED",
             payload={
                 "symbol": "<ETH>",
-                "severity": "INFO",
+                "severity": "CRITICAL",
                 "reason": "<script>alert(1)</script>",
                 "data": {},
             },
@@ -657,6 +695,18 @@ class TestInvalidConstructorArgs:
                 reader=FakeReader(ChildEventReadResult()),
                 deduper=FakeDeduper(),
                 publisher=BadPublisher(),
+            )
+
+    def test_alert_policy_without_should_publish(self) -> None:
+        class BadPolicy:
+            pass
+
+        with pytest.raises(ValueError):
+            SupervisorEventPipeline(
+                reader=FakeReader(ChildEventReadResult()),
+                deduper=FakeDeduper(),
+                publisher=FakePublisher(),
+                alert_policy=BadPolicy(),
             )
 
     def test_max_alerts_per_cycle_zero(self) -> None:
@@ -751,7 +801,8 @@ class TestNoFullPayloadInBody:
     async def test_large_data_not_in_body(self) -> None:
         huge = "x" * 1000
         event = _make_child_event(
-            payload={"symbol": "ETH", "severity": "INFO", "data": {"huge": huge}},
+            event_type="WORKER_TRADING_HALTED",
+            payload={"symbol": "ETH", "severity": "CRITICAL", "data": {"huge": huge}},
         )
         reader = FakeReader(
             ChildEventReadResult(events=[event], errors=[])
@@ -771,6 +822,269 @@ class TestNoFullPayloadInBody:
 
 
 # ============================================================================
+# E05e: Policy-specific tests
+# ============================================================================
+
+
+class TestDefaultPolicySuppressesNormalLifecycle:
+    @pytest.mark.asyncio
+    async def test_worker_started_suppressed(self) -> None:
+        event = _make_child_event(
+            event_type="WORKER_STARTED",
+            payload={"symbol": "ETH-USDT-SWAP", "severity": "INFO", "data": {}},
+        )
+        reader = FakeReader(
+            ChildEventReadResult(events=[event], errors=[])
+        )
+        deduper = FakeDeduper(allowed=True)
+        publisher = FakePublisher(result=True)
+
+        pipeline = SupervisorEventPipeline(
+            reader=reader,
+            deduper=deduper,
+            publisher=publisher,
+        )
+        result = await pipeline.process_once(now_ms=1000)
+
+        assert result.events_seen == 1
+        assert result.alerts_built == 1
+        assert result.alerts_policy_suppressed == 1
+        assert result.alerts_allowed == 0
+        assert result.alerts_suppressed == 0
+        assert result.alerts_published == 0
+        assert result.publish_failures == 0
+        assert len(deduper.calls) == 0
+        assert len(publisher.alerts) == 0
+
+
+class TestDefaultPolicyAllowsCriticalEvent:
+    @pytest.mark.asyncio
+    async def test_critical_passes_policy(self) -> None:
+        event = _make_child_event(
+            event_type="WORKER_TRADING_HALTED",
+            payload={"symbol": "ETH-USDT-SWAP", "severity": "CRITICAL", "data": {}},
+        )
+        reader = FakeReader(
+            ChildEventReadResult(events=[event], errors=[])
+        )
+        deduper = FakeDeduper(allowed=True)
+        publisher = FakePublisher(result=True)
+
+        pipeline = SupervisorEventPipeline(
+            reader=reader,
+            deduper=deduper,
+            publisher=publisher,
+        )
+        result = await pipeline.process_once(now_ms=1000)
+
+        assert result.alerts_policy_suppressed == 0
+        assert len(deduper.calls) == 1
+        assert len(publisher.alerts) == 1
+
+
+class TestPolicySuppressesWithoutBuildingAlert:
+    @pytest.mark.asyncio
+    async def test_normal_lifecycle_not_built(self) -> None:
+        event = _make_child_event(
+            event_type="WORKER_STARTED",
+            payload={
+                "symbol": "ETH",
+                "severity": "INFO",
+                "reason": "NORMAL_EVENT_REASON_SHOULD_NOT_APPEAR",
+                "data": {"huge": "X" * 10000},
+            },
+        )
+        reader = FakeReader(
+            ChildEventReadResult(events=[event], errors=[])
+        )
+        deduper = FakeDeduper(allowed=True)
+        publisher = FakePublisher(result=True)
+
+        pipeline = SupervisorEventPipeline(
+            reader=reader,
+            deduper=deduper,
+            publisher=publisher,
+        )
+        result = await pipeline.process_once(now_ms=1000)
+
+        assert result.alerts_policy_suppressed == 1
+        assert len(publisher.alerts) == 0
+        assert len(deduper.calls) == 0
+
+
+class TestReadErrorAllowedByDefaultPolicy:
+    @pytest.mark.asyncio
+    async def test_read_error_passes_policy(self) -> None:
+        error = _make_read_error()
+        reader = FakeReader(
+            ChildEventReadResult(events=[], errors=[error])
+        )
+        deduper = FakeDeduper(allowed=True)
+        publisher = FakePublisher(result=True)
+
+        pipeline = SupervisorEventPipeline(
+            reader=reader,
+            deduper=deduper,
+            publisher=publisher,
+        )
+        result = await pipeline.process_once(now_ms=1000)
+
+        assert result.alerts_policy_suppressed == 0
+        assert result.alerts_allowed == 1
+        assert result.alerts_published == 1
+        assert publisher.alerts[0].event_type == "CHILD_EVENT_READ_FAILED"
+
+
+class TestFakePolicySuppressesCriticalEvent:
+    @pytest.mark.asyncio
+    async def test_fake_policy_suppresses(self) -> None:
+        event = _make_child_event(
+            event_type="WORKER_TRADING_HALTED",
+            payload={"symbol": "ETH-USDT-SWAP", "severity": "CRITICAL", "data": {}},
+        )
+        reader = FakeReader(
+            ChildEventReadResult(events=[event], errors=[])
+        )
+        deduper = FakeDeduper(allowed=True)
+        publisher = FakePublisher(result=True)
+        fake_policy = FakePolicy(allowed=False)
+
+        pipeline = SupervisorEventPipeline(
+            reader=reader,
+            deduper=deduper,
+            publisher=publisher,
+            alert_policy=fake_policy,
+        )
+        result = await pipeline.process_once(now_ms=1000)
+
+        assert result.alerts_policy_suppressed == 1
+        assert len(deduper.calls) == 0
+        assert len(publisher.alerts) == 0
+        assert len(fake_policy.calls) == 1
+
+
+class TestFakePolicyAllowsNormalEvent:
+    @pytest.mark.asyncio
+    async def test_fake_policy_allows(self) -> None:
+        event = _make_child_event(
+            event_type="WORKER_STARTED",
+            payload={"symbol": "ETH-USDT-SWAP", "severity": "INFO", "data": {}},
+        )
+        reader = FakeReader(
+            ChildEventReadResult(events=[event], errors=[])
+        )
+        deduper = FakeDeduper(allowed=True)
+        publisher = FakePublisher(result=True)
+        fake_policy = FakePolicy(allowed=True)
+
+        pipeline = SupervisorEventPipeline(
+            reader=reader,
+            deduper=deduper,
+            publisher=publisher,
+            alert_policy=fake_policy,
+        )
+        result = await pipeline.process_once(now_ms=1000)
+
+        assert result.alerts_policy_suppressed == 0
+        assert len(deduper.calls) == 1
+        assert len(publisher.alerts) == 1
+
+
+class TestCycleLimitDropsBeforePolicy:
+    @pytest.mark.asyncio
+    async def test_limit_before_policy(self) -> None:
+        events = [
+            _make_child_event(
+                event_type="WORKER_TRADING_HALTED",
+                payload={"symbol": f"SYM-{i}", "severity": "CRITICAL", "data": {}},
+                source_path=f"path/{i}.jsonl",
+            )
+            for i in range(5)
+        ]
+        reader = FakeReader(
+            ChildEventReadResult(events=events, errors=[])
+        )
+        deduper = FakeDeduper(allowed=True)
+        publisher = FakePublisher(result=True)
+        fake_policy = FakePolicy(allowed=True)
+
+        pipeline = SupervisorEventPipeline(
+            reader=reader,
+            deduper=deduper,
+            publisher=publisher,
+            alert_policy=fake_policy,
+            max_alerts_per_cycle=2,
+        )
+        result = await pipeline.process_once(now_ms=1000)
+
+        assert result.alerts_built == 5
+        assert result.dropped_due_to_cycle_limit == 3
+        # Only 2 alerts reached policy.
+        assert len(fake_policy.calls) == 2
+        assert len(deduper.calls) == 2
+        assert len(publisher.alerts) == 2
+
+
+class TestPolicySeesNormalizedFields:
+    @pytest.mark.asyncio
+    async def test_normalized_fields(self) -> None:
+        event = _make_child_event(
+            event_type="WORKER_TRADING_HALTED",
+            payload={
+                "symbol": "ETH",
+                "severity": " critical ",
+                "reason": " halt reason ",
+            },
+        )
+        reader = FakeReader(
+            ChildEventReadResult(events=[event], errors=[])
+        )
+        deduper = FakeDeduper(allowed=True)
+        publisher = FakePublisher(result=True)
+        fake_policy = FakePolicy(allowed=True)
+
+        pipeline = SupervisorEventPipeline(
+            reader=reader,
+            deduper=deduper,
+            publisher=publisher,
+            alert_policy=fake_policy,
+        )
+        await pipeline.process_once(now_ms=1000)
+
+        assert len(fake_policy.calls) == 1
+        call = fake_policy.calls[0]
+        assert call["event_type"] == "WORKER_TRADING_HALTED"
+        assert call["severity"] == "CRITICAL"
+        assert call["reason"] == "halt reason"
+
+
+class TestPolicySeesReadErrorMetadata:
+    @pytest.mark.asyncio
+    async def test_read_error_policy_fields(self) -> None:
+        error = _make_read_error(error_type="BAD_JSON")
+        reader = FakeReader(
+            ChildEventReadResult(events=[], errors=[error])
+        )
+        deduper = FakeDeduper(allowed=True)
+        publisher = FakePublisher(result=True)
+        fake_policy = FakePolicy(allowed=True)
+
+        pipeline = SupervisorEventPipeline(
+            reader=reader,
+            deduper=deduper,
+            publisher=publisher,
+            alert_policy=fake_policy,
+        )
+        await pipeline.process_once(now_ms=1000)
+
+        assert len(fake_policy.calls) == 1
+        call = fake_policy.calls[0]
+        assert call["event_type"] == "CHILD_EVENT_READ_FAILED"
+        assert call["severity"] == "ERROR"
+        assert call["reason"] == "BAD_JSON"
+
+
+# ============================================================================
 # E05a-b: cycle limit enforced before building alerts
 # ============================================================================
 
@@ -781,15 +1095,15 @@ class TestCycleLimitDoesNotBuildDroppedAlerts:
         """Dropped candidates must not have their content appear in any published alert."""
         events = [
             _make_child_event(
-                event_type="WORKER_STARTED",
-                payload={"symbol": "ETH", "severity": "INFO", "reason": "first"},
+                event_type="WORKER_TRADING_HALTED",
+                payload={"symbol": "ETH", "severity": "CRITICAL", "reason": "first"},
                 source_path="path/0.jsonl",
             ),
             _make_child_event(
-                event_type="WORKER_STOPPED",
+                event_type="WORKER_DRAIN_TIMEOUT",
                 payload={
                     "symbol": "ETH",
-                    "severity": "INFO",
+                    "severity": "ERROR",
                     "reason": "DROPPED_REASON_SHOULD_NOT_APPEAR",
                     "data": {"huge": "X" * 10000},
                 },
@@ -964,9 +1278,15 @@ class TestMixedEvents:
     @pytest.mark.asyncio
     async def test_filters_non_lifecycle(self) -> None:
         events = [
-            _make_child_event(event_type="WORKER_STARTED"),
+            _make_child_event(
+                event_type="WORKER_TRADING_HALTED",
+                payload={"symbol": "ETH", "severity": "CRITICAL", "data": {}},
+            ),
             _make_child_event(event_type="ORDER_FILLED"),
-            _make_child_event(event_type="WORKER_STOPPED"),
+            _make_child_event(
+                event_type="WORKER_DRAIN_TIMEOUT",
+                payload={"symbol": "ETH", "severity": "ERROR", "data": {}},
+            ),
             _make_child_event(event_type="TRADE_EXECUTED"),
         ]
         reader = FakeReader(
@@ -983,24 +1303,25 @@ class TestMixedEvents:
         result = await pipeline.process_once(now_ms=1000)
 
         assert result.events_seen == 4
-        assert result.alerts_built == 2  # only WORKER_STARTED and WORKER_STOPPED
+        # Only WORKER_TRADING_HALTED and WORKER_DRAIN_TIMEOUT are lifecycle
+        assert result.alerts_built == 2
         assert result.alerts_published == 2
         assert len(publisher.alerts) == 2
 
         published_types = {a.event_type for a in publisher.alerts}
-        assert published_types == {"WORKER_STARTED", "WORKER_STOPPED"}
+        assert published_types == {"WORKER_TRADING_HALTED", "WORKER_DRAIN_TIMEOUT"}
         assert "ORDER_FILLED" not in published_types
         assert "TRADE_EXECUTED" not in published_types
 
 
 # ============================================================================
-# 24. All lifecycle event types produce alerts
+# 24. All lifecycle event types are attempted — policy splits critical vs suppressed
 # ============================================================================
 
 
 class TestAllLifecycleEventTypes:
     @pytest.mark.asyncio
-    async def test_all_lifecycle_types(self) -> None:
+    async def test_policy_splits_critical_and_suppressed(self) -> None:
         events = [
             _make_child_event(
                 event_type=et,
@@ -1021,10 +1342,24 @@ class TestAllLifecycleEventTypes:
         )
         result = await pipeline.process_once(now_ms=1000)
 
+        # All 10 lifecycle types are candidates.
         assert result.alerts_built == len(LIFECYCLE_EVENT_TYPES)
-        assert result.alerts_published == len(LIFECYCLE_EVENT_TYPES)
+
+        # Policy suppresses normal lifecycle, allows critical ones.
+        # Critical: STARTUP_RECOVERY_FAILED, TRADING_HALTED, HEARTBEAT_WRITE_FAILED,
+        #           DRAIN_TIMEOUT = 4
+        # Suppressed: STARTED, STOPPING, STOPPED, STARTUP_RECOVERY_COMPLETED,
+        #            DRAIN_STARTED, DRAIN_COMPLETED = 6
+        assert result.alerts_policy_suppressed == 6
+        assert result.alerts_published == 4
+
         published_types = {a.event_type for a in publisher.alerts}
-        assert published_types == LIFECYCLE_EVENT_TYPES
+        assert "WORKER_STARTED" not in published_types
+        assert "WORKER_STOPPING" not in published_types
+        assert "WORKER_STARTUP_RECOVERY_COMPLETED" not in published_types
+        assert "WORKER_DRAIN_STARTED" not in published_types
+        assert "WORKER_TRADING_HALTED" in published_types
+        assert "WORKER_DRAIN_TIMEOUT" in published_types
 
 
 # ============================================================================
@@ -1036,8 +1371,8 @@ class TestSupervisorAlertFrozen:
     def test_frozen(self) -> None:
         alert = SupervisorAlert(
             symbol="TEST",
-            event_type="WORKER_STARTED",
-            severity="INFO",
+            event_type="WORKER_TRADING_HALTED",
+            severity="CRITICAL",
             reason=None,
             subject="test subject",
             body="<html></html>",
@@ -1057,6 +1392,7 @@ class TestPipelineResultFrozen:
             events_seen=0,
             read_errors_seen=0,
             alerts_built=0,
+            alerts_policy_suppressed=0,
             alerts_allowed=0,
             alerts_suppressed=0,
             alerts_published=0,

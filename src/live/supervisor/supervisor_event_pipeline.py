@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from src.live.supervisor.alert_deduper import AlertDeduper
+from src.live.supervisor.alert_policy import AlertPolicy
 from src.live.supervisor.child_event_reader import (
     ChildEvent,
     ChildEventReadError,
@@ -65,6 +66,7 @@ class SupervisorEventPipelineResult:
     events_seen: int
     read_errors_seen: int
     alerts_built: int
+    alerts_policy_suppressed: int
     alerts_allowed: int
     alerts_suppressed: int
     alerts_published: int
@@ -98,7 +100,11 @@ class SupervisorEventPipeline:
 
     Orchestrates the supervisor-side event processing chain::
 
-        ChildEventReader → SupervisorEventPipeline → AlertDeduper → Publisher
+        ChildEventReader
+        → SupervisorEventPipeline
+            → AlertPolicy
+            → AlertDeduper
+            → Publisher
 
     This is a **supervisor control-plane** tool.  It must never be used
     inside the tick / trading path.
@@ -111,6 +117,10 @@ class SupervisorEventPipeline:
         Cooldown-based deduplication for alerts.
     publisher : SupervisorAlertPublisher
         Alert publisher (e.g. email adapter).  Test doubles inject a fake.
+    alert_policy : AlertPolicy | None
+        Policy that decides which alerts are critical enough to publish.
+        ``None`` defaults to ``AlertPolicy()``.  Any object with a
+        ``should_publish`` method is accepted (duck-typing for testing).
     max_alerts_per_cycle : int
         Maximum number of alerts to process per call (default 100).
     """
@@ -121,6 +131,7 @@ class SupervisorEventPipeline:
         reader: ChildEventReader,
         deduper: AlertDeduper,
         publisher: SupervisorAlertPublisher,
+        alert_policy: AlertPolicy | None = None,
         max_alerts_per_cycle: int = 100,
     ) -> None:
         # -- reader -----------------------------------------------------------
@@ -144,6 +155,15 @@ class SupervisorEventPipeline:
                 f"got {type(publisher).__name__}"
             )
 
+        # -- alert_policy -----------------------------------------------------
+        if alert_policy is None:
+            alert_policy = AlertPolicy()
+        elif not hasattr(alert_policy, "should_publish"):
+            raise ValueError(
+                f"alert_policy must have 'should_publish' attribute, "
+                f"got {type(alert_policy).__name__}"
+            )
+
         # -- max_alerts_per_cycle ---------------------------------------------
         if type(max_alerts_per_cycle) is not int:
             raise ValueError(
@@ -158,6 +178,7 @@ class SupervisorEventPipeline:
         self._reader = reader
         self._deduper = deduper
         self._publisher = publisher
+        self._alert_policy = alert_policy
         self._max_alerts_per_cycle = max_alerts_per_cycle
 
     # ------------------------------------------------------------------
@@ -209,6 +230,7 @@ class SupervisorEventPipeline:
 
         # -- counters ---------------------------------------------------------
         alerts_built = 0
+        alerts_policy_suppressed = 0
         alerts_allowed = 0
         alerts_suppressed = 0
         alerts_published = 0
@@ -225,6 +247,19 @@ class SupervisorEventPipeline:
                 dropped_due_to_cycle_limit += 1
                 continue
             processed += 1
+
+            # -- policy check (before building alert) -------------------------
+            severity = _extract_severity(event.payload)
+            reason = _extract_reason(event.payload)
+            policy_decision = self._alert_policy.should_publish(
+                event_type=event.event_type,
+                severity=severity,
+                reason=reason,
+            )
+            if not policy_decision.allowed:
+                alerts_policy_suppressed += 1
+                continue
+
             alert = _build_alert_from_child_event(event)
             allowed, suppressed, failed = await self._dedupe_and_publish_alert(
                 alert, now_ms
@@ -246,6 +281,17 @@ class SupervisorEventPipeline:
                 dropped_due_to_cycle_limit += 1
                 continue
             processed += 1
+
+            # -- policy check (before building alert) -------------------------
+            policy_decision = self._alert_policy.should_publish(
+                event_type=READ_ERROR_EVENT_TYPE,
+                severity="ERROR",
+                reason=error.error_type,
+            )
+            if not policy_decision.allowed:
+                alerts_policy_suppressed += 1
+                continue
+
             alert = _build_alert_from_read_error(error)
             allowed, suppressed, failed = await self._dedupe_and_publish_alert(
                 alert, now_ms
@@ -264,6 +310,7 @@ class SupervisorEventPipeline:
             events_seen=events_seen,
             read_errors_seen=read_errors_seen,
             alerts_built=alerts_built,
+            alerts_policy_suppressed=alerts_policy_suppressed,
             alerts_allowed=alerts_allowed,
             alerts_suppressed=alerts_suppressed,
             alerts_published=alerts_published,
