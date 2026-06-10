@@ -35,6 +35,12 @@ from src.live.supervisor.supervisor_event_pipeline import (
     SupervisorEventPipeline,
     SupervisorEventPipelineResult,
 )
+from src.live.supervisor.alert_policy import (
+    DEFAULT_CRITICAL_RUNTIME_EVENT_TYPES,
+    DEFAULT_SUPPRESSED_RUNTIME_EVENT_TYPES,
+    AlertPolicy,
+    AlertPolicyDecision,
+)
 
 __all__ = [
     "ReclaimSupervisor",
@@ -62,4 +68,8 @@ __all__ = [
     "SupervisorAlertPublisher",
     "SupervisorEventPipeline",
     "SupervisorEventPipelineResult",
+    "AlertPolicy",
+    "AlertPolicyDecision",
+    "DEFAULT_CRITICAL_RUNTIME_EVENT_TYPES",
+    "DEFAULT_SUPPRESSED_RUNTIME_EVENT_TYPES",
 ]
