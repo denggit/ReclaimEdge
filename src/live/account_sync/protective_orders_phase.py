@@ -171,6 +171,7 @@ async def run_account_sync_protective_orders_phase(
         sl_message = "protective_sl_price_missing"
         side = three_stage_post_tp1_sl_payload.get("side")
         old_sl_order_id = three_stage_post_tp1_sl_payload.get("old_sl_order_id")
+        kept_existing_sl = False
 
         # ── No-loosen check: only replace existing SL if candidate is stronger ──
         # Priority for existing_sl: payload (set by tp_progress_phase before
@@ -200,6 +201,7 @@ async def run_account_sync_protective_orders_phase(
 
         if not _should_replace and existing_sl_price is not None and existing_sl_order_id:
             # Existing SL is stronger or equal — keep it, skip new placement
+            kept_existing_sl = True
             async with state_lock:
                 strategy.state.three_stage_post_tp1_protective_sl_price = existing_sl_price
                 strategy.state.three_stage_post_tp1_protective_sl_order_id = existing_sl_order_id
@@ -245,166 +247,167 @@ async def run_account_sync_protective_orders_phase(
                 sl_ok = False
                 sl_order_id = None
                 sl_message = f"trader_exception: {type(exc).__name__}: {exc}"
-        if sl_ok:
-            old_sl_order_id = three_stage_post_tp1_sl_payload.get("old_sl_order_id")
-            if old_sl_order_id and old_sl_order_id != sl_order_id:
-                await trader.cancel_three_stage_post_tp1_protective_stop(old_sl_order_id)
-            # Also cancel any stale middle bucket fast SL (from split slow fill)
-            fast_sl_order_id = getattr(strategy.state, "middle_bucket_split_fast_sl_order_id", None)
-            if fast_sl_order_id and fast_sl_order_id != sl_order_id:
-                await trader.cancel_middle_bucket_fast_protective_stop(fast_sl_order_id)
-            async with state_lock:
-                strategy.state.three_stage_post_tp1_protective_sl_order_id = sl_order_id
-                strategy.state.three_stage_post_tp1_protective_sl_price = float(sl_price)
-                strategy.state.three_stage_post_tp1_protected = True
-                # Clear stale fast SL state after slow fill (replaced by post-TP1 SL)
-                strategy.state.middle_bucket_split_fast_sl_order_id = None
-                strategy.state.middle_bucket_split_fast_sl_protected = False
-                save_state_payload = (execution_state.current_position_id, copy.deepcopy(strategy.state),
-                                      execution_state.cash_before_position)
-            if hasattr(journal, "append"):
-                journal.append(
-                    "THREE_STAGE_TP1_PROTECTIVE_SL_PLACED",
-                    {
-                        "position_id": three_stage_post_tp1_sl_payload.get("position_id"),
-                        "side": three_stage_post_tp1_sl_payload.get("side"),
-                        "contracts": str(three_stage_post_tp1_sl_payload.get("contracts")),
-                        "core_contracts": str(three_stage_post_tp1_sl_payload.get("core_contracts")),
-                        "net_contracts": str(three_stage_post_tp1_sl_payload.get("net_contracts")),
-                        "sl_contracts": str(three_stage_post_tp1_sl_payload.get("contracts")),
-                        "protective_sl_price": sl_price,
-                        "protective_sl_order_id": sl_order_id,
-                        "current_price": three_stage_post_tp1_sl_payload.get("current_price"),
-                        "current_price_source": three_stage_post_tp1_sl_payload.get("current_price_source"),
-                        "avg_entry_price": getattr(strategy.state, "avg_entry_price", None),
-                        "tp1_price": getattr(strategy.state, "three_stage_tp1_price", None),
-                        "tp1_ratio": getattr(strategy.state, "three_stage_tp1_ratio", 0.0),
-                        "tp2_price": getattr(strategy.state, "three_stage_tp2_price", None),
-                        "tp2_ratio": getattr(strategy.state, "three_stage_tp2_ratio", 0.0),
-                        "runner_ratio": getattr(strategy.state, "three_stage_runner_ratio", 0.0),
-                        "reason": "three_stage_tp1_filled",
-                        "retry_config": "NEAR_TP_PROTECTIVE_SL_RETRY_COUNT/NEAR_TP_PROTECTIVE_SL_RETRY_INTERVAL_SECONDS",
-                    },
-                    position_id=three_stage_post_tp1_sl_payload.get("position_id"),
-                )
-            logger.warning(
-                "THREE_STAGE_TP1_PROTECTIVE_SL_PLACED | position_id=%s side=%s core_contracts=%s net_contracts=%s sl_contracts=%s protective_sl_price=%s protective_sl_order_id=%s retry_config=near_tp",
-                three_stage_post_tp1_sl_payload.get("position_id"),
-                three_stage_post_tp1_sl_payload.get("side"),
-                three_stage_post_tp1_sl_payload.get("core_contracts"),
-                three_stage_post_tp1_sl_payload.get("net_contracts"),
-                three_stage_post_tp1_sl_payload.get("contracts"),
-                sl_price,
-                sl_order_id,
-            )
-        else:
-            # ── candidate None but existing SL valid → keep existing, skip DME ──
-            if candidate_sl_price is None and existing_sl_price is not None and existing_sl_order_id:
+        if not kept_existing_sl:
+            if sl_ok:
+                old_sl_order_id = three_stage_post_tp1_sl_payload.get("old_sl_order_id")
+                if old_sl_order_id and old_sl_order_id != sl_order_id:
+                    await trader.cancel_three_stage_post_tp1_protective_stop(old_sl_order_id)
+                # Also cancel any stale middle bucket fast SL (from split slow fill)
+                fast_sl_order_id = getattr(strategy.state, "middle_bucket_split_fast_sl_order_id", None)
+                if fast_sl_order_id and fast_sl_order_id != sl_order_id:
+                    await trader.cancel_middle_bucket_fast_protective_stop(fast_sl_order_id)
                 async with state_lock:
-                    strategy.state.three_stage_post_tp1_protective_sl_price = existing_sl_price
-                    strategy.state.three_stage_post_tp1_protective_sl_order_id = existing_sl_order_id
+                    strategy.state.three_stage_post_tp1_protective_sl_order_id = sl_order_id
+                    strategy.state.three_stage_post_tp1_protective_sl_price = float(sl_price)
                     strategy.state.three_stage_post_tp1_protected = True
+                    # Clear stale fast SL state after slow fill (replaced by post-TP1 SL)
+                    strategy.state.middle_bucket_split_fast_sl_order_id = None
+                    strategy.state.middle_bucket_split_fast_sl_protected = False
                     save_state_payload = (execution_state.current_position_id, copy.deepcopy(strategy.state),
                                           execution_state.cash_before_position)
-                logger.warning(
-                    "PROTECTIVE_SL_KEEP_EXISTING_STRONGER | target=three_stage_post_tp1 "
-                    "side=%s existing_sl=%.4f candidate_sl=None chosen_sl=%.4f "
-                    "old_sl_order_id=%s reason=candidate_missing_keep_existing",
-                    side,
-                    existing_sl_price,
-                    existing_sl_price,
-                    existing_sl_order_id,
-                )
                 if hasattr(journal, "append"):
                     journal.append(
-                        "PROTECTIVE_SL_KEEP_EXISTING_STRONGER",
+                        "THREE_STAGE_TP1_PROTECTIVE_SL_PLACED",
                         {
                             "position_id": three_stage_post_tp1_sl_payload.get("position_id"),
-                            "target": "three_stage_post_tp1",
-                            "side": side,
-                            "existing_sl": existing_sl_price,
-                            "candidate_sl": None,
-                            "chosen_sl": existing_sl_price,
-                            "old_sl_order_id": existing_sl_order_id,
-                            "reason": "candidate_missing_keep_existing",
+                            "side": three_stage_post_tp1_sl_payload.get("side"),
+                            "contracts": str(three_stage_post_tp1_sl_payload.get("contracts")),
+                            "core_contracts": str(three_stage_post_tp1_sl_payload.get("core_contracts")),
+                            "net_contracts": str(three_stage_post_tp1_sl_payload.get("net_contracts")),
+                            "sl_contracts": str(three_stage_post_tp1_sl_payload.get("contracts")),
+                            "protective_sl_price": sl_price,
+                            "protective_sl_order_id": sl_order_id,
+                            "current_price": three_stage_post_tp1_sl_payload.get("current_price"),
+                            "current_price_source": three_stage_post_tp1_sl_payload.get("current_price_source"),
+                            "avg_entry_price": getattr(strategy.state, "avg_entry_price", None),
+                            "tp1_price": getattr(strategy.state, "three_stage_tp1_price", None),
+                            "tp1_ratio": getattr(strategy.state, "three_stage_tp1_ratio", 0.0),
+                            "tp2_price": getattr(strategy.state, "three_stage_tp2_price", None),
+                            "tp2_ratio": getattr(strategy.state, "three_stage_tp2_ratio", 0.0),
+                            "runner_ratio": getattr(strategy.state, "three_stage_runner_ratio", 0.0),
+                            "reason": "three_stage_tp1_filled",
+                            "retry_config": "NEAR_TP_PROTECTIVE_SL_RETRY_COUNT/NEAR_TP_PROTECTIVE_SL_RETRY_INTERVAL_SECONDS",
                         },
                         position_id=three_stage_post_tp1_sl_payload.get("position_id"),
                     )
-            else:
-                # ── Risk control: protective SL failed → delayed market exit (NO immediate exit) ──
-                _dme_side = three_stage_post_tp1_sl_payload.get("side")
-                _dme_core_contracts = three_stage_post_tp1_sl_payload.get("core_contracts")
-                _dme_net_contracts = three_stage_post_tp1_sl_payload.get("net_contracts")
-                _dme_sl_contracts = three_stage_post_tp1_sl_payload.get("contracts")
-                _dme_halt_reason = "three_stage_post_tp1_sl_failed_delayed_market_exit_armed"
-                _dme_position_id = three_stage_post_tp1_sl_payload.get("position_id")
-
-                async with state_lock:
-                    arm_payload = dme.arm_delayed_market_exit(
-                        strategy_state=strategy.state,
-                        execution_state=execution_state,
-                        position_id=_dme_position_id,
-                        side=_dme_side or "UNKNOWN",
-                        reason=_dme_halt_reason,
-                        context="three_stage_post_tp1_protective_sl_failed",
-                        source_event="THREE_STAGE_POST_TP1_PROTECTIVE_SL_FAILED",
-                        now_ms=int(time.time() * 1000),
-                        error=sl_message,
-                    )
-
-                state_store.save(
-                    LiveStateStore.from_strategy_state(
-                        position_id=execution_state.current_position_id,
-                        symbol=trader.symbol,
-                        strategy_state=strategy.state,
-                        cash_before_position=execution_state.cash_before_position,
-                    )
-                )
-                if hasattr(journal, "append"):
-                    journal.append(
-                        "THREE_STAGE_POST_TP1_PROTECTIVE_SL_FAILED",
-                        {
-                            "position_id": _dme_position_id,
-                            "side": _dme_side,
-                            "protective_sl_price": sl_price,
-                            "reason": sl_message,
-                            "trading_halted": True,
-                            "halt_reason": _dme_halt_reason,
-                            "retry_config": "NEAR_TP_PROTECTIVE_SL_RETRY_COUNT/NEAR_TP_PROTECTIVE_SL_RETRY_INTERVAL_SECONDS",
-                            "market_exit_attempted": False,
-                            "delayed_market_exit_armed": True,
-                            "core_contracts": str(_dme_core_contracts) if _dme_core_contracts is not None else None,
-                            "net_contracts": str(_dme_net_contracts) if _dme_net_contracts is not None else None,
-                            "sl_contracts": str(_dme_sl_contracts) if _dme_sl_contracts is not None else None,
-                            "manual_intervention_required": True,
-                            **arm_payload,
-                        },
-                        position_id=_dme_position_id,
-                    )
-                logger.error(
-                    "THREE_STAGE_POST_TP1_PROTECTIVE_SL_FAILED | position_id=%s side=%s sl_price=%s sl_message=%s delayed_market_exit_armed=true core_contracts=%s net_contracts=%s sl_contracts=%s manual_intervention_required=true",
-                    _dme_position_id,
-                    _dme_side,
+                logger.warning(
+                    "THREE_STAGE_TP1_PROTECTIVE_SL_PLACED | position_id=%s side=%s core_contracts=%s net_contracts=%s sl_contracts=%s protective_sl_price=%s protective_sl_order_id=%s retry_config=near_tp",
+                    three_stage_post_tp1_sl_payload.get("position_id"),
+                    three_stage_post_tp1_sl_payload.get("side"),
+                    three_stage_post_tp1_sl_payload.get("core_contracts"),
+                    three_stage_post_tp1_sl_payload.get("net_contracts"),
+                    three_stage_post_tp1_sl_payload.get("contracts"),
                     sl_price,
-                    sl_message,
-                    _dme_core_contracts,
-                    _dme_net_contracts,
-                    _dme_sl_contracts,
+                    sl_order_id,
                 )
-                await _send_protective_orders_halt_alert(
-                    email_sender=email_sender,
-                    halt_alert_deduper=halt_alert_deduper,
-                    symbol=trader.symbol,
-                    position_id=_dme_position_id,
-                    halt_reason=_dme_halt_reason,
-                    side=_dme_side,
-                    manual_intervention_required=True,
-                    message=(
-                        f"Three-stage post-TP1 protective SL failed: {sl_message}. "
-                        f"Delayed market exit armed (30 min countdown). NO immediate market exit."
-                    ),
-                    extra={"sl_price": str(sl_price), "delayed_market_exit_armed": True},
-                )
+            else:
+                # ── candidate None but existing SL valid → keep existing, skip DME ──
+                if candidate_sl_price is None and existing_sl_price is not None and existing_sl_order_id:
+                    async with state_lock:
+                        strategy.state.three_stage_post_tp1_protective_sl_price = existing_sl_price
+                        strategy.state.three_stage_post_tp1_protective_sl_order_id = existing_sl_order_id
+                        strategy.state.three_stage_post_tp1_protected = True
+                        save_state_payload = (execution_state.current_position_id, copy.deepcopy(strategy.state),
+                                              execution_state.cash_before_position)
+                    logger.warning(
+                        "PROTECTIVE_SL_KEEP_EXISTING_STRONGER | target=three_stage_post_tp1 "
+                        "side=%s existing_sl=%.4f candidate_sl=None chosen_sl=%.4f "
+                        "old_sl_order_id=%s reason=candidate_missing_keep_existing",
+                        side,
+                        existing_sl_price,
+                        existing_sl_price,
+                        existing_sl_order_id,
+                    )
+                    if hasattr(journal, "append"):
+                        journal.append(
+                            "PROTECTIVE_SL_KEEP_EXISTING_STRONGER",
+                            {
+                                "position_id": three_stage_post_tp1_sl_payload.get("position_id"),
+                                "target": "three_stage_post_tp1",
+                                "side": side,
+                                "existing_sl": existing_sl_price,
+                                "candidate_sl": None,
+                                "chosen_sl": existing_sl_price,
+                                "old_sl_order_id": existing_sl_order_id,
+                                "reason": "candidate_missing_keep_existing",
+                            },
+                            position_id=three_stage_post_tp1_sl_payload.get("position_id"),
+                        )
+                else:
+                    # ── Risk control: protective SL failed → delayed market exit (NO immediate exit) ──
+                    _dme_side = three_stage_post_tp1_sl_payload.get("side")
+                    _dme_core_contracts = three_stage_post_tp1_sl_payload.get("core_contracts")
+                    _dme_net_contracts = three_stage_post_tp1_sl_payload.get("net_contracts")
+                    _dme_sl_contracts = three_stage_post_tp1_sl_payload.get("contracts")
+                    _dme_halt_reason = "three_stage_post_tp1_sl_failed_delayed_market_exit_armed"
+                    _dme_position_id = three_stage_post_tp1_sl_payload.get("position_id")
+
+                    async with state_lock:
+                        arm_payload = dme.arm_delayed_market_exit(
+                            strategy_state=strategy.state,
+                            execution_state=execution_state,
+                            position_id=_dme_position_id,
+                            side=_dme_side or "UNKNOWN",
+                            reason=_dme_halt_reason,
+                            context="three_stage_post_tp1_protective_sl_failed",
+                            source_event="THREE_STAGE_POST_TP1_PROTECTIVE_SL_FAILED",
+                            now_ms=int(time.time() * 1000),
+                            error=sl_message,
+                        )
+
+                    state_store.save(
+                        LiveStateStore.from_strategy_state(
+                            position_id=execution_state.current_position_id,
+                            symbol=trader.symbol,
+                            strategy_state=strategy.state,
+                            cash_before_position=execution_state.cash_before_position,
+                        )
+                    )
+                    if hasattr(journal, "append"):
+                        journal.append(
+                            "THREE_STAGE_POST_TP1_PROTECTIVE_SL_FAILED",
+                            {
+                                "position_id": _dme_position_id,
+                                "side": _dme_side,
+                                "protective_sl_price": sl_price,
+                                "reason": sl_message,
+                                "trading_halted": True,
+                                "halt_reason": _dme_halt_reason,
+                                "retry_config": "NEAR_TP_PROTECTIVE_SL_RETRY_COUNT/NEAR_TP_PROTECTIVE_SL_RETRY_INTERVAL_SECONDS",
+                                "market_exit_attempted": False,
+                                "delayed_market_exit_armed": True,
+                                "core_contracts": str(_dme_core_contracts) if _dme_core_contracts is not None else None,
+                                "net_contracts": str(_dme_net_contracts) if _dme_net_contracts is not None else None,
+                                "sl_contracts": str(_dme_sl_contracts) if _dme_sl_contracts is not None else None,
+                                "manual_intervention_required": True,
+                                **arm_payload,
+                            },
+                            position_id=_dme_position_id,
+                        )
+                    logger.error(
+                        "THREE_STAGE_POST_TP1_PROTECTIVE_SL_FAILED | position_id=%s side=%s sl_price=%s sl_message=%s delayed_market_exit_armed=true core_contracts=%s net_contracts=%s sl_contracts=%s manual_intervention_required=true",
+                        _dme_position_id,
+                        _dme_side,
+                        sl_price,
+                        sl_message,
+                        _dme_core_contracts,
+                        _dme_net_contracts,
+                        _dme_sl_contracts,
+                    )
+                    await _send_protective_orders_halt_alert(
+                        email_sender=email_sender,
+                        halt_alert_deduper=halt_alert_deduper,
+                        symbol=trader.symbol,
+                        position_id=_dme_position_id,
+                        halt_reason=_dme_halt_reason,
+                        side=_dme_side,
+                        manual_intervention_required=True,
+                        message=(
+                            f"Three-stage post-TP1 protective SL failed: {sl_message}. "
+                            f"Delayed market exit armed (30 min countdown). NO immediate market exit."
+                        ),
+                        extra={"sl_price": str(sl_price), "delayed_market_exit_armed": True},
+                    )
     middle_runner_activation_recorded = False
     if middle_runner_sl_payload is not None:
         sl_price = middle_runner_sl_payload.get("protective_sl_price")
@@ -413,6 +416,7 @@ async def run_account_sync_protective_orders_phase(
         sl_message = "protective_sl_price_missing"
         mr_side = middle_runner_sl_payload.get("side")
         mr_old_sl_order_id = middle_runner_sl_payload.get("old_sl_order_id")
+        kept_existing_sl_mr = False
 
         # ── No-loosen check: only replace existing SL if candidate is stronger ──
         # Priority for existing_sl: payload → state fallback.
@@ -441,6 +445,7 @@ async def run_account_sync_protective_orders_phase(
 
         if not _mr_should_replace and mr_existing_sl_price is not None and mr_existing_sl_order_id:
             # Existing SL is stronger or equal — keep it, skip new placement
+            kept_existing_sl_mr = True
             async with state_lock:
                 strategy.state.middle_runner_protective_sl_price = mr_existing_sl_price
                 strategy.state.middle_runner_protective_sl_order_id = mr_existing_sl_order_id
@@ -487,7 +492,7 @@ async def run_account_sync_protective_orders_phase(
                 sl_ok = False
                 sl_order_id = None
                 sl_message = f"trader_exception: {type(exc).__name__}: {exc}"
-        if sl_ok:
+        if sl_ok and not kept_existing_sl_mr:
             old_sl_order_id = middle_runner_sl_payload.get("old_sl_order_id")
             if old_sl_order_id and old_sl_order_id != sl_order_id:
                 await trader.cancel_middle_runner_protective_stop(old_sl_order_id)
@@ -540,7 +545,7 @@ async def run_account_sync_protective_orders_phase(
                 sl_price,
                 sl_order_id,
             )
-        else:
+        elif not kept_existing_sl_mr:
             # ── candidate None but existing SL valid → keep existing, skip DME ──
             if mr_candidate_sl_price is None and mr_existing_sl_price is not None and mr_existing_sl_order_id:
                 async with state_lock:

@@ -544,6 +544,39 @@ class TpUpdateCoordinator:
         tp_mode: TpMode = "UPPER" if s.state.side == "LONG" else "LOWER"
 
         # ── Middle Bucket Split for Middle Runner ─────────────────────
+        split_active_mr = bool(getattr(s.state, "middle_bucket_split_active", False))
+        fast_consumed_mr = bool(getattr(s.state, "middle_bucket_split_fast_consumed", False))
+        slow_consumed_mr = bool(getattr(s.state, "middle_bucket_split_slow_consumed", False))
+        partial_split_in_progress_mr = split_active_mr and (fast_consumed_mr != slow_consumed_mr)
+
+        if partial_split_in_progress_mr:
+            # Partial split already has one leg filled — do NOT run fresh
+            # split selection.  Only update final TP and let order_specs
+            # generate the unconsumed leg + runner/final.
+            s.state.middle_runner_final_tp_price = tp_price
+            partial_tp_price = s.state.middle_bucket_split_effective_price
+            partial_tp_ratio = s.state.middle_runner_first_close_ratio or min(
+                max(s.config.middle_runner_first_close_ratio, 0.1), 0.95)
+            tp_plan = "MIDDLE_RUNNER"
+            s.state.middle_runner_first_tp_price = partial_tp_price
+            s.state.middle_runner_pending = True
+            candle_ts = getattr(boll, "candle_ts_ms", 0)
+            logger.warning(
+                "MIDDLE_BUCKET_SPLIT_PARTIAL_PROGRESS_TP_UPDATE | "
+                "plan=MIDDLE_RUNNER side=%s "
+                "fast_consumed=%s slow_consumed=%s "
+                "kept_fast_price=%s kept_slow_price=%s "
+                "updated_final_tp_price=%.4f candle_ts=%s",
+                s.state.side,
+                fast_consumed_mr,
+                slow_consumed_mr,
+                f"{float(getattr(s.state, 'middle_bucket_split_fast_price', 0.0) or 0.0):.4f}",
+                f"{float(getattr(s.state, 'middle_bucket_split_slow_price', 0.0) or 0.0):.4f}",
+                tp_price,
+                candle_ts,
+            )
+            return tp_price, tp_mode, partial_tp_price, partial_tp_ratio, tp_plan, reason_override
+
         if s.config.middle_bucket_split_enabled and not s.state.middle_runner_active:
             split_result = self._apply_middle_bucket_split_for_middle_runner(boll)
 
@@ -619,6 +652,38 @@ class TpUpdateCoordinator:
         tp_mode: TpMode = "UPPER" if s.state.side == "LONG" else "LOWER"
 
         # ── Middle Bucket Split for Three-Stage ──────────────────────
+        split_active = bool(getattr(s.state, "middle_bucket_split_active", False))
+        fast_consumed = bool(getattr(s.state, "middle_bucket_split_fast_consumed", False))
+        slow_consumed = bool(getattr(s.state, "middle_bucket_split_slow_consumed", False))
+        partial_split_in_progress = split_active and (fast_consumed != slow_consumed)
+
+        if partial_split_in_progress:
+            # Partial split already has one leg filled — do NOT run fresh
+            # split selection.  Only update TP2 outer and let order_specs
+            # generate the unconsumed leg + tp2_outer.
+            tp2_price, _tp2_src = s._select_three_stage_tp2_outer(s.state.side, boll)
+            s.state.three_stage_tp2_price = tp2_price
+            s.state.tp_price = tp2_price
+            partial_tp_price = s.state.middle_bucket_split_effective_price
+            partial_tp_ratio = s.state.three_stage_tp1_ratio
+            tp_plan = "THREE_STAGE_RUNNER"
+            candle_ts = getattr(boll, "candle_ts_ms", 0)
+            logger.warning(
+                "MIDDLE_BUCKET_SPLIT_PARTIAL_PROGRESS_TP_UPDATE | "
+                "plan=THREE_STAGE_RUNNER side=%s "
+                "fast_consumed=%s slow_consumed=%s "
+                "kept_fast_price=%s kept_slow_price=%s "
+                "updated_tp2_price=%.4f candle_ts=%s",
+                s.state.side,
+                fast_consumed,
+                slow_consumed,
+                f"{float(getattr(s.state, 'middle_bucket_split_fast_price', 0.0) or 0.0):.4f}",
+                f"{float(getattr(s.state, 'middle_bucket_split_slow_price', 0.0) or 0.0):.4f}",
+                tp2_price,
+                candle_ts,
+            )
+            return tp_price, tp_mode, partial_tp_price, partial_tp_ratio, tp_plan, reason_override
+
         if (
             s.config.middle_bucket_split_enabled
             and not s.state.three_stage_tp1_consumed
@@ -928,6 +993,8 @@ class TpUpdateCoordinator:
                 f" middle_split_effective_price={getattr(s.state, 'middle_bucket_split_effective_price', None)}"
                 f" middle_split_fast_total_ratio={getattr(s.state, 'middle_bucket_split_fast_total_ratio', 0.0):.4f}"
                 f" middle_split_slow_total_ratio={getattr(s.state, 'middle_bucket_split_slow_total_ratio', 0.0):.4f}"
+                f" middle_split_fast_consumed={getattr(s.state, 'middle_bucket_split_fast_consumed', False)}"
+                f" middle_split_slow_consumed={getattr(s.state, 'middle_bucket_split_slow_consumed', False)}"
                 f" middle_split_reason={getattr(s.state, 'middle_bucket_split_reason', None)}"
             )
         logger.warning(

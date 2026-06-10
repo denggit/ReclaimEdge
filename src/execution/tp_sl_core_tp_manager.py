@@ -506,6 +506,8 @@ class CoreTakeProfitManager:
                     slow_ratio_of_bucket=Decimal(str(getattr(intent, "middle_bucket_split_slow_ratio_of_bucket", 0.0))),
                     fast_total_ratio=Decimal(str(getattr(intent, "middle_bucket_split_fast_total_ratio", 0.0))),
                     slow_total_ratio=Decimal(str(getattr(intent, "middle_bucket_split_slow_total_ratio", 0.0))),
+                    fast_consumed=bool(getattr(intent, "middle_bucket_split_fast_consumed", False)),
+                    slow_consumed=bool(getattr(intent, "middle_bucket_split_slow_consumed", False)),
                 )
 
         decision = order_specs.build_take_profit_order_specs(

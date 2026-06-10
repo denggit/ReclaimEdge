@@ -99,6 +99,70 @@ def apply_three_stage_middle_bucket_split(
     )
 
     if decision.action == "SPLIT":
+        # ── Detect partial split in progress ──────────────────────────
+        old_split_active = bool(s.state.middle_bucket_split_active)
+        old_fast_consumed = bool(s.state.middle_bucket_split_fast_consumed)
+        old_slow_consumed = bool(s.state.middle_bucket_split_slow_consumed)
+        partial_split_in_progress = (
+            old_split_active and (old_fast_consumed != old_slow_consumed)
+        )
+
+        if partial_split_in_progress:
+            # Preserve consumed flags — do NOT reset a leg that has already
+            # been filled.  Only update the unconsumed leg's target price
+            # and TP2 outer (handled by the TP update coordinator).
+            s.state.middle_bucket_split_active = True
+            s.state.middle_bucket_split_fast_consumed = old_fast_consumed
+            s.state.middle_bucket_split_slow_consumed = old_slow_consumed
+
+            old_fast_price = s.state.middle_bucket_split_fast_price
+            old_slow_price = s.state.middle_bucket_split_slow_price
+
+            if old_fast_consumed and not old_slow_consumed:
+                # Fast already filled — only update slow price
+                s.state.middle_bucket_split_slow_price = decision.slow_price
+                # Keep old fast_price as historical record
+            elif old_slow_consumed and not old_fast_consumed:
+                # Slow already filled — only update fast price
+                s.state.middle_bucket_split_fast_price = decision.fast_price
+                # Keep old slow_price as historical record
+
+            # Do NOT change ratio fields — avoid ratio drift
+            # Do NOT change middle_bucket_split_add_disabled
+            # effective_price and tp1_price are preserved from existing state
+            # (tp2 outer is updated by TP update coordinator separately)
+
+            s.state.middle_bucket_split_reason = (
+                f"{decision.reason}|partial_progress_preserved"
+            )
+            candle_ts = getattr(boll, "candle_ts_ms", 0)
+            logger.warning(
+                "MIDDLE_BUCKET_SPLIT_PARTIAL_PROGRESS_PRESERVED | "
+                "plan=THREE_STAGE_RUNNER side=%s "
+                "old_fast_consumed=%s old_slow_consumed=%s "
+                "old_fast_price=%s old_slow_price=%s "
+                "new_fast_price=%s new_slow_price=%s "
+                "action=preserve_consumed_flags candle_ts=%s",
+                s.state.side,
+                old_fast_consumed,
+                old_slow_consumed,
+                f"{float(old_fast_price or 0.0):.4f}" if old_fast_price is not None else "-",
+                f"{float(old_slow_price or 0.0):.4f}" if old_slow_price is not None else "-",
+                f"{float(decision.fast_price or 0.0):.4f}" if decision.fast_price is not None else "-",
+                f"{float(decision.slow_price or 0.0):.4f}" if decision.slow_price is not None else "-",
+                candle_ts,
+            )
+            tp1_ratio = s.state.three_stage_tp1_ratio
+            return MiddleBucketSplitApplyResult(
+                action="SPLIT",
+                split_active=True,
+                partial_tp_price=s.state.middle_bucket_split_effective_price,
+                partial_tp_ratio=tp1_ratio,
+                tp_plan="THREE_STAGE_RUNNER",
+                reason=f"{decision.reason}|partial_progress_preserved",
+            )
+
+        # ── Fresh split (no partial progress) ──────────────────────────
         s.state.middle_bucket_split_active = True
         s.state.middle_bucket_split_fast_consumed = False
         s.state.middle_bucket_split_slow_consumed = False
@@ -240,6 +304,61 @@ def apply_middle_runner_bucket_split(
     )
 
     if decision.action == "SPLIT":
+        # ── Detect partial split in progress ──────────────────────────
+        old_split_active = bool(s.state.middle_bucket_split_active)
+        old_fast_consumed = bool(s.state.middle_bucket_split_fast_consumed)
+        old_slow_consumed = bool(s.state.middle_bucket_split_slow_consumed)
+        partial_split_in_progress = (
+            old_split_active and (old_fast_consumed != old_slow_consumed)
+        )
+
+        if partial_split_in_progress:
+            # Preserve consumed flags — do NOT reset a leg that has already
+            # been filled.
+            s.state.middle_bucket_split_active = True
+            s.state.middle_bucket_split_fast_consumed = old_fast_consumed
+            s.state.middle_bucket_split_slow_consumed = old_slow_consumed
+
+            old_fast_price = s.state.middle_bucket_split_fast_price
+            old_slow_price = s.state.middle_bucket_split_slow_price
+
+            if old_fast_consumed and not old_slow_consumed:
+                s.state.middle_bucket_split_slow_price = decision.slow_price
+            elif old_slow_consumed and not old_fast_consumed:
+                s.state.middle_bucket_split_fast_price = decision.fast_price
+
+            s.state.middle_bucket_split_reason = (
+                f"{decision.reason}|partial_progress_preserved"
+            )
+            candle_ts = getattr(boll, "candle_ts_ms", 0)
+            logger.warning(
+                "MIDDLE_BUCKET_SPLIT_PARTIAL_PROGRESS_PRESERVED | "
+                "plan=MIDDLE_RUNNER side=%s "
+                "old_fast_consumed=%s old_slow_consumed=%s "
+                "old_fast_price=%s old_slow_price=%s "
+                "new_fast_price=%s new_slow_price=%s "
+                "action=preserve_consumed_flags candle_ts=%s",
+                s.state.side,
+                old_fast_consumed,
+                old_slow_consumed,
+                f"{float(old_fast_price or 0.0):.4f}" if old_fast_price is not None else "-",
+                f"{float(old_slow_price or 0.0):.4f}" if old_slow_price is not None else "-",
+                f"{float(decision.fast_price or 0.0):.4f}" if decision.fast_price is not None else "-",
+                f"{float(decision.slow_price or 0.0):.4f}" if decision.slow_price is not None else "-",
+                candle_ts,
+            )
+            partial_tp_ratio_val = s.state.middle_runner_first_close_ratio or min(
+                max(s.config.middle_runner_first_close_ratio, 0.1), 0.95)
+            return MiddleBucketSplitApplyResult(
+                action="SPLIT",
+                split_active=True,
+                partial_tp_price=s.state.middle_bucket_split_effective_price,
+                partial_tp_ratio=partial_tp_ratio_val,
+                tp_plan="MIDDLE_RUNNER",
+                reason=f"{decision.reason}|partial_progress_preserved",
+            )
+
+        # ── Fresh split (no partial progress) ──────────────────────────
         s.state.middle_bucket_split_active = True
         s.state.middle_bucket_split_fast_consumed = False
         s.state.middle_bucket_split_slow_consumed = False
