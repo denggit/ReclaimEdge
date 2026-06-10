@@ -410,7 +410,8 @@ class TestMaxAlertsPerCycle:
         assert result.alerts_allowed == 2
         assert result.dropped_due_to_cycle_limit == 3
         assert len(publisher.alerts) == 2
-        assert len(deduper.calls) == 2
+        # Two calls per alert: record_send=False + record_send=True.
+        assert len(deduper.calls) == 4
 
 
 # ============================================================================
@@ -786,7 +787,8 @@ class TestDeduperPayloadNone:
         )
         await pipeline.process_once(now_ms=1000)
 
-        assert len(deduper.calls) == 1
+        # Two calls per successful alert: record_send=False + record_send=True.
+        assert len(deduper.calls) == 2
         call = deduper.calls[0]
         assert call["payload"] is None
 
@@ -878,7 +880,8 @@ class TestDefaultPolicyAllowsCriticalEvent:
         result = await pipeline.process_once(now_ms=1000)
 
         assert result.alerts_policy_suppressed == 0
-        assert len(deduper.calls) == 1
+        # Two calls: record_send=False (check) + record_send=True (record).
+        assert len(deduper.calls) == 2
         assert len(publisher.alerts) == 1
 
 
@@ -986,7 +989,8 @@ class TestFakePolicyAllowsNormalEvent:
         result = await pipeline.process_once(now_ms=1000)
 
         assert result.alerts_policy_suppressed == 0
-        assert len(deduper.calls) == 1
+        # Two calls per successful alert: record_send=False + record_send=True.
+        assert len(deduper.calls) == 2
         assert len(publisher.alerts) == 1
 
 
@@ -1023,7 +1027,8 @@ class TestPolicyRunsBeforeCycleLimit:
         assert result.dropped_due_to_cycle_limit == 3
         # Policy called for all 5 candidates.
         assert len(fake_policy.calls) == 5
-        assert len(deduper.calls) == 2
+        # Two calls per alert: record_send=False + record_send=True.
+        assert len(deduper.calls) == 4
         assert len(publisher.alerts) == 2
 
 
@@ -1073,7 +1078,8 @@ class TestPolicySuppressedEventsDoNotConsumeLimit:
         assert result.dropped_due_to_cycle_limit == 0
         assert result.alerts_allowed == 1
         assert result.alerts_published == 1
-        assert len(deduper.calls) == 1
+        # Two calls per successful alert: record_send=False + record_send=True.
+        assert len(deduper.calls) == 2
         assert len(publisher.alerts) == 1
         assert publisher.alerts[0].event_type == "WORKER_TRADING_HALTED"
 
@@ -1118,7 +1124,8 @@ class TestCriticalEventsStillRespectPublishLimit:
         assert result.dropped_due_to_cycle_limit == 1
         assert result.alerts_allowed == 2
         assert result.alerts_published == 2
-        assert len(deduper.calls) == 2
+        # Two calls per alert: record_send=False + record_send=True.
+        assert len(deduper.calls) == 4
         assert len(publisher.alerts) == 2
 
 
@@ -1225,7 +1232,8 @@ class TestCycleLimitDoesNotBuildDroppedAlerts:
         assert result.alerts_allowed == 1
         assert result.alerts_published == 1
         assert result.dropped_due_to_cycle_limit == 1
-        assert len(deduper.calls) == 1
+        # Two calls per successful alert: record_send=False + record_send=True.
+        assert len(deduper.calls) == 2
         assert len(publisher.alerts) == 1
         assert "DROPPED_REASON_SHOULD_NOT_APPEAR" not in publisher.alerts[0].body
         assert "X" * 10000 not in publisher.alerts[0].body
@@ -1259,7 +1267,8 @@ class TestCycleLimitAppliesToReadErrorsWithoutBuildingAll:
         assert result.alerts_allowed == 1
         assert result.alerts_published == 1
         assert result.dropped_due_to_cycle_limit == 2
-        assert len(deduper.calls) == 1
+        # Two calls per successful alert: record_send=False + record_send=True.
+        assert len(deduper.calls) == 2
         assert len(publisher.alerts) == 1
 
 
@@ -1360,7 +1369,8 @@ class TestNowMsNone:
         assert result.events_seen == 1
         assert result.alerts_published == 1
         # The deduper should have received a now_ms that is a positive int.
-        assert len(deduper.calls) == 1
+        # Two calls per successful alert: record_send=False + record_send=True.
+        assert len(deduper.calls) == 2
         call = deduper.calls[0]
         assert isinstance(call["now_ms"], int)
         assert call["now_ms"] > 0
@@ -1498,3 +1508,251 @@ class TestPipelineResultFrozen:
         )
         with pytest.raises(Exception):
             result.events_seen = 5  # type: ignore[misc]
+
+
+# ============================================================================
+# E05g: dedupe state recorded only after successful publish
+# ============================================================================
+
+
+class TestDedupeStateNotWrittenOnPublishFailure:
+    @pytest.mark.asyncio
+    async def test_publisher_false_does_not_write_dedupe_state(self, tmp_path: Path) -> None:
+        """When publisher returns False, dedupe state must NOT be written."""
+        from src.live.supervisor.alert_deduper import AlertDeduper as RealDeduper
+
+        state_path = tmp_path / "dedupe.json"
+        event = _make_child_event(
+            event_type="WORKER_TRADING_HALTED",
+            payload={
+                "symbol": "ETH-USDT-SWAP",
+                "severity": "CRITICAL",
+                "reason": "test halt",
+                "data": {},
+            },
+        )
+        reader = FakeReader(ChildEventReadResult(events=[event], errors=[]))
+        deduper = RealDeduper(state_path=state_path, cooldown_seconds=900)
+        publisher = FakePublisher(result=False)
+
+        pipeline = SupervisorEventPipeline(
+            reader=reader,
+            deduper=deduper,
+            publisher=publisher,
+        )
+        result = await pipeline.process_once(now_ms=1000)
+
+        assert result.alerts_allowed == 1
+        assert result.publish_failures == 1
+        assert result.alerts_published == 0
+
+        # Dedupe state must NOT be written.
+        assert not state_path.exists() or (
+            isinstance(read_json_or_none(state_path), dict)
+            and len(read_json_or_none(state_path).get("entries", {})) == 0
+        )
+
+    @pytest.mark.asyncio
+    async def test_publisher_raises_does_not_write_dedupe_state(self, tmp_path: Path) -> None:
+        """When publisher raises, dedupe state must NOT be written."""
+        from src.live.supervisor.alert_deduper import AlertDeduper as RealDeduper
+
+        state_path = tmp_path / "dedupe.json"
+        event = _make_child_event(
+            event_type="WORKER_TRADING_HALTED",
+            payload={
+                "symbol": "ETH-USDT-SWAP",
+                "severity": "CRITICAL",
+                "reason": "test halt",
+                "data": {},
+            },
+        )
+        reader = FakeReader(ChildEventReadResult(events=[event], errors=[]))
+        deduper = RealDeduper(state_path=state_path, cooldown_seconds=900)
+        publisher = FakePublisher(result=True, raises=True)
+
+        pipeline = SupervisorEventPipeline(
+            reader=reader,
+            deduper=deduper,
+            publisher=publisher,
+        )
+        result = await pipeline.process_once(now_ms=1000)
+
+        assert result.publish_failures == 1
+        assert result.alerts_published == 0
+
+        # Dedupe state must NOT be written.
+        assert not state_path.exists() or (
+            isinstance(read_json_or_none(state_path), dict)
+            and len(read_json_or_none(state_path).get("entries", {})) == 0
+        )
+
+
+class TestDedupeStateWrittenOnPublishSuccess:
+    @pytest.mark.asyncio
+    async def test_publisher_success_writes_dedupe_state(self, tmp_path: Path) -> None:
+        """When publisher returns True, dedupe state must be written."""
+        from src.live.supervisor.alert_deduper import AlertDeduper as RealDeduper
+        from src.live.outbox.atomic_json import read_json_or_none as read_json
+
+        state_path = tmp_path / "dedupe.json"
+        event = _make_child_event(
+            event_type="WORKER_TRADING_HALTED",
+            payload={
+                "symbol": "ETH-USDT-SWAP",
+                "severity": "CRITICAL",
+                "reason": "test halt",
+                "data": {},
+            },
+        )
+        reader = FakeReader(ChildEventReadResult(events=[event], errors=[]))
+        deduper = RealDeduper(state_path=state_path, cooldown_seconds=900)
+        publisher = FakePublisher(result=True)
+
+        pipeline = SupervisorEventPipeline(
+            reader=reader,
+            deduper=deduper,
+            publisher=publisher,
+        )
+        result = await pipeline.process_once(now_ms=1000)
+
+        assert result.alerts_published == 1
+        assert result.publish_failures == 0
+        assert state_path.exists()
+
+        state = read_json(state_path)
+        assert state is not None
+        entries = state.get("entries", {})
+        assert len(entries) == 1
+        key = next(iter(entries))
+        assert entries[key]["last_sent_ts_ms"] == 1000
+
+
+class TestSecondRoundSuppressedAfterSuccess:
+    @pytest.mark.asyncio
+    async def test_second_round_suppressed(self, tmp_path: Path) -> None:
+        """After a successful publish, a second round within cooldown must be
+        suppressed (dedupe state was written)."""
+        from src.live.supervisor.alert_deduper import AlertDeduper as RealDeduper
+
+        state_path = tmp_path / "dedupe.json"
+
+        # Round 1: publisher succeeds.
+        event = _make_child_event(
+            event_type="WORKER_TRADING_HALTED",
+            payload={
+                "symbol": "ETH-USDT-SWAP",
+                "severity": "CRITICAL",
+                "reason": "test halt",
+                "data": {},
+            },
+        )
+        deduper = RealDeduper(state_path=state_path, cooldown_seconds=900)
+
+        p1 = SupervisorEventPipeline(
+            reader=FakeReader(ChildEventReadResult(events=[event], errors=[])),
+            deduper=deduper,
+            publisher=FakePublisher(result=True),
+        )
+        r1 = await p1.process_once(now_ms=1000)
+        assert r1.alerts_published == 1
+        assert r1.publish_failures == 0
+
+        # Round 2: same event, within cooldown.
+        p2 = SupervisorEventPipeline(
+            reader=FakeReader(ChildEventReadResult(events=[event], errors=[])),
+            deduper=deduper,
+            publisher=FakePublisher(result=True),
+        )
+        r2 = await p2.process_once(now_ms=1100)
+        assert r2.alerts_suppressed == 1
+        assert r2.alerts_published == 0
+
+
+class TestFailedPublishAllowsRetry:
+    @pytest.mark.asyncio
+    async def test_failed_publish_retry_succeeds(self, tmp_path: Path) -> None:
+        """After a failed publish (no dedupe state written), the next round
+        must allow the same alert and write state on success."""
+        from src.live.supervisor.alert_deduper import AlertDeduper as RealDeduper
+        from src.live.outbox.atomic_json import read_json_or_none as read_json
+
+        state_path = tmp_path / "dedupe.json"
+        event = _make_child_event(
+            event_type="WORKER_TRADING_HALTED",
+            payload={
+                "symbol": "ETH-USDT-SWAP",
+                "severity": "CRITICAL",
+                "reason": "test halt",
+                "data": {},
+            },
+        )
+
+        deduper = RealDeduper(state_path=state_path, cooldown_seconds=900)
+
+        # Round 1: publisher fails.
+        p1 = SupervisorEventPipeline(
+            reader=FakeReader(ChildEventReadResult(events=[event], errors=[])),
+            deduper=deduper,
+            publisher=FakePublisher(result=False),
+        )
+        r1 = await p1.process_once(now_ms=1000)
+        assert r1.publish_failures == 1
+        assert r1.alerts_published == 0
+
+        # Round 2: same event, publisher succeeds.
+        p2 = SupervisorEventPipeline(
+            reader=FakeReader(ChildEventReadResult(events=[event], errors=[])),
+            deduper=deduper,
+            publisher=FakePublisher(result=True),
+        )
+        r2 = await p2.process_once(now_ms=1100)
+        assert r2.alerts_published == 1
+        assert r2.alerts_suppressed == 0
+
+        # Dedupe state must now contain last_sent_ts_ms == 1100.
+        state = read_json(state_path)
+        assert state is not None
+        entries = state.get("entries", {})
+        assert len(entries) == 1
+        key = next(iter(entries))
+        assert entries[key]["last_sent_ts_ms"] == 1100
+
+
+# ============================================================================
+# E05g: source order guard
+# ============================================================================
+
+
+class TestPipelineSourceOrderGuard:
+    def test_record_send_false_before_publish_alert(self) -> None:
+        source = _PIPELINE_SOURCE.read_text(encoding="utf-8")
+        # Scope to the _dedupe_and_publish_alert method body.
+        method_start = source.index("def _dedupe_and_publish_alert")
+        tail = source[method_start:]
+        idx_false = tail.index("record_send=False")
+        idx_publish = tail.index("_publisher.publish_alert")
+        assert idx_false < idx_publish, (
+            "record_send=False must appear before _publisher.publish_alert "
+            "inside _dedupe_and_publish_alert"
+        )
+
+    def test_record_send_true_after_publish_alert(self) -> None:
+        source = _PIPELINE_SOURCE.read_text(encoding="utf-8")
+        # Scope to the _dedupe_and_publish_alert method body.
+        method_start = source.index("def _dedupe_and_publish_alert")
+        tail = source[method_start:]
+        # The docstring mentions "record_send=True", so we search after
+        # the last publish_alert reference for the actual code call.
+        idx_publish_last = tail.rindex("_publisher.publish_alert")
+        rest = tail[idx_publish_last:]
+        assert "record_send=True" in rest, (
+            "record_send=True must appear after the last _publisher.publish_alert "
+            "inside _dedupe_and_publish_alert"
+        )
+
+    def test_record_send_in_source(self) -> None:
+        source = _PIPELINE_SOURCE.read_text(encoding="utf-8")
+        assert "record_send" in source, (
+            "supervisor_event_pipeline.py must use record_send parameter"
+        )

@@ -339,7 +339,13 @@ class SupervisorEventPipeline:
         * ``(True, False, False)`` — deduper allowed and publisher succeeded.
         * ``(True, False, True)`` — deduper allowed but publisher failed
           (returned ``False`` or raised).
+
+        Dedupe state is recorded **only after** a successful publish.  A
+        non-mutating ``record_send=False`` call is used first; if
+        ``publish_alert`` returns ``True``, a second ``record_send=True``
+        call persists the sent timestamp.
         """
+        # Phase 1: non-mutating dedupe check.
         decision = self._deduper.should_send(
             symbol=alert.symbol,
             event_type=alert.event_type,
@@ -347,6 +353,7 @@ class SupervisorEventPipeline:
             reason=alert.reason,
             payload=None,
             now_ms=now_ms,
+            record_send=False,
         )
 
         if not decision.allowed:
@@ -359,6 +366,17 @@ class SupervisorEventPipeline:
 
         if not ok:
             return True, False, True
+
+        # Phase 2: record dedupe state only after successful publish.
+        self._deduper.should_send(
+            symbol=alert.symbol,
+            event_type=alert.event_type,
+            severity=alert.severity,
+            reason=alert.reason,
+            payload=None,
+            now_ms=now_ms,
+            record_send=True,
+        )
 
         return True, False, False
 

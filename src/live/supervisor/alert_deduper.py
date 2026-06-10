@@ -134,6 +134,7 @@ class AlertDeduper:
         reason: str | None = None,
         payload: dict[str, Any] | None = None,
         now_ms: int | None = None,
+        record_send: bool = True,
     ) -> AlertDedupeDecision:
         """Decide whether an alert should be sent.
 
@@ -154,6 +155,11 @@ class AlertDeduper:
         now_ms : int | None
             Epoch milliseconds for the decision.  Defaults to
             ``int(time.time() * 1000)``.
+        record_send : bool
+            Whether to persist this allowed decision as an actual sent alert.
+            Defaults to ``True`` for backward compatibility.
+            ``SupervisorEventPipeline`` uses ``False`` before publishing,
+            then records only after publish succeeds.
 
         Returns
         -------
@@ -211,6 +217,12 @@ class AlertDeduper:
                     f"now_ms must be >= 0, got {now_ms}"
                 )
 
+        # -- validate record_send ------------------------------------------------
+        if type(record_send) is not bool:
+            raise ValueError(
+                f"record_send must be bool, got {type(record_send).__name__}"
+            )
+
         # -- reason extraction ---------------------------------------------------
         reason_source = self._extract_reason(reason, payload)
         reason_preview = self._normalize_reason(reason_source)
@@ -247,11 +259,12 @@ class AlertDeduper:
                 now_ts_ms=now_ms,
                 reason=reason_preview,
             )
-            self._update_entry(
-                entries, dedupe_key, symbol, event_type, severity,
-                reason_preview, now_ms, send_count=1,
-            )
-            self._prune_and_save(entries, now_ms, dedupe_key)
+            if record_send:
+                self._update_entry(
+                    entries, dedupe_key, symbol, event_type, severity,
+                    reason_preview, now_ms, send_count=1,
+                )
+                self._prune_and_save(entries, now_ms, dedupe_key)
             return result
 
         # Cooldown == 0: always allow, still update state.
@@ -270,11 +283,12 @@ class AlertDeduper:
                 now_ts_ms=now_ms,
                 reason=reason_preview,
             )
-            self._update_entry(
-                entries, dedupe_key, symbol, event_type, severity,
-                reason_preview, now_ms, send_count=send_count,
-            )
-            self._prune_and_save(entries, now_ms, dedupe_key)
+            if record_send:
+                self._update_entry(
+                    entries, dedupe_key, symbol, event_type, severity,
+                    reason_preview, now_ms, send_count=send_count,
+                )
+                self._prune_and_save(entries, now_ms, dedupe_key)
             return result
 
         # Clock went backwards: suppress.
@@ -306,11 +320,12 @@ class AlertDeduper:
                 now_ts_ms=now_ms,
                 reason=reason_preview,
             )
-            self._update_entry(
-                entries, dedupe_key, symbol, event_type, severity,
-                reason_preview, now_ms, send_count=send_count,
-            )
-            self._prune_and_save(entries, now_ms, dedupe_key)
+            if record_send:
+                self._update_entry(
+                    entries, dedupe_key, symbol, event_type, severity,
+                    reason_preview, now_ms, send_count=send_count,
+                )
+                self._prune_and_save(entries, now_ms, dedupe_key)
             return result
         else:
             # Still within cooldown: suppress.

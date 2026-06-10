@@ -1090,6 +1090,18 @@ class TestAlertDeduperSourceGuard:
                 f"alert_deduper.py must not import/use {token}"
             )
 
+    def test_record_send_in_source(self) -> None:
+        source = _ALERT_DEDUPER_SOURCE.read_text(encoding="utf-8")
+        assert "record_send" in source, (
+            "alert_deduper.py must define record_send parameter"
+        )
+        assert "record_send: bool = True" in source, (
+            "alert_deduper.py must have record_send: bool = True signature"
+        )
+        assert "type(record_send) is not bool" in source, (
+            "alert_deduper.py must validate record_send with type(record_send) is not bool"
+        )
+
 
 # ============================================================================
 # 27. no append / JSONL / unbounded history guard
@@ -1227,3 +1239,171 @@ class TestReasonSourcePriority:
 
         assert decision.reason is None
         assert decision.dedupe_key.endswith("|-")
+
+
+# ============================================================================
+# E05g: record_send=False does not write state
+# ============================================================================
+
+
+class TestRecordSendFalseDoesNotWriteState:
+    def test_record_send_false_does_not_create_state_file(self, tmp_path: Path) -> None:
+        state_path = tmp_path / "dedupe.json"
+        deduper = AlertDeduper(state_path=state_path, cooldown_seconds=900)
+
+        decision = deduper.should_send(
+            symbol="ETH-USDT-SWAP",
+            event_type="WORKER_TRADING_HALTED",
+            severity="ERROR",
+            reason="boom",
+            now_ms=1000,
+            record_send=False,
+        )
+
+        assert decision.allowed is True
+        assert not state_path.exists()
+
+    def test_record_send_false_does_not_update_existing_state(self, tmp_path: Path) -> None:
+        """With an existing entry, record_send=False must return allowed but
+        not update last_sent_ts_ms."""
+        state_path = tmp_path / "dedupe.json"
+        deduper = AlertDeduper(state_path=state_path, cooldown_seconds=1)
+
+        # First — record_send=True to seed state.
+        deduper.should_send(
+            symbol="ETH-USDT-SWAP",
+            event_type="WORKER_TRADING_HALTED",
+            severity="ERROR",
+            reason="boom",
+            now_ms=1000,
+            record_send=True,
+        )
+
+        state = read_json_or_none(state_path)
+        key = next(iter(state["entries"]))
+        assert state["entries"][key]["last_sent_ts_ms"] == 1000
+
+        # Second — after cooldown, record_send=False.
+        decision = deduper.should_send(
+            symbol="ETH-USDT-SWAP",
+            event_type="WORKER_TRADING_HALTED",
+            severity="ERROR",
+            reason="boom",
+            now_ms=3000,
+            record_send=False,
+        )
+
+        assert decision.allowed is True
+        # last_sent_ts_ms must still be 1000 (not updated to 3000).
+        state2 = read_json_or_none(state_path)
+        assert state2["entries"][key]["last_sent_ts_ms"] == 1000
+
+
+# ============================================================================
+# E05g: record_send=False then default call still writes state
+# ============================================================================
+
+
+class TestRecordSendFalseThenDefaultCallWritesState:
+    def test_false_then_true_writes_state(self, tmp_path: Path) -> None:
+        state_path = tmp_path / "dedupe.json"
+        deduper = AlertDeduper(state_path=state_path, cooldown_seconds=900)
+
+        # Phase 1: record_send=False — allowed but no state written.
+        decision1 = deduper.should_send(
+            symbol="ETH-USDT-SWAP",
+            event_type="WORKER_TRADING_HALTED",
+            severity="ERROR",
+            reason="boom",
+            now_ms=1000,
+            record_send=False,
+        )
+        assert decision1.allowed is True
+        assert not state_path.exists()
+
+        # Phase 2: default (record_send=True) — allowed and writes state.
+        decision2 = deduper.should_send(
+            symbol="ETH-USDT-SWAP",
+            event_type="WORKER_TRADING_HALTED",
+            severity="ERROR",
+            reason="boom",
+            now_ms=1000,
+        )
+        assert decision2.allowed is True
+        assert state_path.exists()
+
+        state = read_json_or_none(state_path)
+        assert len(state["entries"]) == 1
+        key = next(iter(state["entries"]))
+        assert state["entries"][key]["last_sent_ts_ms"] == 1000
+
+
+# ============================================================================
+# E05g: record_send=True preserves old behavior
+# ============================================================================
+
+
+class TestRecordSendTruePreservesOldBehavior:
+    def test_record_send_true_writes_state(self, tmp_path: Path) -> None:
+        state_path = tmp_path / "dedupe.json"
+        deduper = AlertDeduper(state_path=state_path, cooldown_seconds=900)
+
+        decision = deduper.should_send(
+            symbol="ETH-USDT-SWAP",
+            event_type="WORKER_TRADING_HALTED",
+            severity="ERROR",
+            reason="boom",
+            now_ms=1000,
+            record_send=True,
+        )
+
+        assert decision.allowed is True
+        assert state_path.exists()
+
+        state = read_json_or_none(state_path)
+        key = next(iter(state["entries"]))
+        assert state["entries"][key]["last_sent_ts_ms"] == 1000
+
+
+# ============================================================================
+# E05g: record_send type validation
+# ============================================================================
+
+
+class TestRecordSendMustBeBool:
+    @pytest.mark.parametrize("bad", [1, 0, "true", None])
+    def test_record_send_must_be_bool(self, tmp_path: Path, bad) -> None:
+        deduper = AlertDeduper(state_path=tmp_path / "dedupe.json")
+        with pytest.raises(ValueError, match="record_send must be bool"):
+            deduper.should_send(
+                symbol="ETH-USDT-SWAP",
+                event_type="WORKER_TRADING_HALTED",
+                severity="ERROR",
+                reason="boom",
+                now_ms=1000,
+                record_send=bad,
+            )
+
+    def test_record_send_true_is_valid(self, tmp_path: Path) -> None:
+        deduper = AlertDeduper(state_path=tmp_path / "dedupe.json")
+        # Must not raise.
+        deduper.should_send(
+            symbol="ETH-USDT-SWAP",
+            event_type="WORKER_TRADING_HALTED",
+            severity="ERROR",
+            reason="boom",
+            now_ms=1000,
+            record_send=True,
+        )
+
+    def test_record_send_false_is_valid(self, tmp_path: Path) -> None:
+        deduper = AlertDeduper(state_path=tmp_path / "dedupe.json")
+        # Must not raise.
+        deduper.should_send(
+            symbol="ETH-USDT-SWAP",
+            event_type="WORKER_TRADING_HALTED",
+            severity="ERROR",
+            reason="boom",
+            now_ms=1000,
+            record_send=False,
+        )
