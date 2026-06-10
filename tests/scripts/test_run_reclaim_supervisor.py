@@ -82,6 +82,21 @@ def test_source_guard_must_not_contain_forbidden_tokens() -> None:
 
 
 # ============================================================================
+# Helpers
+# ============================================================================
+
+
+def _patch_entry_load_dotenv(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Patch ``load_dotenv`` in the supervisor entry module namespace.
+
+    The entry uses ``from dotenv import load_dotenv``, so patching
+    ``dotenv.load_dotenv`` is NOT sufficient — the module-level binding
+    must be replaced.
+    """
+    monkeypatch.setattr("scripts.run_reclaim_supervisor.load_dotenv", lambda: None)
+
+
+# ============================================================================
 # Fake / helper classes
 # ============================================================================
 
@@ -268,7 +283,7 @@ def test_main_wiring_injects_pipeline_to_supervisor(monkeypatch: pytest.MonkeyPa
         "scripts.run_reclaim_supervisor.live_config_helpers.live_trading_enabled",
         lambda: True,
     )
-    monkeypatch.setattr("dotenv.load_dotenv", lambda: None)
+    _patch_entry_load_dotenv(monkeypatch)
     monkeypatch.setattr(
         "scripts.run_reclaim_supervisor.build_parent_event_pipeline",
         fake_build_pipeline,
@@ -321,7 +336,7 @@ def test_main_live_trading_false_no_pipeline_construction(monkeypatch: pytest.Mo
         "scripts.run_reclaim_supervisor.live_config_helpers.live_trading_enabled",
         lambda: False,
     )
-    monkeypatch.setattr("dotenv.load_dotenv", lambda: None)
+    _patch_entry_load_dotenv(monkeypatch)
     monkeypatch.setattr(
         "scripts.run_reclaim_supervisor.build_parent_event_pipeline",
         fake_build_pipeline,
@@ -354,7 +369,7 @@ def test_main_does_not_send_real_email(monkeypatch: pytest.MonkeyPatch) -> None:
         "scripts.run_reclaim_supervisor.live_config_helpers.live_trading_enabled",
         lambda: True,
     )
-    monkeypatch.setattr("dotenv.load_dotenv", lambda: None)
+    _patch_entry_load_dotenv(monkeypatch)
 
     async def fake_run_forever(self: object) -> None:
         pass  # do not loop
