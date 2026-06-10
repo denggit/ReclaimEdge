@@ -175,6 +175,10 @@ class SupervisorEventPipeline:
         alerts, deduplicates them, and publishes allowed alerts via the
         injected publisher.
 
+        Candidate alerts are streamed — when the cycle limit is reached
+        remaining candidates are counted as dropped without building full
+        ``SupervisorAlert`` objects or their HTML bodies.
+
         Parameters
         ----------
         now_ms : int | None
@@ -203,59 +207,54 @@ class SupervisorEventPipeline:
         events_seen = len(result.events)
         read_errors_seen = len(result.errors)
 
-        # -- build alerts from lifecycle events -------------------------------
-        alerts: list[SupervisorAlert] = []
-        for event in result.events:
-            if event.event_type in LIFECYCLE_EVENT_TYPES:
-                alert = _build_alert_from_child_event(event)
-                alerts.append(alert)
-            # Non-lifecycle events are silently ignored.
-
-        # -- build alerts from read errors ------------------------------------
-        for error in result.errors:
-            alert = _build_alert_from_read_error(error)
-            alerts.append(alert)
-
-        alerts_built = len(alerts)
-
-        # -- enforce cycle limit ----------------------------------------------
-        dropped_due_to_cycle_limit = 0
-        if len(alerts) > self._max_alerts_per_cycle:
-            dropped_due_to_cycle_limit = len(alerts) - self._max_alerts_per_cycle
-            alerts = alerts[: self._max_alerts_per_cycle]
-
-        # -- deduplicate + publish --------------------------------------------
+        # -- counters ---------------------------------------------------------
+        alerts_built = 0
         alerts_allowed = 0
         alerts_suppressed = 0
         alerts_published = 0
         publish_failures = 0
+        dropped_due_to_cycle_limit = 0
+        processed = 0
 
-        for alert in alerts:
-            decision = self._deduper.should_send(
-                symbol=alert.symbol,
-                event_type=alert.event_type,
-                severity=alert.severity,
-                reason=alert.reason,
-                payload=None,
-                now_ms=now_ms,
+        # -- stream lifecycle events ------------------------------------------
+        for event in result.events:
+            if event.event_type not in LIFECYCLE_EVENT_TYPES:
+                continue
+            alerts_built += 1
+            if processed >= self._max_alerts_per_cycle:
+                dropped_due_to_cycle_limit += 1
+                continue
+            processed += 1
+            alert = _build_alert_from_child_event(event)
+            allowed, suppressed, failed = await self._dedupe_and_publish_alert(
+                alert, now_ms
             )
-
-            if not decision.allowed:
+            if suppressed:
                 alerts_suppressed += 1
-                continue
-
-            alerts_allowed += 1
-
-            try:
-                ok = await self._publisher.publish_alert(alert)
-            except Exception:
+            elif failed:
                 publish_failures += 1
-                continue
-
-            if ok:
-                alerts_published += 1
             else:
+                alerts_allowed += 1
+                alerts_published += 1
+
+        # -- stream read errors -----------------------------------------------
+        for error in result.errors:
+            alerts_built += 1
+            if processed >= self._max_alerts_per_cycle:
+                dropped_due_to_cycle_limit += 1
+                continue
+            processed += 1
+            alert = _build_alert_from_read_error(error)
+            allowed, suppressed, failed = await self._dedupe_and_publish_alert(
+                alert, now_ms
+            )
+            if suppressed:
+                alerts_suppressed += 1
+            elif failed:
                 publish_failures += 1
+            else:
+                alerts_allowed += 1
+                alerts_published += 1
 
         return SupervisorEventPipelineResult(
             events_seen=events_seen,
@@ -267,6 +266,42 @@ class SupervisorEventPipeline:
             publish_failures=publish_failures,
             dropped_due_to_cycle_limit=dropped_due_to_cycle_limit,
         )
+
+    # ------------------------------------------------------------------
+    # Internal: dedupe + publish
+    # ------------------------------------------------------------------
+
+    async def _dedupe_and_publish_alert(
+        self,
+        alert: SupervisorAlert,
+        now_ms: int,
+    ) -> tuple[bool, bool, bool]:
+        """Dedupe and publish a single alert.
+
+        Returns ``(allowed, suppressed, failed)`` — exactly one will be
+        ``True``.
+        """
+        decision = self._deduper.should_send(
+            symbol=alert.symbol,
+            event_type=alert.event_type,
+            severity=alert.severity,
+            reason=alert.reason,
+            payload=None,
+            now_ms=now_ms,
+        )
+
+        if not decision.allowed:
+            return False, True, False
+
+        try:
+            ok = await self._publisher.publish_alert(alert)
+        except Exception:
+            return False, False, True
+
+        if not ok:
+            return False, False, True
+
+        return True, False, False
 
 
 # ---------------------------------------------------------------------------

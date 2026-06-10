@@ -351,6 +351,7 @@ class TestMaxAlertsPerCycle:
         assert result.alerts_allowed == 2
         assert result.dropped_due_to_cycle_limit == 3
         assert len(publisher.alerts) == 2
+        assert len(deduper.calls) == 2
 
 
 # ============================================================================
@@ -736,6 +737,88 @@ class TestNoFullPayloadInBody:
 
 
 # ============================================================================
+# E05a-b: cycle limit enforced before building alerts
+# ============================================================================
+
+
+class TestCycleLimitDoesNotBuildDroppedAlerts:
+    @pytest.mark.asyncio
+    async def test_dropped_alert_not_built(self) -> None:
+        """Dropped candidates must not have their content appear in any published alert."""
+        events = [
+            _make_child_event(
+                event_type="WORKER_STARTED",
+                payload={"symbol": "ETH", "severity": "INFO", "reason": "first"},
+                source_path="path/0.jsonl",
+            ),
+            _make_child_event(
+                event_type="WORKER_STOPPED",
+                payload={
+                    "symbol": "ETH",
+                    "severity": "INFO",
+                    "reason": "DROPPED_REASON_SHOULD_NOT_APPEAR",
+                    "data": {"huge": "X" * 10000},
+                },
+                source_path="path/1.jsonl",
+            ),
+        ]
+        reader = FakeReader(
+            ChildEventReadResult(events=events, errors=[])
+        )
+        deduper = FakeDeduper(allowed=True)
+        publisher = FakePublisher(result=True)
+
+        pipeline = SupervisorEventPipeline(
+            reader=reader,
+            deduper=deduper,
+            publisher=publisher,
+            max_alerts_per_cycle=1,
+        )
+        result = await pipeline.process_once(now_ms=1000)
+
+        assert result.alerts_built == 2
+        assert result.alerts_allowed == 1
+        assert result.alerts_published == 1
+        assert result.dropped_due_to_cycle_limit == 1
+        assert len(deduper.calls) == 1
+        assert len(publisher.alerts) == 1
+        assert "DROPPED_REASON_SHOULD_NOT_APPEAR" not in publisher.alerts[0].body
+        assert "X" * 10000 not in publisher.alerts[0].body
+
+
+class TestCycleLimitAppliesToReadErrorsWithoutBuildingAll:
+    @pytest.mark.asyncio
+    async def test_read_errors_limited(self) -> None:
+        """Cycle limit applies to read errors — dropped errors are not built."""
+        errors = [
+            _make_read_error(error_type="BAD_JSON"),
+            _make_read_error(error_type="LINE_TOO_LONG"),
+            _make_read_error(error_type="INVALID_EVENT_OBJECT"),
+        ]
+        reader = FakeReader(
+            ChildEventReadResult(events=[], errors=errors)
+        )
+        deduper = FakeDeduper(allowed=True)
+        publisher = FakePublisher(result=True)
+
+        pipeline = SupervisorEventPipeline(
+            reader=reader,
+            deduper=deduper,
+            publisher=publisher,
+            max_alerts_per_cycle=1,
+        )
+        result = await pipeline.process_once(now_ms=1000)
+
+        assert result.read_errors_seen == 3
+        assert result.alerts_built == 3
+        assert result.alerts_allowed == 1
+        assert result.alerts_published == 1
+        assert result.dropped_due_to_cycle_limit == 2
+        assert len(deduper.calls) == 1
+        assert len(publisher.alerts) == 1
+
+
+# ============================================================================
 # 20. Source guard
 # ============================================================================
 
@@ -792,6 +875,18 @@ class TestNoHistoryJsonlState:
             assert token not in source_text, (
                 f"Forbidden pattern '{token}' found in supervisor_event_pipeline.py"
             )
+
+    def test_no_full_alert_list_build(self) -> None:
+        """Ensure process_once does not build a full alert list before the cycle limit."""
+        source_text = _PIPELINE_SOURCE.read_text(encoding="utf-8")
+        assert "alerts: list[SupervisorAlert]" not in source_text, (
+            "Pipeline source must not pre-build a full alert list — "
+            "cycle limit must be enforced before building each SupervisorAlert"
+        )
+        assert "alerts.append(" not in source_text, (
+            "Pipeline source must not append to a pre-built alert list — "
+            "cycle limit must be enforced before building each SupervisorAlert"
+        )
 
 
 # ============================================================================
