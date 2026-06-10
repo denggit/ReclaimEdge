@@ -655,11 +655,12 @@ class SymbolWorkerApp:
                 )
 
                 # -- E05h: DRAIN_COMPLETED or DRAIN_TIMEOUT ----------------
+                execution_queue_remaining = execution_queue.qsize()
                 remaining_critical = sum(
                     1 for t in critical_drain_tasks if not t.done()
                 )
                 drain_timeout = self.app_config.symbol_worker_shutdown_drain_timeout_seconds
-                if remaining_critical > 0:
+                if execution_queue_remaining > 0:
                     _emit_worker_event_best_effort(
                         worker_event_emitter,
                         WORKER_DRAIN_TIMEOUT,
@@ -667,6 +668,7 @@ class SymbolWorkerApp:
                         payload={
                             "reason": shutdown_controller.reason or "unknown",
                             "remaining_critical_tasks": remaining_critical,
+                            "execution_queue_size": execution_queue_remaining,
                             "timeout_seconds": drain_timeout,
                         },
                     )
@@ -677,7 +679,8 @@ class SymbolWorkerApp:
                         severity="INFO",
                         payload={
                             "reason": shutdown_controller.reason or "unknown",
-                            "remaining_critical_tasks": 0,
+                            "remaining_critical_tasks": remaining_critical,
+                            "execution_queue_size": 0,
                             "timeout_seconds": drain_timeout,
                         },
                     )

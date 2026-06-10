@@ -1687,6 +1687,60 @@ class TestSymbolWorkerAppShutdownClassification:
 
 
 # ============================================================================
+# 19b. symbol_worker_app.py source guard — DRAIN_TIMEOUT uses execution_queue
+# ============================================================================
+
+
+class TestSymbolWorkerAppDrainTimeoutSourceGuard:
+    def test_drain_timeout_uses_execution_queue_size(self) -> None:
+        """symbol_worker_app.py must use execution_queue.qsize() as the
+        DRAIN_TIMEOUT gate — NOT remaining_critical > 0."""
+        from pathlib import Path
+
+        source = (
+            Path(__file__)
+            .resolve()
+            .parent.parent.parent.joinpath("src", "live", "symbol_worker_app.py")
+            .read_text(encoding="utf-8")
+        )
+
+        assert "execution_queue_remaining = execution_queue.qsize()" in source, (
+            "symbol_worker_app.py must compute execution_queue_remaining"
+            " via execution_queue.qsize()"
+        )
+        assert "execution_queue_size" in source, (
+            "symbol_worker_app.py DRAIN_TIMEOUT/DRAIN_COMPLETED payload"
+            " must include execution_queue_size"
+        )
+        assert "if execution_queue_remaining > 0:" in source, (
+            "symbol_worker_app.py DRAIN_TIMEOUT gate must be"
+            " execution_queue_remaining > 0"
+        )
+
+    def test_drain_timeout_not_gated_on_remaining_critical(self) -> None:
+        """The DRAIN_TIMEOUT branch must NOT use remaining_critical as the
+        sole gate.  The old pattern 'if remaining_critical > 0' as the
+        DRAIN_TIMEOUT condition must no longer exist."""
+        from pathlib import Path
+
+        source = (
+            Path(__file__)
+            .resolve()
+            .parent.parent.parent.joinpath("src", "live", "symbol_worker_app.py")
+            .read_text(encoding="utf-8")
+        )
+
+        # The old pattern was:
+        #   if remaining_critical > 0:
+        #       emit WORKER_DRAIN_TIMEOUT
+        # Verify this exact pattern no longer exists.
+        assert "if remaining_critical > 0:" not in source, (
+            "symbol_worker_app.py must NOT gate DRAIN_TIMEOUT on"
+            " remaining_critical > 0"
+        )
+
+
+# ============================================================================
 # E05h: Child lifecycle event outbox tests
 # ============================================================================
 
@@ -2048,27 +2102,30 @@ class TestE05hShutdownEvents:
         assert "WORKER_DRAIN_STARTED" in event_types, (
             f"Expected WORKER_DRAIN_STARTED in outbox, got {event_types}"
         )
-        # Either DRAIN_COMPLETED or DRAIN_TIMEOUT must be emitted (the
-        # outcome depends on task timing, but at least one is guaranteed).
-        drain_outcome = {"WORKER_DRAIN_COMPLETED", "WORKER_DRAIN_TIMEOUT"}
-        assert drain_outcome & set(event_types), (
-            f"Expected DRAIN_COMPLETED or DRAIN_TIMEOUT in outbox, got {event_types}"
+        # Normal graceful shutdown with empty execution_queue must emit
+        # DRAIN_COMPLETED, NOT DRAIN_TIMEOUT.  Critical tasks (execution_worker,
+        # account_position_sync_worker) are long-running loops that do not
+        # naturally complete — an empty execution_queue means the drain was
+        # successful.
+        assert "WORKER_DRAIN_COMPLETED" in event_types, (
+            f"Expected WORKER_DRAIN_COMPLETED in outbox, got {event_types}"
+        )
+        assert "WORKER_DRAIN_TIMEOUT" not in event_types, (
+            f"WORKER_DRAIN_TIMEOUT must NOT be emitted when execution_queue is empty,"
+            f" got {event_types}"
         )
         assert "WORKER_STOPPED" in event_types, (
             f"Expected WORKER_STOPPED in outbox, got {event_types}"
         )
 
-        # Order: STOPPING < DRAIN_STARTED < drain outcome < STOPPED.
+        # Order: STOPPING < DRAIN_STARTED < DRAIN_COMPLETED < STOPPED.
         idx_stopping = event_types.index("WORKER_STOPPING")
         idx_drain_started = event_types.index("WORKER_DRAIN_STARTED")
-        drain_result_event = next(
-            e for e in event_types if e in drain_outcome
-        )
-        idx_drain_result = event_types.index(drain_result_event)
+        idx_drain_completed = event_types.index("WORKER_DRAIN_COMPLETED")
         idx_stopped = event_types.index("WORKER_STOPPED")
-        assert idx_stopping < idx_drain_started < idx_drain_result < idx_stopped, (
-            f"Expected STOPPING < DRAIN_STARTED < {drain_result_event} < STOPPED, "
-            f"got {idx_stopping}<{idx_drain_started}<{idx_drain_result}<{idx_stopped}"
+        assert idx_stopping < idx_drain_started < idx_drain_completed < idx_stopped, (
+            f"Expected STOPPING < DRAIN_STARTED < DRAIN_COMPLETED < STOPPED, "
+            f"got {idx_stopping}<{idx_drain_started}<{idx_drain_completed}<{idx_stopped}"
         )
 
 
@@ -2082,8 +2139,8 @@ class TestE05hDrainTimeout:
     async def test_drain_timeout_emits_drain_timeout(
         self, tmp_path: Any, monkeypatch: Any
     ) -> None:
-        """When critical tasks do not finish within drain timeout,
-        WORKER_DRAIN_TIMEOUT must be emitted."""
+        """When the execution_queue still has backlog after the drain window,
+        WORKER_DRAIN_TIMEOUT must be emitted with execution_queue_size > 0."""
         controller = WorkerShutdownController()
         factory = _ShutdownTestFactory(tmp_path=tmp_path)
 
@@ -2129,7 +2186,22 @@ class TestE05hDrainTimeout:
             _noop_sync,
         )
 
-        # Make account worker block forever — won't finish within drain timeout.
+        # Fake execution worker: put a dummy command into the execution_queue
+        # and then block forever.  This ensures execution_queue.qsize() > 0
+        # when the drain timeout fires, which is the new signal for a real
+        # drain timeout (as opposed to normal graceful shutdown with empty
+        # queue where critical tasks happen to still be running).
+        async def _fake_execution_worker(**kwargs: Any) -> None:
+            execution_queue = kwargs["execution_queue"]
+            await execution_queue.put(object())
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(
+            "src.live.symbol_worker_app.execution_worker_module.execution_worker",
+            _fake_execution_worker,
+        )
+
+        # Account worker also blocks forever (critical task).
         async def _fake_account_worker(**kwargs: Any) -> None:
             await asyncio.Event().wait()
 
@@ -2167,6 +2239,139 @@ class TestE05hDrainTimeout:
         )
         assert drain_timeout["payload"]["severity"] == "ERROR"
         assert drain_timeout["payload"]["data"]["remaining_critical_tasks"] > 0
+        assert drain_timeout["payload"]["data"]["execution_queue_size"] > 0, (
+            f"Expected execution_queue_size > 0 in DRAIN_TIMEOUT payload,"
+            f" got {drain_timeout['payload']['data']}"
+        )
+
+
+# ============================================================================
+# E05h-3b: Critical tasks running + empty queue → DRAIN_COMPLETED (no false alarm)
+# ============================================================================
+
+
+class TestE05hDrainCompletedWithRunningCriticalTasks:
+    @pytest.mark.asyncio
+    async def test_running_critical_tasks_empty_queue_emits_drain_completed(
+        self, tmp_path: Any, monkeypatch: Any
+    ) -> None:
+        """When critical tasks (execution_worker, account_worker) are still
+        running after the drain window BUT the execution_queue is empty,
+        WORKER_DRAIN_COMPLETED must be emitted — NOT WORKER_DRAIN_TIMEOUT.
+
+        This is the key fix: long-running critical task loops do not
+        naturally complete, so remaining_critical > 0 is normal.
+        The drain is only considered timed-out when the execution_queue
+        still has a backlog (i.e. real work that wasn't processed).
+        """
+        controller = WorkerShutdownController()
+        factory = _ShutdownTestFactory(tmp_path=tmp_path)
+
+        app_config = _make_app_config(
+            symbol_worker_shutdown_drain_timeout_seconds=0.05,
+            symbol_worker_shutdown_save_state_enabled=False,
+            symbol_worker_shutdown_heartbeat_enabled=False,
+        )
+
+        app = SymbolWorkerApp(
+            app_config=app_config,
+            factory=factory,
+            shutdown_controller=controller,
+        )
+
+        async def _fake_fetch_cash(_trader: Any) -> float:
+            return 10000.0
+
+        async def _noop(**kwargs: Any) -> None:
+            return None
+
+        def _noop_sync(**kwargs: Any) -> bool:
+            return False
+
+        monkeypatch.setattr(
+            "src.live.symbol_worker_app.live_flat_balance.fetch_usdt_cash_balance",
+            _fake_fetch_cash,
+        )
+        monkeypatch.setattr(
+            "src.live.symbol_worker_app.startup_order_recovery.apply_main_tp_startup_recovery",
+            _noop,
+        )
+        monkeypatch.setattr(
+            "src.live.symbol_worker_app.startup_order_recovery.apply_sidecar_startup_recovery",
+            _noop,
+        )
+        monkeypatch.setattr(
+            "src.live.symbol_worker_app.rolling_loss_live_helpers.apply_rolling_loss_guard_startup_state",
+            _noop,
+        )
+        monkeypatch.setattr(
+            "src.live.symbol_worker_app.runner_live_helpers.apply_three_stage_startup_safety_gate",
+            _noop_sync,
+        )
+
+        # Both critical tasks block forever — they are long-running loops.
+        # The execution_queue stays empty (default).
+        async def _fake_execution_worker(**kwargs: Any) -> None:
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(
+            "src.live.symbol_worker_app.execution_worker_module.execution_worker",
+            _fake_execution_worker,
+        )
+
+        async def _fake_account_worker(**kwargs: Any) -> None:
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(
+            "src.live.symbol_worker_app.account_position_sync_worker_module.account_position_sync_worker",
+            _fake_account_worker,
+        )
+
+        async def _trigger_shutdown() -> None:
+            await asyncio.sleep(0.10)
+            controller.request_shutdown("test_no_false_alarm")
+
+        trigger_task = asyncio.ensure_future(_trigger_shutdown())
+
+        try:
+            await asyncio.wait_for(app.run(), timeout=10.0)
+        finally:
+            if not trigger_task.done():
+                trigger_task.cancel()
+                try:
+                    await trigger_task
+                except asyncio.CancelledError:
+                    pass
+
+        outbox_path = tmp_path / "worker_events.jsonl"
+        events = _read_outbox_events(outbox_path)
+        event_types = [e["event_type"] for e in events]
+
+        # Must emit DRAIN_COMPLETED, NOT DRAIN_TIMEOUT.
+        assert "WORKER_DRAIN_COMPLETED" in event_types, (
+            f"Expected WORKER_DRAIN_COMPLETED in outbox, got {event_types}"
+        )
+        assert "WORKER_DRAIN_TIMEOUT" not in event_types, (
+            f"WORKER_DRAIN_TIMEOUT must NOT be emitted when execution_queue is empty,"
+            f" got {event_types}"
+        )
+
+        # Verify DRAIN_COMPLETED payload.
+        drain_completed = next(
+            e for e in events if e["event_type"] == "WORKER_DRAIN_COMPLETED"
+        )
+        assert drain_completed["payload"]["severity"] == "INFO"
+        # remaining_critical_tasks > 0 is allowed — critical tasks are
+        # long-running loops that don't naturally complete.
+        assert drain_completed["payload"]["data"]["remaining_critical_tasks"] > 0, (
+            f"Expected remaining_critical_tasks > 0 (critical tasks are long-running"
+            f" loops), got {drain_completed['payload']['data']}"
+        )
+        # execution_queue_size must be 0 — no backlog means successful drain.
+        assert drain_completed["payload"]["data"]["execution_queue_size"] == 0, (
+            f"Expected execution_queue_size == 0,"
+            f" got {drain_completed['payload']['data']}"
+        )
 
 
 # ============================================================================
