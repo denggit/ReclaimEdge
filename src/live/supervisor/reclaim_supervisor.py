@@ -694,6 +694,11 @@ class ReclaimSupervisor:
             )
             while not self._stop_requested:
                 await asyncio.sleep(self._config.poll_interval_seconds)
+
+                # Process child event outbox before exit/heartbeat checks
+                # so that events written just before child exit are not lost.
+                await self.process_child_events_once()
+
                 # Check child exit first; if restarted or cooldown-handled,
                 # skip heartbeat this iteration to avoid double-processing.
                 handled = await self.check_child_exit_once()

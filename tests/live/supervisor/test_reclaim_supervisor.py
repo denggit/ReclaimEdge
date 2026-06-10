@@ -1357,7 +1357,7 @@ async def test_process_child_events_once_cancelled_error_propagates() -> None:
 
 
 @pytest.mark.asyncio
-async def test_run_forever_does_not_call_event_pipeline_yet() -> None:
+async def test_run_forever_calls_injected_event_pipeline() -> None:
     config = ReclaimSupervisorConfig(poll_interval_seconds=0.01)
     pipeline = FakeEventPipeline()
     supervisor = ReclaimSupervisor(config=config, event_pipeline=pipeline)
@@ -1369,7 +1369,69 @@ async def test_run_forever_does_not_call_event_pipeline_yet() -> None:
     supervisor.request_stop()
     await asyncio.wait_for(task, timeout=1.0)
 
-    assert pipeline.calls == 0
+    assert pipeline.calls >= 1
+    assert fake_child.terminated is True
+    assert supervisor.shutdown_result is not None
+
+
+@pytest.mark.asyncio
+async def test_run_forever_without_event_pipeline_still_runs() -> None:
+    config = ReclaimSupervisorConfig(poll_interval_seconds=0.01)
+    supervisor = ReclaimSupervisor(config=config)
+    fake_child = FakeChildProcess(supervisor.build_child_spec(), running=True)
+    supervisor.create_child_process = lambda: fake_child  # type: ignore[method-assign]
+
+    task = asyncio.create_task(supervisor.run_forever())
+    await asyncio.sleep(0.02)
+    supervisor.request_stop()
+    await asyncio.wait_for(task, timeout=1.0)
+
+    assert fake_child.started is True
+    assert fake_child.terminated is True
+
+
+@pytest.mark.asyncio
+async def test_run_forever_event_pipeline_error_does_not_stop_supervisor() -> None:
+    config = ReclaimSupervisorConfig(poll_interval_seconds=0.01)
+    pipeline = FakeEventPipeline(raises=RuntimeError("boom"))
+    supervisor = ReclaimSupervisor(config=config, event_pipeline=pipeline)
+    fake_child = FakeChildProcess(supervisor.build_child_spec(), running=True)
+    supervisor.create_child_process = lambda: fake_child  # type: ignore[method-assign]
+
+    task = asyncio.create_task(supervisor.run_forever())
+    await asyncio.sleep(0.03)
+
+    assert pipeline.calls >= 1
+    assert supervisor.stop_requested is False
+
+    supervisor.request_stop()
+    await asyncio.wait_for(task, timeout=1.0)
+
+    events = supervisor.health_events
+    assert any(e.event_type == "EVENT_PIPELINE_FAILED" for e in events)
+
+
+@pytest.mark.asyncio
+async def test_run_forever_event_pipeline_cancelled_error_propagates_and_shutdowns() -> None:
+    config = ReclaimSupervisorConfig(poll_interval_seconds=0.01)
+    pipeline = FakeEventPipeline(raises=asyncio.CancelledError())
+    supervisor = ReclaimSupervisor(config=config, event_pipeline=pipeline)
+    fake_child = FakeChildProcess(supervisor.build_child_spec(), running=True)
+    supervisor.create_child_process = lambda: fake_child  # type: ignore[method-assign]
+
+    with pytest.raises(asyncio.CancelledError):
+        await supervisor.run_forever()
+
+    assert pipeline.calls == 1
+    assert fake_child.terminated is True
+    assert supervisor.shutdown_result is not None
+
+
+def test_run_forever_processes_events_before_child_exit_check() -> None:
+    source = _supervisor_source()
+    event_idx = source.index("await self.process_child_events_once()")
+    exit_idx = source.index("handled = await self.check_child_exit_once()")
+    assert event_idx < exit_idx
 
 
 # ============================================================================
@@ -1423,6 +1485,13 @@ def test_source_no_btc_or_email_or_trading() -> None:
         "send_email",
         "SupervisorEmailPublisher",
         "src.utils.email_sender",
+        "SupervisorEventPipeline",
+        "ChildEventReader",
+        "AlertDeduper",
+        "AlertPolicy",
+        "JsonlOutbox",
+        "write_json_atomic",
+        "read_json_or_none",
         "SymbolWorkerApp",
         "Trader",
         "account_position_sync_worker",
