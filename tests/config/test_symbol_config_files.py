@@ -191,3 +191,76 @@ def test_btc_toml_passes_validator() -> None:
     """Disabled BTC config must pass validator without error."""
     config = load_symbol_config_from_dir(str(_SYMBOLS_DIR), "BTC-USDT-SWAP")
     validate_symbol_config(config)
+
+
+# ---------------------------------------------------------------------------
+# 7. BTC TOML source guards — must NOT contain enabled=true / live_trading=true
+# ---------------------------------------------------------------------------
+
+
+def test_btc_toml_must_not_contain_enabled_true_line() -> None:
+    """BTC TOML must NOT contain the exact line 'enabled = true'."""
+    content = _BTC_TOML.read_text(encoding="utf-8")
+    lines = content.splitlines()
+    for line in lines:
+        stripped = line.strip()
+        assert stripped != "enabled = true", (
+            f"BTC-USDT-SWAP.toml must not contain exact line 'enabled = true'. "
+            f"Found: {stripped!r}"
+        )
+
+
+def test_btc_toml_must_not_contain_live_trading_true_line() -> None:
+    """BTC TOML must NOT contain the exact line 'live_trading = true'."""
+    content = _BTC_TOML.read_text(encoding="utf-8")
+    lines = content.splitlines()
+    for line in lines:
+        stripped = line.strip()
+        assert stripped != "live_trading = true", (
+            f"BTC-USDT-SWAP.toml must not contain exact line 'live_trading = true'. "
+            f"Found: {stripped!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 8. Source guards — run_symbol_worker.py unchanged
+# ---------------------------------------------------------------------------
+
+
+def test_run_symbol_worker_must_contain_live_trading_gate() -> None:
+    """run_symbol_worker.py must still contain the LIVE_TRADING gate check."""
+    source = (_PROJECT_ROOT / "scripts" / "run_symbol_worker.py").read_text(
+        encoding="utf-8"
+    )
+    assert "LIVE_TRADING is not true. Refusing to start symbol worker." in source, (
+        "run_symbol_worker.py must still contain the LIVE_TRADING gate"
+    )
+
+
+def test_run_symbol_worker_must_not_contain_btc_usdt_swap() -> None:
+    """run_symbol_worker.py must NOT contain BTC-USDT-SWAP."""
+    source = (_PROJECT_ROOT / "scripts" / "run_symbol_worker.py").read_text(
+        encoding="utf-8"
+    )
+    assert "BTC-USDT-SWAP" not in source, (
+        "run_symbol_worker.py must NOT contain BTC-USDT-SWAP"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 9. Source guards — trader.py unchanged (no default BTC metadata)
+# ---------------------------------------------------------------------------
+
+
+def test_trader_module_has_no_default_btc_metadata() -> None:
+    """trader.py must NOT define default instrument metadata for BTC."""
+    source = (_PROJECT_ROOT / "src" / "execution" / "trader.py").read_text(
+        encoding="utf-8"
+    )
+    # BTC must not appear as a value for inst_id in any TraderInstrumentMetadata
+    # or DEFAULT_* constant definition.  The existing test
+    # test_default_metadata_for_btc_raises_value_error already covers the
+    # runtime behaviour; this is a source-level backstop.
+    assert 'inst_id="BTC-USDT-SWAP"' not in source, (
+        "trader.py must NOT define BTC default instrument metadata"
+    )
