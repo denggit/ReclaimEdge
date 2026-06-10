@@ -54,6 +54,91 @@ def parse_allowed_live_symbols(raw: str | None) -> tuple[str, ...]:
     return tuple(result)
 
 
+def _decimal_from_metadata_value(value: object, *, field_name: str) -> Decimal:
+    """Convert a metadata constructor value to Decimal with validation.
+
+    - ``Decimal`` is returned as-is
+    - ``str`` / ``int`` / ``float`` are converted
+    - ``bool`` is rejected (booleans are a subclass of int)
+    - ``None`` or any other type raises ``ValueError``
+    """
+    if isinstance(value, Decimal):
+        return value
+    if isinstance(value, bool):
+        raise ValueError(f"{field_name} must not be a boolean, got {value!r}")
+    if isinstance(value, (str, int, float)):
+        return Decimal(str(value))
+    raise ValueError(
+        f"{field_name} must be Decimal, str, int, or float, got {type(value).__name__}: {value!r}"
+    )
+
+
+@dataclass(frozen=True)
+class TraderInstrumentMetadata:
+    """Immutable per-instrument contract parameters for live trading.
+
+    This is intentionally self-contained: it does not read env, call the
+    network, or depend on ``config/*``.  It exists so that different
+    instruments (ETH vs BTC) can supply different multiplier / precision /
+    min‑contract values without changing any trading logic.
+    """
+
+    inst_id: str
+    contract_multiplier: Decimal
+    contract_precision: Decimal
+    min_contracts: Decimal
+
+    def __post_init__(self) -> None:
+        # --- inst_id ---
+        if not isinstance(self.inst_id, str) or not self.inst_id.strip():
+            raise ValueError(f"inst_id must be a non-empty string, got {self.inst_id!r}")
+
+        # Use object.__setattr__ because the dataclass is frozen.
+        object.__setattr__(self, "inst_id", self.inst_id.strip())
+
+        # --- numeric fields ---
+        multiplier = _decimal_from_metadata_value(self.contract_multiplier, field_name="contract_multiplier")
+        if multiplier <= 0:
+            raise ValueError(f"contract_multiplier must be > 0, got {multiplier}")
+        object.__setattr__(self, "contract_multiplier", multiplier)
+
+        precision = _decimal_from_metadata_value(self.contract_precision, field_name="contract_precision")
+        if precision <= 0:
+            raise ValueError(f"contract_precision must be > 0, got {precision}")
+        object.__setattr__(self, "contract_precision", precision)
+
+        min_cts = _decimal_from_metadata_value(self.min_contracts, field_name="min_contracts")
+        if min_cts <= 0:
+            raise ValueError(f"min_contracts must be > 0, got {min_cts}")
+        object.__setattr__(self, "min_contracts", min_cts)
+
+
+#: Default metadata for ETH-USDT-SWAP – matches the hard-coded values that
+#: Trader has always used before instrument metadata was configurable.
+DEFAULT_ETH_INSTRUMENT_METADATA = TraderInstrumentMetadata(
+    inst_id="ETH-USDT-SWAP",
+    contract_multiplier=Decimal("0.1"),
+    contract_precision=Decimal("0.01"),
+    min_contracts=Decimal("0.01"),
+)
+
+
+def default_instrument_metadata_for(inst_id: str) -> TraderInstrumentMetadata:
+    """Return the default instrument metadata for *inst_id*.
+
+    Currently only ``ETH-USDT-SWAP`` is configured.  Raising for any other
+    symbol is intentional – this gate prevents a symbol that passes the
+    allowlist check from accidentally trading with wrong contract parameters.
+    """
+    normalized = (inst_id or "").strip()
+    if normalized == "ETH-USDT-SWAP":
+        return DEFAULT_ETH_INSTRUMENT_METADATA
+    raise ValueError(
+        f"No default instrument metadata for {normalized!r}. "
+        "Only ETH-USDT-SWAP is configured for live trading metadata."
+    )
+
+
 @dataclass(frozen=True)
 class LiveTradeResult:
     ok: bool
@@ -104,7 +189,11 @@ class Trader:
     - recover existing ETH-USDT-SWAP position on restart
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        instrument_metadata: TraderInstrumentMetadata | None = None,
+    ) -> None:
         self.symbol = os.getenv("OKX_INST_ID", "ETH-USDT-SWAP").strip() or "ETH-USDT-SWAP"
         self.allowed_live_symbols = parse_allowed_live_symbols(os.getenv("RECLAIM_ALLOWED_LIVE_SYMBOLS"))
 
@@ -114,15 +203,28 @@ class Trader:
                 f"symbol={self.symbol!r} allowed={self.allowed_live_symbols!r}"
             )
 
+        # --- instrument metadata ---
+        if instrument_metadata is None:
+            metadata = default_instrument_metadata_for(self.symbol)
+        else:
+            if instrument_metadata.inst_id != self.symbol:
+                raise ValueError(
+                    f"instrument_metadata.inst_id {instrument_metadata.inst_id!r} "
+                    f"does not match Trader symbol {self.symbol!r}"
+                )
+            metadata = instrument_metadata
+
+        self.instrument_metadata = metadata
+        self.contract_multiplier = metadata.contract_multiplier
+        self.contract_precision = metadata.contract_precision
+        self.min_contracts = metadata.min_contracts
+
         self.base_url = os.getenv("OKX_BASE_URL", "https://www.okx.com")
         self.td_mode = os.getenv("OKX_TD_MODE", "isolated")
         self.leverage = os.getenv("LEVERAGE", "50")
         self.pos_side_mode = os.getenv("OKX_POS_SIDE_MODE", "net")
         self.live_trading = os.getenv("LIVE_TRADING", "false").strip().lower() in {"1", "true", "yes", "y", "on"}
         self.max_live_equity_usdt = float(os.getenv("MAX_LIVE_EQUITY_USDT", "30"))
-        self.contract_multiplier = Decimal("0.1")
-        self.contract_precision = Decimal("0.01")
-        self.min_contracts = Decimal("0.01")
 
         self.api_key = OKX_CONFIG.get("api_key", "")
         self.secret_key = OKX_CONFIG.get("secret_key", "")
@@ -188,7 +290,7 @@ class Trader:
         position = await self.fetch_position_snapshot()
         self.position_contracts = position.contracts
         logger.warning(
-            "LIVE trader initialized | symbol=%s td_mode=%s leverage=%s equity=%.4f existing_side=%s existing_contracts=%s existing_avg=%.4f contract_multiplier=%s min_contracts=%s allowed_live_symbols=%s",
+            "LIVE trader initialized | symbol=%s td_mode=%s leverage=%s equity=%.4f existing_side=%s existing_contracts=%s existing_avg=%.4f contract_multiplier=%s contract_precision=%s min_contracts=%s allowed_live_symbols=%s",
             self.symbol,
             self.td_mode,
             self.leverage,
@@ -197,6 +299,7 @@ class Trader:
             self.position_contracts,
             position.avg_entry_price,
             self.contract_multiplier,
+            self.contract_precision,
             self.min_contracts,
             self.allowed_live_symbols,
         )

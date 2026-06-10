@@ -332,3 +332,34 @@ async def test_replace_tp_fetch_fails_raises_runtime_error() -> None:
 
     # Verify no TP/SL orders were placed
     assert not tp_place_called, "No TP orders should have been placed after fetch failure"
+
+
+# ============================================================
+# Test 7: eth_qty_to_contracts with custom metadata multiplier
+# ============================================================
+def test_eth_qty_to_contracts_uses_metadata_multiplier() -> None:
+    """eth_qty_to_contracts must use self.contract_multiplier (set from metadata)."""
+    t = make_trader(contract_multiplier=Decimal("0.01"), contract_precision=Decimal("0.01"), min_contracts=Decimal("0.01"))
+
+    # eth_qty 0.02 with multiplier 0.01 → 2 contracts
+    result = t.eth_qty_to_contracts(Decimal("0.02"))
+    assert result == Decimal("2"), f"0.02 / 0.01 should be 2, got {result}"
+
+
+def test_eth_qty_to_contracts_eth_default_multiplier() -> None:
+    """eth_qty_to_contracts with ETH default multiplier 0.1."""
+    t = make_trader()  # uses ETH defaults: contract_multiplier=0.1
+
+    # eth_qty 0.1 with multiplier 0.1 → 1 contract
+    result = t.eth_qty_to_contracts(Decimal("0.1"))
+    assert result == Decimal("1"), f"0.1 / 0.1 should be 1, got {result}"
+
+
+def test_eth_qty_to_contracts_rounds_down_with_custom_precision() -> None:
+    """eth_qty_to_contracts rounds down according to contract_precision."""
+    t = make_trader(contract_multiplier=Decimal("0.01"), contract_precision=Decimal("0.01"), min_contracts=Decimal("0.01"))
+
+    # eth_qty 0.025 with multiplier 0.01 → 2.5, rounded down to 2.50
+    result = t.eth_qty_to_contracts(Decimal("0.025"))
+    # 0.025 / 0.01 = 2.5, no rounding needed
+    assert result == Decimal("2.5"), f"0.025 / 0.01 should be 2.5, got {result}"
