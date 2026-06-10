@@ -868,3 +868,135 @@ class TestCursorInvalidDict:
         result = reader.read_new_events()
 
         assert len(result.events) == 1
+
+
+# ============================================================================
+# E03b: parameter validation
+# ============================================================================
+
+
+class TestRejectsInvalidMaxBytesPerRead:
+    def test_rejects_zero_max_bytes_per_read(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match="max_bytes_per_read"):
+            ChildEventReader(
+                outbox_path=tmp_path / "events.jsonl",
+                cursor_path=tmp_path / "cursor.json",
+                max_bytes_per_read=0,
+            )
+
+    def test_rejects_negative_max_bytes_per_read(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match="max_bytes_per_read"):
+            ChildEventReader(
+                outbox_path=tmp_path / "events.jsonl",
+                cursor_path=tmp_path / "cursor.json",
+                max_bytes_per_read=-1,
+            )
+
+    def test_rejects_bool_max_bytes_per_read(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match="max_bytes_per_read"):
+            ChildEventReader(
+                outbox_path=tmp_path / "events.jsonl",
+                cursor_path=tmp_path / "cursor.json",
+                max_bytes_per_read=True,  # type: ignore[arg-type]
+            )
+
+
+class TestRejectsInvalidMaxLineBytes:
+    def test_rejects_zero_max_line_bytes(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match="max_line_bytes"):
+            ChildEventReader(
+                outbox_path=tmp_path / "events.jsonl",
+                cursor_path=tmp_path / "cursor.json",
+                max_line_bytes=0,
+            )
+
+    def test_rejects_negative_max_line_bytes(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match="max_line_bytes"):
+            ChildEventReader(
+                outbox_path=tmp_path / "events.jsonl",
+                cursor_path=tmp_path / "cursor.json",
+                max_line_bytes=-1,
+            )
+
+    def test_rejects_bool_max_line_bytes(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match="max_line_bytes"):
+            ChildEventReader(
+                outbox_path=tmp_path / "events.jsonl",
+                cursor_path=tmp_path / "cursor.json",
+                max_line_bytes=True,  # type: ignore[arg-type]
+            )
+
+
+# ============================================================================
+# E03b: truncate to empty file writes cursor zero
+# ============================================================================
+
+
+class TestTruncatedToEmptyFile:
+    def test_truncated_to_empty_file_writes_cursor_zero(self, tmp_path: Path) -> None:
+        outbox = tmp_path / "events.jsonl"
+        cursor = tmp_path / "cursor.json"
+
+        # Write two events and read them.
+        _write_outbox_lines(
+            outbox,
+            _make_event(1, "WORKER_STARTED"),
+            _make_event(2, "WORKER_STOPPED"),
+        )
+
+        reader = ChildEventReader(outbox_path=outbox, cursor_path=cursor)
+        result1 = reader.read_new_events()
+        assert len(result1.events) == 2
+        assert result1.cursor_offset > 0
+
+        # Overwrite the outbox with an empty file (simulating truncate).
+        _write_outbox_raw(outbox, "")
+
+        result2 = reader.read_new_events()
+
+        assert result2.events == []
+        assert result2.errors == []
+        assert result2.cursor_offset == 0
+        assert result2.reached_eof is True
+        assert result2.truncated_or_rotated is True
+
+        # Cursor JSON must exist with offset=0.
+        assert cursor.exists()
+        cursor_data = read_json_or_none(cursor)
+        assert cursor_data is not None
+        assert cursor_data["offset"] == 0
+        assert cursor_data["path"] == str(outbox)
+
+
+# ============================================================================
+# E03b: event_type whitespace handling
+# ============================================================================
+
+
+class TestEventTypeWhitespace:
+    def test_whitespace_event_type_is_invalid(self, tmp_path: Path) -> None:
+        outbox = tmp_path / "events.jsonl"
+        cursor = tmp_path / "cursor.json"
+
+        obj = {"ts_ms": 1, "event_type": "   ", "payload": {}}
+        _write_outbox_raw(outbox, json.dumps(obj, sort_keys=True) + "\n")
+
+        reader = ChildEventReader(outbox_path=outbox, cursor_path=cursor)
+        result = reader.read_new_events()
+
+        assert result.events == []
+        assert len(result.errors) == 1
+        assert result.errors[0].error_type == "INVALID_EVENT_TYPE"
+
+    def test_event_type_is_stripped_on_success(self, tmp_path: Path) -> None:
+        outbox = tmp_path / "events.jsonl"
+        cursor = tmp_path / "cursor.json"
+
+        obj = {"ts_ms": 1, "event_type": "  WORKER_STARTED  ", "payload": {}}
+        _write_outbox_raw(outbox, json.dumps(obj, sort_keys=True) + "\n")
+
+        reader = ChildEventReader(outbox_path=outbox, cursor_path=cursor)
+        result = reader.read_new_events()
+
+        assert len(result.events) == 1
+        assert result.events[0].event_type == "WORKER_STARTED"

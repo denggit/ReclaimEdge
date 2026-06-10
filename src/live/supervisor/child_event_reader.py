@@ -105,6 +105,20 @@ class ChildEventReader:
         max_bytes_per_read: int = 1024 * 1024,
         max_line_bytes: int = 64 * 1024,
     ) -> None:
+        # Strict type checks — bool is an int subclass, so isinstance(True, int)
+        # would silently pass.  A negative or zero value would cause fh.read(-1)
+        # which reads the entire file → memory risk.
+        if type(max_bytes_per_read) is not int or max_bytes_per_read <= 0:
+            raise ValueError(
+                f"max_bytes_per_read must be a positive int, "
+                f"got {type(max_bytes_per_read).__name__}={max_bytes_per_read!r}"
+            )
+        if type(max_line_bytes) is not int or max_line_bytes <= 0:
+            raise ValueError(
+                f"max_line_bytes must be a positive int, "
+                f"got {type(max_line_bytes).__name__}={max_line_bytes!r}"
+            )
+
         self._outbox_path = outbox_path
         self._cursor_path = cursor_path
         self._max_bytes_per_read = max_bytes_per_read
@@ -156,6 +170,11 @@ class ChildEventReader:
         bytes_read = len(chunk)
 
         if bytes_read == 0:
+            # If the file was truncated/rotated, we must persist the reset
+            # offset=0 so a subsequent reader instance doesn't pick up a
+            # stale cursor pointing past EOF.
+            if truncated_or_rotated:
+                self._write_cursor(0)
             return ChildEventReadResult(
                 events=[],
                 errors=[],
@@ -389,7 +408,7 @@ def _parse_line(
 
     # -- event_type ---------------------------------------------------------
     event_type = obj.get("event_type")
-    if not isinstance(event_type, str) or not event_type:
+    if not isinstance(event_type, str) or not event_type.strip():
         return ChildEventReadError(
             ts_ms=_now_ms(),
             error_type="INVALID_EVENT_TYPE",
@@ -399,6 +418,7 @@ def _parse_line(
             offset_end=offset_end,
             raw_preview=_make_raw_preview(stripped),
         )
+    event_type = event_type.strip()
 
     # -- payload ------------------------------------------------------------
     payload = obj.get("payload")
