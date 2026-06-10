@@ -225,6 +225,7 @@ class _FakeRuntimePaths:
         self.journal_file = tmp_path / "journal.jsonl"
         self.trade_summary_file = tmp_path / "summary.jsonl"
         self.rolling_loss_guard_state_file = tmp_path / "rolling_loss.json"
+        self.worker_event_outbox_file = tmp_path / "worker_events.jsonl"
 
 
 class _ShutdownTestFactory(SymbolWorkerFactory):
@@ -1683,3 +1684,689 @@ class TestSymbolWorkerAppShutdownClassification:
         assert "_drain_critical_runtime_tasks(" in source, (
             "symbol_worker_app.py must call _drain_critical_runtime_tasks"
         )
+
+
+# ============================================================================
+# E05h: Child lifecycle event outbox tests
+# ============================================================================
+
+
+class _FakeHeartbeatWriterRaising:
+    """A heartbeat writer that raises on write_status_once for testing
+    WORKER_HEARTBEAT_WRITE_FAILED emission."""
+
+    def __init__(self) -> None:
+        self.status_writes: list[str] = []
+        self.config = _FakeHeartbeatConfig(enabled=True)
+
+    def write_status_once(self, status: str) -> None:
+        raise RuntimeError("disk full")
+
+    async def run_until_cancelled(self) -> None:
+        await asyncio.Event().wait()
+
+
+class _ShutdownTestFactoryWithRaisingHeartbeat(SymbolWorkerFactory):
+    """Factory that returns a raising heartbeat writer."""
+
+    def __init__(self, *, tmp_path: Any) -> None:
+        super().__init__()
+        self._tmp_path = tmp_path
+
+    def create_email_sender(self) -> Any:
+        return object()
+
+    def create_trader(self) -> _FakeTrader:
+        return _FakeTrader()
+
+    def create_runtime_paths(self, *, runtime_dir: str | Any, inst_id: str) -> _FakeRuntimePaths:
+        return _FakeRuntimePaths(self._tmp_path)
+
+    def create_heartbeat_writer(self, *, runtime_paths: Any, heartbeat_config: Any) -> _FakeHeartbeatWriterRaising:
+        return _FakeHeartbeatWriterRaising()
+
+    def create_persistence(self, *, runtime_paths: Any, email_sender: Any) -> _FakePersistence:
+        return _FakePersistence()
+
+    def create_strategy_objects(self, *, strategy_config: Any, position_sizer_config: Any) -> _FakeStrategyObjects:
+        return _FakeStrategyObjects()
+
+    def create_cvd_tracker(self, config: Any) -> _FakeCvd:
+        return _FakeCvd()
+
+    def create_queues(self, app_config: Any) -> _FakeQueues:
+        return _FakeQueues()
+
+    def create_monitor(self, *, config: Any, tick_handlers: Any) -> _FakeMonitor:
+        return _FakeMonitor()
+
+
+class _FakeTraderRaisingFetch:
+    """Trader that raises on fetch_position_snapshot for testing
+    WORKER_STARTUP_RECOVERY_FAILED."""
+
+    def __init__(self) -> None:
+        self.symbol = "ETH-USDT-SWAP"
+        self.td_mode = "isolated"
+        self.pos_side_mode = "net"
+        self.leverage = 15
+        self.account_equity_usdt = 10000.0
+
+    async def start(self) -> None:
+        pass
+
+    async def initialize(self) -> None:
+        pass
+
+    async def close(self) -> None:
+        pass
+
+    async def fetch_position_snapshot(self) -> Any:
+        raise RuntimeError("OKX API down")
+
+
+class _ShutdownTestFactoryRaisingFetch(SymbolWorkerFactory):
+    """Factory that returns a trader that raises on fetch_position_snapshot."""
+
+    def __init__(self, *, tmp_path: Any) -> None:
+        super().__init__()
+        self._tmp_path = tmp_path
+
+    def create_email_sender(self) -> Any:
+        return object()
+
+    def create_trader(self) -> _FakeTraderRaisingFetch:
+        return _FakeTraderRaisingFetch()
+
+    def create_runtime_paths(self, *, runtime_dir: str | Any, inst_id: str) -> _FakeRuntimePaths:
+        return _FakeRuntimePaths(self._tmp_path)
+
+    def create_heartbeat_writer(self, *, runtime_paths: Any, heartbeat_config: Any) -> _FakeHeartbeatWriter:
+        return _FakeHeartbeatWriter()
+
+    def create_persistence(self, *, runtime_paths: Any, email_sender: Any) -> _FakePersistence:
+        return _FakePersistence()
+
+    def create_strategy_objects(self, *, strategy_config: Any, position_sizer_config: Any) -> _FakeStrategyObjects:
+        return _FakeStrategyObjects()
+
+    def create_cvd_tracker(self, config: Any) -> _FakeCvd:
+        return _FakeCvd()
+
+    def create_queues(self, app_config: Any) -> _FakeQueues:
+        return _FakeQueues()
+
+    def create_monitor(self, *, config: Any, tick_handlers: Any) -> _FakeMonitor:
+        return _FakeMonitor()
+
+
+# ---------------------------------------------------------------------------
+# Helper: read outbox events from file
+# ---------------------------------------------------------------------------
+
+
+def _read_outbox_events(path: Any) -> list[dict]:
+    """Read JSONL outbox lines and return a list of event dicts."""
+    from src.live.outbox.jsonl_outbox import JsonlOutbox as RealOutbox
+
+    outbox = RealOutbox(path)
+    events = outbox.read_events()
+    return [
+        {"event_type": e.event_type, "payload": e.payload}
+        for e in events
+    ]
+
+
+# ============================================================================
+# E05h-1: Startup emits WORKER_STARTED and STARTUP_RECOVERY_COMPLETED
+# ============================================================================
+
+
+class TestE05hStartupEvents:
+    @pytest.mark.asyncio
+    async def test_startup_emits_started_and_recovery_completed(
+        self, tmp_path: Any, monkeypatch: Any
+    ) -> None:
+        controller = WorkerShutdownController()
+        factory = _ShutdownTestFactory(tmp_path=tmp_path)
+
+        app_config = _make_app_config(
+            symbol_worker_shutdown_drain_timeout_seconds=0.10,
+            symbol_worker_shutdown_save_state_enabled=False,
+            symbol_worker_shutdown_heartbeat_enabled=True,
+        )
+
+        app = SymbolWorkerApp(
+            app_config=app_config,
+            factory=factory,
+            shutdown_controller=controller,
+        )
+
+        async def _fake_fetch_cash(_trader: Any) -> float:
+            return 10000.0
+
+        async def _noop(**kwargs: Any) -> None:
+            return None
+
+        def _noop_sync(**kwargs: Any) -> bool:
+            return False
+
+        monkeypatch.setattr(
+            "src.live.symbol_worker_app.live_flat_balance.fetch_usdt_cash_balance",
+            _fake_fetch_cash,
+        )
+        monkeypatch.setattr(
+            "src.live.symbol_worker_app.startup_order_recovery.apply_main_tp_startup_recovery",
+            _noop,
+        )
+        monkeypatch.setattr(
+            "src.live.symbol_worker_app.startup_order_recovery.apply_sidecar_startup_recovery",
+            _noop,
+        )
+        monkeypatch.setattr(
+            "src.live.symbol_worker_app.rolling_loss_live_helpers.apply_rolling_loss_guard_startup_state",
+            _noop,
+        )
+        monkeypatch.setattr(
+            "src.live.symbol_worker_app.runner_live_helpers.apply_three_stage_startup_safety_gate",
+            _noop_sync,
+        )
+
+        # Monkeypatch workers so app.run() can complete.
+        # Critical tasks must BLOCK until cancelled (otherwise they return
+        # cleanly before shutdown and trigger the unexpected-exit path).
+        async def _fake_acct(**kwargs: Any) -> None:
+            await asyncio.Event().wait()
+
+        async def _fake_exec(**kwargs: Any) -> None:
+            await asyncio.Event().wait()
+
+        async def _fake_strat(**kwargs: Any) -> None:
+            await asyncio.Event().wait()
+
+        async def _fake_mon(self: Any) -> None:
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(
+            "src.live.symbol_worker_app.account_position_sync_worker_module.account_position_sync_worker",
+            _fake_acct,
+        )
+        monkeypatch.setattr(
+            "src.live.symbol_worker_app.execution_worker_module.execution_worker",
+            _fake_exec,
+        )
+        monkeypatch.setattr(
+            "src.live.symbol_worker_app.strategy_tick_worker_module.strategy_tick_worker",
+            _fake_strat,
+        )
+        monkeypatch.setattr(
+            _FakeMonitor, "run_forever", _fake_mon,
+        )
+
+        # Trigger shutdown shortly after startup.
+        async def _trigger_shutdown() -> None:
+            await asyncio.sleep(0.10)
+            controller.request_shutdown("test_startup_events")
+
+        trigger_task = asyncio.ensure_future(_trigger_shutdown())
+
+        try:
+            await asyncio.wait_for(app.run(), timeout=10.0)
+        finally:
+            if not trigger_task.done():
+                trigger_task.cancel()
+                try:
+                    await trigger_task
+                except asyncio.CancelledError:
+                    pass
+
+        outbox_path = tmp_path / "worker_events.jsonl"
+        events = _read_outbox_events(outbox_path)
+        event_types = [e["event_type"] for e in events]
+
+        assert "WORKER_STARTED" in event_types, (
+            f"Expected WORKER_STARTED in outbox, got {event_types}"
+        )
+        assert "WORKER_STARTUP_RECOVERY_COMPLETED" in event_types, (
+            f"Expected WORKER_STARTUP_RECOVERY_COMPLETED in outbox, got {event_types}"
+        )
+
+        # Verify payload fields for WORKER_STARTED.
+        started = next(e for e in events if e["event_type"] == "WORKER_STARTED")
+        assert started["payload"]["symbol"] == "ETH-USDT-SWAP"
+        assert started["payload"]["severity"] == "INFO"
+        assert started["payload"]["data"]["phase"] == "runtime_paths_ready"
+
+
+# ============================================================================
+# E05h-2: Graceful shutdown emits STOPPING/DRAIN_STARTED/DRAIN_COMPLETED/STOPPED
+# ============================================================================
+
+
+class TestE05hShutdownEvents:
+    @pytest.mark.asyncio
+    async def test_shutdown_emits_drain_events(
+        self, tmp_path: Any, monkeypatch: Any
+    ) -> None:
+        controller = WorkerShutdownController()
+        factory = _ShutdownTestFactory(tmp_path=tmp_path)
+
+        app_config = _make_app_config(
+            symbol_worker_shutdown_drain_timeout_seconds=2.0,
+            symbol_worker_shutdown_save_state_enabled=False,
+            symbol_worker_shutdown_heartbeat_enabled=True,
+        )
+
+        app = SymbolWorkerApp(
+            app_config=app_config,
+            factory=factory,
+            shutdown_controller=controller,
+        )
+
+        async def _fake_fetch_cash(_trader: Any) -> float:
+            return 10000.0
+
+        async def _noop(**kwargs: Any) -> None:
+            return None
+
+        def _noop_sync(**kwargs: Any) -> bool:
+            return False
+
+        monkeypatch.setattr(
+            "src.live.symbol_worker_app.live_flat_balance.fetch_usdt_cash_balance",
+            _fake_fetch_cash,
+        )
+        monkeypatch.setattr(
+            "src.live.symbol_worker_app.startup_order_recovery.apply_main_tp_startup_recovery",
+            _noop,
+        )
+        monkeypatch.setattr(
+            "src.live.symbol_worker_app.startup_order_recovery.apply_sidecar_startup_recovery",
+            _noop,
+        )
+        monkeypatch.setattr(
+            "src.live.symbol_worker_app.rolling_loss_live_helpers.apply_rolling_loss_guard_startup_state",
+            _noop,
+        )
+        monkeypatch.setattr(
+            "src.live.symbol_worker_app.runner_live_helpers.apply_three_stage_startup_safety_gate",
+            _noop_sync,
+        )
+
+        # Monkeypatch workers — critical tasks must BLOCK until cancelled.
+        async def _fake_account_worker(**kwargs: Any) -> None:
+            await asyncio.Event().wait()
+
+        async def _fake_execution_worker(**kwargs: Any) -> None:
+            await asyncio.Event().wait()
+
+        async def _fake_strategy_worker(**kwargs: Any) -> None:
+            await asyncio.Event().wait()
+
+        async def _fake_monitor_run(self: Any) -> None:
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(
+            "src.live.symbol_worker_app.account_position_sync_worker_module.account_position_sync_worker",
+            _fake_account_worker,
+        )
+        monkeypatch.setattr(
+            "src.live.symbol_worker_app.execution_worker_module.execution_worker",
+            _fake_execution_worker,
+        )
+        monkeypatch.setattr(
+            "src.live.symbol_worker_app.strategy_tick_worker_module.strategy_tick_worker",
+            _fake_strategy_worker,
+        )
+        monkeypatch.setattr(
+            _FakeMonitor, "run_forever", _fake_monitor_run,
+        )
+
+        async def _trigger_shutdown() -> None:
+            await asyncio.sleep(0.10)
+            controller.request_shutdown("test_shutdown_events")
+
+        trigger_task = asyncio.ensure_future(_trigger_shutdown())
+
+        try:
+            await asyncio.wait_for(app.run(), timeout=10.0)
+        finally:
+            if not trigger_task.done():
+                trigger_task.cancel()
+                try:
+                    await trigger_task
+                except asyncio.CancelledError:
+                    pass
+
+        outbox_path = tmp_path / "worker_events.jsonl"
+        events = _read_outbox_events(outbox_path)
+        event_types = [e["event_type"] for e in events]
+
+        assert "WORKER_STOPPING" in event_types, (
+            f"Expected WORKER_STOPPING in outbox, got {event_types}"
+        )
+        assert "WORKER_DRAIN_STARTED" in event_types, (
+            f"Expected WORKER_DRAIN_STARTED in outbox, got {event_types}"
+        )
+        # Either DRAIN_COMPLETED or DRAIN_TIMEOUT must be emitted (the
+        # outcome depends on task timing, but at least one is guaranteed).
+        drain_outcome = {"WORKER_DRAIN_COMPLETED", "WORKER_DRAIN_TIMEOUT"}
+        assert drain_outcome & set(event_types), (
+            f"Expected DRAIN_COMPLETED or DRAIN_TIMEOUT in outbox, got {event_types}"
+        )
+        assert "WORKER_STOPPED" in event_types, (
+            f"Expected WORKER_STOPPED in outbox, got {event_types}"
+        )
+
+        # Order: STOPPING < DRAIN_STARTED < drain outcome < STOPPED.
+        idx_stopping = event_types.index("WORKER_STOPPING")
+        idx_drain_started = event_types.index("WORKER_DRAIN_STARTED")
+        drain_result_event = next(
+            e for e in event_types if e in drain_outcome
+        )
+        idx_drain_result = event_types.index(drain_result_event)
+        idx_stopped = event_types.index("WORKER_STOPPED")
+        assert idx_stopping < idx_drain_started < idx_drain_result < idx_stopped, (
+            f"Expected STOPPING < DRAIN_STARTED < {drain_result_event} < STOPPED, "
+            f"got {idx_stopping}<{idx_drain_started}<{idx_drain_result}<{idx_stopped}"
+        )
+
+
+# ============================================================================
+# E05h-3: Drain timeout emits WORKER_DRAIN_TIMEOUT
+# ============================================================================
+
+
+class TestE05hDrainTimeout:
+    @pytest.mark.asyncio
+    async def test_drain_timeout_emits_drain_timeout(
+        self, tmp_path: Any, monkeypatch: Any
+    ) -> None:
+        """When critical tasks do not finish within drain timeout,
+        WORKER_DRAIN_TIMEOUT must be emitted."""
+        controller = WorkerShutdownController()
+        factory = _ShutdownTestFactory(tmp_path=tmp_path)
+
+        app_config = _make_app_config(
+            symbol_worker_shutdown_drain_timeout_seconds=0.05,
+            symbol_worker_shutdown_save_state_enabled=False,
+            symbol_worker_shutdown_heartbeat_enabled=False,
+        )
+
+        app = SymbolWorkerApp(
+            app_config=app_config,
+            factory=factory,
+            shutdown_controller=controller,
+        )
+
+        async def _fake_fetch_cash(_trader: Any) -> float:
+            return 10000.0
+
+        async def _noop(**kwargs: Any) -> None:
+            return None
+
+        def _noop_sync(**kwargs: Any) -> bool:
+            return False
+
+        monkeypatch.setattr(
+            "src.live.symbol_worker_app.live_flat_balance.fetch_usdt_cash_balance",
+            _fake_fetch_cash,
+        )
+        monkeypatch.setattr(
+            "src.live.symbol_worker_app.startup_order_recovery.apply_main_tp_startup_recovery",
+            _noop,
+        )
+        monkeypatch.setattr(
+            "src.live.symbol_worker_app.startup_order_recovery.apply_sidecar_startup_recovery",
+            _noop,
+        )
+        monkeypatch.setattr(
+            "src.live.symbol_worker_app.rolling_loss_live_helpers.apply_rolling_loss_guard_startup_state",
+            _noop,
+        )
+        monkeypatch.setattr(
+            "src.live.symbol_worker_app.runner_live_helpers.apply_three_stage_startup_safety_gate",
+            _noop_sync,
+        )
+
+        # Make account worker block forever — won't finish within drain timeout.
+        async def _fake_account_worker(**kwargs: Any) -> None:
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(
+            "src.live.symbol_worker_app.account_position_sync_worker_module.account_position_sync_worker",
+            _fake_account_worker,
+        )
+
+        async def _trigger_shutdown() -> None:
+            await asyncio.sleep(0.10)
+            controller.request_shutdown("test_drain_timeout")
+
+        trigger_task = asyncio.ensure_future(_trigger_shutdown())
+
+        try:
+            await asyncio.wait_for(app.run(), timeout=10.0)
+        finally:
+            if not trigger_task.done():
+                trigger_task.cancel()
+                try:
+                    await trigger_task
+                except asyncio.CancelledError:
+                    pass
+
+        outbox_path = tmp_path / "worker_events.jsonl"
+        events = _read_outbox_events(outbox_path)
+        event_types = [e["event_type"] for e in events]
+
+        assert "WORKER_DRAIN_TIMEOUT" in event_types, (
+            f"Expected WORKER_DRAIN_TIMEOUT in outbox, got {event_types}"
+        )
+
+        drain_timeout = next(
+            e for e in events if e["event_type"] == "WORKER_DRAIN_TIMEOUT"
+        )
+        assert drain_timeout["payload"]["severity"] == "ERROR"
+        assert drain_timeout["payload"]["data"]["remaining_critical_tasks"] > 0
+
+
+# ============================================================================
+# E05h-4: Heartbeat write failure emits WORKER_HEARTBEAT_WRITE_FAILED
+# ============================================================================
+
+
+class TestE05hHeartbeatWriteFailure:
+    @pytest.mark.asyncio
+    async def test_heartbeat_write_failure_emits_event(
+        self, tmp_path: Any, monkeypatch: Any
+    ) -> None:
+        controller = WorkerShutdownController()
+        factory = _ShutdownTestFactoryWithRaisingHeartbeat(tmp_path=tmp_path)
+
+        app_config = _make_app_config(
+            symbol_worker_shutdown_drain_timeout_seconds=2.0,
+            symbol_worker_shutdown_save_state_enabled=False,
+            symbol_worker_shutdown_heartbeat_enabled=True,
+        )
+
+        app = SymbolWorkerApp(
+            app_config=app_config,
+            factory=factory,
+            shutdown_controller=controller,
+        )
+
+        async def _fake_fetch_cash(_trader: Any) -> float:
+            return 10000.0
+
+        async def _noop(**kwargs: Any) -> None:
+            return None
+
+        def _noop_sync(**kwargs: Any) -> bool:
+            return False
+
+        monkeypatch.setattr(
+            "src.live.symbol_worker_app.live_flat_balance.fetch_usdt_cash_balance",
+            _fake_fetch_cash,
+        )
+        monkeypatch.setattr(
+            "src.live.symbol_worker_app.startup_order_recovery.apply_main_tp_startup_recovery",
+            _noop,
+        )
+        monkeypatch.setattr(
+            "src.live.symbol_worker_app.startup_order_recovery.apply_sidecar_startup_recovery",
+            _noop,
+        )
+        monkeypatch.setattr(
+            "src.live.symbol_worker_app.rolling_loss_live_helpers.apply_rolling_loss_guard_startup_state",
+            _noop,
+        )
+        monkeypatch.setattr(
+            "src.live.symbol_worker_app.runner_live_helpers.apply_three_stage_startup_safety_gate",
+            _noop_sync,
+        )
+
+        async def _trigger_shutdown() -> None:
+            await asyncio.sleep(0.10)
+            controller.request_shutdown("test_hb_failure")
+
+        trigger_task = asyncio.ensure_future(_trigger_shutdown())
+
+        try:
+            await asyncio.wait_for(app.run(), timeout=10.0)
+        finally:
+            if not trigger_task.done():
+                trigger_task.cancel()
+                try:
+                    await trigger_task
+                except asyncio.CancelledError:
+                    pass
+
+        outbox_path = tmp_path / "worker_events.jsonl"
+        events = _read_outbox_events(outbox_path)
+        event_types = [e["event_type"] for e in events]
+
+        assert "WORKER_HEARTBEAT_WRITE_FAILED" in event_types, (
+            f"Expected WORKER_HEARTBEAT_WRITE_FAILED in outbox, got {event_types}"
+        )
+
+        hb_failed = [
+            e for e in events if e["event_type"] == "WORKER_HEARTBEAT_WRITE_FAILED"
+        ]
+        assert len(hb_failed) >= 2, (
+            f"Expected at least 2 HEARTBEAT_WRITE_FAILED events, got {len(hb_failed)}"
+        )
+
+        statuses = {e["payload"]["data"]["status"] for e in hb_failed}
+        assert statuses >= {"stopping", "stopped"}, (
+            f"Expected stopping and stopped statuses, got {statuses}"
+        )
+
+        for e in hb_failed:
+            assert e["payload"]["severity"] == "ERROR"
+            assert e["payload"]["data"]["error_type"] == "RuntimeError"
+
+        # run() must still complete despite heartbeat write failures.
+        assert controller.requested is True
+
+
+# ============================================================================
+# E05h-5: Startup failure emits WORKER_STARTUP_RECOVERY_FAILED
+# ============================================================================
+
+
+class TestE05hStartupFailure:
+    @pytest.mark.asyncio
+    async def test_startup_failure_emits_recovery_failed(
+        self, tmp_path: Any, monkeypatch: Any
+    ) -> None:
+        """When startup raises after emitter is created,
+        WORKER_STARTUP_RECOVERY_FAILED must be emitted."""
+        controller = WorkerShutdownController()
+        factory = _ShutdownTestFactoryRaisingFetch(tmp_path=tmp_path)
+
+        app_config = _make_app_config()
+
+        app = SymbolWorkerApp(
+            app_config=app_config,
+            factory=factory,
+            shutdown_controller=controller,
+        )
+
+        async def _fake_fetch_cash(_trader: Any) -> float:
+            return 10000.0
+
+        monkeypatch.setattr(
+            "src.live.symbol_worker_app.live_flat_balance.fetch_usdt_cash_balance",
+            _fake_fetch_cash,
+        )
+
+        # run() must still raise the original error.
+        with pytest.raises(RuntimeError, match="OKX API down"):
+            await app.run()
+
+        outbox_path = tmp_path / "worker_events.jsonl"
+        events = _read_outbox_events(outbox_path)
+
+        # WORKER_STARTED must have been emitted before the failure.
+        started_events = [e for e in events if e["event_type"] == "WORKER_STARTED"]
+        assert len(started_events) == 1
+
+        # WORKER_STARTUP_RECOVERY_FAILED must be emitted.
+        failed_events = [
+            e for e in events if e["event_type"] == "WORKER_STARTUP_RECOVERY_FAILED"
+        ]
+        assert len(failed_events) == 1
+        failed = failed_events[0]
+        assert failed["payload"]["severity"] == "ERROR"
+        assert failed["payload"]["data"]["error_type"] == "RuntimeError"
+        assert "phase" in failed["payload"]["data"]
+
+
+# ============================================================================
+# E05h-6: Emitter failure does not mask original error
+# ============================================================================
+
+
+class TestE05hEmitterFailureDoesNotMaskError:
+    @pytest.mark.asyncio
+    async def test_emitter_failure_does_not_mask_startup_error(
+        self, tmp_path: Any, monkeypatch: Any
+    ) -> None:
+        """If the emitter raises inside the best-effort wrapper, the
+        wrapper must catch and log it — the original error must still
+        propagate."""
+        controller = WorkerShutdownController()
+        factory = _ShutdownTestFactoryRaisingFetch(tmp_path=tmp_path)
+
+        app_config = _make_app_config()
+
+        app = SymbolWorkerApp(
+            app_config=app_config,
+            factory=factory,
+            shutdown_controller=controller,
+        )
+
+        async def _fake_fetch_cash(_trader: Any) -> float:
+            return 10000.0
+
+        monkeypatch.setattr(
+            "src.live.symbol_worker_app.live_flat_balance.fetch_usdt_cash_balance",
+            _fake_fetch_cash,
+        )
+
+        # Make the outbox append raise by writing to an invalid path.
+        # The real _emit_worker_event_best_effort must catch this.
+        # We monkeypatch WorkerEventEmitter.emit to raise.
+        import src.live.outbox.worker_event_emitter as emitter_module
+
+        original_emit = emitter_module.WorkerEventEmitter.emit
+
+        def _raising_emit(self, event_type, payload=None, *, severity="INFO", ts_ms=None):
+            raise RuntimeError("outbox disk error")
+
+        monkeypatch.setattr(
+            emitter_module.WorkerEventEmitter, "emit", _raising_emit
+        )
+
+        # Original error must still propagate.
+        with pytest.raises(RuntimeError, match="OKX API down"):
+            await app.run()

@@ -341,3 +341,82 @@ def test_symbol_worker_app_uses_named_task_references_for_shutdown() -> None:
         assert token in source, (
             f"SymbolWorkerApp must contain named reference {token!r}"
         )
+
+
+# ============================================================================
+# E05h: source guard — required event imports and emitter
+# ============================================================================
+
+
+class TestE05hRequiredImports:
+    def test_contains_worker_event_emitter_import(self) -> None:
+        source = _app_source()
+        assert "WorkerEventEmitter" in source, (
+            "symbol_worker_app.py must import WorkerEventEmitter"
+        )
+        assert "JsonlOutbox" in source, (
+            "symbol_worker_app.py must import JsonlOutbox"
+        )
+
+    def test_contains_event_constants(self) -> None:
+        source = _app_source()
+        required_constants = [
+            "WORKER_STARTED",
+            "WORKER_STARTUP_RECOVERY_COMPLETED",
+            "WORKER_STARTUP_RECOVERY_FAILED",
+            "WORKER_STOPPING",
+            "WORKER_STOPPED",
+            "WORKER_HEARTBEAT_WRITE_FAILED",
+            "WORKER_DRAIN_STARTED",
+            "WORKER_DRAIN_COMPLETED",
+            "WORKER_DRAIN_TIMEOUT",
+        ]
+        for token in required_constants:
+            assert token in source, (
+                f"symbol_worker_app.py must import {token}"
+            )
+
+    def test_contains_emit_helper(self) -> None:
+        source = _app_source()
+        assert "_emit_worker_event_best_effort" in source, (
+            "symbol_worker_app.py must define _emit_worker_event_best_effort"
+        )
+
+    def test_contains_worker_event_emitter_variable(self) -> None:
+        source = _app_source()
+        assert "worker_event_emitter: WorkerEventEmitter | None = None" in source, (
+            "symbol_worker_app.py must initialise worker_event_emitter"
+        )
+
+
+class TestE05hForbiddenTokens:
+    def test_no_supervisor_imports(self) -> None:
+        source = _app_source()
+        forbidden = [
+            "SupervisorEventPipeline",
+            "ChildEventReader",
+            "AlertDeduper",
+            "AlertPolicy",
+            "SupervisorEmailPublisher",
+            "send_email_async(",
+            "process_once(",
+        ]
+        for token in forbidden:
+            assert token not in source, (
+                f"symbol_worker_app.py must not contain {token!r}"
+            )
+
+    def test_no_external_http_libs(self) -> None:
+        source = _app_source()
+        forbidden = [
+            "import requests",
+            "import httpx",
+            "import websocket",
+            "from okx",
+            "RECLAIM_SYMBOLS",
+            "BTC-USDT-SWAP",
+        ]
+        for token in forbidden:
+            assert token not in source, (
+                f"symbol_worker_app.py must not contain {token!r}"
+            )

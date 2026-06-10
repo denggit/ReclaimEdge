@@ -12,6 +12,19 @@ from src.live import runtime_types as live_runtime_types
 from src.live import time_utils as live_time_utils
 from src.live.account_sync import flat_balance as live_flat_balance
 from src.live.live_app_config import LiveAppConfig
+from src.live.outbox import (
+    WORKER_DRAIN_COMPLETED,
+    WORKER_DRAIN_STARTED,
+    WORKER_DRAIN_TIMEOUT,
+    WORKER_HEARTBEAT_WRITE_FAILED,
+    WORKER_STARTED,
+    WORKER_STARTUP_RECOVERY_COMPLETED,
+    WORKER_STARTUP_RECOVERY_FAILED,
+    WORKER_STOPPED,
+    WORKER_STOPPING,
+    JsonlOutbox,
+    WorkerEventEmitter,
+)
 from src.live.runtime_path_compat import handoff_legacy_runtime_files
 from src.live.startup_recovery import basic_restore as startup_basic_restore
 from src.live.startup_recovery import order_recovery as startup_order_recovery
@@ -41,6 +54,31 @@ from src.risk import rolling_loss_live as rolling_loss_live_helpers
 from src.utils.log import get_logger
 
 logger = get_logger(__name__)
+
+
+def _emit_worker_event_best_effort(
+    emitter: WorkerEventEmitter | None,
+    event_type: str,
+    *,
+    severity: str = "INFO",
+    payload: dict[str, object] | None = None,
+) -> None:
+    """Best-effort emit a worker lifecycle event.
+
+    This helper never raises — the caller must not have its control
+    flow altered by an emit failure.  It is a pure child-side outbox
+    write and must never send email or interact with the supervisor.
+    """
+    if emitter is None:
+        return
+    try:
+        emitter.emit(event_type, payload or {}, severity=severity)
+    except Exception:
+        logger.exception(
+            "WORKER_EVENT_EMIT_FAILED | event_type=%s severity=%s",
+            event_type,
+            severity,
+        )
 
 
 def _assert_trader_matches_symbol_config(
@@ -111,6 +149,9 @@ class SymbolWorkerApp:
         )
 
     async def run(self) -> None:
+        worker_event_emitter: WorkerEventEmitter | None = None
+        startup_phase = "trader_initialize"
+
         email_sender = self.factory.create_email_sender()
         trader = self.factory.create_trader()
         await trader.start()
@@ -124,6 +165,20 @@ class SymbolWorkerApp:
                 runtime_dir=runtime_configs.env_runtime.runtime_dir,
                 inst_id=trader.symbol,
             )
+            # -- E05h: create worker event emitter and outbox ------------------
+            worker_event_outbox = JsonlOutbox(runtime_paths.worker_event_outbox_file)
+            worker_event_emitter = WorkerEventEmitter(
+                symbol=trader.symbol,
+                outbox=worker_event_outbox,
+            )
+            _emit_worker_event_best_effort(
+                worker_event_emitter,
+                WORKER_STARTED,
+                severity="INFO",
+                payload={"phase": "runtime_paths_ready"},
+            )
+            startup_phase = "runtime_paths_ready"
+            # ------------------------------------------------------------------
             handoff_result = handoff_legacy_runtime_files(
                 runtime_paths=runtime_paths,
                 inst_id=trader.symbol,
@@ -169,109 +224,146 @@ class SymbolWorkerApp:
                 equity=trader.account_equity_usdt,
                 note="Live runner startup cash baseline.",
             )
-        except Exception:
+        except Exception as exc:
+            _emit_worker_event_best_effort(
+                worker_event_emitter,
+                WORKER_STARTUP_RECOVERY_FAILED,
+                severity="ERROR",
+                payload={
+                    "phase": startup_phase,
+                    "error_type": type(exc).__name__,
+                    "reason": str(exc)[:300],
+                },
+            )
             await trader.close()
             raise
         current_position_id: str | None = None
         cash_before_position: float | None = None
 
-        saved_state = state_store.load()
-        trusted_saved_state = startup_trust_validation.trusted_startup_saved_state(saved_state, startup_position)
-        if startup_position.has_position:
-            if trusted_saved_state is not None:
-                startup_basic_restore.restore_strategy_from_saved_state(strategy, trusted_saved_state)
-                current_position_id = trusted_saved_state.position_id
-                cash_before_position = trusted_saved_state.cash_before_position
-            else:
-                startup_basic_restore.restore_strategy_from_position(strategy, startup_position, live_time_utils.utc_ms())
-                current_position_id = journal.new_position_id(trader.symbol, startup_position.side or "UNKNOWN")
-                cash_before_position = startup_cash
-                journal.record_startup_recovery(
-                    position_id=current_position_id,
-                    symbol=trader.symbol,
-                    side=startup_position.side or "UNKNOWN",
-                    contracts=str(startup_position.contracts),
-                    eth_qty=startup_position.eth_qty,
-                    avg_entry=startup_position.avg_entry_price,
-                    cash=startup_cash,
-                    equity=trader.account_equity_usdt,
+        startup_phase = "startup_recovery"
+        try:
+            saved_state = state_store.load()
+            trusted_saved_state = startup_trust_validation.trusted_startup_saved_state(saved_state, startup_position)
+            if startup_position.has_position:
+                if trusted_saved_state is not None:
+                    startup_basic_restore.restore_strategy_from_saved_state(strategy, trusted_saved_state)
+                    current_position_id = trusted_saved_state.position_id
+                    cash_before_position = trusted_saved_state.cash_before_position
+                else:
+                    startup_basic_restore.restore_strategy_from_position(strategy, startup_position, live_time_utils.utc_ms())
+                    current_position_id = journal.new_position_id(trader.symbol, startup_position.side or "UNKNOWN")
+                    cash_before_position = startup_cash
+                    journal.record_startup_recovery(
+                        position_id=current_position_id,
+                        symbol=trader.symbol,
+                        side=startup_position.side or "UNKNOWN",
+                        contracts=str(startup_position.contracts),
+                        eth_qty=startup_position.eth_qty,
+                        avg_entry=startup_position.avg_entry_price,
+                        cash=startup_cash,
+                        equity=trader.account_equity_usdt,
+                    )
+                strategy.state.startup_force_tp_reconcile = True
+                logger.warning(
+                    "STARTUP_FORCE_TP_RECONCILE_ARMED | position_id=%s side=%s layers=%s tp_plan=%s last_tp_update_candle_ts_ms=%s trusted_saved_state=%s",
+                    current_position_id,
+                    strategy.state.side,
+                    strategy.state.layers,
+                    getattr(strategy.state, "tp_plan", "SINGLE"),
+                    getattr(strategy.state, "last_tp_update_candle_ts_ms", 0),
+                    trusted_saved_state is not None,
                 )
-            strategy.state.startup_force_tp_reconcile = True
-            logger.warning(
-                "STARTUP_FORCE_TP_RECONCILE_ARMED | position_id=%s side=%s layers=%s tp_plan=%s last_tp_update_candle_ts_ms=%s trusted_saved_state=%s",
-                current_position_id,
-                strategy.state.side,
-                strategy.state.layers,
-                getattr(strategy.state, "tp_plan", "SINGLE"),
-                getattr(strategy.state, "last_tp_update_candle_ts_ms", 0),
-                trusted_saved_state is not None,
-            )
-            state_store.save(LiveStateStore.from_strategy_state(position_id=current_position_id, symbol=trader.symbol,
-                                                                strategy_state=strategy.state,
-                                                                cash_before_position=cash_before_position))
-        else:
-            state_store.clear()
+                state_store.save(LiveStateStore.from_strategy_state(position_id=current_position_id, symbol=trader.symbol,
+                                                                    strategy_state=strategy.state,
+                                                                    cash_before_position=cash_before_position))
+            else:
+                state_store.clear()
 
-        cvd = self.factory.create_cvd_tracker(cvd_config)
-        state_lock = asyncio.Lock()
-        account_snapshot = live_runtime_types.AccountSnapshot(
-            position=startup_position,
-            cash=startup_cash,
-            equity=trader.account_equity_usdt,
-            updated_monotonic=time.monotonic(),
-            updated_ts_ms=live_time_utils.utc_ms(),
-            version=1,
-        )
-        execution_state = live_runtime_types.ExecutionState(
-            current_position_id=current_position_id,
-            cash_before_position=cash_before_position,
-            trading_halted=False,
-        )
-        await startup_order_recovery.apply_main_tp_startup_recovery(
-            execution_state=execution_state,
-            saved_state=trusted_saved_state,
-            startup_position=startup_position,
-            trader=trader,
-            journal=journal,
-        )
-        await startup_order_recovery.apply_sidecar_startup_recovery(
-            strategy=strategy,
-            execution_state=execution_state,
-            saved_state=trusted_saved_state,
-            startup_position=startup_position,
-            trader=trader,
-            journal=journal,
-            state_store=state_store,
-        )
-        sidecar_runtime_state.refresh_sidecar_state_totals(strategy.state, int(position_sizer_config.sidecar_max_legs))
-        startup_core_position = build_core_position_view(
-            startup_position,
-            sidecar_open_qty(strategy.state.sidecar_legs),
-            sidecar_open_contracts(strategy.state.sidecar_legs),
-        )
-        core_position_view_helpers.apply_core_position_view_to_state(strategy.state, startup_core_position)
-        account_snapshot.position = startup_core_position
-        if startup_position.has_position:
-            state_store.save(LiveStateStore.from_strategy_state(position_id=current_position_id, symbol=trader.symbol,
-                                                                strategy_state=strategy.state,
-                                                                cash_before_position=cash_before_position))
-        await rolling_loss_live_helpers.apply_rolling_loss_guard_startup_state(
-            rolling_loss_guard=rolling_loss_guard,
-            execution_state=execution_state,
-            has_position=startup_position.has_position,
-            equity=trader.account_equity_usdt,
-            now_ms=live_time_utils.utc_ms(),
-            journal=journal,
-            email_sender=email_sender,
-        )
-        runner_live_helpers.apply_three_stage_startup_safety_gate(
-            strategy=strategy,
-            execution_state=execution_state,
-            saved_state=trusted_saved_state,
-            startup_position=startup_position,
-            journal=journal,
-            state_store=state_store,
-            trader_symbol=trader.symbol,
+            cvd = self.factory.create_cvd_tracker(cvd_config)
+            state_lock = asyncio.Lock()
+            account_snapshot = live_runtime_types.AccountSnapshot(
+                position=startup_position,
+                cash=startup_cash,
+                equity=trader.account_equity_usdt,
+                updated_monotonic=time.monotonic(),
+                updated_ts_ms=live_time_utils.utc_ms(),
+                version=1,
+            )
+            execution_state = live_runtime_types.ExecutionState(
+                current_position_id=current_position_id,
+                cash_before_position=cash_before_position,
+                trading_halted=False,
+            )
+            await startup_order_recovery.apply_main_tp_startup_recovery(
+                execution_state=execution_state,
+                saved_state=trusted_saved_state,
+                startup_position=startup_position,
+                trader=trader,
+                journal=journal,
+            )
+            await startup_order_recovery.apply_sidecar_startup_recovery(
+                strategy=strategy,
+                execution_state=execution_state,
+                saved_state=trusted_saved_state,
+                startup_position=startup_position,
+                trader=trader,
+                journal=journal,
+                state_store=state_store,
+            )
+            sidecar_runtime_state.refresh_sidecar_state_totals(strategy.state, int(position_sizer_config.sidecar_max_legs))
+            startup_core_position = build_core_position_view(
+                startup_position,
+                sidecar_open_qty(strategy.state.sidecar_legs),
+                sidecar_open_contracts(strategy.state.sidecar_legs),
+            )
+            core_position_view_helpers.apply_core_position_view_to_state(strategy.state, startup_core_position)
+            account_snapshot.position = startup_core_position
+            if startup_position.has_position:
+                state_store.save(LiveStateStore.from_strategy_state(position_id=current_position_id, symbol=trader.symbol,
+                                                                    strategy_state=strategy.state,
+                                                                    cash_before_position=cash_before_position))
+            await rolling_loss_live_helpers.apply_rolling_loss_guard_startup_state(
+                rolling_loss_guard=rolling_loss_guard,
+                execution_state=execution_state,
+                has_position=startup_position.has_position,
+                equity=trader.account_equity_usdt,
+                now_ms=live_time_utils.utc_ms(),
+                journal=journal,
+                email_sender=email_sender,
+            )
+            runner_live_helpers.apply_three_stage_startup_safety_gate(
+                strategy=strategy,
+                execution_state=execution_state,
+                saved_state=trusted_saved_state,
+                startup_position=startup_position,
+                journal=journal,
+                state_store=state_store,
+                trader_symbol=trader.symbol,
+            )
+        except Exception as exc:
+            _emit_worker_event_best_effort(
+                worker_event_emitter,
+                WORKER_STARTUP_RECOVERY_FAILED,
+                severity="ERROR",
+                payload={
+                    "phase": startup_phase,
+                    "error_type": type(exc).__name__,
+                    "reason": str(exc)[:300],
+                },
+            )
+            await trader.close()
+            raise
+
+        # -- E05h: startup recovery completed ----------------------------------
+        _emit_worker_event_best_effort(
+            worker_event_emitter,
+            WORKER_STARTUP_RECOVERY_COMPLETED,
+            severity="INFO",
+            payload={
+                "has_startup_position": startup_position.has_position,
+                "trusted_saved_state": trusted_saved_state is not None,
+                "position_id": current_position_id,
+            },
         )
         queues = self.factory.create_queues(self.app_config)
         strategy_tick_queue = queues.strategy_tick_queue
@@ -490,6 +582,14 @@ class SymbolWorkerApp:
                 # Stage 1: drain critical tasks, then save state, then
                 # cancel remaining critical tasks.
 
+                # -- E05h: WORKER_STOPPING ---------------------------------
+                _emit_worker_event_best_effort(
+                    worker_event_emitter,
+                    WORKER_STOPPING,
+                    severity="INFO",
+                    payload={"reason": shutdown_controller.reason or "unknown"},
+                )
+
                 # 1. Begin drain: mark trading_halted, no new positions
                 await _begin_symbol_worker_drain(
                     execution_state=execution_state,
@@ -497,12 +597,40 @@ class SymbolWorkerApp:
                     reason=shutdown_controller.reason or "unknown",
                 )
 
+                # -- E05h: WORKER_DRAIN_STARTED ---------------------------
+                _emit_worker_event_best_effort(
+                    worker_event_emitter,
+                    WORKER_DRAIN_STARTED,
+                    severity="INFO",
+                    payload={
+                        "reason": shutdown_controller.reason or "unknown",
+                        "critical_task_count": len(
+                            critical_drain_tasks & pending
+                        ),
+                    },
+                )
+
                 # 2. Write stopping heartbeat best-effort (early signal)
                 if (
                     self.app_config.symbol_worker_shutdown_heartbeat_enabled
                     and heartbeat_writer.config.enabled
                 ):
-                    heartbeat_writer.write_status_once("stopping")
+                    try:
+                        heartbeat_writer.write_status_once("stopping")
+                    except Exception as exc:
+                        logger.exception(
+                            "SYMBOL_WORKER_HEARTBEAT_WRITE_FAILED | status=stopping"
+                        )
+                        _emit_worker_event_best_effort(
+                            worker_event_emitter,
+                            WORKER_HEARTBEAT_WRITE_FAILED,
+                            severity="ERROR",
+                            payload={
+                                "status": "stopping",
+                                "error_type": type(exc).__name__,
+                                "reason": str(exc)[:300],
+                            },
+                        )
 
                 # 3. Cancel producer / auxiliary tasks first
                 #    (strategy tick, monitor, report loops, heartbeat loop).
@@ -525,6 +653,34 @@ class SymbolWorkerApp:
                     execution_queue=execution_queue,
                     timeout=self.app_config.symbol_worker_shutdown_drain_timeout_seconds,
                 )
+
+                # -- E05h: DRAIN_COMPLETED or DRAIN_TIMEOUT ----------------
+                remaining_critical = sum(
+                    1 for t in critical_drain_tasks if not t.done()
+                )
+                drain_timeout = self.app_config.symbol_worker_shutdown_drain_timeout_seconds
+                if remaining_critical > 0:
+                    _emit_worker_event_best_effort(
+                        worker_event_emitter,
+                        WORKER_DRAIN_TIMEOUT,
+                        severity="ERROR",
+                        payload={
+                            "reason": shutdown_controller.reason or "unknown",
+                            "remaining_critical_tasks": remaining_critical,
+                            "timeout_seconds": drain_timeout,
+                        },
+                    )
+                else:
+                    _emit_worker_event_best_effort(
+                        worker_event_emitter,
+                        WORKER_DRAIN_COMPLETED,
+                        severity="INFO",
+                        payload={
+                            "reason": shutdown_controller.reason or "unknown",
+                            "remaining_critical_tasks": 0,
+                            "timeout_seconds": drain_timeout,
+                        },
+                    )
 
                 # 5. Save strategy state AFTER critical drain.
                 #    Captures the most recent state from any work that
@@ -549,7 +705,22 @@ class SymbolWorkerApp:
                     self.app_config.symbol_worker_shutdown_heartbeat_enabled
                     and heartbeat_writer.config.enabled
                 ):
-                    heartbeat_writer.write_status_once("stopped")
+                    try:
+                        heartbeat_writer.write_status_once("stopped")
+                    except Exception as exc:
+                        logger.exception(
+                            "SYMBOL_WORKER_HEARTBEAT_WRITE_FAILED | status=stopped"
+                        )
+                        _emit_worker_event_best_effort(
+                            worker_event_emitter,
+                            WORKER_HEARTBEAT_WRITE_FAILED,
+                            severity="ERROR",
+                            payload={
+                                "status": "stopped",
+                                "error_type": type(exc).__name__,
+                                "reason": str(exc)[:300],
+                            },
+                        )
 
                 # 8. Complete
                 logger.warning("SYMBOL_WORKER_SHUTDOWN_COMPLETE")
@@ -578,4 +749,11 @@ class SymbolWorkerApp:
                         "Symbol worker runtime task exited unexpectedly without exception"
                     )
         finally:
+            # -- E05h: best-effort WORKER_STOPPED before close ------------
+            _emit_worker_event_best_effort(
+                worker_event_emitter,
+                WORKER_STOPPED,
+                severity="INFO",
+                payload={"phase": "finally"},
+            )
             await trader.close()

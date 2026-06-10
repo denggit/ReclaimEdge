@@ -131,12 +131,15 @@ def test_no_asyncio_create_task_for_heartbeat() -> None:
 
 def test_heartbeat_writer_degrades_failures_without_symbol_worker_app_catch() -> None:
     """SymbolWorkerApp must NOT contain heartbeat degrade logic —
-    that belongs in heartbeat_writer.py."""
+    that belongs in heartbeat_writer.py.
+
+    As of E05h the app imports WORKER_HEARTBEAT_WRITE_FAILED as an
+    outbox event constant — that is allowed.  The degrade state machine
+    (consecutive_failures / last_error) must still live in the
+    heartbeat writer module only."""
     source = _APP_MODULE.read_text(encoding="utf-8")
 
-    assert "HEARTBEAT_WRITE_FAILED" not in source, (
-        "SymbolWorkerApp must not contain HEARTBEAT_WRITE_FAILED"
-    )
+    # Degrade state machine must NOT be in the app.
     assert "consecutive_failures" not in source, (
         "SymbolWorkerApp must not reference consecutive_failures"
     )
