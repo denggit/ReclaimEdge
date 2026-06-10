@@ -990,9 +990,10 @@ class TestFakePolicyAllowsNormalEvent:
         assert len(publisher.alerts) == 1
 
 
-class TestCycleLimitDropsBeforePolicy:
+class TestPolicyRunsBeforeCycleLimit:
     @pytest.mark.asyncio
-    async def test_limit_before_policy(self) -> None:
+    async def test_policy_runs_before_cycle_limit(self) -> None:
+        """Policy is called for all candidates; cycle limit only gates policy-allowed alerts."""
         events = [
             _make_child_event(
                 event_type="WORKER_TRADING_HALTED",
@@ -1018,9 +1019,105 @@ class TestCycleLimitDropsBeforePolicy:
         result = await pipeline.process_once(now_ms=1000)
 
         assert result.alerts_built == 5
+        assert result.alerts_policy_suppressed == 0
         assert result.dropped_due_to_cycle_limit == 3
-        # Only 2 alerts reached policy.
-        assert len(fake_policy.calls) == 2
+        # Policy called for all 5 candidates.
+        assert len(fake_policy.calls) == 5
+        assert len(deduper.calls) == 2
+        assert len(publisher.alerts) == 2
+
+
+class TestPolicySuppressedEventsDoNotConsumeLimit:
+    @pytest.mark.asyncio
+    async def test_normal_events_do_not_block_critical(self) -> None:
+        """Policy-suppressed normal lifecycle events must not consume the publish limit."""
+        events = [
+            _make_child_event(
+                event_type="WORKER_STARTED",
+                payload={"symbol": "ETH", "severity": "INFO", "data": {}},
+                source_path="path/0.jsonl",
+            ),
+            _make_child_event(
+                event_type="WORKER_STOPPED",
+                payload={"symbol": "ETH", "severity": "INFO", "data": {}},
+                source_path="path/1.jsonl",
+            ),
+            _make_child_event(
+                event_type="WORKER_DRAIN_COMPLETED",
+                payload={"symbol": "ETH", "severity": "INFO", "data": {}},
+                source_path="path/2.jsonl",
+            ),
+            _make_child_event(
+                event_type="WORKER_TRADING_HALTED",
+                payload={"symbol": "ETH", "severity": "CRITICAL", "data": {}},
+                source_path="path/3.jsonl",
+            ),
+        ]
+        reader = FakeReader(
+            ChildEventReadResult(events=events, errors=[])
+        )
+        deduper = FakeDeduper(allowed=True)
+        publisher = FakePublisher(result=True)
+
+        pipeline = SupervisorEventPipeline(
+            reader=reader,
+            deduper=deduper,
+            publisher=publisher,
+            max_alerts_per_cycle=1,
+        )
+        result = await pipeline.process_once(now_ms=1000)
+
+        assert result.events_seen == 4
+        assert result.alerts_built == 4
+        assert result.alerts_policy_suppressed == 3
+        assert result.dropped_due_to_cycle_limit == 0
+        assert result.alerts_allowed == 1
+        assert result.alerts_published == 1
+        assert len(deduper.calls) == 1
+        assert len(publisher.alerts) == 1
+        assert publisher.alerts[0].event_type == "WORKER_TRADING_HALTED"
+
+
+class TestCriticalEventsStillRespectPublishLimit:
+    @pytest.mark.asyncio
+    async def test_critical_respects_limit(self) -> None:
+        """Critical events still respect max_alerts_per_cycle after passing policy."""
+        events = [
+            _make_child_event(
+                event_type="WORKER_TRADING_HALTED",
+                payload={"symbol": "SYM-0", "severity": "CRITICAL", "data": {}},
+                source_path="path/0.jsonl",
+            ),
+            _make_child_event(
+                event_type="WORKER_DRAIN_TIMEOUT",
+                payload={"symbol": "SYM-1", "severity": "ERROR", "data": {}},
+                source_path="path/1.jsonl",
+            ),
+            _make_child_event(
+                event_type="WORKER_HEARTBEAT_WRITE_FAILED",
+                payload={"symbol": "SYM-2", "severity": "ERROR", "data": {}},
+                source_path="path/2.jsonl",
+            ),
+        ]
+        reader = FakeReader(
+            ChildEventReadResult(events=events, errors=[])
+        )
+        deduper = FakeDeduper(allowed=True)
+        publisher = FakePublisher(result=True)
+
+        pipeline = SupervisorEventPipeline(
+            reader=reader,
+            deduper=deduper,
+            publisher=publisher,
+            max_alerts_per_cycle=2,
+        )
+        result = await pipeline.process_once(now_ms=1000)
+
+        assert result.alerts_built == 3
+        assert result.alerts_policy_suppressed == 0
+        assert result.dropped_due_to_cycle_limit == 1
+        assert result.alerts_allowed == 2
+        assert result.alerts_published == 2
         assert len(deduper.calls) == 2
         assert len(publisher.alerts) == 2
 

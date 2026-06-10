@@ -243,12 +243,8 @@ class SupervisorEventPipeline:
             if event.event_type not in LIFECYCLE_EVENT_TYPES:
                 continue
             alerts_built += 1
-            if processed >= self._max_alerts_per_cycle:
-                dropped_due_to_cycle_limit += 1
-                continue
-            processed += 1
 
-            # -- policy check (before building alert) -------------------------
+            # -- policy check (before consuming limit) ------------------------
             severity = _extract_severity(event.payload)
             reason = _extract_reason(event.payload)
             policy_decision = self._alert_policy.should_publish(
@@ -259,6 +255,12 @@ class SupervisorEventPipeline:
             if not policy_decision.allowed:
                 alerts_policy_suppressed += 1
                 continue
+
+            # -- cycle limit (only for policy-allowed alerts) -----------------
+            if processed >= self._max_alerts_per_cycle:
+                dropped_due_to_cycle_limit += 1
+                continue
+            processed += 1
 
             alert = _build_alert_from_child_event(event)
             allowed, suppressed, failed = await self._dedupe_and_publish_alert(
@@ -277,12 +279,8 @@ class SupervisorEventPipeline:
         # -- stream read errors -----------------------------------------------
         for error in result.errors:
             alerts_built += 1
-            if processed >= self._max_alerts_per_cycle:
-                dropped_due_to_cycle_limit += 1
-                continue
-            processed += 1
 
-            # -- policy check (before building alert) -------------------------
+            # -- policy check (before consuming limit) ------------------------
             policy_decision = self._alert_policy.should_publish(
                 event_type=READ_ERROR_EVENT_TYPE,
                 severity="ERROR",
@@ -291,6 +289,12 @@ class SupervisorEventPipeline:
             if not policy_decision.allowed:
                 alerts_policy_suppressed += 1
                 continue
+
+            # -- cycle limit (only for policy-allowed alerts) -----------------
+            if processed >= self._max_alerts_per_cycle:
+                dropped_due_to_cycle_limit += 1
+                continue
+            processed += 1
 
             alert = _build_alert_from_read_error(error)
             allowed, suppressed, failed = await self._dedupe_and_publish_alert(
