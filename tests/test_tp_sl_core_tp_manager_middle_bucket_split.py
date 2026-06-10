@@ -550,14 +550,93 @@ class TestClassifierDirect:
         assert reason == "split_fallback_final_order_structure"
         assert mode == "FINAL_FULL_SIZE"
 
-    def test_only_fast_without_slow_is_not_split(self):
-        """tp1_middle_fast without tp1_middle_slow is NOT classified as SPLIT."""
+    # ── Test 1 & 2: Partial split structures are recognized as valid ────
+
+    def test_fast_consumed_slow_pending_is_valid_partial_split(self):
+        """fast consumed, only slow + tp2 remain → PARTIAL_SPLIT_SLOW_PENDING.
+        Must NOT return FINAL_FULL_SIZE. Must NOT trigger degrade."""
+        executed, reason, mode = self._classify(
+            split_was_active=True,
+            labels=["tp1_middle_slow", "tp2_outer"],
+        )
+        assert executed is True, (
+            "Partial split (slow + tp2) must be recognized as valid"
+        )
+        assert reason is None
+        assert mode == "PARTIAL_SPLIT_SLOW_PENDING"
+
+    def test_slow_consumed_fast_pending_is_valid_partial_split(self):
+        """slow consumed, only fast + tp2 remain → PARTIAL_SPLIT_FAST_PENDING.
+        Must NOT return FINAL_FULL_SIZE. Must NOT trigger degrade."""
         executed, reason, mode = self._classify(
             split_was_active=True,
             labels=["tp1_middle_fast", "tp2_outer"],
         )
+        assert executed is True, (
+            "Partial split (fast + tp2) must be recognized as valid"
+        )
+        assert reason is None
+        assert mode == "PARTIAL_SPLIT_FAST_PENDING"
+
+    # ── Test 3: Unknown structures still fall back ────────────────────
+
+    def test_only_fast_without_tp2_is_unknown(self):
+        """tp1_middle_fast alone (no tp2_outer) → unknown → FINAL_FULL_SIZE."""
+        executed, reason, mode = self._classify(
+            split_was_active=True,
+            labels=["tp1_middle_fast"],
+        )
         assert executed is False
-        assert mode != "SPLIT_FAST_SLOW"
+        assert mode == "FINAL_FULL_SIZE"
+        assert reason is not None
+
+    # ── Test 4: Full split still SPLIT_FAST_SLOW ──────────────────────
+
+    def test_full_split_still_split_fast_slow(self):
+        """labels={"tp1_middle_fast", "tp1_middle_slow", "tp2_outer"} → SPLIT_FAST_SLOW."""
+        executed, reason, mode = self._classify(
+            split_was_active=True,
+            labels=["tp1_middle_fast", "tp1_middle_slow", "tp2_outer"],
+        )
+        assert executed is True
+        assert reason is None
+        assert mode == "SPLIT_FAST_SLOW"
+
+    # ── Test 5: Post-TP1 tp2 only still POST_TP1_TP2_ONLY ─────────────
+
+    def test_post_tp1_tp2_only_still_post_tp1_tp2_only(self):
+        """labels={"tp2_outer"} → POST_TP1_TP2_ONLY (existing behavior unchanged)."""
+        executed, reason, mode = self._classify(
+            split_was_active=True,
+            labels=["tp2_outer"],
+        )
+        assert executed is True
+        assert reason is None
+        assert mode == "POST_TP1_TP2_ONLY"
+
+    # ── Test: Partial split with reason still returns None reason ─────
+
+    def test_partial_split_slow_pending_ignores_disabled_reason(self):
+        """Even if split_disabled_reason is passed, partial split ignores it."""
+        executed, reason, mode = self._classify(
+            split_was_active=True,
+            labels=["tp1_middle_slow", "tp2_outer"],
+            reason="some_other_reason",
+        )
+        assert executed is True
+        assert reason is None
+        assert mode == "PARTIAL_SPLIT_SLOW_PENDING"
+
+    def test_partial_split_fast_pending_ignores_disabled_reason(self):
+        """Even if split_disabled_reason is passed, partial split ignores it."""
+        executed, reason, mode = self._classify(
+            split_was_active=True,
+            labels=["tp1_middle_fast", "tp2_outer"],
+            reason="some_other_reason",
+        )
+        assert executed is True
+        assert reason is None
+        assert mode == "PARTIAL_SPLIT_FAST_PENDING"
 
 
 # ── Integration: Three-Stage TP2/runner too small → FINAL_FULL_SIZE ────
@@ -1088,3 +1167,148 @@ class TestTrendRunnerSlFailurePreservesActualOrderModeSplitFastSlow:
         assert result.middle_bucket_split_executed is True
         assert result.middle_bucket_split_actual_order_mode == "SPLIT_FAST_SLOW"
         assert result.middle_bucket_split_disabled_reason is None
+
+
+# ── Integration: order_specs partial consumed + classifier round-trip ───
+
+
+class TestPartialSplitOrderSpecsClassifierIntegration:
+    """Integration test: build_take_profit_order_specs with partial consumed
+    flags → classifier recognizes the resulting labels as valid partial split."""
+
+    def _classify(self, *, split_was_active, labels, reason=None):
+        from src.execution.tp_sl_core_tp_manager import (
+            _classify_middle_bucket_split_actual_order_mode,
+        )
+        from decimal import Decimal
+        specs = [(label, Decimal("1"), 3000.0) for label in labels]
+        return _classify_middle_bucket_split_actual_order_mode(
+            split_was_active=split_was_active,
+            specs=specs,
+            split_disabled_reason=reason,
+        )
+
+    def test_fast_consumed_order_specs_plus_classifier(self):
+        """fast_consumed=True, slow_consumed=False → labels=["tp1_middle_slow", "tp2_outer"]
+        → classifier returns PARTIAL_SPLIT_SLOW_PENDING (not FINAL_FULL_SIZE)."""
+        from src.execution.order_specs import (
+            MiddleBucketSplitOrderInput,
+            build_take_profit_order_specs,
+        )
+        from decimal import Decimal
+
+        fast_total = Decimal("0.70") * Decimal("0.70")  # 0.49
+        slow_total = Decimal("0.70") * Decimal("0.30")  # 0.21
+        split = MiddleBucketSplitOrderInput(
+            active=True,
+            fast_price=1638.73,
+            slow_price=1634.46,
+            effective_price=1637.0,
+            middle_bucket_ratio=Decimal("0.70"),
+            fast_ratio_of_bucket=Decimal("0.70"),
+            slow_ratio_of_bucket=Decimal("0.30"),
+            fast_total_ratio=fast_total,
+            slow_total_ratio=slow_total,
+            fast_consumed=True,
+            slow_consumed=False,
+        )
+        decision = build_take_profit_order_specs(
+            position_contracts=Decimal("100"),
+            min_contracts=Decimal("1"),
+            contract_precision=Decimal("1"),
+            tp_plan="THREE_STAGE_RUNNER",
+            final_tp_price=1609.44,
+            partial_tp_price=None,
+            partial_tp_ratio=Decimal("0"),
+            partial_tp_consumed=False,
+            middle_runner_active=False,
+            three_stage_tp1_price=1637.0,
+            three_stage_tp2_price=1609.44,
+            three_stage_tp1_ratio=Decimal("0.70"),
+            three_stage_tp2_ratio=Decimal("0.20"),
+            three_stage_tp1_consumed=False,
+            three_stage_tp2_consumed=False,
+            three_stage_runner_ratio=Decimal("0.10"),
+            middle_bucket_split=split,
+        )
+
+        labels = [s.label for s in decision.specs]
+        assert labels == ["tp1_middle_slow", "tp2_outer"], (
+            f"Expected partial (slow + tp2), got: {labels}"
+        )
+
+        # Now classify the resulting labels
+        executed, reason, mode = self._classify(
+            split_was_active=True, labels=labels,
+        )
+        assert executed is True, (
+            f"Classifier must return True for partial split, got: executed={executed}"
+        )
+        assert reason is None
+        assert mode == "PARTIAL_SPLIT_SLOW_PENDING", (
+            f"Expected PARTIAL_SPLIT_SLOW_PENDING, got: {mode}"
+        )
+        assert mode != "FINAL_FULL_SIZE", (
+            "Partial split must NOT be classified as FINAL_FULL_SIZE"
+        )
+
+    def test_slow_consumed_order_specs_plus_classifier(self):
+        """slow_consumed=True, fast_consumed=False → labels=["tp1_middle_fast", "tp2_outer"]
+        → classifier returns PARTIAL_SPLIT_FAST_PENDING (not FINAL_FULL_SIZE)."""
+        from src.execution.order_specs import (
+            MiddleBucketSplitOrderInput,
+            build_take_profit_order_specs,
+        )
+        from decimal import Decimal
+
+        fast_total = Decimal("0.70") * Decimal("0.70")
+        slow_total = Decimal("0.70") * Decimal("0.30")
+        split = MiddleBucketSplitOrderInput(
+            active=True,
+            fast_price=1638.73,
+            slow_price=1634.46,
+            effective_price=1637.0,
+            middle_bucket_ratio=Decimal("0.70"),
+            fast_ratio_of_bucket=Decimal("0.70"),
+            slow_ratio_of_bucket=Decimal("0.30"),
+            fast_total_ratio=fast_total,
+            slow_total_ratio=slow_total,
+            fast_consumed=False,
+            slow_consumed=True,
+        )
+        decision = build_take_profit_order_specs(
+            position_contracts=Decimal("100"),
+            min_contracts=Decimal("1"),
+            contract_precision=Decimal("1"),
+            tp_plan="THREE_STAGE_RUNNER",
+            final_tp_price=1609.44,
+            partial_tp_price=None,
+            partial_tp_ratio=Decimal("0"),
+            partial_tp_consumed=False,
+            middle_runner_active=False,
+            three_stage_tp1_price=1637.0,
+            three_stage_tp2_price=1609.44,
+            three_stage_tp1_ratio=Decimal("0.70"),
+            three_stage_tp2_ratio=Decimal("0.20"),
+            three_stage_tp1_consumed=False,
+            three_stage_tp2_consumed=False,
+            three_stage_runner_ratio=Decimal("0.10"),
+            middle_bucket_split=split,
+        )
+
+        labels = [s.label for s in decision.specs]
+        assert labels == ["tp1_middle_fast", "tp2_outer"], (
+            f"Expected partial (fast + tp2), got: {labels}"
+        )
+
+        executed, reason, mode = self._classify(
+            split_was_active=True, labels=labels,
+        )
+        assert executed is True, (
+            f"Classifier must return True for partial split, got: executed={executed}"
+        )
+        assert reason is None
+        assert mode == "PARTIAL_SPLIT_FAST_PENDING", (
+            f"Expected PARTIAL_SPLIT_FAST_PENDING, got: {mode}"
+        )
+        assert mode != "FINAL_FULL_SIZE"

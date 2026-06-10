@@ -80,6 +80,26 @@ def _classify_middle_bucket_split_actual_order_mode(
         )
         return True, None, "POST_TP1_TP2_ONLY"
 
+    # ── PARTIAL_SPLIT_SLOW_PENDING: fast consumed, only slow + tp2 remain ─
+    if labels == {"tp1_middle_slow", "tp2_outer"}:
+        logger.info(
+            "MIDDLE_BUCKET_SPLIT_PARTIAL_ORDER_STRUCTURE | "
+            "split_was_active=true labels=%s action=keep_split_state "
+            "actual_order_mode=PARTIAL_SPLIT_SLOW_PENDING state_order_consistent=true",
+            sorted(labels),
+        )
+        return True, None, "PARTIAL_SPLIT_SLOW_PENDING"
+
+    # ── PARTIAL_SPLIT_FAST_PENDING: slow consumed, only fast + tp2 remain ─
+    if labels == {"tp1_middle_fast", "tp2_outer"}:
+        logger.info(
+            "MIDDLE_BUCKET_SPLIT_PARTIAL_ORDER_STRUCTURE | "
+            "split_was_active=true labels=%s action=keep_split_state "
+            "actual_order_mode=PARTIAL_SPLIT_FAST_PENDING state_order_consistent=true",
+            sorted(labels),
+        )
+        return True, None, "PARTIAL_SPLIT_FAST_PENDING"
+
     # ── Unknown / safety fallback ──────────────────────────────────────
     logger.warning(
         "MIDDLE_BUCKET_SPLIT_UNKNOWN_ORDER_STRUCTURE | "
