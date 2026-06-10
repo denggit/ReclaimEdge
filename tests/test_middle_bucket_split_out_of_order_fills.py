@@ -307,3 +307,100 @@ class TestFastBeforeSlowOrdering:
         assert event == "MIDDLE_BUCKET_FAST"
         assert strategy.state.middle_bucket_split_fast_consumed is True
         assert strategy.state.middle_bucket_split_slow_consumed is False
+
+
+class TestRepeatSyncNoMisidentification:
+    """Regression tests: mutual exclusion prevents repeat-sync misidentification.
+
+    Before the fix, after fast fills in sync #1, sync #2 with the same
+    remaining_ratio would satisfy the slow-only condition (because
+    after_fast ≤ after_slow) and incorrectly mark slow_consumed=True.
+    With mutual exclusion, both single-leg branches require BOTH legs
+    unconsumed, so a consumed leg blocks the other single-leg branch.
+    """
+
+    def test_fast_first_repeat_sync_no_slow_misidentify(self):
+        """Fast fills in sync 1; sync 2 with same qty must NOT trigger slow-only.
+
+        This is the critical regression test for Problem 1.
+        """
+        strategy = _make_mock_strategy(
+            middle_bucket_split_fast_total_ratio=0.49,
+            middle_bucket_split_slow_total_ratio=0.21,
+        )
+        position = _make_mock_position(eth_qty=5.1)  # remaining_ratio = 0.51 (after_fast)
+
+        # Sync 1: fast fills
+        with mock.patch(
+            "src.position_management.tp_progress.position_cost_runtime.record_core_position_reduction_exit"
+        ):
+            event1 = mark_middle_bucket_split_progress_if_position_reduced(strategy, position)
+
+        assert event1 == "MIDDLE_BUCKET_FAST"
+        assert strategy.state.middle_bucket_split_fast_consumed is True
+        assert strategy.state.middle_bucket_split_slow_consumed is False
+        assert strategy.state.three_stage_tp1_consumed is False
+
+        # Sync 2: same remaining_ratio, slow did NOT actually fill
+        event2 = mark_middle_bucket_split_progress_if_position_reduced(strategy, position)
+        assert event2 is None, (
+            "Repeat sync must NOT trigger SLOW_ONLY — fast is already consumed, "
+            "so slow-only branch (which requires BOTH unconsumed) should be blocked"
+        )
+        assert strategy.state.middle_bucket_split_slow_consumed is False, (
+            "slow_consumed must remain False — slow did not actually fill"
+        )
+        assert strategy.state.three_stage_tp1_consumed is False
+
+    def test_slow_first_repeat_sync_no_fast_misidentify(self):
+        """Slow fills first; sync 2 with same qty must NOT trigger fast-only."""
+        strategy = _make_mock_strategy(
+            side="SHORT",
+            middle_bucket_split_fast_total_ratio=0.49,
+            middle_bucket_split_slow_total_ratio=0.21,
+        )
+        # remaining_ratio = 0.79 (after_slow for slow_total=0.21)
+        position = _make_mock_position(side="SHORT", eth_qty=7.9)
+
+        # Sync 1: slow fills (out-of-order)
+        with mock.patch(
+            "src.position_management.tp_progress.position_cost_runtime.record_core_position_reduction_exit"
+        ):
+            event1 = mark_middle_bucket_split_progress_if_position_reduced(strategy, position)
+
+        assert event1 == "MIDDLE_BUCKET_SLOW_ONLY"
+        assert strategy.state.middle_bucket_split_slow_consumed is True
+        assert strategy.state.middle_bucket_split_fast_consumed is False
+
+        # Sync 2: same remaining_ratio, fast did NOT actually fill
+        event2 = mark_middle_bucket_split_progress_if_position_reduced(strategy, position)
+        assert event2 is None, "Repeat sync must NOT trigger FAST when slow already consumed"
+        assert strategy.state.middle_bucket_split_fast_consumed is False
+
+
+class TestWaitingOtherLeg:
+    """After one leg consumed but full threshold not reached, function returns None
+    and logs MIDDLE_BUCKET_SPLIT_WAITING_OTHER_LEG."""
+
+    def test_waiting_other_leg_after_fast(self):
+        """Fast consumed, remaining not yet at after_full → return None (waiting)."""
+        strategy = _make_mock_strategy(
+            middle_bucket_split_fast_consumed=True,
+            middle_bucket_split_slow_consumed=False,
+        )
+        # remaining = 5.1 → ratio 0.51, not yet at after_full (0.30)
+        position = _make_mock_position(eth_qty=5.1)
+
+        event = mark_middle_bucket_split_progress_if_position_reduced(strategy, position)
+        assert event is None  # waiting for slow to reach full threshold
+
+    def test_waiting_other_leg_after_slow(self):
+        """Slow consumed, remaining not yet at after_full → return None (waiting)."""
+        strategy = _make_mock_strategy(
+            middle_bucket_split_fast_consumed=False,
+            middle_bucket_split_slow_consumed=True,
+        )
+        position = _make_mock_position(eth_qty=7.9)
+
+        event = mark_middle_bucket_split_progress_if_position_reduced(strategy, position)
+        assert event is None  # waiting for fast to reach full threshold

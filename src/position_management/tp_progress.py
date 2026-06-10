@@ -398,8 +398,16 @@ def mark_middle_bucket_split_progress_if_position_reduced(
         )
         return event
 
-    # ── 3. Fast leg fill (only fast, slow not yet filled) ─────────────
-    if not fast_consumed and remaining_ratio <= after_fast_ratio + fast_tolerance:
+    # ── 3. Fast leg fill (requires BOTH legs unconsumed) ──────────────
+    #    Mutual exclusion: after one leg is consumed, only full threshold
+    #    (checked above) can trigger the other leg.  This prevents
+    #    fast-only remaining_ratio from also satisfying slow-only when
+    #    after_fast <= after_slow.
+    if (
+        not fast_consumed
+        and not slow_consumed
+        and remaining_ratio <= after_fast_ratio + fast_tolerance
+    ):
         position_cost_runtime.record_core_position_reduction_exit(
             state,
             position,
@@ -434,8 +442,13 @@ def mark_middle_bucket_split_progress_if_position_reduced(
         )
         return event
 
-    # ── 4. Slow leg fill (only slow, fast not yet — out-of-order) ─────
-    if not slow_consumed and remaining_ratio <= after_slow_ratio + slow_tolerance:
+    # ── 4. Slow leg fill (requires BOTH legs unconsumed — out-of-order) ─
+    #    Same mutual exclusion as fast-only above.
+    if (
+        not fast_consumed
+        and not slow_consumed
+        and remaining_ratio <= after_slow_ratio + slow_tolerance
+    ):
         position_cost_runtime.record_core_position_reduction_exit(
             state,
             position,
@@ -470,6 +483,19 @@ def mark_middle_bucket_split_progress_if_position_reduced(
             float(state.avg_entry_price or 0.0),
         )
         return event
+
+    # ── 5. One leg consumed but full threshold not yet reached ─────────
+    if fast_consumed != slow_consumed:
+        logger.info(
+            "MIDDLE_BUCKET_SPLIT_WAITING_OTHER_LEG | side=%s "
+            "fast_consumed=%s slow_consumed=%s "
+            "remaining_ratio=%.6f after_full_ratio=%.6f",
+            state.side,
+            fast_consumed,
+            slow_consumed,
+            remaining_ratio,
+            after_full_ratio,
+        )
 
     return None
 

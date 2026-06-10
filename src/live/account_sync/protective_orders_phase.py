@@ -173,10 +173,24 @@ async def run_account_sync_protective_orders_phase(
         old_sl_order_id = three_stage_post_tp1_sl_payload.get("old_sl_order_id")
 
         # ── No-loosen check: only replace existing SL if candidate is stronger ──
-        existing_sl_price: float | None = getattr(strategy.state, "three_stage_post_tp1_protective_sl_price", None)
+        # Priority for existing_sl: payload (set by tp_progress_phase before
+        # any candidate was written to state) → state fallback.
+        existing_sl_price: float | None = three_stage_post_tp1_sl_payload.get("existing_sl_price")
+        if existing_sl_price is None:
+            existing_sl_price = getattr(strategy.state, "three_stage_post_tp1_protective_sl_price", None)
         if existing_sl_price is None:
             existing_sl_price = getattr(strategy.state, "middle_bucket_split_fast_sl_price", None)
-        candidate_sl_price: float | None = float(sl_price) if sl_price is not None else None
+        # Priority for existing_sl_order_id: payload → state fallback
+        existing_sl_order_id: str | None = three_stage_post_tp1_sl_payload.get("existing_sl_order_id")
+        if existing_sl_order_id is None:
+            existing_sl_order_id = old_sl_order_id
+        if existing_sl_order_id is None:
+            existing_sl_order_id = getattr(strategy.state, "three_stage_post_tp1_protective_sl_order_id", None)
+        if existing_sl_order_id is None:
+            existing_sl_order_id = getattr(strategy.state, "middle_bucket_split_fast_sl_order_id", None)
+        candidate_sl_price: float | None = three_stage_post_tp1_sl_payload.get("candidate_sl_price")
+        if candidate_sl_price is None:
+            candidate_sl_price = float(sl_price) if sl_price is not None else None
 
         _should_replace = should_replace_sl(
             side=side,
@@ -184,11 +198,11 @@ async def run_account_sync_protective_orders_phase(
             candidate_sl_price=candidate_sl_price,
         )
 
-        if not _should_replace and existing_sl_price is not None and old_sl_order_id:
+        if not _should_replace and existing_sl_price is not None and existing_sl_order_id:
             # Existing SL is stronger or equal — keep it, skip new placement
             async with state_lock:
                 strategy.state.three_stage_post_tp1_protective_sl_price = existing_sl_price
-                strategy.state.three_stage_post_tp1_protective_sl_order_id = old_sl_order_id
+                strategy.state.three_stage_post_tp1_protective_sl_order_id = existing_sl_order_id
                 strategy.state.three_stage_post_tp1_protected = True
                 save_state_payload = (execution_state.current_position_id, copy.deepcopy(strategy.state),
                                       execution_state.cash_before_position)
@@ -200,7 +214,7 @@ async def run_account_sync_protective_orders_phase(
                 existing_sl_price,
                 candidate_sl_price,
                 existing_sl_price,
-                old_sl_order_id,
+                existing_sl_order_id,
             )
             if hasattr(journal, "append"):
                 journal.append(
@@ -212,7 +226,7 @@ async def run_account_sync_protective_orders_phase(
                         "existing_sl": existing_sl_price,
                         "candidate_sl": candidate_sl_price,
                         "chosen_sl": existing_sl_price,
-                        "old_sl_order_id": old_sl_order_id,
+                        "old_sl_order_id": existing_sl_order_id,
                         "reason": "no_loosen",
                     },
                     position_id=three_stage_post_tp1_sl_payload.get("position_id"),
@@ -285,10 +299,10 @@ async def run_account_sync_protective_orders_phase(
             )
         else:
             # ── candidate None but existing SL valid → keep existing, skip DME ──
-            if candidate_sl_price is None and existing_sl_price is not None and old_sl_order_id:
+            if candidate_sl_price is None and existing_sl_price is not None and existing_sl_order_id:
                 async with state_lock:
                     strategy.state.three_stage_post_tp1_protective_sl_price = existing_sl_price
-                    strategy.state.three_stage_post_tp1_protective_sl_order_id = old_sl_order_id
+                    strategy.state.three_stage_post_tp1_protective_sl_order_id = existing_sl_order_id
                     strategy.state.three_stage_post_tp1_protected = True
                     save_state_payload = (execution_state.current_position_id, copy.deepcopy(strategy.state),
                                           execution_state.cash_before_position)
@@ -299,7 +313,7 @@ async def run_account_sync_protective_orders_phase(
                     side,
                     existing_sl_price,
                     existing_sl_price,
-                    old_sl_order_id,
+                    existing_sl_order_id,
                 )
                 if hasattr(journal, "append"):
                     journal.append(
@@ -311,7 +325,7 @@ async def run_account_sync_protective_orders_phase(
                             "existing_sl": existing_sl_price,
                             "candidate_sl": None,
                             "chosen_sl": existing_sl_price,
-                            "old_sl_order_id": old_sl_order_id,
+                            "old_sl_order_id": existing_sl_order_id,
                             "reason": "candidate_missing_keep_existing",
                         },
                         position_id=three_stage_post_tp1_sl_payload.get("position_id"),
@@ -401,10 +415,23 @@ async def run_account_sync_protective_orders_phase(
         mr_old_sl_order_id = middle_runner_sl_payload.get("old_sl_order_id")
 
         # ── No-loosen check: only replace existing SL if candidate is stronger ──
-        mr_existing_sl_price: float | None = getattr(strategy.state, "middle_runner_protective_sl_price", None)
+        # Priority for existing_sl: payload → state fallback.
+        mr_existing_sl_price: float | None = middle_runner_sl_payload.get("existing_sl_price")
+        if mr_existing_sl_price is None:
+            mr_existing_sl_price = getattr(strategy.state, "middle_runner_protective_sl_price", None)
         if mr_existing_sl_price is None:
             mr_existing_sl_price = getattr(strategy.state, "middle_bucket_split_fast_sl_price", None)
-        mr_candidate_sl_price: float | None = float(sl_price) if sl_price is not None else None
+        # Priority for existing_sl_order_id: payload → state fallback
+        mr_existing_sl_order_id: str | None = middle_runner_sl_payload.get("existing_sl_order_id")
+        if mr_existing_sl_order_id is None:
+            mr_existing_sl_order_id = mr_old_sl_order_id
+        if mr_existing_sl_order_id is None:
+            mr_existing_sl_order_id = getattr(strategy.state, "middle_runner_protective_sl_order_id", None)
+        if mr_existing_sl_order_id is None:
+            mr_existing_sl_order_id = getattr(strategy.state, "middle_bucket_split_fast_sl_order_id", None)
+        mr_candidate_sl_price: float | None = middle_runner_sl_payload.get("candidate_sl_price")
+        if mr_candidate_sl_price is None:
+            mr_candidate_sl_price = float(sl_price) if sl_price is not None else None
 
         _mr_should_replace = should_replace_sl(
             side=mr_side,
@@ -412,11 +439,11 @@ async def run_account_sync_protective_orders_phase(
             candidate_sl_price=mr_candidate_sl_price,
         )
 
-        if not _mr_should_replace and mr_existing_sl_price is not None and mr_old_sl_order_id:
+        if not _mr_should_replace and mr_existing_sl_price is not None and mr_existing_sl_order_id:
             # Existing SL is stronger or equal — keep it, skip new placement
             async with state_lock:
                 strategy.state.middle_runner_protective_sl_price = mr_existing_sl_price
-                strategy.state.middle_runner_protective_sl_order_id = mr_old_sl_order_id
+                strategy.state.middle_runner_protective_sl_order_id = mr_existing_sl_order_id
                 if middle_runner_sl_payload.get("reason") == "partial_size_mismatch_degraded":
                     strategy.state.middle_runner_size_mismatch_protected = True
                 save_state_payload = (execution_state.current_position_id, copy.deepcopy(strategy.state),
@@ -429,7 +456,7 @@ async def run_account_sync_protective_orders_phase(
                 mr_existing_sl_price,
                 mr_candidate_sl_price,
                 mr_existing_sl_price,
-                mr_old_sl_order_id,
+                mr_existing_sl_order_id,
             )
             if hasattr(journal, "append"):
                 journal.append(
@@ -441,7 +468,7 @@ async def run_account_sync_protective_orders_phase(
                         "existing_sl": mr_existing_sl_price,
                         "candidate_sl": mr_candidate_sl_price,
                         "chosen_sl": mr_existing_sl_price,
-                        "old_sl_order_id": mr_old_sl_order_id,
+                        "old_sl_order_id": mr_existing_sl_order_id,
                         "reason": "no_loosen",
                     },
                     position_id=middle_runner_sl_payload.get("position_id"),
@@ -515,10 +542,10 @@ async def run_account_sync_protective_orders_phase(
             )
         else:
             # ── candidate None but existing SL valid → keep existing, skip DME ──
-            if mr_candidate_sl_price is None and mr_existing_sl_price is not None and mr_old_sl_order_id:
+            if mr_candidate_sl_price is None and mr_existing_sl_price is not None and mr_existing_sl_order_id:
                 async with state_lock:
                     strategy.state.middle_runner_protective_sl_price = mr_existing_sl_price
-                    strategy.state.middle_runner_protective_sl_order_id = mr_old_sl_order_id
+                    strategy.state.middle_runner_protective_sl_order_id = mr_existing_sl_order_id
                     if middle_runner_sl_payload.get("reason") == "partial_size_mismatch_degraded":
                         strategy.state.middle_runner_size_mismatch_protected = True
                     save_state_payload = (execution_state.current_position_id, copy.deepcopy(strategy.state),
@@ -530,7 +557,7 @@ async def run_account_sync_protective_orders_phase(
                     mr_side,
                     mr_existing_sl_price,
                     mr_existing_sl_price,
-                    mr_old_sl_order_id,
+                    mr_existing_sl_order_id,
                 )
                 if hasattr(journal, "append"):
                     journal.append(
@@ -542,7 +569,7 @@ async def run_account_sync_protective_orders_phase(
                             "existing_sl": mr_existing_sl_price,
                             "candidate_sl": None,
                             "chosen_sl": mr_existing_sl_price,
-                            "old_sl_order_id": mr_old_sl_order_id,
+                            "old_sl_order_id": mr_existing_sl_order_id,
                             "reason": "candidate_missing_keep_existing",
                         },
                         position_id=middle_runner_sl_payload.get("position_id"),
