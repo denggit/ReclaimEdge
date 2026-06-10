@@ -5,6 +5,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Mapping
 
 from src.live import time_utils as live_time_utils
 from src.live.runtime_paths import RuntimePaths
@@ -80,6 +81,7 @@ class ReclaimSupervisorConfig:
     restart_policy: RestartPolicyConfig = field(default_factory=RestartPolicyConfig)
     restart_on_child_exit: bool = True
     restart_on_bad_heartbeat: bool = True
+    child_env: dict[str, str] | None = None
 
     def __post_init__(self) -> None:
         if self.poll_interval_seconds <= 0:
@@ -99,6 +101,15 @@ class ReclaimSupervisorConfig:
         object.__setattr__(self, "project_root", Path(self.project_root))
         object.__setattr__(self, "worker_script", Path(self.worker_script))
         object.__setattr__(self, "runtime_dir", Path(self.runtime_dir))
+        # -- child_env normalization ----------------------------------------
+        if self.child_env is not None:
+            normalized: dict[str, str] = {}
+            for key, value in self.child_env.items():
+                key_str = str(key)
+                if not key_str.strip():
+                    raise ValueError("child_env key must not be empty")
+                normalized[key_str] = str(value)
+            object.__setattr__(self, "child_env", normalized)
 
 
 class ReclaimSupervisor:
@@ -186,7 +197,7 @@ class ReclaimSupervisor:
             name=self._config.child_name,
             argv=(sys.executable, str(script_path)),
             cwd=self._config.project_root,
-            env=None,
+            env=self._config.child_env,
             terminate_timeout_seconds=self._config.child_terminate_timeout_seconds,
             kill_timeout_seconds=self._config.child_kill_timeout_seconds,
         )

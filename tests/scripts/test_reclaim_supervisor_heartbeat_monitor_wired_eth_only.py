@@ -66,6 +66,8 @@ def test_reclaim_supervisor_now_imports_heartbeat_monitor() -> None:
 def test_run_reclaim_supervisor_does_not_import_heartbeat_monitor() -> None:
     source = _read(_PROJECT_ROOT / "scripts" / "run_reclaim_supervisor.py")
 
+    # F04: RECLAIM_SYMBOLS is now intentionally used in the entry script
+    # for child env override.
     forbidden = [
         "HeartbeatMonitor",
         "HeartbeatStatus",
@@ -73,7 +75,6 @@ def test_run_reclaim_supervisor_does_not_import_heartbeat_monitor() -> None:
         "heartbeats_dir",
         "ChildProcess",
         "run_symbol_worker",
-        "RECLAIM_SYMBOLS",
         "BTC",
     ]
     for token in forbidden:

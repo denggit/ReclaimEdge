@@ -4,6 +4,11 @@ from src.live.supervisor.reclaim_supervisor import (
     SupervisorHealthEvent,
     SupervisorShutdownResult,
 )
+from src.live.supervisor.symbol_selection import (
+    SupervisorSymbolSelection,
+    require_single_enabled_symbol,
+    select_enabled_supervisor_symbols,
+)
 from src.live.supervisor.child_process import ChildProcess, ChildProcessSnapshot, ChildProcessSpec
 from src.live.supervisor.heartbeat_monitor import (
     HeartbeatMonitor,
@@ -84,4 +89,7 @@ __all__ = [
     "SupervisorEmailPublisher",
     "WorkerEventOutboxRetention",
     "OutboxRetentionResult",
+    "SupervisorSymbolSelection",
+    "select_enabled_supervisor_symbols",
+    "require_single_enabled_symbol",
 ]

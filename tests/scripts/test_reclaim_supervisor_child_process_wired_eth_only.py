@@ -105,13 +105,14 @@ def test_run_reclaim_supervisor_entry_still_not_wired_directly_to_child_process(
         "D07 run_reclaim_supervisor.py must install signal handlers"
     )
 
+    # F04: RECLAIM_SYMBOLS is now intentionally used in the entry script
+    # for child env override.
     forbidden = [
         "ChildProcess",
         "ChildProcessSpec",
         "run_symbol_worker",
         "subprocess",
         "multiprocessing",
-        "RECLAIM_SYMBOLS",
         "BTC",
     ]
     for token in forbidden:

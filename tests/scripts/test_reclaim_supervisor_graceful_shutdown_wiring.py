@@ -206,6 +206,8 @@ def test_supervisor_has_heartbeat_and_restart_but_no_btc_email() -> None:
 def test_entry_no_direct_child_or_heartbeat() -> None:
     source = _read(_PROJECT_ROOT / "scripts" / "run_reclaim_supervisor.py")
 
+    # F04: RECLAIM_SYMBOLS is now intentionally used in the entry script
+    # for child env override.
     forbidden = [
         "ChildProcess",
         "ChildProcessSpec",
@@ -214,7 +216,6 @@ def test_entry_no_direct_child_or_heartbeat() -> None:
         "run_symbol_worker",
         "subprocess",
         "multiprocessing",
-        "RECLAIM_SYMBOLS",
         "BTC",
     ]
     for token in forbidden:

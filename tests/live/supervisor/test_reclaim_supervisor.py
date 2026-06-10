@@ -316,6 +316,49 @@ def test_invalid_heartbeat_config_raises() -> None:
 
 
 # ============================================================================
+# 4c. test_child_env_config
+# ============================================================================
+
+
+def test_child_env_default_is_none() -> None:
+    config = ReclaimSupervisorConfig()
+    assert config.child_env is None
+
+
+def test_build_child_spec_env_is_none_by_default(tmp_path: Path) -> None:
+    config = ReclaimSupervisorConfig(project_root=tmp_path)
+    supervisor = ReclaimSupervisor(config=config)
+    spec = supervisor.build_child_spec()
+    assert spec.env is None
+
+
+def test_build_child_spec_env_passthrough(tmp_path: Path) -> None:
+    child_env = {"RECLAIM_SYMBOLS": "ETH-USDT-SWAP", "OKX_INST_ID": "ETH-USDT-SWAP"}
+    config = ReclaimSupervisorConfig(
+        project_root=tmp_path,
+        child_env=child_env,
+    )
+    supervisor = ReclaimSupervisor(config=config)
+    spec = supervisor.build_child_spec()
+    assert spec.env is not None
+    assert spec.env["RECLAIM_SYMBOLS"] == "ETH-USDT-SWAP"
+    assert spec.env["OKX_INST_ID"] == "ETH-USDT-SWAP"
+
+
+def test_child_env_empty_key_raises() -> None:
+    with pytest.raises(ValueError, match="child_env key must not be empty"):
+        ReclaimSupervisorConfig(child_env={"": "value"})
+
+
+def test_child_env_normalizes_keys_and_values_to_str() -> None:
+    config = ReclaimSupervisorConfig(child_env={"KEY": 123, "OTHER": True})
+    assert config.child_env is not None
+    assert config.child_env["KEY"] == "123"
+    assert config.child_env["OTHER"] == "True"
+    assert isinstance(list(config.child_env.keys())[0], str)
+
+
+# ============================================================================
 # 5. test_from_env_returns_single_child_supervisor
 # ============================================================================
 
@@ -1467,6 +1510,7 @@ def test_source_allows_heartbeat_monitor_and_child_process_and_restart() -> None
         "event_pipeline",
         "process_child_events_once",
         "EVENT_PIPELINE_FAILED",
+        "child_env",
     ]
     for token in allowed:
         assert token in source, (

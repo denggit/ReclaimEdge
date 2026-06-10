@@ -90,17 +90,38 @@ class TestRejectsDuplicateSymbols:
             )
 
 
-class TestRejectsBtcForNow:
-    """BTC-USDT-SWAP is not yet supported — must be rejected."""
+class TestAllowsBtc:
+    """BTC-USDT-SWAP is now allowed in _ALLOWED_SYMBOLS —
+    whether it actually launches is decided by TOML enabled + supervisor selection."""
 
     def test_btc_alone(self) -> None:
-        with pytest.raises(ValueError, match="RECLAIM_SYMBOLS"):
-            load_env_runtime_config({"RECLAIM_SYMBOLS": "BTC-USDT-SWAP"})
+        cfg = load_env_runtime_config({"RECLAIM_SYMBOLS": "BTC-USDT-SWAP"})
+        assert cfg.symbols == ("BTC-USDT-SWAP",)
 
     def test_eth_and_btc(self) -> None:
+        cfg = load_env_runtime_config(
+            {"RECLAIM_SYMBOLS": "ETH-USDT-SWAP,BTC-USDT-SWAP"}
+        )
+        assert cfg.symbols == ("ETH-USDT-SWAP", "BTC-USDT-SWAP")
+
+    def test_eth_and_btc_order_preserved(self) -> None:
+        cfg = load_env_runtime_config(
+            {"RECLAIM_SYMBOLS": "BTC-USDT-SWAP,ETH-USDT-SWAP"}
+        )
+        assert cfg.symbols == ("BTC-USDT-SWAP", "ETH-USDT-SWAP")
+
+
+class TestRejectsUnsupportedSymbols:
+    """Symbols not in _ALLOWED_SYMBOLS must still be rejected."""
+
+    def test_sol_rejected(self) -> None:
+        with pytest.raises(ValueError, match="RECLAIM_SYMBOLS"):
+            load_env_runtime_config({"RECLAIM_SYMBOLS": "SOL-USDT-SWAP"})
+
+    def test_eth_and_sol_rejected(self) -> None:
         with pytest.raises(ValueError, match="RECLAIM_SYMBOLS"):
             load_env_runtime_config(
-                {"RECLAIM_SYMBOLS": "ETH-USDT-SWAP,BTC-USDT-SWAP"}
+                {"RECLAIM_SYMBOLS": "ETH-USDT-SWAP,SOL-USDT-SWAP"}
             )
 
 

@@ -32,9 +32,10 @@ from typing import Mapping
 # Allowed values
 # ---------------------------------------------------------------------------
 
-# Currently only ETH-USDT-SWAP is supported by the validator, Trader and
-# supervisor.  Expanding this set must be done deliberately.
-_ALLOWED_SYMBOLS: frozenset[str] = frozenset({"ETH-USDT-SWAP"})
+# RECLAIM_SYMBOLS 允许声明 BTC，但能否启动由 TOML enabled 和 supervisor
+# selection 决定。BTC currently remains disabled by TOML / validator.
+# Expanding this set must be done deliberately.
+_ALLOWED_SYMBOLS: frozenset[str] = frozenset({"ETH-USDT-SWAP", "BTC-USDT-SWAP"})
 
 _TRUE_VALUES: frozenset[str] = frozenset({"1", "true", "yes", "on"})
 _FALSE_VALUES: frozenset[str] = frozenset({"0", "false", "no", "off", ""})

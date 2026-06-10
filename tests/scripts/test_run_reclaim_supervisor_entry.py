@@ -92,6 +92,8 @@ def test_run_reclaim_supervisor_no_symbol_worker_or_child_start() -> None:
     machinery."""
     source = _new_entry_source()
 
+    # F04: RECLAIM_SYMBOLS is now intentionally used in the entry script
+    # for child env override.
     forbidden = [
         "SymbolWorkerApp",
         "run_symbol_worker",
@@ -104,7 +106,6 @@ def test_run_reclaim_supervisor_no_symbol_worker_or_child_start() -> None:
         "ChildProcessSpec",
         "HeartbeatMonitor",
         "HeartbeatStatus",
-        "RECLAIM_SYMBOLS",
         "BTC",
         "workers",
     ]
@@ -154,12 +155,12 @@ def test_run_reclaim_supervisor_no_trading_runtime_objects() -> None:
 
 
 def test_run_reclaim_supervisor_no_multi_symbol_or_btc() -> None:
-    """D02 run_reclaim_supervisor.py must NOT introduce BTC, RECLAIM_SYMBOLS,
-    argparse, or CLI symbol parameters."""
+    """D02+F04 run_reclaim_supervisor.py must NOT introduce BTC, argparse,
+    or CLI symbol parameters.  RECLAIM_SYMBOLS is now intentionally used
+    for child env override (F04)."""
     source = _new_entry_source()
 
     forbidden = [
-        "RECLAIM_SYMBOLS",
         "BTC-USDT-SWAP",
         "BTC",
         "argparse",
