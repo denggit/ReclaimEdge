@@ -1,17 +1,20 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""C04 regression tests ensuring ``SymbolWorkerApp.run()`` calls
-``build_live_symbol_runtime_configs`` exactly once, after
-``trader.initialize()``, and passes ``account_equity_usdt`` (A07 fix).
-The thin live entry is only responsible for the LIVE_TRADING gate.
+"""Regression tests for live symbol TOML bootstrap wiring.
 
-These tests use AST / source inspection — they never import or instantiate
-live runtime objects, Trader, or asyncio workers.
+G09e intentionally bootstraps TOML runtime config before Trader creation in
+live mode so TraderInstrumentMetadata and TraderMarketSettings can be built
+from the symbol TOML.  After ``trader.initialize()``, account equity is applied
+with the explicit runtime config override helper.
+
+The thin live entry is only responsible for the global LIVE_TRADING gate.
+
+These tests use source inspection — they never import or instantiate live
+runtime objects, Trader, or asyncio workers.
 """
 
 from __future__ import annotations
 
-import ast
 from pathlib import Path
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -27,98 +30,89 @@ def _app_source() -> str:
     return _APP_MODULE.read_text()
 
 
-def _app_ast() -> ast.Module:
-    return ast.parse(_app_source())
-
-
 # ---------------------------------------------------------------------------
-# 1. test_app_calls_symbol_bootstrap_once
+# 1. test_live_path_uses_pre_trader_bootstrap_for_toml_metadata
 # ---------------------------------------------------------------------------
 
 
-def test_app_calls_symbol_bootstrap_once() -> None:
-    """``build_live_symbol_runtime_configs`` must be called exactly once
-    in SymbolWorkerApp.run()."""
-    tree = _app_ast()
-    count = 0
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Call):
-            func = node.func
-            if isinstance(func, ast.Name) and func.id == "build_live_symbol_runtime_configs":
-                count += 1
-    assert count == 1, (
-        f"Expected exactly 1 call to build_live_symbol_runtime_configs, "
-        f"found {count}"
-    )
-
-
-# ---------------------------------------------------------------------------
-# 2. test_app_passes_trader_account_equity_to_bootstrap
-# ---------------------------------------------------------------------------
-
-
-def test_app_passes_trader_account_equity_to_bootstrap() -> None:
-    """The single call to ``build_live_symbol_runtime_configs`` must pass
-    ``account_equity_usdt=trader.account_equity_usdt`` so the legacy
-    ``.env`` path uses ``from_account_equity()`` instead of ``from_env()``."""
-    tree = _app_ast()
-    found_call = False
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Call):
-            func = node.func
-            if isinstance(func, ast.Name) and func.id == "build_live_symbol_runtime_configs":
-                found_call = True
-                kw_names = {kw.arg for kw in node.keywords}
-                assert "account_equity_usdt" in kw_names, (
-                    "build_live_symbol_runtime_configs must receive "
-                    "account_equity_usdt= to use from_account_equity() "
-                    "on the legacy .env path"
-                )
-    assert found_call, "build_live_symbol_runtime_configs call not found"
-
-
-# ---------------------------------------------------------------------------
-# 3. test_app_does_not_use_replace_for_account_equity
-# ---------------------------------------------------------------------------
-
-
-def test_app_does_not_use_replace_for_account_equity() -> None:
-    """Account equity must be applied via ``account_equity_usdt`` parameter
-    to ``build_live_symbol_runtime_configs`` — NOT via
-    ``dataclasses.replace``.
-
-    The source must not contain ``from dataclasses import replace`` nor
-    ``dry_run_equity_usdt=trader.account_equity_usdt``.
-    """
+def test_live_path_uses_pre_trader_bootstrap_for_toml_metadata() -> None:
+    """Live mode bootstraps TOML config before Trader is created."""
     source = _app_source()
-    assert "from dataclasses import replace" not in source, (
-        "dataclasses.replace must not be imported — account equity "
-        "should be passed to build_live_symbol_runtime_configs()"
+
+    for token in (
+        "_build_pre_trader_runtime_configs_for_mode(",
+        "_build_live_trader_metadata_from_runtime_configs(",
+        "factory.create_trader(",
+    ):
+        assert token in source
+
+    pre_idx = source.index(
+        "pre_runtime_configs = _build_pre_trader_runtime_configs_for_mode("
     )
-    assert "dry_run_equity_usdt=trader.account_equity_usdt" not in source, (
-        "dry_run_equity_usdt must not be set via replace — pass "
-        "account_equity_usdt to build_live_symbol_runtime_configs() instead"
+    metadata_idx = source.index(
+        "metadata, market_settings = _build_live_trader_metadata_from_runtime_configs("
     )
-
-
-# ---------------------------------------------------------------------------
-# 4. test_app_bootstrap_occurs_after_trader_initialize
-# ---------------------------------------------------------------------------
-
-
-def test_app_bootstrap_occurs_after_trader_initialize() -> None:
-    """``build_live_symbol_runtime_configs`` must be called AFTER
-    ``await trader.initialize()`` so that ``trader.account_equity_usdt``
-    is available and the legacy ``.env`` path does not read
-    ``DRY_RUN_EQUITY_USDT``."""
-    source = _app_source()
+    create_trader_idx = source.index("trader = self.factory.create_trader(")
+    start_idx = source.index("await trader.start()")
     init_idx = source.index("await trader.initialize()")
-    bootstrap_idx = source.index("build_live_symbol_runtime_configs(")
-    assert init_idx < bootstrap_idx, (
-        f"build_live_symbol_runtime_configs must be called after "
-        f"trader.initialize() — found initialize at {init_idx}, "
-        f"bootstrap at {bootstrap_idx}"
+
+    assert pre_idx < metadata_idx < create_trader_idx < start_idx < init_idx
+
+
+# ---------------------------------------------------------------------------
+# 2. test_live_path_overrides_runtime_account_equity_after_initialize
+# ---------------------------------------------------------------------------
+
+
+def test_live_path_overrides_runtime_account_equity_after_initialize() -> None:
+    """Live runtime configs are updated with Trader account equity post-init."""
+    source = _app_source()
+
+    assert "_override_runtime_config_account_equity(" in source
+    assert "pre_runtime_configs" in source
+    assert "trader.account_equity_usdt" in source
+
+    init_idx = source.index("await trader.initialize()")
+    override_idx = source.index(
+        "runtime_configs = _override_runtime_config_account_equity("
     )
+    assert init_idx < override_idx
+
+
+# ---------------------------------------------------------------------------
+# 3. test_account_equity_override_is_explicit_helper
+# ---------------------------------------------------------------------------
+
+
+def test_account_equity_override_is_explicit_helper() -> None:
+    """Account equity override is centralized in an explicit helper."""
+    source = _app_source()
+    assert "def _override_runtime_config_account_equity(" in source
+    assert "dry_run_equity_usdt=account_equity_usdt" in source
+
+
+# ---------------------------------------------------------------------------
+# 4. test_live_path_pre_trader_bootstrap_occurs_before_create_trader
+# ---------------------------------------------------------------------------
+
+
+def test_live_path_pre_trader_bootstrap_occurs_before_create_trader() -> None:
+    """Pre-trader TOML bootstrap feeds Trader construction, then equity override."""
+    source = _app_source()
+
+    pre_idx = source.index(
+        "pre_runtime_configs = _build_pre_trader_runtime_configs_for_mode("
+    )
+    create_trader_idx = source.index("trader = self.factory.create_trader(")
+    init_idx = source.index("await trader.initialize()")
+    override_idx = source.index(
+        "runtime_configs = _override_runtime_config_account_equity("
+    )
+    guard_idx = source.index("_assert_trader_matches_symbol_config(trader,")
+    strategy_idx = source.index("factory.create_strategy_objects(")
+
+    assert pre_idx < create_trader_idx
+    assert init_idx < override_idx < guard_idx < strategy_idx
 
 
 # ---------------------------------------------------------------------------
@@ -144,17 +138,19 @@ def test_app_has_trader_toml_consistency_guard() -> None:
 
 
 def test_app_consistency_guard_called_after_bootstrap_before_strategy_creation() -> None:
-    """The consistency guard must be called after the bootstrap call and
+    """The consistency guard must be called after account equity override and
     before strategy objects are created (via factory as of C02)."""
     source = _app_source()
 
-    bootstrap_idx = source.index("runtime_configs = build_live_symbol_runtime_configs(")
+    override_idx = source.index(
+        "runtime_configs = _override_runtime_config_account_equity("
+    )
     # The call site (not the ``def`` line) — passes ``trader`` as first arg.
     guard_idx = source.index("_assert_trader_matches_symbol_config(trader,")
     strategy_idx = source.index("factory.create_strategy_objects(")
 
-    assert bootstrap_idx < guard_idx < strategy_idx, (
-        f"Order violation: bootstrap={bootstrap_idx}, "
+    assert override_idx < guard_idx < strategy_idx, (
+        f"Order violation: override={override_idx}, "
         f"guard={guard_idx}, strategy={strategy_idx}"
     )
 
@@ -166,8 +162,9 @@ def test_app_consistency_guard_called_after_bootstrap_before_strategy_creation()
 
 def test_live_entry_does_not_use_symbol_live_trading_as_gate() -> None:
     """``symbol_config.symbol.live_trading`` must NOT appear in the live
-    entrypoint source.  ``LIVE_TRADING`` is still controlled by the
-    existing ``.env`` gate — A08 must not change that semantic."""
+    entrypoint source. ``run_boll_cvd_live.py`` remains responsible only for
+    the global ``.env`` LIVE_TRADING gate; per-symbol live gating happens in
+    SymbolWorkerApp / startup preflight."""
     source = _live_source()
     assert "symbol_config.symbol.live_trading" not in source, (
         "symbol_config.symbol.live_trading must not be used as a live "

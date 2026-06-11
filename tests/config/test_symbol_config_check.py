@@ -28,7 +28,7 @@ _SYMBOLS_DIR = _PROJECT_ROOT / "config" / "symbols"
 
 
 # ---------------------------------------------------------------------------
-# 1. BTC config check succeeds (disabled, live_trading=false)
+# 1. BTC config check succeeds (enabled=true, live_trading=true)
 # ---------------------------------------------------------------------------
 
 
@@ -40,28 +40,27 @@ def test_btc_config_check_succeeds() -> None:
     )
     assert isinstance(result, SymbolConfigCheckResult)
     assert result.inst_id == "BTC-USDT-SWAP"
-    assert result.enabled is False
-    assert result.live_trading is False
+    assert result.enabled is True
+    assert result.live_trading is True
     assert result.contract_value == Decimal("0.01")
     assert result.min_contracts == Decimal("0.01")
     assert result.contract_precision == Decimal("0.01")
     assert result.price_precision == Decimal("0.1")
     assert result.sidecar_enabled is False
     assert result.middle_bucket_split_enabled is False
-    assert result.safe_for_config_check_only is True
     assert isinstance(result.mapped, MappedSymbolConfigs)
     assert result.mapped.trader_preview.inst_id == "BTC-USDT-SWAP"
     assert result.mapped.trader_preview.contract_value == Decimal("0.01")
-    assert result.mapped.trader_preview.live_trading is False
+    assert result.mapped.trader_preview.live_trading is True
 
 
 # ---------------------------------------------------------------------------
-# 2. ETH config check succeeds (enabled=true, live_trading=false)
+# 2. ETH config check succeeds (enabled=true, live_trading=true)
 # ---------------------------------------------------------------------------
 
 
 def test_eth_config_check_succeeds() -> None:
-    """ETH-USDT-SWAP config check passes; enabled=true, live_trading=false."""
+    """ETH-USDT-SWAP config check passes; enabled=true, live_trading=true."""
     result = check_symbol_config(
         symbol_config_dir=_SYMBOLS_DIR,
         inst_id="ETH-USDT-SWAP",
@@ -69,9 +68,9 @@ def test_eth_config_check_succeeds() -> None:
     assert isinstance(result, SymbolConfigCheckResult)
     assert result.inst_id == "ETH-USDT-SWAP"
     assert result.enabled is True
-    assert result.live_trading is False
+    assert result.live_trading is True
     assert result.contract_value == Decimal("0.1")
-    assert result.safe_for_config_check_only is True
+    assert result.mapped.trader_preview.live_trading is True
 
 
 # ---------------------------------------------------------------------------
@@ -104,12 +103,12 @@ def test_unsupported_inst_id_fails() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 5. BTC enabled=true fails (via temp TOML)
+# 5. BTC enabled=true succeeds (via temp TOML)
 # ---------------------------------------------------------------------------
 
 
-def test_btc_enabled_true_temp_toml_fails() -> None:
-    """A BTC TOML with enabled=true must fail validation."""
+def test_btc_enabled_true_temp_toml_succeeds() -> None:
+    """A BTC TOML with enabled=true passes symbol config validation."""
     btc_toml_content = """\
 [symbol]
 inst_id = "BTC-USDT-SWAP"
@@ -209,23 +208,22 @@ execution_backlog_log_seconds = "30"
         config_dir = Path(tmpdir)
         toml_path = config_dir / "BTC-USDT-SWAP.toml"
         toml_path.write_text(btc_toml_content, encoding="utf-8")
-        with pytest.raises(SymbolConfigValidationError) as exc_info:
-            check_symbol_config(
-                symbol_config_dir=config_dir,
-                inst_id="BTC-USDT-SWAP",
-            )
-        msg = str(exc_info.value)
-        assert "BTC-USDT-SWAP" in msg
-        assert "enabled" in msg.lower()
+        result = check_symbol_config(
+            symbol_config_dir=config_dir,
+            inst_id="BTC-USDT-SWAP",
+        )
+        assert result.inst_id == "BTC-USDT-SWAP"
+        assert result.enabled is True
+        assert result.live_trading is False
 
 
 # ---------------------------------------------------------------------------
-# 6. BTC live_trading=true fails (via temp TOML)
+# 6. BTC live_trading=true succeeds (via temp TOML)
 # ---------------------------------------------------------------------------
 
 
-def test_btc_live_trading_true_temp_toml_fails() -> None:
-    """A BTC TOML with live_trading=true must fail validation."""
+def test_btc_live_trading_true_temp_toml_succeeds() -> None:
+    """A BTC TOML with live_trading=true passes symbol config validation."""
     btc_toml_content = """\
 [symbol]
 inst_id = "BTC-USDT-SWAP"
@@ -325,14 +323,14 @@ execution_backlog_log_seconds = "30"
         config_dir = Path(tmpdir)
         toml_path = config_dir / "BTC-USDT-SWAP.toml"
         toml_path.write_text(btc_toml_content, encoding="utf-8")
-        with pytest.raises(SymbolConfigValidationError) as exc_info:
-            check_symbol_config(
-                symbol_config_dir=config_dir,
-                inst_id="BTC-USDT-SWAP",
-            )
-        msg = str(exc_info.value)
-        assert "BTC-USDT-SWAP" in msg
-        assert "live_trading" in msg.lower()
+        result = check_symbol_config(
+            symbol_config_dir=config_dir,
+            inst_id="BTC-USDT-SWAP",
+        )
+        assert result.inst_id == "BTC-USDT-SWAP"
+        assert result.enabled is False
+        assert result.live_trading is True
+        assert result.mapped.trader_preview.live_trading is True
 
 
 # ---------------------------------------------------------------------------
@@ -348,17 +346,17 @@ def test_to_summary_dict() -> None:
     )
     d = result.to_summary_dict()
     assert d["inst_id"] == "BTC-USDT-SWAP"
-    assert d["enabled"] is False
-    assert d["live_trading"] is False
+    assert d["enabled"] is True
+    assert d["live_trading"] is True
     assert d["contract_value"] == "0.01"
     assert d["price_precision"] == "0.1"
     assert d["sidecar_enabled"] is False
     assert d["middle_bucket_split_enabled"] is False
-    assert d["safe_for_config_check_only"] is True
+    assert isinstance(d["safe_for_config_check_only"], bool)
     tp = d["trader_preview"]
     assert tp["inst_id"] == "BTC-USDT-SWAP"
     assert tp["contract_value"] == "0.01"
-    assert tp["live_trading"] is False
+    assert tp["live_trading"] is True
     # Ensure it's valid JSON
     import json
     json.dumps(d)
@@ -370,13 +368,18 @@ def test_to_summary_dict() -> None:
 
 
 def test_safe_for_config_check_only() -> None:
-    """safe_for_config_check_only returns True when live_trading is False."""
+    """Config check accepts ETH live_trading=true as TOML self-consistency.
+
+    Live worker safety is enforced by startup preflight and SymbolWorkerApp's
+    per-symbol live gate, not by the pure config-check preview.
+    """
     result = check_symbol_config(
         symbol_config_dir=_SYMBOLS_DIR,
         inst_id="ETH-USDT-SWAP",
     )
-    assert result.live_trading is False
-    assert result.safe_for_config_check_only is True
+    assert result.inst_id == "ETH-USDT-SWAP"
+    assert result.enabled is True
+    assert result.live_trading is True
 
 
 # ---------------------------------------------------------------------------

@@ -189,7 +189,7 @@ def test_loaded_eth_toml_maps_successfully() -> None:
     assert mapped.cvd.fast_window_seconds == 5.0
     assert mapped.position_sizer.layer_multiplier_step == 0.15
     assert mapped.strategy.three_stage_tp2_use_structure_boll is True
-    assert mapped.trader_preview.live_trading is False
+    assert mapped.trader_preview.live_trading is True
 
 
 # ---------------------------------------------------------------------------
@@ -223,7 +223,7 @@ def test_mapper_rejects_invalid_symbol_config() -> None:
 
 
 def test_btc_mapper_preview_only() -> None:
-    """BTC config can be mapped for preview only; no Trader wiring."""
+    """BTC config maps live_trading from TOML for preview."""
     config = load_symbol_config_from_dir(str(_SYMBOLS_DIR), "BTC-USDT-SWAP")
     mapped = map_symbol_config(config)
     assert isinstance(mapped, MappedSymbolConfigs)
@@ -231,4 +231,4 @@ def test_btc_mapper_preview_only() -> None:
     assert mapped.trader_preview.contract_value == Decimal("0.01")
     assert mapped.trader_preview.contract_precision == Decimal("0.01")
     assert mapped.trader_preview.min_contracts == Decimal("0.01")
-    assert mapped.trader_preview.live_trading is False
+    assert mapped.trader_preview.live_trading is True

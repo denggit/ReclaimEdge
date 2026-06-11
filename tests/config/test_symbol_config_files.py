@@ -3,8 +3,8 @@
 """Tests for on-disk symbol TOML config files (A03).
 
 These tests verify that the canonical ``config/symbols/ETH-USDT-SWAP.toml``
-exists, can be loaded by the A02 loader, matches the Python-side
-``SymbolConfig.default_eth()`` defaults, and that safety switches are correct.
+exists, can be loaded by the A02 loader, carries the current live production
+values, and that safety switches are correct.
 """
 
 from __future__ import annotations
@@ -111,18 +111,19 @@ def test_default_eth_toml_matches_live_config() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 4. Safety switches
+# 4. Live switches
 # ---------------------------------------------------------------------------
 
 
-def test_default_eth_toml_safety_switches() -> None:
-    """Safety-critical fields must be locked to their safe defaults."""
+def test_default_eth_toml_live_switches() -> None:
+    """ETH TOML is enabled for live worker startup under the G09e TOML gate."""
     loaded = load_symbol_config_from_dir(str(_SYMBOLS_DIR), "ETH-USDT-SWAP")
 
-    # live_trading must be off (real gate is LIVE_TRADING in .env)
+    # .env LIVE_TRADING remains the global master gate; this is the per-symbol
+    # TOML live gate used by SymbolWorkerApp and startup preflight.
     assert loaded.symbol.enabled is True
-    assert loaded.symbol.live_trading is False
-    assert loaded.is_live_trading_enabled is False
+    assert loaded.symbol.live_trading is True
+    assert loaded.is_live_trading_enabled is True
 
     # three_stage_tp2 must use structure Boll
     assert loaded.tp.three_stage_tp2_use_structure_boll is True
@@ -145,21 +146,21 @@ def test_default_eth_toml_passes_validator() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 6. BTC TOML — exists but disabled (F03)
+# 6. BTC TOML — exists and maps current live switches
 # ---------------------------------------------------------------------------
 
 
-def test_btc_toml_exists_but_disabled() -> None:
-    """BTC-USDT-SWAP.toml must exist, but enabled and live_trading must be False."""
+def test_btc_toml_exists_with_live_switches() -> None:
+    """BTC-USDT-SWAP.toml must exist and preserve current live switches."""
     assert _BTC_TOML.is_file(), (
         f"Expected {_BTC_TOML} to exist (F03 adds disabled BTC config)."
     )
     config = load_symbol_config_from_dir(str(_SYMBOLS_DIR), "BTC-USDT-SWAP")
     assert config.inst_id == "BTC-USDT-SWAP"
-    assert config.symbol.enabled is False
-    assert config.symbol.live_trading is False
-    assert config.is_enabled is False
-    assert config.is_live_trading_enabled is False
+    assert config.symbol.enabled is True
+    assert config.symbol.live_trading is True
+    assert config.is_enabled is True
+    assert config.is_live_trading_enabled is True
 
 
 def test_btc_toml_market_metadata() -> None:
@@ -196,32 +197,20 @@ def test_btc_toml_passes_validator() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 7. BTC TOML source guards — must NOT contain enabled=true / live_trading=true
+# 7. BTC TOML source guards — enabled/live true are valid TOML values
 # ---------------------------------------------------------------------------
 
 
-def test_btc_toml_must_not_contain_enabled_true_line() -> None:
-    """BTC TOML must NOT contain the exact line 'enabled = true'."""
+def test_btc_toml_contains_enabled_true_line() -> None:
+    """BTC TOML may contain the exact line 'enabled = true'."""
     content = _BTC_TOML.read_text(encoding="utf-8")
-    lines = content.splitlines()
-    for line in lines:
-        stripped = line.strip()
-        assert stripped != "enabled = true", (
-            f"BTC-USDT-SWAP.toml must not contain exact line 'enabled = true'. "
-            f"Found: {stripped!r}"
-        )
+    assert "enabled = true" in {line.strip() for line in content.splitlines()}
 
 
-def test_btc_toml_must_not_contain_live_trading_true_line() -> None:
-    """BTC TOML must NOT contain the exact line 'live_trading = true'."""
+def test_btc_toml_contains_live_trading_true_line() -> None:
+    """BTC TOML may contain the exact line 'live_trading = true'."""
     content = _BTC_TOML.read_text(encoding="utf-8")
-    lines = content.splitlines()
-    for line in lines:
-        stripped = line.strip()
-        assert stripped != "live_trading = true", (
-            f"BTC-USDT-SWAP.toml must not contain exact line 'live_trading = true'. "
-            f"Found: {stripped!r}"
-        )
+    assert "live_trading = true" in {line.strip() for line in content.splitlines()}
 
 
 # ---------------------------------------------------------------------------

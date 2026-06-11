@@ -244,18 +244,21 @@ def test_symbol_worker_app_run_has_expected_runtime_order() -> None:
 
 def test_symbol_worker_app_does_not_load_dotenv_or_live_trading_gate() -> None:
     """SymbolWorkerApp.run() must NOT contain load_dotenv or the
-    LIVE_TRADING gate — those belong to the entry script."""
+    global LIVE_TRADING gate — those belong to the entry script.
+
+    The per-symbol TOML live gate remains in SymbolWorkerApp.
+    """
     source = _app_source()
 
     forbidden = [
         "load_dotenv",
-        "live_trading_enabled",
         "LIVE_TRADING is not true",
     ]
     for token in forbidden:
         assert token not in source, (
             f"SymbolWorkerApp must not contain {token!r}"
         )
+    assert "_assert_symbol_live_trading_enabled_for_worker_mode" in source
 
 
 # ============================================================================

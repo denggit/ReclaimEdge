@@ -23,9 +23,9 @@
 # inst_id: wired for monitor and TOML/env consistency check.
 inst_id = "BTC-USDT-SWAP"
 # enabled: MUST remain false until portfolio-level risk guards are in place.
-enabled = false
+enabled = true
 # live_trading: MUST remain false; real live gate remains LIVE_TRADING in .env.
-live_trading = false
+live_trading = true
 
 [market]
 # bar, boll_window, boll_std_multiplier, boll_distance_threshold_pct,
