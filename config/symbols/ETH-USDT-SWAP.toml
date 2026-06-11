@@ -28,11 +28,10 @@ live_trading = true
 # bar, boll_window, boll_std_multiplier, boll_distance_threshold_pct,
 # tp_boll_window: wired to BollBandBreakoutMonitorConfig.
 bar = "15m"
-# td_mode, pos_side_mode: checked against Trader env; Trader still reads .env.
+# td_mode / pos_side_mode are mapped into TraderMarketSettings on TOML-backed live workers.
 td_mode = "isolated"
 pos_side_mode = "net"
-# contract_value, min_contracts, contract_precision, price_precision:
-# pending for future Trader/instrument metadata migration.
+# Instrument metadata is mapped into TraderInstrumentMetadata on TOML-backed live workers.
 contract_value = "0.1"
 min_contracts = "0.01"
 contract_precision = "0.01"
@@ -45,8 +44,9 @@ tp_boll_window = 15
 min_outside_pct = "0.0005"
 
 [capital]
-# layer_margin_pct, leverage, max_layers, layer_multiplier_step: wired to
+# layer_margin_pct, max_layers, layer_multiplier_step: wired to
 # SimplePositionSizerConfig and strategy config.
+# leverage is mapped into TraderMarketSettings on TOML-backed live workers.
 dry_run_equity_usdt = "1000"
 layer_margin_pct = "0.06"
 leverage = "15"
