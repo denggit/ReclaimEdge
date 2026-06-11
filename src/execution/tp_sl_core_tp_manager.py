@@ -899,17 +899,32 @@ class CoreTakeProfitManager:
         old_sl_price: Any,
     ) -> str:
         t = self.trader
-        if old_sl_order_id:
-            return "active"
         if not hasattr(t, "fetch_pending_algo_orders"):
+            logger.warning(
+                "TREND_RUNNER_OLD_SL_PROTECTION_QUERY_FAILED | symbol=%s side=%s old_sl_order_id=%s old_sl_price=%s candidate_count=%s action_taken=protection_unknown reason=fetch_pending_algo_orders_unavailable",
+                getattr(t, "symbol", ""),
+                side,
+                old_sl_order_id,
+                old_sl_price,
+                None,
+            )
             return "unknown"
         try:
             orders = await t.fetch_pending_algo_orders()
         except Exception:
-            logger.exception("TREND_RUNNER_SL_PROTECTION_QUERY_FAILED | symbol=%s side=%s", getattr(t, "symbol", ""), side)
+            logger.exception(
+                "TREND_RUNNER_OLD_SL_PROTECTION_QUERY_FAILED | symbol=%s side=%s old_sl_order_id=%s old_sl_price=%s candidate_count=%s action_taken=protection_unknown",
+                getattr(t, "symbol", ""),
+                side,
+                old_sl_order_id,
+                old_sl_price,
+                None,
+            )
             return "unknown"
+
         close_side = "sell" if str(side).upper() == "LONG" else "buy"
-        candidates = []
+        tolerance = self._runner_sl_price_tolerance()
+        candidates: list[dict[str, Any]] = []
         for item in orders:
             if item.get("instId") != getattr(t, "symbol", ""):
                 continue
@@ -918,19 +933,72 @@ class CoreTakeProfitManager:
             algo_id = item.get("algoId") or item.get("ordId")
             if not algo_id:
                 continue
+            if old_sl_order_id is not None:
+                if (
+                    str(item.get("algoId") or "") != str(old_sl_order_id)
+                    and str(item.get("ordId") or "") != str(old_sl_order_id)
+                ):
+                    continue
             if old_sl_price is not None:
-                raw_trigger = item.get("slTriggerPx") or item.get("triggerPx")
+                trigger_price = self._pending_algo_trigger_price(item)
+                if trigger_price is None and old_sl_order_id is None:
+                    continue
                 try:
-                    if raw_trigger is not None and abs(Decimal(str(raw_trigger)) - Decimal(str(old_sl_price))) > Decimal("0.01"):
+                    if trigger_price is not None and abs(trigger_price - Decimal(str(old_sl_price))) > tolerance:
                         continue
                 except Exception:
                     continue
             candidates.append(item)
+
         if len(candidates) == 1:
+            logger.warning(
+                "TREND_RUNNER_OLD_SL_CONFIRMED_ACTIVE | symbol=%s side=%s old_sl_order_id=%s old_sl_price=%s candidate_count=%s action_taken=confirmed_exchange_pending_algo",
+                getattr(t, "symbol", ""),
+                side,
+                old_sl_order_id,
+                old_sl_price,
+                len(candidates),
+            )
             return "active"
         if len(candidates) == 0:
+            logger.warning(
+                "TREND_RUNNER_OLD_SL_NOT_FOUND_ON_EXCHANGE | symbol=%s side=%s old_sl_order_id=%s old_sl_price=%s candidate_count=%s action_taken=protection_absent",
+                getattr(t, "symbol", ""),
+                side,
+                old_sl_order_id,
+                old_sl_price,
+                len(candidates),
+            )
             return "absent"
+        logger.warning(
+            "TREND_RUNNER_OLD_SL_PROTECTION_AMBIGUOUS | symbol=%s side=%s old_sl_order_id=%s old_sl_price=%s candidate_count=%s action_taken=protection_unknown",
+            getattr(t, "symbol", ""),
+            side,
+            old_sl_order_id,
+            old_sl_price,
+            len(candidates),
+        )
         return "unknown"
+
+    def _runner_sl_price_tolerance(self) -> Decimal:
+        raw_tick_size = getattr(self.trader, "tick_size", "0.01") or "0.01"
+        try:
+            tick_size = Decimal(str(raw_tick_size))
+        except Exception:
+            tick_size = Decimal("0.01")
+        if tick_size <= 0:
+            tick_size = Decimal("0.01")
+        return max(Decimal("0.01"), tick_size * Decimal("2"))
+
+    @staticmethod
+    def _pending_algo_trigger_price(item: dict[str, Any]) -> Decimal | None:
+        raw = item.get("slTriggerPx") or item.get("triggerPx")
+        if raw in (None, ""):
+            return None
+        try:
+            return Decimal(str(raw))
+        except Exception:
+            return None
 
     async def _place_reduce_only_take_profit_orders(self, intent: TradeIntent,
                                                     specs: list[tuple[str, Decimal, float]]) -> list[str]:

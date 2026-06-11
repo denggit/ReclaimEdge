@@ -72,6 +72,23 @@ def make_trader(**overrides) -> Trader:
     return t
 
 
+def runner_exit_result() -> trader_module.LiveTradeResult:
+    return trader_module.LiveTradeResult(
+        True,
+        "MARKET_EXIT_RUNNER",
+        None,
+        None,
+        "1",
+        "1700.00",
+        "market_exit_order_id=exit-1",
+        reduce_filled=True,
+        near_tp_exit_all=True,
+        contracts_before="1",
+        contracts_reduced="1",
+        contracts_after="0",
+    )
+
+
 class TraderManagedCoreContractsTest(unittest.IsolatedAsyncioTestCase):
     """Tests for Trader._managed_core_contracts_from_intent."""
 
@@ -273,9 +290,13 @@ class TraderManagedCoreContractsTest(unittest.IsolatedAsyncioTestCase):
             sl_place_called = True
             return True, "sl-new", "ok"
 
+        async def mock_fetch_pending_algo_orders():  # type: ignore[no-untyped-def]
+            return [{"instId": trader.symbol, "side": "sell", "algoId": "old-sl", "slTriggerPx": "1677.00"}]
+
         trader.fetch_position_snapshot = mock_fetch_snapshot
         trader.cancel_existing_reduce_only_orders = mock_cancel_existing
         trader._place_reduce_only_take_profit_orders = mock_place_tp
+        trader.fetch_pending_algo_orders = mock_fetch_pending_algo_orders
         trader.place_trend_runner_protective_stop_with_retries = mock_place_sl
 
         result = await trader.replace_take_profit(
@@ -325,20 +346,7 @@ class TraderManagedCoreContractsTest(unittest.IsolatedAsyncioTestCase):
         async def mock_market_exit(intent):  # type: ignore[no-untyped-def]
             nonlocal market_exit_called
             market_exit_called = True
-            return trader_module.LiveTradeResult(
-                True,
-                "MARKET_EXIT_RUNNER",
-                None,
-                None,
-                "1",
-                "1700.00",
-                "market_exit_order_id=exit-1",
-                reduce_filled=True,
-                near_tp_exit_all=True,
-                contracts_before="1",
-                contracts_reduced="1",
-                contracts_after="0",
-            )
+            return runner_exit_result()
 
         trader.fetch_position_snapshot = mock_fetch_snapshot
         trader.cancel_existing_reduce_only_orders = mock_cancel_existing
@@ -381,9 +389,13 @@ class TraderManagedCoreContractsTest(unittest.IsolatedAsyncioTestCase):
         async def mock_place_sl(*args, **kwargs):  # type: ignore[no-untyped-def]
             return False, None, "exchange rejected"
 
+        async def mock_fetch_pending_algo_orders():  # type: ignore[no-untyped-def]
+            return [{"instId": trader.symbol, "side": "sell", "algoId": "old-sl", "slTriggerPx": "1675.00"}]
+
         trader.fetch_position_snapshot = mock_fetch_snapshot
         trader.cancel_existing_reduce_only_orders = mock_cancel_existing
         trader._place_reduce_only_take_profit_orders = mock_place_tp
+        trader.fetch_pending_algo_orders = mock_fetch_pending_algo_orders
         trader.place_trend_runner_protective_stop_with_retries = mock_place_sl
 
         result = await trader.replace_take_profit(
@@ -402,6 +414,134 @@ class TraderManagedCoreContractsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.message, "trend_runner_sl_update_failed_but_old_sl_active")
         self.assertEqual(result.tp_order_ids, ("tp-new",))
         self.assertEqual(result.protective_sl_order_id, "old-sl")
+
+    async def test_trend_runner_sl_place_failed_old_sl_id_missing_on_exchange_market_exits(self) -> None:
+        trader = make_trader()
+        trader.tp_order_id = "old-tp"
+        trader.trend_runner_sl_order_id = "old-sl"
+        market_exit_called = False
+
+        async def mock_fetch_snapshot():  # type: ignore[no-untyped-def]
+            return trader_module.PositionSnapshot("LONG", Decimal("1.00"), 1670.0, 0.1, Decimal("1.00"))
+
+        async def mock_cancel_existing(*args, **kwargs):  # type: ignore[no-untyped-def]
+            return True
+
+        async def mock_place_tp(_intent, _specs):  # type: ignore[no-untyped-def]
+            return ["tp-new"]
+
+        async def mock_fetch_pending_algo_orders():  # type: ignore[no-untyped-def]
+            return []
+
+        async def mock_place_sl(*args, **kwargs):  # type: ignore[no-untyped-def]
+            return False, None, "exchange rejected"
+
+        async def mock_market_exit(intent):  # type: ignore[no-untyped-def]
+            nonlocal market_exit_called
+            market_exit_called = True
+            return runner_exit_result()
+
+        trader.fetch_position_snapshot = mock_fetch_snapshot
+        trader.cancel_existing_reduce_only_orders = mock_cancel_existing
+        trader._place_reduce_only_take_profit_orders = mock_place_tp
+        trader.fetch_pending_algo_orders = mock_fetch_pending_algo_orders
+        trader.place_trend_runner_protective_stop_with_retries = mock_place_sl
+        trader.execute_market_exit_runner = mock_market_exit
+
+        result = await trader.replace_take_profit(
+            make_intent(
+                price=1678.18,
+                trend_runner_active=True,
+                trend_runner_sl_price=1677.00,
+                trend_runner_sl_order_id="old-sl",
+                managed_core_contracts="1.00",
+            )
+        )
+
+        self.assertEqual(result.action, "MARKET_EXIT_RUNNER")
+        self.assertTrue(market_exit_called)
+
+    async def test_trend_runner_sl_place_failed_query_error_returns_protection_unknown(self) -> None:
+        trader = make_trader()
+        trader.tp_order_id = "old-tp"
+        trader.trend_runner_sl_order_id = "old-sl"
+        market_exit_called = False
+
+        async def mock_fetch_snapshot():  # type: ignore[no-untyped-def]
+            return trader_module.PositionSnapshot("LONG", Decimal("1.00"), 1670.0, 0.1, Decimal("1.00"))
+
+        async def mock_cancel_existing(*args, **kwargs):  # type: ignore[no-untyped-def]
+            return True
+
+        async def mock_place_tp(_intent, _specs):  # type: ignore[no-untyped-def]
+            return ["tp-new"]
+
+        async def mock_fetch_pending_algo_orders():  # type: ignore[no-untyped-def]
+            raise RuntimeError("query failed")
+
+        async def mock_place_sl(*args, **kwargs):  # type: ignore[no-untyped-def]
+            return False, None, "exchange rejected"
+
+        async def mock_market_exit(intent):  # type: ignore[no-untyped-def]
+            nonlocal market_exit_called
+            market_exit_called = True
+            return runner_exit_result()
+
+        trader.fetch_position_snapshot = mock_fetch_snapshot
+        trader.cancel_existing_reduce_only_orders = mock_cancel_existing
+        trader._place_reduce_only_take_profit_orders = mock_place_tp
+        trader.fetch_pending_algo_orders = mock_fetch_pending_algo_orders
+        trader.place_trend_runner_protective_stop_with_retries = mock_place_sl
+        trader.execute_market_exit_runner = mock_market_exit
+
+        result = await trader.replace_take_profit(
+            make_intent(
+                price=1678.18,
+                trend_runner_active=True,
+                trend_runner_sl_price=1677.00,
+                trend_runner_sl_order_id="old-sl",
+                managed_core_contracts="1.00",
+            )
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.message, "trend_runner_sl_update_failed_protection_unknown")
+        self.assertFalse(market_exit_called)
+
+    async def test_trend_runner_protection_state_price_only_unique_candidate_active(self) -> None:
+        trader = make_trader()
+
+        async def mock_fetch_pending_algo_orders():  # type: ignore[no-untyped-def]
+            return [{"instId": trader.symbol, "side": "sell", "algoId": "algo-1", "slTriggerPx": "1675.01"}]
+
+        trader.fetch_pending_algo_orders = mock_fetch_pending_algo_orders
+
+        state = await trader._tp_sl_manager.core_tp._trend_runner_sl_protection_state(
+            side="LONG",
+            old_sl_order_id=None,
+            old_sl_price=Decimal("1675"),
+        )
+
+        self.assertEqual(state, "active")
+
+    async def test_trend_runner_protection_state_multiple_candidates_unknown(self) -> None:
+        trader = make_trader()
+
+        async def mock_fetch_pending_algo_orders():  # type: ignore[no-untyped-def]
+            return [
+                {"instId": trader.symbol, "side": "sell", "algoId": "algo-1", "slTriggerPx": "1675"},
+                {"instId": trader.symbol, "side": "sell", "algoId": "algo-2", "slTriggerPx": "1674"},
+            ]
+
+        trader.fetch_pending_algo_orders = mock_fetch_pending_algo_orders
+
+        state = await trader._tp_sl_manager.core_tp._trend_runner_sl_protection_state(
+            side="LONG",
+            old_sl_order_id=None,
+            old_sl_price=None,
+        )
+
+        self.assertEqual(state, "unknown")
 
 
 if __name__ == "__main__":
