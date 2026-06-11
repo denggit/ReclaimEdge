@@ -25,7 +25,22 @@ from src.live.symbol_worker_app import _runtime_config_env_for_worker_mode
 
 
 class TestRuntimeConfigEnvForWorkerMode:
-    def test_paper_mode_forces_legacy_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_paper_mode_forces_legacy_env_for_eth(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """ETH-USDT-SWAP paper mode forces legacy env path."""
+        monkeypatch.setenv("RECLAIM_USE_SYMBOL_TOML", "true")
+        monkeypatch.setenv("RECLAIM_SYMBOLS", "ETH-USDT-SWAP")
+
+        env = _runtime_config_env_for_worker_mode(
+            mode="paper",
+            trader_symbol="ETH-USDT-SWAP",
+        )
+
+        assert env is not None
+        assert env["RECLAIM_USE_SYMBOL_TOML"] == "false"
+        assert env["RECLAIM_SYMBOLS"] == "ETH-USDT-SWAP"
+
+    def test_paper_mode_allows_toml_for_btc(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """BTC-USDT-SWAP paper mode allows TOML path (avoids legacy BTC rejection)."""
         monkeypatch.setenv("RECLAIM_USE_SYMBOL_TOML", "true")
         monkeypatch.setenv("RECLAIM_SYMBOLS", "ETH-USDT-SWAP")
 
@@ -35,8 +50,11 @@ class TestRuntimeConfigEnvForWorkerMode:
         )
 
         assert env is not None
-        assert env["RECLAIM_USE_SYMBOL_TOML"] == "false"
         assert env["RECLAIM_SYMBOLS"] == "BTC-USDT-SWAP"
+        # BTC paper must NOT force legacy path — allows TOML bootstrap.
+        # The env is a copy of os.environ; RECLAIM_USE_SYMBOL_TOML keeps
+        # its original value (not overridden to "false").
+        assert env.get("RECLAIM_USE_SYMBOL_TOML") == "true"
 
     def test_paper_mode_does_not_mutate_os_environ(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("RECLAIM_USE_SYMBOL_TOML", "true")
@@ -73,8 +91,8 @@ class TestRuntimeConfigEnvForWorkerMode:
 
 
 class TestBtcPaperRuntimeConfigs:
-    def test_btc_paper_does_not_load_toml(self) -> None:
-        """BTC paper mode with legacy path must produce symbol_config=None."""
+    def test_btc_paper_loads_toml(self) -> None:
+        """BTC paper mode uses TOML path for runtime configs (strategy/sizer/etc.)."""
         from config.live_symbol_config_bootstrap import build_live_symbol_runtime_configs
 
         paper_env = _runtime_config_env_for_worker_mode(
@@ -88,11 +106,12 @@ class TestBtcPaperRuntimeConfigs:
             account_equity_usdt=1000.0,
         )
 
-        # Legacy path → symbol_config is None
-        assert configs.symbol_config is None
+        # TOML path → symbol_config is the loaded BTC TOML
+        assert configs.symbol_config is not None
+        assert configs.symbol_config.symbol.inst_id == "BTC-USDT-SWAP"
         # env_runtime.symbols should be set to BTC-USDT-SWAP
         assert configs.env_runtime.symbols == ("BTC-USDT-SWAP",)
-        # Strategy / monitor / CVD / sizer should be from legacy env
+        # Strategy / monitor / CVD / sizer should be from TOML
         assert configs.strategy is not None
         assert configs.monitor is not None
         assert configs.cvd is not None

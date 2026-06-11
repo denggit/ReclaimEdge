@@ -7,6 +7,7 @@ from typing import Callable, Sequence
 
 from src.execution.paper_trader import PaperTrader
 from src.execution.trader import Trader
+from src.execution.trader_types import TraderInstrumentMetadata, TraderMarketSettings
 from src.indicators.cvd_tracker import CvdTracker, CvdTrackerConfig
 from src.live.heartbeat_writer import HeartbeatWriter, HeartbeatWriterConfig
 from src.live.live_app_config import LiveAppConfig, LiveHeartbeatConfig
@@ -66,9 +67,18 @@ class SymbolWorkerFactory:
     def create_email_sender(self) -> EmailSender:
         return EmailSender()
 
-    def create_trader(self, *, trader_mode: str = "live") -> Trader | PaperTrader:
+    def create_trader(
+        self,
+        *,
+        trader_mode: str = "live",
+        instrument_metadata: TraderInstrumentMetadata | None = None,
+        market_settings: TraderMarketSettings | None = None,
+    ) -> Trader | PaperTrader:
         if trader_mode == "live":
-            return Trader()
+            return Trader(
+                instrument_metadata=instrument_metadata,
+                market_settings=market_settings,
+            )
         if trader_mode == "paper":
             return self.create_paper_trader_from_env()
         raise RuntimeError(

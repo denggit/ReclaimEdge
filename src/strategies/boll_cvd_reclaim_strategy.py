@@ -1096,7 +1096,7 @@ class BollCvdReclaimStrategy:
             self.state.trend_runner_reverse_fast_cvd_start = cvd.fast_cvd
             samples.clear()
             samples.append((ts_ms, cvd.buy_ratio, cvd.sell_ratio, cvd.fast_cvd, price))
-            logger.warning(
+            logger.info(
                 "TREND_RUNNER_REVERSE_CANDIDATE | side=%s price=%.4f fast_cvd=%.8f buy_ratio=%.4f sell_ratio=%.4f",
                 side,
                 price,
@@ -1128,7 +1128,7 @@ class BollCvdReclaimStrategy:
             self._reset_trend_runner_reverse_state()
             return "trend_runner_reverse_burst_confirmed"
 
-        logger.warning("TREND_RUNNER_REVERSE_CANCELLED | side=%s price=%.4f elapsed_ms=%s", side, price, elapsed_ms)
+        logger.info("TREND_RUNNER_REVERSE_CANCELLED | side=%s price=%.4f elapsed_ms=%s", side, price, elapsed_ms)
         self._reset_trend_runner_reverse_state()
         return None
 

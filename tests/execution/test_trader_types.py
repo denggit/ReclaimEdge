@@ -143,3 +143,140 @@ class TestTraderInstrumentMetadataValidation:
                 contract_precision=Decimal("0.01"),
                 min_contracts=Decimal("0"),
             )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 4. TraderMarketSettings validation
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestTraderMarketSettingsValidation:
+    def test_valid_settings(self) -> None:
+        from decimal import Decimal
+        from src.execution.trader_types import TraderMarketSettings
+
+        s = TraderMarketSettings(
+            inst_id="BTC-USDT-SWAP",
+            td_mode="isolated",
+            pos_side_mode="net",
+            leverage=Decimal("15"),
+        )
+        assert s.inst_id == "BTC-USDT-SWAP"
+        assert s.td_mode == "isolated"
+        assert s.pos_side_mode == "net"
+        assert s.leverage == Decimal("15")
+
+    def test_leverage_accepts_decimal(self) -> None:
+        from decimal import Decimal
+        from src.execution.trader_types import TraderMarketSettings
+
+        s = TraderMarketSettings(
+            inst_id="BTC-USDT-SWAP",
+            td_mode="isolated",
+            pos_side_mode="net",
+            leverage=Decimal("5"),
+        )
+        assert s.leverage == Decimal("5")
+
+    def test_leverage_accepts_str(self) -> None:
+        from decimal import Decimal
+        from src.execution.trader_types import TraderMarketSettings
+
+        s = TraderMarketSettings(
+            inst_id="BTC-USDT-SWAP",
+            td_mode="isolated",
+            pos_side_mode="net",
+            leverage="10",
+        )
+        assert s.leverage == Decimal("10")
+
+    def test_leverage_accepts_int(self) -> None:
+        from decimal import Decimal
+        from src.execution.trader_types import TraderMarketSettings
+
+        s = TraderMarketSettings(
+            inst_id="BTC-USDT-SWAP",
+            td_mode="isolated",
+            pos_side_mode="net",
+            leverage=20,
+        )
+        assert s.leverage == Decimal("20")
+
+    def test_leverage_rejects_bool(self) -> None:
+        import pytest
+        from src.execution.trader_types import TraderMarketSettings
+
+        with pytest.raises(ValueError, match="leverage must not be a boolean"):
+            TraderMarketSettings(
+                inst_id="BTC-USDT-SWAP",
+                td_mode="isolated",
+                pos_side_mode="net",
+                leverage=True,  # type: ignore[arg-type]
+            )
+
+    def test_leverage_must_be_positive(self) -> None:
+        import pytest
+        from decimal import Decimal
+        from src.execution.trader_types import TraderMarketSettings
+
+        with pytest.raises(ValueError, match="leverage must be > 0"):
+            TraderMarketSettings(
+                inst_id="BTC-USDT-SWAP",
+                td_mode="isolated",
+                pos_side_mode="net",
+                leverage=Decimal("0"),
+            )
+
+    def test_empty_inst_id_raises(self) -> None:
+        import pytest
+        from decimal import Decimal
+        from src.execution.trader_types import TraderMarketSettings
+
+        with pytest.raises(ValueError, match="inst_id must be a non-empty string"):
+            TraderMarketSettings(
+                inst_id="",
+                td_mode="isolated",
+                pos_side_mode="net",
+                leverage=Decimal("15"),
+            )
+
+    def test_empty_td_mode_raises(self) -> None:
+        import pytest
+        from decimal import Decimal
+        from src.execution.trader_types import TraderMarketSettings
+
+        with pytest.raises(ValueError, match="td_mode must be a non-empty string"):
+            TraderMarketSettings(
+                inst_id="BTC-USDT-SWAP",
+                td_mode="",
+                pos_side_mode="net",
+                leverage=Decimal("15"),
+            )
+
+    def test_empty_pos_side_mode_raises(self) -> None:
+        import pytest
+        from decimal import Decimal
+        from src.execution.trader_types import TraderMarketSettings
+
+        with pytest.raises(ValueError, match="pos_side_mode must be a non-empty string"):
+            TraderMarketSettings(
+                inst_id="BTC-USDT-SWAP",
+                td_mode="isolated",
+                pos_side_mode="",
+                leverage=Decimal("15"),
+            )
+
+    def test_inst_id_is_stripped(self) -> None:
+        from decimal import Decimal
+        from src.execution.trader_types import TraderMarketSettings
+
+        s = TraderMarketSettings(
+            inst_id="  BTC-USDT-SWAP  ",
+            td_mode="  isolated  ",
+            pos_side_mode="  net  ",
+            leverage=Decimal("15"),
+        )
+        assert s.inst_id == "BTC-USDT-SWAP"
+        assert s.td_mode == "isolated"
+        assert s.pos_side_mode == "net"
+

@@ -12,6 +12,7 @@ from src.execution.trader_types import (
     LiveTradeResult,
     PositionSnapshot,
     TraderInstrumentMetadata,
+    TraderMarketSettings,
 )
 from src.strategies.boll_cvd_reclaim_strategy import PositionSide, TradeIntent
 from src.utils.log import get_logger
@@ -101,6 +102,7 @@ class Trader:
         self,
         *,
         instrument_metadata: TraderInstrumentMetadata | None = None,
+        market_settings: TraderMarketSettings | None = None,
     ) -> None:
         self.symbol = os.getenv("OKX_INST_ID", "ETH-USDT-SWAP").strip() or "ETH-USDT-SWAP"
         self.allowed_live_symbols = parse_allowed_live_symbols(os.getenv("RECLAIM_ALLOWED_LIVE_SYMBOLS"))
@@ -128,9 +130,21 @@ class Trader:
         self.min_contracts = metadata.min_contracts
 
         self.base_url = os.getenv("OKX_BASE_URL", "https://www.okx.com")
-        self.td_mode = os.getenv("OKX_TD_MODE", "isolated")
-        self.leverage = os.getenv("LEVERAGE", "50")
-        self.pos_side_mode = os.getenv("OKX_POS_SIDE_MODE", "net")
+
+        # --- market settings (td_mode / pos_side_mode / leverage) ---
+        if market_settings is not None:
+            if market_settings.inst_id != self.symbol:
+                raise ValueError(
+                    f"market_settings.inst_id {market_settings.inst_id!r} "
+                    f"does not match Trader symbol {self.symbol!r}"
+                )
+            self.td_mode = market_settings.td_mode
+            self.pos_side_mode = market_settings.pos_side_mode
+            self.leverage = str(market_settings.leverage)
+        else:
+            self.td_mode = os.getenv("OKX_TD_MODE", "isolated")
+            self.leverage = os.getenv("LEVERAGE", "50")
+            self.pos_side_mode = os.getenv("OKX_POS_SIDE_MODE", "net")
         self.live_trading = os.getenv("LIVE_TRADING", "false").strip().lower() in {"1", "true", "yes", "y", "on"}
         self.max_live_equity_usdt = float(os.getenv("MAX_LIVE_EQUITY_USDT", "30"))
 

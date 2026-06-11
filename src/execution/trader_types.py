@@ -67,6 +67,49 @@ class TraderInstrumentMetadata:
 
 
 @dataclass(frozen=True)
+class TraderMarketSettings:
+    """Immutable per-instrument market / leverage parameters for live trading.
+
+    This is intentionally self-contained: it does not read env, call the
+    network, or depend on ``config/*``.  It exists so that different
+    instruments (ETH vs BTC) can supply different td_mode / pos_side_mode /
+    leverage values without changing any trading logic.
+
+    When *not* provided to ``Trader``, the current env-based defaults
+    (``OKX_TD_MODE``, ``LEVERAGE``, ``OKX_POS_SIDE_MODE``) are used.
+    """
+
+    inst_id: str
+    td_mode: str
+    pos_side_mode: str
+    leverage: Decimal
+
+    def __post_init__(self) -> None:
+        # --- inst_id ---
+        if not isinstance(self.inst_id, str) or not self.inst_id.strip():
+            raise ValueError(f"inst_id must be a non-empty string, got {self.inst_id!r}")
+        object.__setattr__(self, "inst_id", self.inst_id.strip())
+
+        # --- td_mode ---
+        if not isinstance(self.td_mode, str) or not self.td_mode.strip():
+            raise ValueError(f"td_mode must be a non-empty string, got {self.td_mode!r}")
+        object.__setattr__(self, "td_mode", self.td_mode.strip())
+
+        # --- pos_side_mode ---
+        if not isinstance(self.pos_side_mode, str) or not self.pos_side_mode.strip():
+            raise ValueError(
+                f"pos_side_mode must be a non-empty string, got {self.pos_side_mode!r}"
+            )
+        object.__setattr__(self, "pos_side_mode", self.pos_side_mode.strip())
+
+        # --- leverage ---
+        lev = _decimal_from_metadata_value(self.leverage, field_name="leverage")
+        if lev <= 0:
+            raise ValueError(f"leverage must be > 0, got {lev}")
+        object.__setattr__(self, "leverage", lev)
+
+
+@dataclass(frozen=True)
 class LiveTradeResult:
     ok: bool
     action: str

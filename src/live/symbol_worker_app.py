@@ -4,11 +4,12 @@ import asyncio
 import datetime as dt
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from config.live_symbol_config_bootstrap import build_live_symbol_runtime_configs
 from src.execution.paper_trader import PaperTrader
 from src.execution.trader import Trader
+from src.execution.trader_types import TraderInstrumentMetadata, TraderMarketSettings
 from src.live import queue_helpers as live_queue_helpers
 from src.live import runtime_types as live_runtime_types
 from src.live import time_utils as live_time_utils
@@ -103,15 +104,18 @@ def _runtime_config_env_for_worker_mode(
     Live mode returns ``None`` — the function reads ``os.environ`` as
     usual (preserving existing behaviour).
 
-    Paper mode forces legacy/env config path and sets the symbols env
-    var to the trader symbol.  This avoids the ETH-only TOML bootstrap
-    gate and prevents loading any disabled TOML file.
+    Paper mode sets the symbols env var to the trader symbol.  For
+    ETH-USDT-SWAP the legacy env path is forced (``RECLAIM_USE_SYMBOL_TOML=false``).
+    For all other symbols the TOML path is allowed so that the worker
+    can bootstrap runtime configs without hitting the legacy-path guard
+    that rejects non-ETH symbols.
     """
     if mode != "paper":
         return None
     env = os.environ.copy()
-    env["RECLAIM_USE_SYMBOL_TOML"] = "false"
     env["RECLAIM_" + "SYMBOLS"] = trader_symbol
+    if trader_symbol == "ETH-USDT-SWAP":
+        env["RECLAIM_USE_SYMBOL_TOML"] = "false"
     return env
 
 
@@ -136,6 +140,12 @@ def _assert_trader_matches_symbol_config(
     symbol_config = runtime_configs.symbol_config
     if symbol_config is None:
         # Legacy .env path — nothing to cross-check.
+        return
+
+    # PaperTrader has its own hardcoded market settings that do not
+    # necessarily match the TOML (e.g. leverage=20 vs TOML leverage=15).
+    # Skip the cross-check for paper mode.
+    if isinstance(trader, PaperTrader):
         return
 
     errors: list[str] = []
@@ -164,6 +174,80 @@ def _assert_trader_matches_symbol_config(
         raise RuntimeError(
             "TOML/env trader config mismatch: " + "; ".join(errors)
         )
+
+
+def _build_pre_trader_runtime_configs_for_mode(
+    *,
+    mode: str,
+    trader_symbol: str,
+) -> "LiveSymbolRuntimeConfigs":
+    """Build runtime configs **before** the Trader is constructed.
+
+    For **live** mode this runs the TOML bootstrap path so the caller can
+    extract instrument metadata / market settings from the loaded
+    ``SymbolConfig`` and inject them into ``Trader``.
+
+    For **paper** mode the legacy env path is used — ``symbol_config``
+    will be ``None``.
+    """
+    runtime_config_env = _runtime_config_env_for_worker_mode(
+        mode=mode,
+        trader_symbol=trader_symbol,
+    )
+    return build_live_symbol_runtime_configs(
+        env=runtime_config_env,
+        account_equity_usdt=None,
+    )
+
+
+def _build_live_trader_metadata_from_runtime_configs(
+    runtime_configs: "LiveSymbolRuntimeConfigs",
+) -> tuple[TraderInstrumentMetadata | None, TraderMarketSettings | None]:
+    """Extract Trader metadata / market settings from a TOML-backed
+    ``LiveSymbolRuntimeConfigs``.
+
+    Returns ``(None, None)`` when:
+
+    * the legacy ``.env`` path is active (``symbol_config`` is ``None``), or
+    * the symbol is ``ETH-USDT-SWAP`` — ETH already has hardcoded defaults
+      and must preserve its existing env-based behaviour (leverage, etc.).
+
+    For all other symbols the metadata and market settings are built
+    from the TOML ``SymbolConfig``.
+    """
+    from src.live.symbol_trader_config import (
+        build_trader_instrument_metadata,
+        build_trader_market_settings,
+    )
+
+    symbol_config = runtime_configs.symbol_config
+    if symbol_config is None:
+        return None, None
+
+    # ETH has hardcoded defaults — preserve existing env-based behaviour.
+    if symbol_config.symbol.inst_id == "ETH-USDT-SWAP":
+        return None, None
+
+    return (
+        build_trader_instrument_metadata(symbol_config),
+        build_trader_market_settings(symbol_config),
+    )
+
+
+def _override_runtime_config_account_equity(
+    runtime_configs: "LiveSymbolRuntimeConfigs",
+    account_equity_usdt: float,
+) -> "LiveSymbolRuntimeConfigs":
+    """Return a copy of *runtime_configs* whose ``position_sizer`` has
+    ``dry_run_equity_usdt`` set to *account_equity_usdt*.
+    """
+    return replace(
+        runtime_configs,
+        position_sizer=replace(
+            runtime_configs.position_sizer,
+            dry_run_equity_usdt=account_equity_usdt,
+        ),
+    )
 
 
 async def _run_startup_portfolio_reconciliation_if_available(
@@ -281,18 +365,42 @@ class SymbolWorkerApp:
 
         email_sender = self.factory.create_email_sender()
         mode = os.getenv("RECLAIM_WORKER_MODE", "live").strip().lower()
-        trader = self.factory.create_trader(trader_mode=mode)
+
+        # ── G09c: build runtime configs BEFORE trader for live mode ─────
+        if mode == "live":
+            pre_runtime_configs = _build_pre_trader_runtime_configs_for_mode(
+                mode=mode,
+                trader_symbol=os.getenv("OKX_INST_ID", "ETH-USDT-SWAP").strip(),
+            )
+            metadata, market_settings = _build_live_trader_metadata_from_runtime_configs(
+                pre_runtime_configs,
+            )
+            trader = self.factory.create_trader(
+                trader_mode=mode,
+                instrument_metadata=metadata,
+                market_settings=market_settings,
+            )
+        else:
+            trader = self.factory.create_trader(trader_mode=mode)
+
         await trader.start()
         try:
             await trader.initialize()
-            runtime_config_env = _runtime_config_env_for_worker_mode(
-                mode=mode,
-                trader_symbol=trader.symbol,
-            )
-            runtime_configs = build_live_symbol_runtime_configs(
-                env=runtime_config_env,
-                account_equity_usdt=trader.account_equity_usdt,
-            )
+
+            if mode == "live":
+                runtime_configs = _override_runtime_config_account_equity(
+                    pre_runtime_configs, trader.account_equity_usdt,
+                )
+            else:
+                runtime_config_env = _runtime_config_env_for_worker_mode(
+                    mode=mode,
+                    trader_symbol=trader.symbol,
+                )
+                runtime_configs = build_live_symbol_runtime_configs(
+                    env=runtime_config_env,
+                    account_equity_usdt=trader.account_equity_usdt,
+                )
+
             _assert_trader_matches_symbol_config(trader, runtime_configs)
             runtime_paths = self.factory.create_runtime_paths(
                 runtime_dir=runtime_configs.env_runtime.runtime_dir,

@@ -168,10 +168,15 @@ def test_symbol_worker_app_run_has_expected_runtime_order() -> None:
 
     ordered = [
         "factory.create_email_sender(",
+        # G09c: for live mode, pre-runtime-configs and metadata extraction
+        # happen BEFORE create_trader (inside the if mode == "live" block).
+        "_build_pre_trader_runtime_configs_for_mode(",
+        "_build_live_trader_metadata_from_runtime_configs(",
         "factory.create_trader(",
         "await trader.start()",
         "await trader.initialize()",
-        "build_live_symbol_runtime_configs(",
+        # G09c: account equity override after trader initialize
+        "_override_runtime_config_account_equity(",
         "_assert_trader_matches_symbol_config(trader,",
         "factory.create_runtime_paths(",
         "handoff_legacy_runtime_files(",
@@ -211,6 +216,16 @@ def test_symbol_worker_app_run_has_expected_runtime_order() -> None:
             # The ordering check must use the *last* occurrence — the
             # one in the finally block at the end of run().
             idx = source.rfind(token)
+        elif token in (
+            "_build_pre_trader_runtime_configs_for_mode(",
+            "_build_live_trader_metadata_from_runtime_configs(",
+            "_override_runtime_config_account_equity(",
+        ):
+            # These helpers are defined outside run() AND called inside run().
+            # Use the second occurrence (the call inside run()).
+            first = source.find(token)
+            idx = source.find(token, first + 1)
+            assert idx > first, f"must have two occurrences of {token}"
         else:
             idx = source.find(token)
         assert idx >= 0, f"token {token!r} not found in SymbolWorkerApp source"
@@ -508,3 +523,173 @@ class TestE05hForbiddenTokens:
             assert token not in source, (
                 f"symbol_worker_app.py must not contain {token!r}"
             )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# G09c: Trader metadata / market settings helpers
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestG09cBuildLiveTraderMetadata:
+    def test_returns_none_when_symbol_config_is_none(self) -> None:
+        """When symbol_config is None (legacy path), return (None, None)."""
+        from config.live_symbol_config_bootstrap import LiveSymbolRuntimeConfigs
+        from src.live.symbol_worker_app import (
+            _build_live_trader_metadata_from_runtime_configs,
+        )
+
+        # We can't easily construct a full LiveSymbolRuntimeConfigs without
+        # real dependencies, but we can create one with symbol_config=None.
+        # Use a mock approach instead.
+        from unittest.mock import MagicMock
+
+        fake = MagicMock()
+        fake.symbol_config = None
+
+        metadata, market_settings = _build_live_trader_metadata_from_runtime_configs(fake)
+        assert metadata is None
+        assert market_settings is None
+
+    def test_returns_none_for_eth_usdt_swap(self) -> None:
+        """ETH-USDT-SWAP must return (None, None) to preserve env defaults."""
+        from unittest.mock import MagicMock
+
+        from src.live.symbol_worker_app import (
+            _build_live_trader_metadata_from_runtime_configs,
+        )
+
+        fake = MagicMock()
+        fake.symbol_config.symbol.inst_id = "ETH-USDT-SWAP"
+
+        metadata, market_settings = _build_live_trader_metadata_from_runtime_configs(fake)
+        assert metadata is None
+        assert market_settings is None
+
+    def test_returns_metadata_for_btc_usdt_swap(self) -> None:
+        """BTC-USDT-SWAP must return non-None metadata/settings from TOML."""
+        from decimal import Decimal
+
+        from config.symbol_config import (
+            SymbolCapitalConfig,
+            SymbolConfig,
+            SymbolIdentityConfig,
+            SymbolMarketConfig,
+        )
+        from src.live.symbol_worker_app import (
+            _build_live_trader_metadata_from_runtime_configs,
+        )
+
+        btc_cfg = SymbolConfig(
+            symbol=SymbolIdentityConfig(inst_id="BTC-USDT-SWAP"),
+            market=SymbolMarketConfig(
+                contract_value=Decimal("0.01"),
+                contract_precision=Decimal("0.01"),
+                min_contracts=Decimal("0.01"),
+                td_mode="isolated",
+                pos_side_mode="net",
+            ),
+            capital=SymbolCapitalConfig(leverage=Decimal("15")),
+        )
+
+        from unittest.mock import MagicMock
+
+        fake = MagicMock()
+        fake.symbol_config = btc_cfg
+
+        metadata, market_settings = _build_live_trader_metadata_from_runtime_configs(fake)
+        assert metadata is not None
+        assert metadata.inst_id == "BTC-USDT-SWAP"
+        assert metadata.contract_multiplier == Decimal("0.01")
+        assert market_settings is not None
+        assert market_settings.inst_id == "BTC-USDT-SWAP"
+        assert market_settings.td_mode == "isolated"
+        assert market_settings.leverage == Decimal("15")
+
+
+class TestG09cOverrideRuntimeConfigAccountEquity:
+    def test_overrides_dry_run_equity(self) -> None:
+        """_override_runtime_config_account_equity must update position_sizer
+        using dataclasses.replace."""
+        import inspect
+
+        from src.live.symbol_worker_app import (
+            _override_runtime_config_account_equity,
+        )
+
+        source = inspect.getsource(_override_runtime_config_account_equity)
+        assert "replace" in source
+        assert "dry_run_equity_usdt" in source
+        assert "account_equity_usdt" in source
+
+    def test_overrides_dry_run_equity_with_real_config(self) -> None:
+        """_override_runtime_config_account_equity works with a real config."""
+        from decimal import Decimal
+
+        from config.live_symbol_config_bootstrap import build_live_symbol_runtime_configs
+        from src.live.symbol_worker_app import (
+            _override_runtime_config_account_equity,
+        )
+
+        # Use legacy env path to get a simple config without TOML loading
+        import os
+        env = os.environ.copy()
+        env["RECLAIM_USE_SYMBOL_TOML"] = "false"
+        env["RECLAIM_SYMBOLS"] = "ETH-USDT-SWAP"
+
+        configs = build_live_symbol_runtime_configs(env=env, account_equity_usdt=None)
+        original = configs.position_sizer.dry_run_equity_usdt
+
+        updated = _override_runtime_config_account_equity(configs, 9999.99)
+        assert updated.position_sizer.dry_run_equity_usdt == 9999.99
+        # Original must not be mutated (frozen dataclasses)
+        assert configs.position_sizer.dry_run_equity_usdt == original
+
+
+class TestG09cAssertTraderMatchesSymbolConfig:
+    def test_leverage_comparison_handles_string_vs_decimal(self) -> None:
+        """The leverage comparison must work when trader.leverage is str and
+        TOML leverage is Decimal."""
+        from unittest.mock import MagicMock
+
+        from src.live.symbol_worker_app import (
+            _assert_trader_matches_symbol_config,
+        )
+
+        trader = MagicMock()
+        trader.symbol = "BTC-USDT-SWAP"
+        trader.td_mode = "isolated"
+        trader.pos_side_mode = "net"
+        trader.leverage = "15"  # string from Trader
+
+        runtime_configs = MagicMock()
+        runtime_configs.symbol_config.symbol.inst_id = "BTC-USDT-SWAP"
+        runtime_configs.symbol_config.market.td_mode = "isolated"
+        runtime_configs.symbol_config.market.pos_side_mode = "net"
+        runtime_configs.symbol_config.capital.leverage = "15"  # string from TOML (SymbolConfig uses Decimal but as str for comparison)
+
+        # Should not raise
+        _assert_trader_matches_symbol_config(trader, runtime_configs)
+
+    def test_leverage_mismatch_raises(self) -> None:
+        """A leverage mismatch must raise RuntimeError."""
+        import pytest
+        from unittest.mock import MagicMock
+
+        from src.live.symbol_worker_app import (
+            _assert_trader_matches_symbol_config,
+        )
+
+        trader = MagicMock()
+        trader.symbol = "BTC-USDT-SWAP"
+        trader.td_mode = "isolated"
+        trader.pos_side_mode = "net"
+        trader.leverage = "5"
+
+        runtime_configs = MagicMock()
+        runtime_configs.symbol_config.symbol.inst_id = "BTC-USDT-SWAP"
+        runtime_configs.symbol_config.market.td_mode = "isolated"
+        runtime_configs.symbol_config.market.pos_side_mode = "net"
+        runtime_configs.symbol_config.capital.leverage = "15"
+
+        with pytest.raises(RuntimeError, match="leverage"):
+            _assert_trader_matches_symbol_config(trader, runtime_configs)

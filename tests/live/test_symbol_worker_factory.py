@@ -252,3 +252,121 @@ def test_factory_source_does_not_start_heartbeat() -> None:
         assert token not in source, (
             f"factory must not start heartbeat: {token!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# 10. G09c: create_trader passes through metadata and market_settings
+# ---------------------------------------------------------------------------
+
+
+class TestCreateTraderG09c:
+    def test_live_mode_passes_metadata_and_market_settings(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """live mode create_trader must forward metadata and market_settings
+        to the Trader constructor."""
+        from decimal import Decimal
+        from unittest.mock import patch
+
+        from src.execution.trader_types import (
+            TraderInstrumentMetadata,
+            TraderMarketSettings,
+        )
+        from src.live.symbol_worker_factory import SymbolWorkerFactory
+
+        # Set env vars required by Trader.__init__
+        monkeypatch.setenv("OKX_INST_ID", "BTC-USDT-SWAP")
+        monkeypatch.setenv("RECLAIM_ALLOWED_LIVE_SYMBOLS", "BTC-USDT-SWAP")
+        monkeypatch.setenv("LIVE_TRADING", "true")
+        monkeypatch.setenv("OKX_API_KEY", "test-key")
+        monkeypatch.setenv("OKX_SECRET_KEY", "test-secret")
+        monkeypatch.setenv("OKX_PASSPHRASE", "test-pass")
+
+        metadata = TraderInstrumentMetadata(
+            inst_id="BTC-USDT-SWAP",
+            contract_multiplier=Decimal("0.01"),
+            contract_precision=Decimal("0.01"),
+            min_contracts=Decimal("0.01"),
+        )
+        settings = TraderMarketSettings(
+            inst_id="BTC-USDT-SWAP",
+            td_mode="cross",
+            pos_side_mode="long_short",
+            leverage=Decimal("5"),
+        )
+
+        factory = SymbolWorkerFactory()
+        trader = factory.create_trader(
+            trader_mode="live",
+            instrument_metadata=metadata,
+            market_settings=settings,
+        )
+
+        assert trader.symbol == "BTC-USDT-SWAP"
+        assert trader.instrument_metadata is metadata
+        assert trader.contract_multiplier == Decimal("0.01")
+        assert trader.td_mode == "cross"
+        assert trader.pos_side_mode == "long_short"
+        assert trader.leverage == "5"
+
+    def test_live_mode_without_metadata_uses_env_defaults(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """When metadata and market_settings are None, Trader uses env defaults."""
+        from decimal import Decimal
+
+        from src.live.symbol_worker_factory import SymbolWorkerFactory
+
+        monkeypatch.setenv("OKX_INST_ID", "ETH-USDT-SWAP")
+        monkeypatch.setenv("RECLAIM_ALLOWED_LIVE_SYMBOLS", "ETH-USDT-SWAP")
+        monkeypatch.setenv("LIVE_TRADING", "true")
+        monkeypatch.setenv("OKX_API_KEY", "test-key")
+        monkeypatch.setenv("OKX_SECRET_KEY", "test-secret")
+        monkeypatch.setenv("OKX_PASSPHRASE", "test-pass")
+        monkeypatch.setenv("OKX_TD_MODE", "isolated")
+        monkeypatch.setenv("LEVERAGE", "50")
+        monkeypatch.setenv("OKX_POS_SIDE_MODE", "net")
+
+        factory = SymbolWorkerFactory()
+        trader = factory.create_trader(trader_mode="live")
+
+        assert trader.symbol == "ETH-USDT-SWAP"
+        assert trader.td_mode == "isolated"
+        assert trader.leverage == "50"
+        assert trader.pos_side_mode == "net"
+        # ETH default metadata should be used
+        assert trader.contract_multiplier == Decimal("0.1")
+
+    def test_paper_mode_ignores_metadata_and_settings(self) -> None:
+        """Paper mode should ignore metadata/market_settings (no crash)."""
+        from decimal import Decimal
+        from unittest.mock import patch
+
+        from src.execution.trader_types import (
+            TraderInstrumentMetadata,
+            TraderMarketSettings,
+        )
+        from src.live.symbol_worker_factory import SymbolWorkerFactory
+
+        metadata = TraderInstrumentMetadata(
+            inst_id="BTC-USDT-SWAP",
+            contract_multiplier=Decimal("0.01"),
+            contract_precision=Decimal("0.01"),
+            min_contracts=Decimal("0.01"),
+        )
+        settings = TraderMarketSettings(
+            inst_id="BTC-USDT-SWAP",
+            td_mode="cross",
+            pos_side_mode="long_short",
+            leverage=Decimal("5"),
+        )
+
+        factory = SymbolWorkerFactory()
+        # Paper mode should not crash when metadata/settings are passed
+        trader = factory.create_trader(
+            trader_mode="paper",
+            instrument_metadata=metadata,
+            market_settings=settings,
+        )
+        assert trader is not None
+
