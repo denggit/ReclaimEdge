@@ -6,6 +6,10 @@ from typing import Mapping, Sequence
 
 
 VALID_WORKER_MODES = frozenset({"live", "paper"})
+SUPPORTED_SUPERVISOR_SYMBOLS = frozenset({
+    "ETH-USDT-SWAP",
+    "BTC-USDT-SWAP",
+})
 
 
 @dataclass(frozen=True)
@@ -16,6 +20,18 @@ class SymbolWorkerPlan:
     child_env: dict[str, str]
     heartbeat_path: Path
     event_outbox_path: Path | None
+
+
+def validate_supported_supervisor_symbol(symbol: str) -> str:
+    normalized = symbol.strip()
+    if not normalized:
+        raise ValueError("symbol must not be empty")
+    if normalized not in SUPPORTED_SUPERVISOR_SYMBOLS:
+        raise ValueError(
+            f"unsupported supervisor symbol {normalized!r}; "
+            f"supported={sorted(SUPPORTED_SUPERVISOR_SYMBOLS)!r}"
+        )
+    return normalized
 
 
 def _normalize_worker_mode(mode: str, *, source: str) -> str:
@@ -91,9 +107,7 @@ def build_symbol_worker_plans(
     seen: set[str] = set()
 
     for raw_symbol in symbols:
-        symbol = str(raw_symbol).strip()
-        if not symbol:
-            raise ValueError("symbol must not be empty")
+        symbol = validate_supported_supervisor_symbol(str(raw_symbol))
         if symbol in seen:
             raise ValueError(f"duplicate symbol {symbol!r}")
         seen.add(symbol)

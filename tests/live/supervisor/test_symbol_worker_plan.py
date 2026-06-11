@@ -5,10 +5,51 @@ from pathlib import Path
 import pytest
 
 from src.live.supervisor.symbol_worker_plan import (
+    SUPPORTED_SUPERVISOR_SYMBOLS,
     build_symbol_worker_plans,
     parse_worker_modes,
+    validate_supported_supervisor_symbol,
     worker_mode_for_symbol,
 )
+
+
+def test_supported_supervisor_symbols_are_eth_and_btc_only() -> None:
+    assert SUPPORTED_SUPERVISOR_SYMBOLS == frozenset({
+        "ETH-USDT-SWAP",
+        "BTC-USDT-SWAP",
+    })
+
+
+def test_validate_supported_supervisor_symbol_allows_eth() -> None:
+    assert validate_supported_supervisor_symbol("ETH-USDT-SWAP") == "ETH-USDT-SWAP"
+
+
+def test_validate_supported_supervisor_symbol_allows_btc() -> None:
+    assert validate_supported_supervisor_symbol("BTC-USDT-SWAP") == "BTC-USDT-SWAP"
+
+
+def test_validate_supported_supervisor_symbol_trims_whitespace() -> None:
+    assert validate_supported_supervisor_symbol(" BTC-USDT-SWAP ") == "BTC-USDT-SWAP"
+
+
+def test_validate_supported_supervisor_symbol_rejects_sol() -> None:
+    with pytest.raises(ValueError, match="unsupported supervisor symbol"):
+        validate_supported_supervisor_symbol("SOL-USDT-SWAP")
+
+
+def test_validate_supported_supervisor_symbol_rejects_doge() -> None:
+    with pytest.raises(ValueError, match="unsupported supervisor symbol"):
+        validate_supported_supervisor_symbol("DOGE-USDT-SWAP")
+
+
+def test_unsupported_supervisor_symbol_error_contains_symbol_and_supported() -> None:
+    with pytest.raises(ValueError) as exc_info:
+        validate_supported_supervisor_symbol("SOL-USDT-SWAP")
+
+    message = str(exc_info.value)
+    assert "SOL-USDT-SWAP" in message
+    assert "ETH-USDT-SWAP" in message
+    assert "BTC-USDT-SWAP" in message
 
 
 def test_parse_worker_modes_live_for_eth_and_btc() -> None:
@@ -98,3 +139,48 @@ def test_build_symbol_worker_plans_isolates_child_env_and_paths(tmp_path: Path) 
     assert eth.child_name != btc.child_name
     assert eth.heartbeat_path != btc.heartbeat_path
     assert eth.event_outbox_path != btc.event_outbox_path
+
+
+def test_build_symbol_worker_plans_rejects_unsupported_symbol(tmp_path: Path) -> None:
+    runtime_dir = tmp_path / "runtime"
+
+    with pytest.raises(ValueError, match="unsupported supervisor symbol"):
+        build_symbol_worker_plans(
+            ["ETH-USDT-SWAP", "SOL-USDT-SWAP"],
+            base_env={},
+            runtime_dir=runtime_dir,
+            heartbeat_dir=runtime_dir / "heartbeats",
+            event_dir=runtime_dir / "events",
+        )
+
+
+def test_btc_worker_mode_can_remain_live(tmp_path: Path) -> None:
+    runtime_dir = tmp_path / "runtime"
+
+    plan = build_symbol_worker_plans(
+        ["BTC-USDT-SWAP"],
+        base_env={"RECLAIM_WORKER_MODES": "BTC-USDT-SWAP:live"},
+        runtime_dir=runtime_dir,
+        heartbeat_dir=runtime_dir / "heartbeats",
+        event_dir=runtime_dir / "events",
+    )[0]
+
+    assert plan.symbol == "BTC-USDT-SWAP"
+    assert plan.worker_mode == "live"
+    assert plan.child_env["RECLAIM_WORKER_MODE"] == "live"
+
+
+def test_btc_worker_mode_can_be_configured_to_paper(tmp_path: Path) -> None:
+    runtime_dir = tmp_path / "runtime"
+
+    plan = build_symbol_worker_plans(
+        ["BTC-USDT-SWAP"],
+        base_env={"RECLAIM_WORKER_MODES": "BTC-USDT-SWAP:paper"},
+        runtime_dir=runtime_dir,
+        heartbeat_dir=runtime_dir / "heartbeats",
+        event_dir=runtime_dir / "events",
+    )[0]
+
+    assert plan.symbol == "BTC-USDT-SWAP"
+    assert plan.worker_mode == "paper"
+    assert plan.child_env["RECLAIM_WORKER_MODE"] == "paper"
