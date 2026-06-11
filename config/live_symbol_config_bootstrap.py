@@ -23,6 +23,7 @@ Design rules
 from __future__ import annotations
 
 import os
+from collections.abc import Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -37,6 +38,15 @@ from src.indicators.cvd_tracker import CvdTrackerConfig
 from src.monitors.boll_band_breakout_monitor import BollBandBreakoutMonitorConfig
 from src.risk.simple_position_sizer import SimplePositionSizerConfig
 from src.strategies.boll_cvd_reclaim_strategy import BollCvdReclaimStrategyConfig
+
+# ---------------------------------------------------------------------------
+# Supported live TOML symbols (worker-level, single-symbol only)
+# ---------------------------------------------------------------------------
+
+SUPPORTED_LIVE_SYMBOL_TOML_SYMBOLS: frozenset[str] = frozenset({
+    "ETH-USDT-SWAP",
+    "BTC-USDT-SWAP",
+})
 
 # ---------------------------------------------------------------------------
 # Internal: temporary environ patch (test-safe, scope-guaranteed restore)
@@ -68,6 +78,52 @@ def _temporary_environ(env: Mapping[str, str] | None) -> Iterator[None]:
     finally:
         os.environ.clear()
         os.environ.update(backup)
+
+
+# ---------------------------------------------------------------------------
+# Single-symbol guard (worker-level)
+# ---------------------------------------------------------------------------
+
+
+def require_single_supported_live_symbol(symbols: Sequence[str]) -> str:
+    """Validate that *symbols* contains exactly one supported live TOML symbol.
+
+    Returns the normalised (stripped) symbol string on success.
+
+    Raises ``ValueError`` with a descriptive message when:
+    * *symbols* is empty
+    * *symbols* contains more than one entry (worker must be single-symbol)
+    * the symbol is not in ``SUPPORTED_LIVE_SYMBOL_TOML_SYMBOLS``
+    """
+    if not symbols:
+        raise ValueError(
+            "RECLAIM_SYMBOLS must contain exactly one symbol for worker "
+            "TOML bootstrap, but the symbol list is empty. "
+            "Supported symbols: "
+            f"{sorted(SUPPORTED_LIVE_SYMBOL_TOML_SYMBOLS)!r}"
+        )
+
+    if len(symbols) > 1:
+        raise ValueError(
+            "Worker TOML bootstrap requires exactly one symbol per worker. "
+            f"Got {len(symbols)} symbols: {list(symbols)!r}. "
+            "Split multi-symbol configs across separate workers "
+            "(e.g. via the supervisor). "
+            "Supported symbols: "
+            f"{sorted(SUPPORTED_LIVE_SYMBOL_TOML_SYMBOLS)!r}"
+        )
+
+    symbol = symbols[0].strip()
+
+    if symbol not in SUPPORTED_LIVE_SYMBOL_TOML_SYMBOLS:
+        raise ValueError(
+            f"Unsupported live TOML symbol {symbol!r}. "
+            "Worker TOML bootstrap currently supports: "
+            f"{sorted(SUPPORTED_LIVE_SYMBOL_TOML_SYMBOLS)!r}. "
+            f"Got: {list(symbols)!r}"
+        )
+
+    return symbol
 
 
 # ---------------------------------------------------------------------------
@@ -118,13 +174,18 @@ def build_live_symbol_runtime_configs(
     *env* or ``os.environ``):
 
     * **TOML path** (default, ``RECLAIM_USE_SYMBOL_TOML`` unset or
-      ``true``): the ETH TOML file is loaded, validated and mapped.
+      ``true``): the worker TOML file for the single symbol in
+      ``RECLAIM_SYMBOLS`` is loaded, validated and mapped.
+      Supported symbols: ``ETH-USDT-SWAP``, ``BTC-USDT-SWAP``.
+      Each worker must run with exactly one symbol.
       ``account_equity_usdt`` overrides ``dry_run_equity_usdt`` when
       provided (preserving current live-startup account-equity semantics).
 
     * **Legacy path** (``RECLAIM_USE_SYMBOL_TOML=false``): all config
       objects are created via their respective ``.from_env()``
       class-methods — exactly as the live entrypoint did before A08.
+      Legacy path continues to support ETH-USDT-SWAP only; BTC must
+      use the TOML path.
 
     Parameters
     ----------
@@ -142,28 +203,23 @@ def build_live_symbol_runtime_configs(
     Raises
     ------
     ValueError
-        If ``RECLAIM_USE_SYMBOL_TOML=true`` but the symbol list is not
-        exactly ``("ETH-USDT-SWAP",)``, or the TOML fails validation.
+        If ``RECLAIM_USE_SYMBOL_TOML=true`` but the symbol list does not
+        contain exactly one supported symbol, or the TOML fails validation.
     FileNotFoundError
-        If ``RECLAIM_USE_SYMBOL_TOML=true`` but the ETH TOML file is
-        missing.
+        If ``RECLAIM_USE_SYMBOL_TOML=true`` but the TOML file for the
+        requested symbol is missing.
     """
     # -- 1. Load env-runtime config (this reads *env* OR os.environ) -----------
     env_runtime = load_env_runtime_config(env)
 
     # -- 2. TOML path (default as of A08) -----------------------------------
     if env_runtime.use_symbol_toml:
-        # Gate: only ETH-USDT-SWAP is allowed for now.
-        if env_runtime.symbols != ("ETH-USDT-SWAP",):
-            raise ValueError(
-                "RECLAIM_USE_SYMBOL_TOML=true currently only supports "
-                'RECLAIM_SYMBOLS="ETH-USDT-SWAP". '
-                f"Got: {env_runtime.symbols!r}"
-            )
+        # Gate: worker TOML bootstrap requires exactly one supported symbol.
+        worker_symbol = require_single_supported_live_symbol(env_runtime.symbols)
 
         symbol_config = load_symbol_config_from_dir(
             env_runtime.symbol_config_dir,
-            "ETH-USDT-SWAP",
+            worker_symbol,
         )
         validate_symbol_config(symbol_config)
         mapped = map_symbol_config(symbol_config)
@@ -185,6 +241,16 @@ def build_live_symbol_runtime_configs(
         )
 
     # -- 3. Legacy path (explicit opt-out: RECLAIM_USE_SYMBOL_TOML=false) ---
+    # Legacy env-only path continues to support ETH-USDT-SWAP only.
+    # BTC live must go through the TOML path (use_symbol_toml=true).
+    if env_runtime.symbols != ("ETH-USDT-SWAP",):
+        raise ValueError(
+            "RECLAIM_USE_SYMBOL_TOML=false (legacy env-only path) only supports "
+            'RECLAIM_SYMBOLS="ETH-USDT-SWAP". '
+            "BTC-USDT-SWAP must use the TOML path (RECLAIM_USE_SYMBOL_TOML=true). "
+            f"Got: {env_runtime.symbols!r}"
+        )
+
     with _temporary_environ(env):
         monitor = BollBandBreakoutMonitorConfig.from_env()
         cvd = CvdTrackerConfig.from_env()

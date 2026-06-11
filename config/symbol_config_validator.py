@@ -139,41 +139,11 @@ def _validate_symbol(config: SymbolConfig) -> None:
     _ensure_bool(sec, "enabled", s.enabled)
     _ensure_bool(sec, "live_trading", s.live_trading)
 
-    # ------------------------------------------------------------------
-    # ETH-USDT-SWAP rules
-    # ------------------------------------------------------------------
-    if s.inst_id == "ETH-USDT-SWAP":
-        # live_trading must stay false — real live gate remains LIVE_TRADING
-        # in .env.
-        if s.live_trading is True:
-            _fail(
-                sec,
-                "live_trading",
-                "live_trading must be False for ETH-USDT-SWAP; "
-                "real live gate is LIVE_TRADING in .env",
-            )
-
-    # ------------------------------------------------------------------
-    # BTC-USDT-SWAP rules
-    # ------------------------------------------------------------------
-    if s.inst_id == "BTC-USDT-SWAP":
-        # BTC must stay disabled until portfolio-level risk guards exist.
-        if s.enabled is True:
-            _fail(
-                sec,
-                "enabled",
-                "BTC-USDT-SWAP enabled must be false; "
-                "do not enable before portfolio-level risk guards "
-                "are implemented",
-            )
-        # BTC live_trading must be false.
-        if s.live_trading is True:
-            _fail(
-                sec,
-                "live_trading",
-                "BTC-USDT-SWAP live_trading must be false; "
-                "real live gate is LIVE_TRADING in .env",
-            )
+    # NOTE: ``enabled`` and ``live_trading`` are config items —
+    # the TOML author controls them.  Neither ETH nor BTC is
+    # hard-disabled here.  The real live gate is the supervisor's
+    # supported-symbol whitelist and RECLAIM_SYMBOLS in each
+    # worker env.
 
 
 def _validate_market(config: SymbolConfig) -> None:

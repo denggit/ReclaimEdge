@@ -381,7 +381,7 @@ def test_rejects_non_bool_for_tp_split_tp_enabled() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 10. BTC-USDT-SWAP validator rules (F03)
+# 10. BTC-USDT-SWAP validator rules (G09b: no hard-disable on enabled/live_trading)
 # ---------------------------------------------------------------------------
 
 
@@ -406,8 +406,8 @@ def test_disabled_btc_config_passes() -> None:
     validate_symbol_config(config)
 
 
-def test_btc_enabled_true_fails() -> None:
-    """BTC enabled=True must be rejected."""
+def test_btc_enabled_true_passes() -> None:
+    """BTC enabled=True passes validator — no hard-disable on BTC capability."""
     config = replace(
         SymbolConfig.default_eth(),
         symbol=SymbolIdentityConfig(
@@ -415,16 +415,20 @@ def test_btc_enabled_true_fails() -> None:
             enabled=True,
             live_trading=False,
         ),
+        market=replace(
+            SymbolConfig.default_eth().market,
+            contract_value=Decimal("0.01"),
+            min_contracts=Decimal("0.01"),
+            contract_precision=Decimal("0.01"),
+            price_precision=Decimal("0.1"),
+        ),
     )
-    with pytest.raises(SymbolConfigValidationError) as exc_info:
-        validate_symbol_config(config)
-    msg = str(exc_info.value)
-    assert "BTC-USDT-SWAP" in msg
-    assert "enabled" in msg.lower()
+    # Must not raise — enabled/live_trading are config items.
+    validate_symbol_config(config)
 
 
-def test_btc_live_trading_true_fails() -> None:
-    """BTC live_trading=True must be rejected."""
+def test_btc_live_trading_true_passes() -> None:
+    """BTC live_trading=True passes validator — no hard-disable on BTC capability."""
     config = replace(
         SymbolConfig.default_eth(),
         symbol=SymbolIdentityConfig(
@@ -432,12 +436,42 @@ def test_btc_live_trading_true_fails() -> None:
             enabled=False,
             live_trading=True,
         ),
+        market=replace(
+            SymbolConfig.default_eth().market,
+            contract_value=Decimal("0.01"),
+            min_contracts=Decimal("0.01"),
+            contract_precision=Decimal("0.01"),
+            price_precision=Decimal("0.1"),
+        ),
     )
-    with pytest.raises(SymbolConfigValidationError) as exc_info:
-        validate_symbol_config(config)
-    msg = str(exc_info.value)
-    assert "BTC-USDT-SWAP" in msg
-    assert "live_trading" in msg.lower()
+    # Must not raise — enabled/live_trading are config items.
+    validate_symbol_config(config)
+
+
+def test_btc_sidecar_enabled_true_passes() -> None:
+    """BTC sidecar.enabled=true passes validator — not hard-disabled by symbol."""
+    config = replace(
+        SymbolConfig.default_eth(),
+        symbol=SymbolIdentityConfig(
+            inst_id="BTC-USDT-SWAP",
+            enabled=False,
+            live_trading=False,
+        ),
+        sidecar=replace(
+            SymbolConfig.default_eth().sidecar,
+            enabled=True,
+        ),
+        market=replace(
+            SymbolConfig.default_eth().market,
+            contract_value=Decimal("0.01"),
+            min_contracts=Decimal("0.01"),
+            contract_precision=Decimal("0.01"),
+            price_precision=Decimal("0.1"),
+        ),
+    )
+    # Must not raise — sidecar.enabled is a config item, not hard-disabled
+    # for any supported symbol.
+    validate_symbol_config(config)
 
 
 def test_unsupported_symbol_sol_fails() -> None:
@@ -450,8 +484,8 @@ def test_unsupported_symbol_sol_fails() -> None:
         validate_symbol_config(config)
 
 
-def test_eth_live_trading_true_still_fails() -> None:
-    """ETH live_trading=True must still be rejected — real live gate is .env."""
+def test_eth_live_trading_true_passes() -> None:
+    """ETH live_trading=True passes validator — no hard-disable on ETH capability."""
     config = replace(
         SymbolConfig.default_eth(),
         symbol=SymbolIdentityConfig(
@@ -460,5 +494,5 @@ def test_eth_live_trading_true_still_fails() -> None:
             live_trading=True,
         ),
     )
-    with pytest.raises(SymbolConfigValidationError, match="live_trading"):
-        validate_symbol_config(config)
+    # Must not raise — enabled/live_trading are config items.
+    validate_symbol_config(config)

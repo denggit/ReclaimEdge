@@ -125,29 +125,74 @@ def test_toml_flag_uses_account_equity_override() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 5. test_toml_flag_rejects_btc_symbols_for_now
+# 5. test_toml_flag_loads_btc_symbol
 # ---------------------------------------------------------------------------
 
 
-def test_toml_flag_rejects_btc_symbols_for_now() -> None:
-    """TOML path with BTC-USDT-SWAP → ValueError mentioning RECLAIM_SYMBOLS."""
-    with pytest.raises(ValueError, match="RECLAIM_SYMBOLS"):
+def test_toml_flag_loads_btc_symbol() -> None:
+    """TOML path with BTC-USDT-SWAP → loads BTC TOML, maps all configs."""
+    result = build_live_symbol_runtime_configs(
+        env={
+            "RECLAIM_USE_SYMBOL_TOML": "true",
+            "RECLAIM_SYMBOL_CONFIG_DIR": str(_SYMBOLS_DIR),
+            "RECLAIM_SYMBOLS": "BTC-USDT-SWAP",
+        }
+    )
+
+    assert result.symbol_config is not None
+    assert result.symbol_config.inst_id == "BTC-USDT-SWAP"
+    assert result.monitor.inst_id == "BTC-USDT-SWAP"
+
+    # BTC TOML is currently disabled; the bootstrap must still load it.
+    assert result.symbol_config.symbol.enabled is False
+    assert result.symbol_config.symbol.live_trading is False
+
+
+# ---------------------------------------------------------------------------
+# 6. test_toml_flag_rejects_multi_symbol
+# ---------------------------------------------------------------------------
+
+
+def test_toml_flag_rejects_multi_symbol() -> None:
+    """TOML path with multiple symbols → ValueError (worker must be single-symbol)."""
+    with pytest.raises(ValueError, match="exactly one symbol"):
         build_live_symbol_runtime_configs(
             env={
                 "RECLAIM_USE_SYMBOL_TOML": "true",
                 "RECLAIM_SYMBOL_CONFIG_DIR": str(_SYMBOLS_DIR),
-                "RECLAIM_SYMBOLS": "BTC-USDT-SWAP",
+                "RECLAIM_SYMBOLS": "ETH-USDT-SWAP,BTC-USDT-SWAP",
             }
         )
 
 
 # ---------------------------------------------------------------------------
-# 6. test_toml_flag_missing_file_fails_fast
+# 7. test_toml_flag_rejects_unsupported_symbol
+# ---------------------------------------------------------------------------
+
+
+def test_toml_flag_rejects_unsupported_symbol() -> None:
+    """TOML path with SOL-USDT-SWAP → ValueError mentioning supported symbols."""
+    with pytest.raises(ValueError) as exc_info:
+        build_live_symbol_runtime_configs(
+            env={
+                "RECLAIM_USE_SYMBOL_TOML": "true",
+                "RECLAIM_SYMBOL_CONFIG_DIR": str(_SYMBOLS_DIR),
+                "RECLAIM_SYMBOLS": "SOL-USDT-SWAP",
+            }
+        )
+    msg = str(exc_info.value)
+    assert "SOL-USDT-SWAP" in msg
+    assert "ETH-USDT-SWAP" in msg
+    assert "BTC-USDT-SWAP" in msg
+
+
+# ---------------------------------------------------------------------------
+# 8. test_toml_flag_missing_file_fails_fast
 # ---------------------------------------------------------------------------
 
 
 def test_toml_flag_missing_file_fails_fast(tmp_path: Path) -> None:
-    """TOML path with no ETH TOML in config dir → FileNotFoundError."""
+    """TOML path with no matching TOML in config dir → FileNotFoundError."""
     with pytest.raises(FileNotFoundError):
         build_live_symbol_runtime_configs(
             env={
@@ -159,7 +204,40 @@ def test_toml_flag_missing_file_fails_fast(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 7. test_env_path_does_not_load_toml
+# 9. test_toml_flag_missing_btc_file_fails_fast
+# ---------------------------------------------------------------------------
+
+
+def test_toml_flag_missing_btc_file_fails_fast(tmp_path: Path) -> None:
+    """TOML path with BTC but no TOML → FileNotFoundError (no fallback to ETH)."""
+    with pytest.raises(FileNotFoundError):
+        build_live_symbol_runtime_configs(
+            env={
+                "RECLAIM_USE_SYMBOL_TOML": "true",
+                "RECLAIM_SYMBOL_CONFIG_DIR": str(tmp_path),
+                "RECLAIM_SYMBOLS": "BTC-USDT-SWAP",
+            }
+        )
+
+
+# ---------------------------------------------------------------------------
+# 10. test_legacy_flag_rejects_btc
+# ---------------------------------------------------------------------------
+
+
+def test_legacy_flag_rejects_btc() -> None:
+    """Legacy path (TOML disabled) + BTC → ValueError (BTC must use TOML path)."""
+    with pytest.raises(ValueError, match="legacy env-only path"):
+        build_live_symbol_runtime_configs(
+            env={
+                "RECLAIM_USE_SYMBOL_TOML": "false",
+                "RECLAIM_SYMBOLS": "BTC-USDT-SWAP",
+            }
+        )
+
+
+# ---------------------------------------------------------------------------
+# 11. test_env_path_does_not_load_toml
 # ---------------------------------------------------------------------------
 
 
@@ -180,7 +258,7 @@ def test_env_path_does_not_load_toml(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 8. test_import_has_no_side_effects
+# 12. test_import_has_no_side_effects
 # ---------------------------------------------------------------------------
 
 
@@ -196,7 +274,7 @@ def test_import_has_no_side_effects() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 9. test_env_mapping_restores_os_environ_after_error
+# 13. test_env_mapping_restores_os_environ_after_error
 # ---------------------------------------------------------------------------
 
 
@@ -231,7 +309,7 @@ def test_env_mapping_restores_os_environ_after_error() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 10. test_temporary_environ_noop_when_env_is_none
+# 14. test_temporary_environ_noop_when_env_is_none
 # ---------------------------------------------------------------------------
 
 
@@ -245,7 +323,7 @@ def test_temporary_environ_noop_when_env_is_none() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 11. test_account_equity_env_path
+# 15. test_account_equity_env_path
 # ---------------------------------------------------------------------------
 
 
@@ -264,7 +342,7 @@ def test_account_equity_env_path() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 12. test_legacy_path_account_equity_does_not_read_dry_run_equity
+# 16. test_legacy_path_account_equity_does_not_read_dry_run_equity
 # ---------------------------------------------------------------------------
 
 
