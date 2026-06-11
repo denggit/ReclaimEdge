@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import os
 import time
 from dataclasses import dataclass
 
 from config.live_symbol_config_bootstrap import build_live_symbol_runtime_configs
+from src.execution.paper_trader import PaperTrader
 from src.execution.trader import Trader
 from src.live import queue_helpers as live_queue_helpers
 from src.live import runtime_types as live_runtime_types
@@ -90,7 +92,7 @@ def _emit_worker_event_best_effort(
 
 
 def _assert_trader_matches_symbol_config(
-    trader: Trader,
+    trader: Trader | PaperTrader,
     runtime_configs: "LiveSymbolRuntimeConfigs",
 ) -> None:
     """Fail fast when the running Trader disagrees with the TOML symbol config.
@@ -103,6 +105,9 @@ def _assert_trader_matches_symbol_config(
     what the TOML declares.  A mismatch here means the live session would
     run with inconsistent leverage / tdMode / posSide — a dangerous state
     that must be refused at startup.
+
+    PaperTrader (G08) skips the live_trading requirement but still checks
+    symbol / market-structure metadata consistency when TOML is loaded.
     """
     symbol_config = runtime_configs.symbol_config
     if symbol_config is None:
@@ -161,7 +166,8 @@ class SymbolWorkerApp:
         startup_phase = "trader_initialize"
 
         email_sender = self.factory.create_email_sender()
-        trader = self.factory.create_trader()
+        mode = os.getenv("RECLAIM_WORKER_MODE", "live").strip().lower()
+        trader = self.factory.create_trader(trader_mode=mode)
         await trader.start()
         try:
             await trader.initialize()

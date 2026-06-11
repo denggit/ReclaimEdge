@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Sequence
 
+from src.execution.paper_trader import PaperTrader
 from src.execution.trader import Trader
 from src.indicators.cvd_tracker import CvdTracker, CvdTrackerConfig
 from src.live.heartbeat_writer import HeartbeatWriter, HeartbeatWriterConfig
@@ -65,8 +66,23 @@ class SymbolWorkerFactory:
     def create_email_sender(self) -> EmailSender:
         return EmailSender()
 
-    def create_trader(self) -> Trader:
-        return Trader()
+    def create_trader(self, *, trader_mode: str = "live") -> Trader | PaperTrader:
+        if trader_mode == "live":
+            return Trader()
+        if trader_mode == "paper":
+            return self.create_paper_trader_from_env()
+        raise RuntimeError(
+            f"Invalid RECLAIM_WORKER_MODE: {trader_mode!r}. Must be 'live' or 'paper'."
+        )
+
+    def create_paper_trader_from_env(self) -> PaperTrader:
+        """Create a PaperTrader for dry-run mode.
+
+        PaperTrader reads its own configuration from environment variables
+        (OKX_INST_ID, RECLAIM_PAPER_SYMBOLS, PAPER_ACCOUNT_EQUITY_USDT)
+        and validates that only BTC-USDT-SWAP is allowed.
+        """
+        return PaperTrader()
 
     def create_runtime_paths(self, *, runtime_dir: str | Path, inst_id: str) -> RuntimePaths:
         return RuntimePaths(runtime_dir=runtime_dir, inst_id=inst_id)

@@ -293,7 +293,7 @@ class _ShutdownTestFactory(SymbolWorkerFactory):
     def create_email_sender(self) -> Any:
         return object()
 
-    def create_trader(self) -> _FakeTrader:
+    def create_trader(self, *, trader_mode: str = "live") -> _FakeTrader:
         return _FakeTrader()
 
     def create_runtime_paths(self, *, runtime_dir: str | Any, inst_id: str) -> _FakeRuntimePaths:
@@ -1817,7 +1817,7 @@ class _ShutdownTestFactoryWithRaisingHeartbeat(SymbolWorkerFactory):
     def create_email_sender(self) -> Any:
         return object()
 
-    def create_trader(self) -> _FakeTrader:
+    def create_trader(self, *, trader_mode: str = "live") -> _FakeTrader:
         return _FakeTrader()
 
     def create_runtime_paths(self, *, runtime_dir: str | Any, inst_id: str) -> _FakeRuntimePaths:
@@ -1876,7 +1876,7 @@ class _ShutdownTestFactoryRaisingFetch(SymbolWorkerFactory):
     def create_email_sender(self) -> Any:
         return object()
 
-    def create_trader(self) -> _FakeTraderRaisingFetch:
+    def create_trader(self, *, trader_mode: str = "live") -> _FakeTraderRaisingFetch:
         return _FakeTraderRaisingFetch()
 
     def create_runtime_paths(self, *, runtime_dir: str | Any, inst_id: str) -> _FakeRuntimePaths:

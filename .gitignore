@@ -3,4 +3,4 @@
 /mnt/
 /.claude/
 /.pytest_cache/
-/runtime/
+/runtime/private_write_limiter/

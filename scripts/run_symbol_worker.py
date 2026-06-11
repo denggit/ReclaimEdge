@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 from pathlib import Path
 
@@ -21,8 +22,14 @@ from src.live.worker_shutdown import (  # noqa: E402
 
 async def main() -> None:
     load_dotenv()
-    if not live_config_helpers.live_trading_enabled():
-        raise RuntimeError("LIVE_TRADING is not true. Refusing to start symbol worker.")
+    mode = os.getenv("RECLAIM_WORKER_MODE", "live").strip().lower()
+    if mode not in ("live", "paper"):
+        raise RuntimeError(
+            f"Invalid RECLAIM_WORKER_MODE: {mode!r}. Must be 'live' or 'paper'."
+        )
+    if mode != "paper":
+        if not live_config_helpers.live_trading_enabled():
+            raise RuntimeError("LIVE_TRADING is not true. Refusing to start symbol worker.")
     shutdown_controller = WorkerShutdownController()
     install_symbol_worker_signal_handlers(shutdown_controller)
     app = SymbolWorkerApp.from_env(shutdown_controller=shutdown_controller)
