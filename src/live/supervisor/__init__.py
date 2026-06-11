@@ -4,6 +4,16 @@ from src.live.supervisor.reclaim_supervisor import (
     SupervisorHealthEvent,
     SupervisorShutdownResult,
 )
+from src.live.supervisor.multi_symbol_supervisor import (
+    MultiSymbolSupervisor,
+    SupervisorTaskResult,
+)
+from src.live.supervisor.symbol_worker_plan import (
+    SymbolWorkerPlan,
+    build_symbol_worker_plans,
+    parse_worker_modes,
+    worker_mode_for_symbol,
+)
 from src.live.supervisor.symbol_selection import (
     SupervisorSymbolSelection,
     require_single_enabled_symbol,
@@ -58,6 +68,12 @@ from src.live.supervisor.outbox_retention import (
 __all__ = [
     "ReclaimSupervisor",
     "ReclaimSupervisorConfig",
+    "MultiSymbolSupervisor",
+    "SupervisorTaskResult",
+    "SymbolWorkerPlan",
+    "build_symbol_worker_plans",
+    "parse_worker_modes",
+    "worker_mode_for_symbol",
     "SupervisorHealthEvent",
     "SupervisorShutdownResult",
     "ChildProcess",

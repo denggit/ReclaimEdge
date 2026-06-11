@@ -68,6 +68,7 @@ class ReclaimSupervisorConfig:
     poll_interval_seconds: float = 5.0
     project_root: Path = field(default_factory=_default_project_root)
     child_name: str = "ETH-USDT-SWAP"
+    child_symbol: str | None = None
     worker_script: Path = Path("scripts/run_symbol_worker.py")
     child_terminate_timeout_seconds: float = 10.0
     child_kill_timeout_seconds: float = 5.0
@@ -88,6 +89,8 @@ class ReclaimSupervisorConfig:
             raise ValueError("supervisor poll_interval_seconds must be > 0")
         if not self.child_name.strip():
             raise ValueError("supervisor child_name must not be empty")
+        if self.child_symbol is not None and not self.child_symbol.strip():
+            raise ValueError("supervisor child_symbol must not be empty")
         if self.child_terminate_timeout_seconds <= 0:
             raise ValueError("child_terminate_timeout_seconds must be > 0")
         if self.child_kill_timeout_seconds <= 0:
@@ -213,7 +216,8 @@ class ReclaimSupervisor:
         runtime_dir = self._config.runtime_dir
         if not runtime_dir.is_absolute():
             runtime_dir = self._config.project_root / runtime_dir
-        return RuntimePaths(runtime_dir=runtime_dir, inst_id=self._config.child_name)
+        symbol = self._config.child_symbol or self._config.child_name
+        return RuntimePaths(runtime_dir=runtime_dir, inst_id=symbol)
 
     @property
     def heartbeat_path(self) -> Path:
@@ -526,7 +530,7 @@ class ReclaimSupervisor:
             return None
 
         status = self._heartbeat_monitor.read_status(
-            symbol=self._config.child_name,
+            symbol=self._config.child_symbol or self._config.child_name,
             path=self.heartbeat_path,
         )
         self._last_heartbeat_status = status

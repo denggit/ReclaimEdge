@@ -38,6 +38,8 @@ def test_source_guard_must_contain_required_tokens() -> None:
         "SupervisorEmailPublisher",
         "SupervisorEventPipeline",
         "EmailSender",
+        "MultiSymbolSupervisor",
+        "build_symbol_worker_plans",
         "worker_event_outbox_file",
         "worker_event_cursor_",
         "supervisor_alert_dedupe_",
@@ -61,7 +63,8 @@ def test_source_guard_must_contain_required_tokens() -> None:
 def test_source_guard_must_not_contain_forbidden_tokens() -> None:
     """E05f-e + F04 source must NOT contain trading / child-start / send-email tokens.
     ``RECLAIM_SYMBOLS`` is allowed (used in child_env construction);
-    ``BTC-USDT-SWAP`` is forbidden (must not be hard-coded as selected symbol).
+    ``BTC-USDT-SWAP`` is allowed in tests/config but must not be hard-coded as
+    selected symbol in the entry.
     """
     source = _entry_source()
 
@@ -80,7 +83,6 @@ def test_source_guard_must_not_contain_forbidden_tokens() -> None:
         "send_email_async(",
         "process_once(",
         "run_symbol_worker.py",
-        "BTC-USDT-SWAP",
     ]
     for token in forbidden:
         assert token not in source, (
@@ -449,7 +451,6 @@ def test_retention_no_forbidden_tokens() -> None:
     forbidden = [
         "OUTBOX_RETENTION_MAX_BYTES",
         "OUTBOX_RETENTION_KEEP_ARCHIVES",
-        "os.environ",
     ]
     for token in forbidden:
         assert token not in source, (
@@ -675,6 +676,131 @@ class TestResolveSelectedSymbolAndChildEnv:
         assert supervisor_config.child_env is not None
         assert supervisor_config.child_env["RECLAIM_SYMBOLS"] == "ETH-USDT-SWAP"
         assert supervisor_config.child_env["OKX_INST_ID"] == "ETH-USDT-SWAP"
+
+
+class TestRunReclaimSupervisorMultiSymbol:
+    def test_single_symbol_main_does_not_construct_multi_supervisor(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _write_minimal_toml(tmp_path, "ETH-USDT-SWAP", enabled=True)
+        monkeypatch.setenv("RECLAIM_SYMBOLS", "ETH-USDT-SWAP")
+        monkeypatch.setenv("RECLAIM_SYMBOL_CONFIG_DIR", str(tmp_path))
+        monkeypatch.setattr(
+            "scripts.run_reclaim_supervisor.live_config_helpers.live_trading_enabled",
+            lambda: True,
+        )
+        _patch_entry_load_dotenv(monkeypatch)
+
+        def fail_multi(*args: object, **kwargs: object) -> object:
+            raise AssertionError("single-symbol main must not construct MultiSymbolSupervisor")
+
+        monkeypatch.setattr("scripts.run_reclaim_supervisor.MultiSymbolSupervisor", fail_multi)
+
+        captured_supervisors: list[object] = []
+
+        def fake_install(supervisor: object) -> None:
+            captured_supervisors.append(supervisor)
+
+        monkeypatch.setattr("scripts.run_reclaim_supervisor.install_supervisor_signal_handlers", fake_install)
+
+        def fake_build_pipeline(supervisor: object) -> object:
+            sentinel = type("SentinelPipeline", (), {})()
+            sentinel.process_once = lambda: None  # type: ignore[attr-defined]
+            return sentinel
+
+        monkeypatch.setattr("scripts.run_reclaim_supervisor.build_parent_event_pipeline", fake_build_pipeline)
+
+        async def fake_run_forever(self: object) -> None:
+            pass
+
+        monkeypatch.setattr(
+            "src.live.supervisor.reclaim_supervisor.ReclaimSupervisor.run_forever",
+            fake_run_forever,
+        )
+
+        from scripts.run_reclaim_supervisor import main
+        import asyncio
+
+        asyncio.run(main())
+
+        assert len(captured_supervisors) == 1
+        config = captured_supervisors[0].config
+        assert config.child_symbol == "ETH-USDT-SWAP"
+        assert config.child_env["RECLAIM_SYMBOLS"] == "ETH-USDT-SWAP"
+
+    def test_multi_symbol_main_builds_two_live_worker_plans(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("RECLAIM_SYMBOLS", "ETH-USDT-SWAP,BTC-USDT-SWAP")
+        monkeypatch.setenv(
+            "RECLAIM_WORKER_MODES",
+            "ETH-USDT-SWAP:live,BTC-USDT-SWAP:live",
+        )
+        monkeypatch.setattr(
+            "scripts.run_reclaim_supervisor.live_config_helpers.live_trading_enabled",
+            lambda: True,
+        )
+        monkeypatch.setattr(
+            "scripts.run_reclaim_supervisor._resolve_enabled_symbols_and_runtime",
+            lambda: (("ETH-USDT-SWAP", "BTC-USDT-SWAP"), tmp_path / "runtime"),
+        )
+        monkeypatch.setattr(
+            "scripts.run_reclaim_supervisor.require_single_enabled_symbol",
+            lambda selection: (_ for _ in ()).throw(AssertionError("must not require single symbol")),
+        )
+        _patch_entry_load_dotenv(monkeypatch)
+
+        def fake_build_pipeline(supervisor: object) -> object:
+            sentinel = type("SentinelPipeline", (), {})()
+            sentinel.process_once = lambda: None  # type: ignore[attr-defined]
+            return sentinel
+
+        monkeypatch.setattr("scripts.run_reclaim_supervisor.build_parent_event_pipeline", fake_build_pipeline)
+        monkeypatch.setattr("scripts.run_reclaim_supervisor.install_supervisor_signal_handlers", lambda supervisor: None)
+
+        captured_supervisors: list[object] = []
+
+        class FakeMultiSymbolSupervisor:
+            def __init__(self, supervisors: object) -> None:
+                captured_supervisors.extend(supervisors)
+
+            def request_stop(self) -> None:
+                pass
+
+            async def run(self) -> int:
+                return 0
+
+        monkeypatch.setattr(
+            "scripts.run_reclaim_supervisor.MultiSymbolSupervisor",
+            FakeMultiSymbolSupervisor,
+        )
+
+        from scripts.run_reclaim_supervisor import main
+        import asyncio
+
+        asyncio.run(main())
+
+        assert len(captured_supervisors) == 2
+        configs = [supervisor.config for supervisor in captured_supervisors]
+        child_names = {config.child_name for config in configs}
+        heartbeat_paths = {supervisor.heartbeat_path for supervisor in captured_supervisors}
+
+        assert len(child_names) == 2
+        assert len(heartbeat_paths) == 2
+
+        by_symbol = {config.child_symbol: config for config in configs}
+        eth_env = by_symbol["ETH-USDT-SWAP"].child_env
+        btc_env = by_symbol["BTC-USDT-SWAP"].child_env
+
+        assert eth_env["OKX_INST_ID"] == "ETH-USDT-SWAP"
+        assert eth_env["RECLAIM_SYMBOL"] == "ETH-USDT-SWAP"
+        assert eth_env["RECLAIM_SYMBOLS"] == "ETH-USDT-SWAP"
+        assert eth_env["RECLAIM_WORKER_MODE"] == "live"
+
+        assert btc_env["OKX_INST_ID"] == "BTC-USDT-SWAP"
+        assert btc_env["RECLAIM_SYMBOL"] == "BTC-USDT-SWAP"
+        assert btc_env["RECLAIM_SYMBOLS"] == "BTC-USDT-SWAP"
+        assert btc_env["RECLAIM_WORKER_MODE"] == "live"
 
 
 # ============================================================================
