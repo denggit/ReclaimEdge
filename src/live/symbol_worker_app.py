@@ -38,6 +38,10 @@ from src.live.portfolio_allocator_enforcer import (
 from src.live.runtime_path_compat import handoff_legacy_runtime_files
 from src.live.startup_recovery import basic_restore as startup_basic_restore
 from src.live.startup_recovery import order_recovery as startup_order_recovery
+from src.live.startup_recovery.portfolio_reconciliation import (
+    StartupReconciliationResult,
+    reconcile_startup_state,
+)
 from src.live.startup_recovery import trust_validation as startup_trust_validation
 from src.live.symbol_worker_factory import SymbolWorkerFactory
 from src.live.symbol_worker_shutdown_runtime import (
@@ -160,6 +164,96 @@ def _assert_trader_matches_symbol_config(
         raise RuntimeError(
             "TOML/env trader config mismatch: " + "; ".join(errors)
         )
+
+
+async def _run_startup_portfolio_reconciliation_if_available(
+    *,
+    trader: Trader | PaperTrader,
+    startup_position: object,
+    saved_state: object | None,
+    execution_state: live_runtime_types.ExecutionState,
+    journal: object,
+    portfolio_allocator_shadow_runner: PortfolioAllocatorShadowRunner | None,
+    portfolio_allocator_enforcer: PortfolioAllocatorEnforcer | None,
+) -> StartupReconciliationResult | None:
+    ledger_owner = portfolio_allocator_enforcer or portfolio_allocator_shadow_runner
+    if ledger_owner is None:
+        return None
+
+    try:
+        ledger_snapshot = await asyncio.to_thread(ledger_owner.ledger.read_locked)
+        reconciliation = reconcile_startup_state(
+            inst_id=trader.symbol,
+            position=startup_position,  # type: ignore[arg-type]
+            saved_state=saved_state,  # type: ignore[arg-type]
+            ledger_snapshot=ledger_snapshot,
+        )
+
+        if hasattr(journal, "append"):
+            journal.append(
+                "STARTUP_PORTFOLIO_RECONCILIATION",
+                {
+                    "symbol": reconciliation.inst_id,
+                    "severity": reconciliation.severity,
+                    "action": reconciliation.action,
+                    "okx_has_position": reconciliation.okx_has_position,
+                    "saved_has_position": reconciliation.saved_has_position,
+                    "ledger_is_active": reconciliation.ledger_is_active,
+                    "okx_side": reconciliation.okx_side,
+                    "saved_side": reconciliation.saved_side,
+                    "ledger_side": reconciliation.ledger_side,
+                    "saved_layers": reconciliation.saved_layers,
+                    "ledger_used_layers": reconciliation.ledger_used_layers,
+                    "ledger_plan_exists": reconciliation.ledger_plan_exists,
+                    "issues": [
+                        {
+                            "code": issue.code,
+                            "severity": issue.severity,
+                            "message": issue.message,
+                        }
+                        for issue in reconciliation.issues
+                    ],
+                },
+                position_id=getattr(saved_state, "position_id", None),
+            )
+
+        if reconciliation.severity == "CRITICAL":
+            logger.critical(
+                "STARTUP_PORTFOLIO_RECONCILIATION_CRITICAL | symbol=%s action=%s issues=%s",
+                reconciliation.inst_id,
+                reconciliation.action,
+                [issue.code for issue in reconciliation.issues],
+            )
+        elif reconciliation.severity == "WARN":
+            logger.warning(
+                "STARTUP_PORTFOLIO_RECONCILIATION_WARN | symbol=%s action=%s issues=%s",
+                reconciliation.inst_id,
+                reconciliation.action,
+                [issue.code for issue in reconciliation.issues],
+            )
+        else:
+            logger.info(
+                "STARTUP_PORTFOLIO_RECONCILIATION_OK | symbol=%s",
+                reconciliation.inst_id,
+            )
+
+        if reconciliation.should_halt_new_risk:
+            execution_state.trading_halted = True
+            execution_state.halt_reason = (
+                f"startup_portfolio_reconciliation_{reconciliation.severity.lower()}"
+            )
+            execution_state.halt_until_ts_ms = None
+
+        return reconciliation
+    except Exception:
+        execution_state.trading_halted = True
+        execution_state.halt_reason = "startup_portfolio_reconciliation_error"
+        execution_state.halt_until_ts_ms = None
+        logger.exception(
+            "STARTUP_PORTFOLIO_RECONCILIATION_ERROR | symbol=%s",
+            trader.symbol,
+        )
+        return None
 
 
 @dataclass(frozen=True)
@@ -400,6 +494,15 @@ class SymbolWorkerApp:
                 journal=journal,
                 state_store=state_store,
                 trader_symbol=trader.symbol,
+            )
+            await _run_startup_portfolio_reconciliation_if_available(
+                trader=trader,
+                startup_position=startup_position,
+                saved_state=saved_state,
+                execution_state=execution_state,
+                journal=journal,
+                portfolio_allocator_shadow_runner=portfolio_allocator_shadow_runner,
+                portfolio_allocator_enforcer=portfolio_allocator_enforcer,
             )
         except Exception as exc:
             _emit_worker_event_best_effort(

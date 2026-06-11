@@ -88,7 +88,7 @@ burst_min_abs_range_pct = "0.0015"
 
 [tp]
 # Listed fields wired to BollCvdReclaimStrategyConfig.
-tp_min_net_profit_pct = "0.004"
+tp_min_net_profit_pct = "0.003"
 tp_boll_enabled = true
 three_stage_runner_enabled = true
 three_stage_tp1_ratio = "0.80"

@@ -19,6 +19,7 @@ import asyncio
 import logging
 import os
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Any
 
 import pytest
@@ -30,9 +31,19 @@ from src.live.live_app_config import (
     WeeklySummaryConfig,
 )
 from src.live.runtime_types import AccountSnapshot, ExecutionState
-from src.live.symbol_worker_app import SymbolWorkerApp
+from src.execution.trader_types import PositionSnapshot
+from src.live.symbol_worker_app import (
+    SymbolWorkerApp,
+    _run_startup_portfolio_reconciliation_if_available,
+)
 from src.live.symbol_worker_factory import SymbolWorkerFactory
 from src.live.worker_shutdown import WorkerShutdownController
+from src.portfolio.capital_ledger import (
+    LEDGER_VERSION,
+    CapitalLedgerSnapshot,
+    SymbolCapitalState,
+)
+from src.reporting.live_state_store import LivePositionState
 
 
 # ---------------------------------------------------------------------------
@@ -321,6 +332,76 @@ class _ShutdownTestFactory(SymbolWorkerFactory):
         return _FakeMonitor()
 
 
+class _FakeLedger:
+    def __init__(self, snapshot: CapitalLedgerSnapshot | None = None) -> None:
+        self.snapshot = snapshot
+        self.read_calls = 0
+
+    def read_locked(self) -> CapitalLedgerSnapshot:
+        self.read_calls += 1
+        if self.snapshot is None:
+            raise RuntimeError("ledger read failed")
+        return self.snapshot
+
+
+class _FakeAllocatorRunner:
+    def __init__(self, ledger: _FakeLedger) -> None:
+        self.ledger = ledger
+
+
+class _AppendJournal(_FakeJournal):
+    def __init__(self) -> None:
+        self.append_calls: list[tuple[str, dict[str, Any], str | None]] = []
+
+    def append(
+        self,
+        event_type: str,
+        payload: dict[str, Any],
+        position_id: str | None = None,
+    ) -> None:
+        self.append_calls.append((event_type, payload, position_id))
+
+
+def _startup_position(*, side: str | None = None, contracts: str = "0") -> PositionSnapshot:
+    return PositionSnapshot(
+        side=side,  # type: ignore[arg-type]
+        contracts=Decimal(contracts),
+        avg_entry_price=3000.0 if side is not None else 0.0,
+        eth_qty=1.0 if side is not None else 0.0,
+        raw_pos=Decimal(contracts),
+    )
+
+
+def _startup_ledger_snapshot(state: SymbolCapitalState) -> CapitalLedgerSnapshot:
+    return CapitalLedgerSnapshot(
+        version=LEDGER_VERSION,
+        updated_ms=1,
+        leader_symbol=None,
+        global_no_new_entry=False,
+        symbols={"ETH-USDT-SWAP": state},
+    )
+
+
+def _startup_active_ledger_state() -> SymbolCapitalState:
+    return SymbolCapitalState(
+        state="OPEN",
+        side="LONG",
+        used_layers=1,
+        position_plan_id="plan-1",
+        planned_main_contracts=("1",),
+        plan_max_layers=1,
+    )
+
+
+def _startup_saved_state() -> LivePositionState:
+    return LivePositionState(
+        position_id="pos-1",
+        symbol="ETH-USDT-SWAP",
+        side="LONG",
+        layers=1,
+    )
+
+
 # ============================================================================
 # 1. from_env accepts shutdown_controller
 # ============================================================================
@@ -335,6 +416,125 @@ class TestFromEnvShutdownController:
     def test_from_env_shutdown_controller_defaults_to_none(self) -> None:
         app = SymbolWorkerApp.from_env()
         assert app.shutdown_controller is None
+
+
+# ============================================================================
+# G08d: Startup portfolio reconciliation helper
+# ============================================================================
+
+
+class TestStartupPortfolioReconciliationHelper:
+    @pytest.mark.asyncio
+    async def test_allocator_disabled_skips_reconciliation(self) -> None:
+        trader = _FakeTrader()
+        journal = _AppendJournal()
+        execution_state = ExecutionState(
+            current_position_id=None,
+            cash_before_position=None,
+        )
+
+        result = await _run_startup_portfolio_reconciliation_if_available(
+            trader=trader,  # type: ignore[arg-type]
+            startup_position=_startup_position(),
+            saved_state=None,
+            execution_state=execution_state,
+            journal=journal,
+            portfolio_allocator_shadow_runner=None,
+            portfolio_allocator_enforcer=None,
+        )
+
+        assert result is None
+        assert execution_state.trading_halted is False
+        assert journal.append_calls == []
+
+    @pytest.mark.asyncio
+    async def test_consistent_ledger_journals_without_halt(self) -> None:
+        trader = _FakeTrader()
+        journal = _AppendJournal()
+        execution_state = ExecutionState(
+            current_position_id="pos-1",
+            cash_before_position=1000.0,
+        )
+        ledger = _FakeLedger(
+            _startup_ledger_snapshot(_startup_active_ledger_state())
+        )
+        runner = _FakeAllocatorRunner(ledger)
+
+        result = await _run_startup_portfolio_reconciliation_if_available(
+            trader=trader,  # type: ignore[arg-type]
+            startup_position=_startup_position(side="LONG", contracts="1"),
+            saved_state=_startup_saved_state(),
+            execution_state=execution_state,
+            journal=journal,
+            portfolio_allocator_shadow_runner=runner,  # type: ignore[arg-type]
+            portfolio_allocator_enforcer=None,
+        )
+
+        assert result is not None
+        assert result.severity == "OK"
+        assert execution_state.trading_halted is False
+        assert ledger.read_calls == 1
+        assert len(journal.append_calls) == 1
+        event_type, payload, position_id = journal.append_calls[0]
+        assert event_type == "STARTUP_PORTFOLIO_RECONCILIATION"
+        assert payload["severity"] == "OK"
+        assert payload["action"] == "NONE"
+        assert position_id == "pos-1"
+
+    @pytest.mark.asyncio
+    async def test_ledger_active_but_position_flat_halts_new_risk(self) -> None:
+        trader = _FakeTrader()
+        journal = _AppendJournal()
+        execution_state = ExecutionState(
+            current_position_id=None,
+            cash_before_position=None,
+        )
+        runner = _FakeAllocatorRunner(
+            _FakeLedger(_startup_ledger_snapshot(_startup_active_ledger_state()))
+        )
+
+        result = await _run_startup_portfolio_reconciliation_if_available(
+            trader=trader,  # type: ignore[arg-type]
+            startup_position=_startup_position(),
+            saved_state=None,
+            execution_state=execution_state,
+            journal=journal,
+            portfolio_allocator_shadow_runner=None,
+            portfolio_allocator_enforcer=runner,  # type: ignore[arg-type]
+        )
+
+        assert result is not None
+        assert result.severity == "CRITICAL"
+        assert execution_state.trading_halted is True
+        assert execution_state.halt_reason.startswith(
+            "startup_portfolio_reconciliation"
+        )
+        assert execution_state.halt_until_ts_ms is None
+
+    @pytest.mark.asyncio
+    async def test_reconciliation_exception_halts_new_risk(self) -> None:
+        trader = _FakeTrader()
+        journal = _AppendJournal()
+        execution_state = ExecutionState(
+            current_position_id=None,
+            cash_before_position=None,
+        )
+        runner = _FakeAllocatorRunner(_FakeLedger(snapshot=None))
+
+        result = await _run_startup_portfolio_reconciliation_if_available(
+            trader=trader,  # type: ignore[arg-type]
+            startup_position=_startup_position(),
+            saved_state=None,
+            execution_state=execution_state,
+            journal=journal,
+            portfolio_allocator_shadow_runner=runner,  # type: ignore[arg-type]
+            portfolio_allocator_enforcer=None,
+        )
+
+        assert result is None
+        assert execution_state.trading_halted is True
+        assert execution_state.halt_reason == "startup_portfolio_reconciliation_error"
+        assert execution_state.halt_until_ts_ms is None
 
 
 # ============================================================================
