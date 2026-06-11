@@ -222,7 +222,7 @@ class SymbolWorkerApp:
 
             # ── G05: portfolio allocator shadow runner ──────────────────
             shadow_config = PortfolioAllocatorShadowConfig.from_env(
-                runtime_dir=runtime_paths.runtime_dir,
+                runtime_dir=runtime_configs.env_runtime.runtime_dir,
             )
             portfolio_allocator_shadow_runner = (
                 PortfolioAllocatorShadowRunner.from_config(shadow_config)
