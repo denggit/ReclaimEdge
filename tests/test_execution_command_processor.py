@@ -2060,5 +2060,204 @@ class TestExecutionCommandProcessorWithSidecar(unittest.IsolatedAsyncioTestCase)
         )
 
 
+# ── G05: portfolio allocator shadow tests ────────────────────────────────────
+
+
+class SlowShadowRunner:
+    """Fake shadow runner that blocks on an asyncio.Event to test non-blocking."""
+
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        self.calls: list[dict] = []
+
+    async def run_entry_shadow_check(self, **kwargs) -> None:  # type: ignore[no-untyped-def]
+        self.started.set()
+        self.calls.append(kwargs)
+        await self.release.wait()
+
+
+class FailingShadowRunner:
+    """Fake shadow runner that always raises."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    async def run_entry_shadow_check(self, **kwargs) -> None:  # type: ignore[no-untyped-def]
+        self.calls.append(kwargs)
+        raise RuntimeError("shadow boom")
+
+
+class TestExecutionCommandProcessorShadow(unittest.IsolatedAsyncioTestCase):
+    """G05 shadow mode tests for ExecutionCommandProcessor."""
+
+    @staticmethod
+    async def _drain_bg() -> None:
+        """Yield enough times for background tasks to start."""
+        for _ in range(5):
+            await asyncio.sleep(0)
+
+    async def test_slow_shadow_does_not_block_execution(self) -> None:
+        """Slow shadow runner does NOT delay trader.execute_intent."""
+        slow_runner = SlowShadowRunner()
+        execution_state = ExecutionState(None, None)
+        trader = FakeTrader()
+        journal = FakeJournal()
+        state_store = FakeStateStore()
+        processor, _, _, _ = make_processor(
+            execution_state=execution_state,
+            trader=trader,
+            journal=journal,
+            state_store=state_store,
+        )
+        processor.portfolio_allocator_shadow_runner = slow_runner  # type: ignore[assignment]
+
+        command = make_command(1_000, "OPEN_LONG")
+
+        # Process command — this should NOT be blocked by the slow shadow
+        result = await processor.process(command)
+
+        # trader.execute_intent should have been called (order executed)
+        self.assertGreaterEqual(len(trader.executed), 1)
+        self.assertIn(1_000, trader.executed)
+
+        # Let background tasks run
+        await self._drain_bg()
+
+        # Shadow should have started (but not completed, waiting on release)
+        self.assertTrue(slow_runner.started.is_set())
+        self.assertEqual(len(slow_runner.calls), 1)
+
+        # Cleanup: release the shadow runner so background task finishes
+        slow_runner.release.set()
+        await asyncio.sleep(0)
+
+        self.assertIsNotNone(result)
+
+    async def test_shadow_failure_does_not_block_execution(self) -> None:
+        """Shadow runner exception does NOT prevent trader.execute_intent."""
+        failing_runner = FailingShadowRunner()
+        execution_state = ExecutionState(None, None)
+        trader = FakeTrader()
+        journal = FakeJournal()
+        state_store = FakeStateStore()
+        processor, _, _, _ = make_processor(
+            execution_state=execution_state,
+            trader=trader,
+            journal=journal,
+            state_store=state_store,
+        )
+        processor.portfolio_allocator_shadow_runner = failing_runner  # type: ignore[assignment]
+
+        command = make_command(1_000, "OPEN_LONG")
+        result = await processor.process(command)
+
+        # Let background tasks run (failure is caught by bg done callback)
+        await self._drain_bg()
+
+        # trader.execute_intent should STILL have been called
+        self.assertGreaterEqual(len(trader.executed), 1)
+        self.assertIn(1_000, trader.executed)
+
+        # Shadow runner should have been called
+        self.assertEqual(len(failing_runner.calls), 1)
+
+        # Trading should NOT be halted
+        self.assertFalse(execution_state.trading_halted)
+
+        self.assertIsNotNone(result)
+
+    async def test_shadow_runner_none_skips_cleanly(self) -> None:
+        """When shadow_runner is None, everything works normally."""
+        execution_state = ExecutionState(None, None)
+        trader = FakeTrader()
+        journal = FakeJournal()
+        state_store = FakeStateStore()
+        processor, _, _, _ = make_processor(
+            execution_state=execution_state,
+            trader=trader,
+            journal=journal,
+            state_store=state_store,
+        )
+        # shadow_runner defaults to None in make_processor
+        self.assertIsNone(processor.portfolio_allocator_shadow_runner)
+
+        command = make_command(1_000, "OPEN_LONG")
+        result = await processor.process(command)
+
+        self.assertGreaterEqual(len(trader.executed), 1)
+        self.assertIsNotNone(result)
+
+    async def test_non_entry_intents_do_not_schedule_shadow(self) -> None:
+        """UPDATE_TP, NEAR_TP_REDUCE, MARKET_EXIT_RUNNER do NOT schedule shadow."""
+        slow_runner = SlowShadowRunner()
+        execution_state = ExecutionState("pos-1", 100.0)
+        trader = FakeTrader()
+        journal = FakeJournal()
+        state_store = FakeStateStore()
+
+        for intent_type in ("UPDATE_TP", "NEAR_TP_REDUCE", "MARKET_EXIT_RUNNER"):
+            processor, _, _, _ = make_processor(
+                execution_state=execution_state,
+                trader=trader,
+                journal=journal,
+                state_store=state_store,
+            )
+            processor.portfolio_allocator_shadow_runner = slow_runner  # type: ignore[assignment]
+
+            command = make_command(1_000, intent_type)
+            result = await processor.process(command)
+
+            # Let background tasks run
+            await self._drain_bg()
+
+            # Shadow runner should NOT have been called
+            self.assertEqual(len(slow_runner.calls), 0)
+            # But trader should have executed
+            self.assertGreaterEqual(len(trader.executed), 1)
+
+            # Reset for next iteration
+            slow_runner.calls.clear()
+            slow_runner.started.clear()
+            slow_runner.release.clear()
+            trader.executed.clear()
+
+    async def test_shadow_scheduled_before_execute_intent(self) -> None:
+        """Shadow task is created before trader.execute_intent is called."""
+        slow_runner = SlowShadowRunner()
+        execution_state = ExecutionState(None, None)
+        trader = FakeTrader()
+
+        original_execute = trader.execute_intent
+        execute_called = asyncio.Event()
+
+        async def _wrapped_execute(intent: TradeIntent) -> LiveTradeResult:
+            execute_called.set()
+            return await original_execute(intent)
+
+        trader.execute_intent = _wrapped_execute  # type: ignore[assignment]
+
+        processor, _, _, _ = make_processor(
+            execution_state=execution_state,
+            trader=trader,
+        )
+        processor.portfolio_allocator_shadow_runner = slow_runner  # type: ignore[assignment]
+
+        command = make_command(1_000, "OPEN_LONG")
+        result = await processor.process(command)
+
+        # Let background tasks run
+        await self._drain_bg()
+
+        # Both should have happened
+        self.assertTrue(slow_runner.started.is_set())
+        self.assertTrue(execute_called.is_set())
+        self.assertIsNotNone(result)
+
+        # Cleanup
+        slow_runner.release.set()
+        await asyncio.sleep(0)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -6,7 +6,7 @@ import html
 import os
 from dataclasses import dataclass, field, replace
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from src.execution.trader import LiveTradeResult, PositionSnapshot, Trader
 from src.live import config_helpers as live_config_helpers
@@ -52,6 +52,9 @@ from src.strategies.boll_cvd_shock_reclaim_strategy import BollCvdShockReclaimSt
 from src.utils.email_sender import EmailSender
 from src.utils.log import get_logger
 
+if TYPE_CHECKING:
+    from src.live.portfolio_allocator_shadow import PortfolioAllocatorShadowRunner
+
 logger = get_logger(__name__)
 
 
@@ -67,6 +70,7 @@ class ExecutionCommandProcessor:
     email_sender: EmailSender
     halt_alert_deduper: HaltAlertDeduper = field(default_factory=HaltAlertDeduper)
     sidecar_skip_first_layer: bool = True
+    portfolio_allocator_shadow_runner: "PortfolioAllocatorShadowRunner | None" = None
     _background_tasks: set[asyncio.Task] = field(default_factory=set, init=False)
 
     async def _send_halt_alert(
@@ -104,6 +108,53 @@ class ExecutionCommandProcessor:
             )
         except Exception:
             logger.exception("PROCESSOR_HALT_ALERT_EXCEPTION | halt_reason=%s", halt_reason)
+
+    def _schedule_portfolio_allocator_shadow(
+        self,
+        *,
+        command: live_runtime_types.TradeCommand,
+        sidecar_plan: SidecarExecutionPlan | None,
+        position_id: str | None,
+    ) -> None:
+        """Schedule a fire-and-forget shadow allocation check.
+
+        Does **not** await the result.  The shadow runner is called in a
+        background task whose done callback cleans up the internal task set.
+        If the shadow runner raises, the exception is logged but never
+        propagated — the real order path is never affected.
+        """
+        runner = self.portfolio_allocator_shadow_runner
+        if runner is None:
+            return
+
+        async def _shadow() -> None:
+            await runner.run_entry_shadow_check(
+                command=command,
+                trader=self.trader,
+                strategy=self.strategy,
+                journal=self.journal,
+                position_id=position_id,
+                sidecar_plan=sidecar_plan,
+            )
+
+        task = asyncio.create_task(_shadow())
+        self._background_tasks.add(task)
+
+        def _cleanup(t: asyncio.Task) -> None:
+            self._background_tasks.discard(t)
+            try:
+                exc = t.exception()
+                if exc is not None:
+                    logger.error(
+                        "PORTFOLIO_ALLOCATOR_SHADOW_BG_TASK_FAILED | error=%s",
+                        exc,
+                    )
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.exception("PORTFOLIO_ALLOCATOR_SHADOW_BG_CLEANUP_FAILED")
+
+        task.add_done_callback(_cleanup)
 
     async def process(self, command: live_runtime_types.TradeCommand) -> Any:
         """Process a single TradeCommand. Returns the LiveTradeResult on success, None if skipped."""
@@ -267,6 +318,7 @@ class ExecutionCommandProcessor:
             return None
 
         # ── sidecar combined entry plan ──────────────────────────────────
+        raw_entry_command = command
         sidecar_plan: SidecarExecutionPlan | None = None
         if command.intent.intent_type in {"OPEN_LONG", "OPEN_SHORT", "ADD_LONG", "ADD_SHORT"}:
             async with self.state_lock:
@@ -292,8 +344,16 @@ class ExecutionCommandProcessor:
                 contract_multiplier=getattr(self.trader, "contract_multiplier", Decimal("0.1")),
                 contract_precision=getattr(self.trader, "contract_precision", Decimal("0.01")),
             )
-            command = replace(command, intent=combined_plan.execution_intent)
             sidecar_plan = combined_plan.sidecar_plan
+
+            # ── G05: schedule fire-and-forget shadow allocator check ─────
+            self._schedule_portfolio_allocator_shadow(
+                command=raw_entry_command,
+                sidecar_plan=sidecar_plan,
+                position_id=current_position_id,
+            )
+
+            command = replace(command, intent=combined_plan.execution_intent)
 
         # ── sidecar core final exit safety guard ─────────────────────────
         if command.intent.intent_type == "UPDATE_TP":

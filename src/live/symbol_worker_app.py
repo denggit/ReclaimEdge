@@ -25,6 +25,10 @@ from src.live.outbox import (
     JsonlOutbox,
     WorkerEventEmitter,
 )
+from src.live.portfolio_allocator_shadow import (
+    PortfolioAllocatorShadowConfig,
+    PortfolioAllocatorShadowRunner,
+)
 from src.live.runtime_path_compat import handoff_legacy_runtime_files
 from src.live.startup_recovery import basic_restore as startup_basic_restore
 from src.live.startup_recovery import order_recovery as startup_order_recovery
@@ -215,6 +219,17 @@ class SymbolWorkerApp:
             )
             sizer = strategy_objects.sizer
             strategy = strategy_objects.strategy
+
+            # ── G05: portfolio allocator shadow runner ──────────────────
+            shadow_config = PortfolioAllocatorShadowConfig.from_env(
+                runtime_dir=runtime_paths.runtime_dir,
+            )
+            portfolio_allocator_shadow_runner = (
+                PortfolioAllocatorShadowRunner.from_config(shadow_config)
+                if shadow_config.enabled
+                else None
+            )
+
             startup_position = await trader.fetch_position_snapshot()
             startup_cash = await live_flat_balance.fetch_usdt_cash_balance(trader)
             rolling_loss_guard.load_or_initialize(live_time_utils.utc_ms(), trader.account_equity_usdt)
@@ -518,6 +533,7 @@ class SymbolWorkerApp:
                     email_sender=email_sender,
                     backlog_log_seconds=execution_backlog_log_seconds,
                     sidecar_skip_first_layer=sizer.config.sidecar_skip_first_layer,
+                    portfolio_allocator_shadow_runner=portfolio_allocator_shadow_runner,
                 )
             )
             daily_report_task = asyncio.ensure_future(daily_report_loop())
