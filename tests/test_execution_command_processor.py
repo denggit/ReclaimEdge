@@ -2259,5 +2259,236 @@ class TestExecutionCommandProcessorShadow(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0)
 
 
+# ── G06a: portfolio allocator enforce tests ──────────────────────────────────
+
+
+class AllowingEnforcer:
+    """Fake enforcer that always allows."""
+
+    def __init__(self) -> None:
+        self.precheck_calls: list[dict] = []
+        self.commit_calls: list[dict] = []
+        self.committed = False
+
+    async def precheck_entry_allocation(self, **kwargs) -> Any:  # type: ignore[no-untyped-def]
+        self.precheck_calls.append(kwargs)
+        from src.live.portfolio_allocator_enforcer import PortfolioAllocatorPrecheckResult
+        from src.portfolio.capital_ledger import default_snapshot
+        return PortfolioAllocatorPrecheckResult(
+            enabled=True,
+            allowed=True,
+            reason="ALLOCATOR_ENFORCE_ALLOWED",
+            projected_snapshot=default_snapshot(updated_ms=1000),
+        )
+
+    async def commit_projected_snapshot_after_fill(self, **kwargs) -> None:  # type: ignore[no-untyped-def]
+        self.commit_calls.append(kwargs)
+        self.committed = True
+
+
+class RejectingEnforcer:
+    """Fake enforcer that always rejects."""
+
+    def __init__(self, reason: str = "GLOBAL_NO_NEW_ENTRY") -> None:
+        self.reason = reason
+        self.precheck_calls: list[dict] = []
+
+    async def precheck_entry_allocation(self, **kwargs) -> Any:  # type: ignore[no-untyped-def]
+        self.precheck_calls.append(kwargs)
+        from src.live.portfolio_allocator_enforcer import PortfolioAllocatorPrecheckResult
+        return PortfolioAllocatorPrecheckResult(
+            enabled=True,
+            allowed=False,
+            reason=self.reason,
+        )
+
+    async def commit_projected_snapshot_after_fill(self, **kwargs) -> None:  # type: ignore[no-untyped-def]
+        pass
+
+
+class ErrorEnforcer:
+    """Fake enforcer whose precheck returns an error result (fail-closed)."""
+
+    def __init__(self) -> None:
+        self.precheck_calls: list[dict] = []
+
+    async def precheck_entry_allocation(self, **kwargs) -> Any:  # type: ignore[no-untyped-def]
+        self.precheck_calls.append(kwargs)
+        from src.live.portfolio_allocator_enforcer import PortfolioAllocatorPrecheckResult
+        return PortfolioAllocatorPrecheckResult(
+            enabled=True,
+            allowed=False,
+            reason="ALLOCATOR_ENFORCE_ERROR",
+        )
+
+    async def commit_projected_snapshot_after_fill(self, **kwargs) -> None:  # type: ignore[no-untyped-def]
+        pass
+
+
+class TestExecutionCommandProcessorEnforce(unittest.IsolatedAsyncioTestCase):
+    """G06a enforce mode tests for ExecutionCommandProcessor."""
+
+    async def test_enforce_none_keeps_old_behavior(self) -> None:
+        """15. processor without enforcer: OPEN_LONG still executes."""
+        execution_state = ExecutionState(None, None)
+        trader = FakeTrader()
+        journal = FakeJournal()
+        state_store = FakeStateStore()
+        processor, _, _, _ = make_processor(
+            execution_state=execution_state,
+            trader=trader,
+            journal=journal,
+            state_store=state_store,
+        )
+        # enforcer defaults to None
+        assert processor.portfolio_allocator_enforcer is None
+
+        command = make_command(1_000, "OPEN_LONG")
+        result = await processor.process(command)
+
+        assert result is not None
+        assert len(trader.executed) >= 1
+
+    async def test_enforce_allowed_executes_order(self) -> None:
+        """16. enforce allowed: trader.execute_intent called, commit called after."""
+        allowing = AllowingEnforcer()
+        execution_state = ExecutionState(None, None)
+        trader = FakeTrader()
+        journal = FakeJournal()
+        state_store = FakeStateStore()
+        processor, _, _, _ = make_processor(
+            execution_state=execution_state,
+            trader=trader,
+            journal=journal,
+            state_store=state_store,
+        )
+        processor.portfolio_allocator_enforcer = allowing  # type: ignore[assignment]
+
+        command = make_command(1_000, "OPEN_LONG")
+        result = await processor.process(command)
+
+        assert result is not None
+        assert len(trader.executed) >= 1
+        # Commit should have been called
+        assert allowing.committed is True
+        assert len(allowing.precheck_calls) == 1
+
+    async def test_enforce_rejected_skips_order(self) -> None:
+        """17. enforce rejected: returns None, trader.execute_intent not called, no halt."""
+        rejecting = RejectingEnforcer(reason="GLOBAL_NO_NEW_ENTRY")
+        execution_state = ExecutionState(None, None)
+        trader = FakeTrader()
+        journal = FakeJournal()
+        state_store = FakeStateStore()
+        processor, _, _, _ = make_processor(
+            execution_state=execution_state,
+            trader=trader,
+            journal=journal,
+            state_store=state_store,
+        )
+        processor.portfolio_allocator_enforcer = rejecting  # type: ignore[assignment]
+
+        command = make_command(1_000, "OPEN_LONG")
+        result = await processor.process(command)
+
+        assert result is None
+        assert len(trader.executed) == 0
+        assert execution_state.trading_halted is False
+        assert len(rejecting.precheck_calls) == 1
+
+    async def test_enforce_error_fail_closed_no_crash(self) -> None:
+        """18. enforce error: returns None, no halt, no exception."""
+        error_enforcer = ErrorEnforcer()
+        execution_state = ExecutionState(None, None)
+        trader = FakeTrader()
+        journal = FakeJournal()
+        state_store = FakeStateStore()
+        processor, _, _, _ = make_processor(
+            execution_state=execution_state,
+            trader=trader,
+            journal=journal,
+            state_store=state_store,
+        )
+        processor.portfolio_allocator_enforcer = error_enforcer  # type: ignore[assignment]
+
+        command = make_command(1_000, "OPEN_LONG")
+        # Must not raise
+        result = await processor.process(command)
+
+        assert result is None
+        assert len(trader.executed) == 0
+        assert execution_state.trading_halted is False
+
+    async def test_exit_reduce_not_enforced(self) -> None:
+        """19. UPDATE_TP, NEAR_TP_REDUCE, MARKET_EXIT_RUNNER: enforcer not called."""
+        rejecting = RejectingEnforcer(reason="GLOBAL_NO_NEW_ENTRY")
+        execution_state = ExecutionState("pos-1", 100.0)
+        trader = FakeTrader()
+        journal = FakeJournal()
+        state_store = FakeStateStore()
+
+        for intent_type in ("UPDATE_TP", "NEAR_TP_REDUCE", "MARKET_EXIT_RUNNER"):
+            processor, _, _, _ = make_processor(
+                execution_state=execution_state,
+                trader=trader,
+                journal=journal,
+                state_store=state_store,
+            )
+            processor.portfolio_allocator_enforcer = rejecting  # type: ignore[assignment]
+
+            command = make_command(1_000, intent_type)
+            result = await processor.process(command)
+
+            # Trader should have executed (not blocked)
+            assert len(trader.executed) >= 1
+            # Enforcer should NOT have been called for non-entry intents
+            # (the precheck is in the entry block which is skipped)
+
+            # Reset
+            rejecting.precheck_calls.clear()
+            trader.executed.clear()
+
+    async def test_shadow_and_enforce_coexist(self) -> None:
+        """20. shadow still scheduled fire-and-forget, enforce awaited, order executes."""
+        from tests.test_execution_command_processor import SlowShadowRunner
+
+        slow_runner = SlowShadowRunner()
+        allowing = AllowingEnforcer()
+        execution_state = ExecutionState(None, None)
+        trader = FakeTrader()
+        journal = FakeJournal()
+        state_store = FakeStateStore()
+        processor, _, _, _ = make_processor(
+            execution_state=execution_state,
+            trader=trader,
+            journal=journal,
+            state_store=state_store,
+        )
+        processor.portfolio_allocator_shadow_runner = slow_runner  # type: ignore[assignment]
+        processor.portfolio_allocator_enforcer = allowing  # type: ignore[assignment]
+
+        command = make_command(1_000, "OPEN_LONG")
+        result = await processor.process(command)
+
+        # Let background tasks run a bit
+        for _ in range(5):
+            await asyncio.sleep(0)
+
+        # Order should have executed
+        assert result is not None
+        assert len(trader.executed) >= 1
+        # Enforce precheck should have been called
+        assert len(allowing.precheck_calls) == 1
+        # Enforce commit should have been called
+        assert allowing.committed is True
+        # Shadow should have been scheduled (started but not completed)
+        assert slow_runner.started.is_set()
+        assert len(slow_runner.calls) == 1
+
+        # Cleanup
+        slow_runner.release.set()
+        await asyncio.sleep(0)
+
+
 if __name__ == "__main__":
     unittest.main()

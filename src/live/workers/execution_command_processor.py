@@ -54,6 +54,10 @@ from src.utils.log import get_logger
 
 if TYPE_CHECKING:
     from src.live.portfolio_allocator_shadow import PortfolioAllocatorShadowRunner
+    from src.live.portfolio_allocator_enforcer import (
+        PortfolioAllocatorEnforcer,
+        PortfolioAllocatorPrecheckResult,
+    )
 
 logger = get_logger(__name__)
 
@@ -71,6 +75,7 @@ class ExecutionCommandProcessor:
     halt_alert_deduper: HaltAlertDeduper = field(default_factory=HaltAlertDeduper)
     sidecar_skip_first_layer: bool = True
     portfolio_allocator_shadow_runner: "PortfolioAllocatorShadowRunner | None" = None
+    portfolio_allocator_enforcer: "PortfolioAllocatorEnforcer | None" = None
     _background_tasks: set[asyncio.Task] = field(default_factory=set, init=False)
 
     async def _send_halt_alert(
@@ -155,6 +160,43 @@ class ExecutionCommandProcessor:
                 logger.exception("PORTFOLIO_ALLOCATOR_SHADOW_BG_CLEANUP_FAILED")
 
         task.add_done_callback(_cleanup)
+
+    async def _precheck_portfolio_allocator_enforce(
+        self,
+        *,
+        command: live_runtime_types.TradeCommand,
+        trader: "Trader" = None,
+        sidecar_plan: SidecarExecutionPlan | None,
+        position_id: str | None,
+    ) -> "PortfolioAllocatorPrecheckResult | None":
+        """Run enforce precheck before order placement.
+
+        Returns ``None`` when enforcer is not configured (no interception).
+        Returns a ``PortfolioAllocatorPrecheckResult`` otherwise — the caller
+        must check ``.allowed`` before proceeding.
+        """
+        enforcer = self.portfolio_allocator_enforcer
+        if enforcer is None:
+            return None
+
+        result = await enforcer.precheck_entry_allocation(
+            command=command,
+            trader=trader if trader is not None else self.trader,
+            strategy=self.strategy,
+            journal=self.journal,
+            position_id=position_id,
+            sidecar_plan=sidecar_plan,
+        )
+
+        if not result.allowed:
+            logger.warning(
+                "PORTFOLIO_ALLOCATOR_ENFORCE_REJECTED | symbol=%s intent_type=%s reason=%s",
+                getattr(self.trader, "symbol", ""),
+                getattr(command.intent, "intent_type", ""),
+                result.reason,
+            )
+
+        return result
 
     async def process(self, command: live_runtime_types.TradeCommand) -> Any:
         """Process a single TradeCommand. Returns the LiveTradeResult on success, None if skipped."""
@@ -320,6 +362,7 @@ class ExecutionCommandProcessor:
         # ── sidecar combined entry plan ──────────────────────────────────
         raw_entry_command = command
         sidecar_plan: SidecarExecutionPlan | None = None
+        precheck_result: "PortfolioAllocatorPrecheckResult | None" = None
         if command.intent.intent_type in {"OPEN_LONG", "OPEN_SHORT", "ADD_LONG", "ADD_SHORT"}:
             async with self.state_lock:
                 if self.execution_state.current_position_id is None:
@@ -353,6 +396,15 @@ class ExecutionCommandProcessor:
                 position_id=current_position_id,
             )
 
+            # ── G06a: enforce allocator precheck (awaited, may reject) ──
+            precheck_result = await self._precheck_portfolio_allocator_enforce(
+                command=raw_entry_command,
+                sidecar_plan=sidecar_plan,
+                position_id=current_position_id,
+            )
+            if precheck_result is not None and not precheck_result.allowed:
+                return None
+
             command = replace(command, intent=combined_plan.execution_intent)
 
         # ── sidecar core final exit safety guard ─────────────────────────
@@ -363,6 +415,16 @@ class ExecutionCommandProcessor:
 
         # ── execute intent ───────────────────────────────────────────────
         result = await self.trader.execute_intent(command.intent)
+
+        # ── G06a: commit projected snapshot after fill ──────────────────
+        if precheck_result is not None and self.portfolio_allocator_enforcer is not None:
+            await self.portfolio_allocator_enforcer.commit_projected_snapshot_after_fill(
+                precheck_result=precheck_result,
+                live_result=result,
+                journal=self.journal,
+                position_id=current_position_id,
+            )
+
         if not result.ok:
             # ── UPDATE_TP failure: arm delayed market exit ──────────────
             if command.intent.intent_type == "UPDATE_TP":

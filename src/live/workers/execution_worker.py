@@ -17,6 +17,7 @@ from src.utils.log import get_logger
 
 if TYPE_CHECKING:
     from src.live.portfolio_allocator_shadow import PortfolioAllocatorShadowRunner
+    from src.live.portfolio_allocator_enforcer import PortfolioAllocatorEnforcer
 
 logger = get_logger(__name__)
 
@@ -35,6 +36,7 @@ async def execution_worker(
     backlog_log_seconds: float,
     sidecar_skip_first_layer: bool = True,
     portfolio_allocator_shadow_runner: "PortfolioAllocatorShadowRunner | None" = None,
+    portfolio_allocator_enforcer: "PortfolioAllocatorEnforcer | None" = None,
 ) -> None:
     processor = ExecutionCommandProcessor(
         state_lock=state_lock,
@@ -47,6 +49,7 @@ async def execution_worker(
         email_sender=email_sender,
         sidecar_skip_first_layer=sidecar_skip_first_layer,
         portfolio_allocator_shadow_runner=portfolio_allocator_shadow_runner,
+        portfolio_allocator_enforcer=portfolio_allocator_enforcer,
     )
 
     last_backlog_log = 0.0
