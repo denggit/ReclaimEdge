@@ -638,11 +638,33 @@ def _build_main_request(
         action=action,  # type: ignore[arg-type]
         side=side,
         requested_layer=requested_layer,
+        requested_main_contracts=_intent_requested_main_contracts(
+            intent=intent,
+            trader=trader,
+        ),
         position_plan=position_plan,
         main_margin_delta_usdt=main_margin_delta_usdt,
         account_equity_usdt=account_equity_usdt,
         global_main_cap_pct=config.global_main_cap_pct,
     )
+
+
+def _intent_requested_main_contracts(
+    *,
+    intent: object,
+    trader: object,
+) -> str | None:
+    size = getattr(intent, "size", None)
+    eth_qty = getattr(size, "eth_qty", None) if size is not None else None
+    if eth_qty is None:
+        return None
+
+    multiplier = getattr(trader, "contract_multiplier", None)
+    if multiplier is None:
+        return None
+
+    contracts = Decimal(str(eth_qty)) / Decimal(str(multiplier))
+    return format(contracts, "f")
 
 
 def _build_sidecar_request(

@@ -344,6 +344,10 @@ class PortfolioAllocatorShadowRunner:
             action=action,  # type: ignore[arg-type]
             side=side,
             requested_layer=requested_layer,
+            requested_main_contracts=_intent_requested_main_contracts(
+                intent=intent,
+                trader=trader,
+            ),
             position_plan=position_plan,
             main_margin_delta_usdt=main_margin_delta_usdt,
             account_equity_usdt=account_equity_usdt,
@@ -505,3 +509,21 @@ def _build_position_plan(
         created_ms=getattr(intent, "ts_ms", 0),
     )
     return plan  # type: ignore[return-value]
+
+
+def _intent_requested_main_contracts(
+    *,
+    intent: object,
+    trader: object,
+) -> str | None:
+    size = getattr(intent, "size", None)
+    eth_qty = getattr(size, "eth_qty", None) if size is not None else None
+    if eth_qty is None:
+        return None
+
+    multiplier = getattr(trader, "contract_multiplier", None)
+    if multiplier is None:
+        return None
+
+    contracts = Decimal(str(eth_qty)) / Decimal(str(multiplier))
+    return format(contracts, "f")

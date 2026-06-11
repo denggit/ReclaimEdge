@@ -123,6 +123,7 @@ class AllocationCheckRequest:
     action: AllocationAction
     side: str | None = None
     requested_layer: int | None = None
+    requested_main_contracts: str | None = None
     position_plan: PositionPlan | None = None
     main_margin_delta_usdt: str = "0"
     sidecar_margin_delta_usdt: str = "0"
@@ -509,7 +510,7 @@ def _check_add_main(
             permission=None,
         )
 
-    if requested_layer > len(current.planned_main_contracts):
+    if requested_layer > current.plan_max_layers:
         return _decision(
             allowed=False,
             reason="REQUESTED_LAYER_EXCEEDS_PLAN",
@@ -547,6 +548,52 @@ def _check_add_main(
             snapshot=snapshot,
             request=request,
             permission=permission,
+        )
+
+    # -- Planned contract quantity check -------------------------------------
+    expected_contracts = _expected_main_contracts_for_layer(current, requested_layer)
+    if expected_contracts is None:
+        return _decision(
+            allowed=False,
+            reason="MISSING_EXPECTED_MAIN_CONTRACTS",
+            snapshot=snapshot,
+            request=request,
+            permission=permission,
+        )
+
+    try:
+        requested_contracts = _requested_main_contracts_decimal(
+            request.requested_main_contracts
+        )
+    except CapitalAllocatorError:
+        return _decision(
+            allowed=False,
+            reason="INVALID_REQUESTED_MAIN_CONTRACTS",
+            snapshot=snapshot,
+            request=request,
+            permission=permission,
+        )
+
+    if requested_contracts is None:
+        return _decision(
+            allowed=False,
+            reason="MISSING_REQUESTED_MAIN_CONTRACTS",
+            snapshot=snapshot,
+            request=request,
+            permission=permission,
+        )
+
+    if requested_contracts != expected_contracts:
+        return _decision(
+            allowed=False,
+            reason="ADD_MAIN_CONTRACT_MISMATCH",
+            snapshot=snapshot,
+            request=request,
+            permission=permission,
+            message=(
+                f"requested_main_contracts={requested_contracts} "
+                f"expected_main_contracts={expected_contracts}"
+            ),
         )
 
     # -- Main cap check -------------------------------------------------------
@@ -766,6 +813,29 @@ def _would_exceed(
     )
 
 
+def _expected_main_contracts_for_layer(
+    state: SymbolCapitalState,
+    requested_layer: int,
+) -> Decimal | None:
+    """Return planned main contracts for a 1-based layer, if present."""
+    index = requested_layer - 1
+    if not state.planned_main_contracts or index < 0:
+        return None
+    if index >= len(state.planned_main_contracts):
+        return None
+    return decimal_from_string(
+        state.planned_main_contracts[index],
+        "planned_main_contracts",
+    )
+
+
+def _requested_main_contracts_decimal(value: str | None) -> Decimal | None:
+    """Parse requested main contracts from a request, treating empty as missing."""
+    if value is None or value == "":
+        return None
+    return decimal_from_string(value, "requested_main_contracts")
+
+
 def _replace_symbol_state(
     snapshot: CapitalLedgerSnapshot,
     inst_id: str,
@@ -820,6 +890,7 @@ def _decision(
     request: AllocationCheckRequest,
     permission: SymbolPermission | None,
     leader_symbol: str | None = None,
+    message: str = "",
 ) -> AllocationDecision:
     """Construct an ``AllocationDecision`` with consistent defaults."""
     return AllocationDecision(
@@ -835,5 +906,5 @@ def _decision(
         ),
         permission=permission,
         projected_snapshot=snapshot if allowed else snapshot,
-        message="",
+        message=message,
     )

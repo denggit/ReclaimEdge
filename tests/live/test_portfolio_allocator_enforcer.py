@@ -439,6 +439,60 @@ class TestEnforcerOpenMainRejected(unittest.IsolatedAsyncioTestCase):
 class TestEnforcerAddMain(unittest.IsolatedAsyncioTestCase):
     """Tests for ADD_MAIN."""
 
+    async def test_main_request_includes_requested_contracts_from_intent_size(self) -> None:
+        """ADD_MAIN request carries eth_qty / contract_multiplier contracts."""
+        from src.live.portfolio_allocator_enforcer import (
+            PortfolioAllocatorEnforceConfig,
+            PortfolioAllocatorEnforcer,
+        )
+
+        config = PortfolioAllocatorEnforceConfig(enabled=True)
+        enforcer = PortfolioAllocatorEnforcer.from_config(config)
+        snapshot = default_snapshot(updated_ms=1000)
+        enforcer.ledger = MagicMock()
+        enforcer.ledger.read_locked.return_value = snapshot
+
+        captured: dict[str, AllocationCheckRequest] = {}
+
+        def fake_check(*, snapshot, request, leader_follower_config=None):
+            captured["request"] = request
+            return AllocationDecision(
+                allowed=True,
+                reason="ADD_MAIN_ALLOWED",
+                inst_id=request.inst_id,
+                action=request.action,
+                requested_layer=request.requested_layer,
+                leader_symbol=None,
+                permission=None,
+                projected_snapshot=snapshot,
+            )
+
+        journal = FakeJournal()
+        command = FakeTradeCommand(
+            intent_type="ADD_LONG",
+            side="LONG",
+            layer_index=2,
+            margin_usdt=30.0,
+            eth_qty=0.115,
+        )
+        trader = FakeTrader()
+        trader.contract_multiplier = Decimal("0.1")
+
+        with patch(
+            "src.live.portfolio_allocator_enforcer.check_allocation_dry_run",
+            side_effect=fake_check,
+        ):
+            result = await enforcer.precheck_entry_allocation(
+                command=command,  # type: ignore[arg-type]
+                trader=trader,  # type: ignore[arg-type]
+                strategy=make_strategy(),
+                journal=journal,  # type: ignore[arg-type]
+                position_id="pos-1",
+            )
+
+        assert result.allowed is True
+        assert captured["request"].requested_main_contracts == "1.15"
+
     async def test_add_main_allowed(self) -> None:
         """7. ADD_LONG layer2 with ETH OPEN layer1: allowed, used_layers=2."""
         from src.live.portfolio_allocator_enforcer import (
@@ -490,6 +544,55 @@ class TestEnforcerAddMain(unittest.IsolatedAsyncioTestCase):
         eth_state_after = result.projected_snapshot.symbols.get("ETH-USDT-SWAP")
         assert eth_state_after is not None
         assert eth_state_after.used_layers == 2
+
+    async def test_add_main_contract_mismatch_rejected_without_commit(self) -> None:
+        """ADD_MAIN mismatch fails closed before any ledger commit."""
+        from src.live.portfolio_allocator_enforcer import (
+            PortfolioAllocatorEnforceConfig,
+            PortfolioAllocatorEnforcer,
+        )
+
+        config = PortfolioAllocatorEnforceConfig(enabled=True)
+        enforcer = PortfolioAllocatorEnforcer.from_config(config)
+        eth_state = SymbolCapitalState(
+            state="OPEN",
+            side="LONG",
+            used_layers=1,
+            position_plan_id="plan-1",
+            planned_main_contracts=("1", "1.15", "1.30"),
+            base_main_contracts="1",
+            plan_max_layers=3,
+            permission_max_layers=3,
+            main_used_margin_usdt="30",
+            sidecar_enabled=True,
+        )
+        enforcer.ledger = MagicMock()
+        enforcer.ledger.read_locked.return_value = fake_ledger_snapshot(
+            eth_state=eth_state,
+        )
+
+        journal = FakeJournal()
+        command = FakeTradeCommand(
+            intent_type="ADD_LONG",
+            side="LONG",
+            layer_index=2,
+            margin_usdt=34.5,
+            eth_qty=0.12,
+        )
+        trader = FakeTrader()
+        trader.contract_multiplier = Decimal("0.1")
+
+        result = await enforcer.precheck_entry_allocation(
+            command=command,  # type: ignore[arg-type]
+            trader=trader,  # type: ignore[arg-type]
+            strategy=make_strategy(),
+            journal=journal,  # type: ignore[arg-type]
+            position_id="pos-1",
+        )
+
+        assert result.allowed is False
+        assert result.reason == "ADD_MAIN_CONTRACT_MISMATCH"
+        enforcer.ledger.update_locked.assert_not_called()
 
     async def test_add_main_permission_rejected(self) -> None:
         """8. ADD rejected due to permission (no_add_layer)."""

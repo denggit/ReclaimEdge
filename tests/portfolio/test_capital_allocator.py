@@ -95,6 +95,7 @@ def _request(
     action: AllocationAction = "OPEN_MAIN",
     side: str | None = "LONG",
     requested_layer: int | None = 1,
+    requested_main_contracts: str | None = "__auto__",
     position_plan: PositionPlan | None = None,
     main_margin_delta_usdt: str = "0",
     sidecar_margin_delta_usdt: str = "0",
@@ -102,11 +103,18 @@ def _request(
     global_main_cap_pct: str = "0.70",
 ) -> AllocationCheckRequest:
     """Build an AllocationCheckRequest with sensible defaults."""
+    if requested_main_contracts == "__auto__":
+        requested_main_contracts = None
+        if action == "ADD_MAIN" and requested_layer is not None and requested_layer >= 1:
+            requested_main_contracts = str(
+                Decimal("100") * (Decimal("1") + Decimal("0.15") * (requested_layer - 1))
+            )
     return AllocationCheckRequest(
         inst_id=inst_id,
         action=action,
         side=side,
         requested_layer=requested_layer,
+        requested_main_contracts=requested_main_contracts,
         position_plan=position_plan,
         main_margin_delta_usdt=main_margin_delta_usdt,
         sidecar_margin_delta_usdt=sidecar_margin_delta_usdt,
@@ -674,6 +682,218 @@ class TestAddMainAllowed:
         assert projected.permission_max_layers == 8  # NEUTRAL: plan_max_layers
         assert projected.add_gap_multiplier == "1.0"
         assert projected.add_freeze_multiplier == "1.0"
+
+    def test_requested_contracts_match_planned_layer_allowed(self):
+        snap = _snapshot(
+            symbols={
+                _ETH: _state(
+                    state="OPEN",
+                    side="LONG",
+                    used_layers=1,
+                    position_plan_id="plan-1",
+                    planned_main_contracts=("1", "1.15", "1.30"),
+                    base_main_contracts="1",
+                    plan_max_layers=3,
+                    main_used_margin_usdt="10",
+                    sidecar_enabled=True,
+                ),
+                _BTC: _state(),
+            },
+        )
+        req = _request(
+            action="ADD_MAIN",
+            side="LONG",
+            requested_layer=2,
+            requested_main_contracts="1.15",
+            main_margin_delta_usdt="15",
+            account_equity_usdt="1000",
+        )
+
+        decision = check_allocation_dry_run(snapshot=snap, request=req)
+
+        assert decision.allowed is True
+        assert decision.reason == "ADD_MAIN_ALLOWED"
+        assert decision.projected_snapshot.symbols[_ETH].used_layers == 2
+
+    def test_decimal_equivalent_requested_contracts_allowed(self):
+        snap = _snapshot(
+            symbols={
+                _ETH: _state(
+                    state="OPEN",
+                    side="LONG",
+                    used_layers=1,
+                    position_plan_id="plan-1",
+                    planned_main_contracts=("1", "1.15", "1.30"),
+                    base_main_contracts="1",
+                    plan_max_layers=3,
+                    main_used_margin_usdt="10",
+                    sidecar_enabled=True,
+                ),
+                _BTC: _state(),
+            },
+        )
+        req = _request(
+            action="ADD_MAIN",
+            side="LONG",
+            requested_layer=2,
+            requested_main_contracts="1.150",
+            main_margin_delta_usdt="15",
+            account_equity_usdt="1000",
+        )
+
+        decision = check_allocation_dry_run(snapshot=snap, request=req)
+
+        assert decision.allowed is True
+        assert decision.reason == "ADD_MAIN_ALLOWED"
+
+    def test_open_main_does_not_require_requested_main_contracts(self):
+        plan = _make_plan(max_layers=3)
+        snap = _snapshot(
+            symbols={
+                _ETH: _state(sidecar_enabled=True),
+                _BTC: _state(),
+            },
+        )
+        req = _request(
+            action="OPEN_MAIN",
+            side="LONG",
+            requested_layer=1,
+            requested_main_contracts=None,
+            position_plan=plan,
+            main_margin_delta_usdt="10",
+            account_equity_usdt="1000",
+        )
+
+        decision = check_allocation_dry_run(snapshot=snap, request=req)
+
+        assert decision.allowed is True
+        assert decision.reason == "OPEN_MAIN_ALLOWED"
+
+    def test_missing_requested_contracts_rejected(self):
+        snap = _snapshot(
+            symbols={
+                _ETH: _state(
+                    state="OPEN",
+                    side="LONG",
+                    used_layers=1,
+                    position_plan_id="plan-1",
+                    planned_main_contracts=("1", "1.15", "1.30"),
+                    base_main_contracts="1",
+                    plan_max_layers=3,
+                    main_used_margin_usdt="10",
+                    sidecar_enabled=True,
+                ),
+                _BTC: _state(),
+            },
+        )
+        req = _request(
+            action="ADD_MAIN",
+            side="LONG",
+            requested_layer=2,
+            requested_main_contracts=None,
+            main_margin_delta_usdt="15",
+            account_equity_usdt="1000",
+        )
+
+        decision = check_allocation_dry_run(snapshot=snap, request=req)
+
+        assert decision.allowed is False
+        assert decision.reason == "MISSING_REQUESTED_MAIN_CONTRACTS"
+
+    def test_invalid_requested_contracts_rejected(self):
+        snap = _snapshot(
+            symbols={
+                _ETH: _state(
+                    state="OPEN",
+                    side="LONG",
+                    used_layers=1,
+                    position_plan_id="plan-1",
+                    planned_main_contracts=("1", "1.15", "1.30"),
+                    base_main_contracts="1",
+                    plan_max_layers=3,
+                    main_used_margin_usdt="10",
+                    sidecar_enabled=True,
+                ),
+                _BTC: _state(),
+            },
+        )
+        req = _request(
+            action="ADD_MAIN",
+            side="LONG",
+            requested_layer=2,
+            requested_main_contracts="abc",
+            main_margin_delta_usdt="15",
+            account_equity_usdt="1000",
+        )
+
+        decision = check_allocation_dry_run(snapshot=snap, request=req)
+
+        assert decision.allowed is False
+        assert decision.reason == "INVALID_REQUESTED_MAIN_CONTRACTS"
+
+    def test_mismatched_requested_contracts_rejected(self):
+        snap = _snapshot(
+            symbols={
+                _ETH: _state(
+                    state="OPEN",
+                    side="LONG",
+                    used_layers=1,
+                    position_plan_id="plan-1",
+                    planned_main_contracts=("1", "1.15", "1.30"),
+                    base_main_contracts="1",
+                    plan_max_layers=3,
+                    main_used_margin_usdt="10",
+                    sidecar_enabled=True,
+                ),
+                _BTC: _state(),
+            },
+        )
+        req = _request(
+            action="ADD_MAIN",
+            side="LONG",
+            requested_layer=2,
+            requested_main_contracts="1.20",
+            main_margin_delta_usdt="15",
+            account_equity_usdt="1000",
+        )
+
+        decision = check_allocation_dry_run(snapshot=snap, request=req)
+
+        assert decision.allowed is False
+        assert decision.reason == "ADD_MAIN_CONTRACT_MISMATCH"
+        assert "requested_main_contracts=1.20" in decision.message
+        assert "expected_main_contracts=1.15" in decision.message
+
+    def test_missing_expected_layer_contracts_rejected(self):
+        snap = _snapshot(
+            symbols={
+                _ETH: _state(
+                    state="OPEN",
+                    side="LONG",
+                    used_layers=1,
+                    position_plan_id="plan-1",
+                    planned_main_contracts=("1",),
+                    base_main_contracts="1",
+                    plan_max_layers=3,
+                    main_used_margin_usdt="10",
+                    sidecar_enabled=True,
+                ),
+                _BTC: _state(),
+            },
+        )
+        req = _request(
+            action="ADD_MAIN",
+            side="LONG",
+            requested_layer=2,
+            requested_main_contracts="1.15",
+            main_margin_delta_usdt="15",
+            account_equity_usdt="1000",
+        )
+
+        decision = check_allocation_dry_run(snapshot=snap, request=req)
+
+        assert decision.allowed is False
+        assert decision.reason == "MISSING_EXPECTED_MAIN_CONTRACTS"
 
 
 # ===================================================================
