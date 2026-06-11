@@ -139,7 +139,10 @@ class MarketExitManager:
     async def _cleanup_after_market_exit(self) -> None:
         t = self.trader
         try:
-            await self.trader.cancel_existing_reduce_only_orders()
+            try:
+                await self.trader.cancel_existing_reduce_only_orders(phase="market_exit_runner")
+            except TypeError:
+                await self.trader.cancel_existing_reduce_only_orders()
         except Exception:
             logger.warning("MARKET_EXIT_CLEANUP | cleanup=cancel_reduce_only_tp_failed")
         if t.near_tp_protective_sl_order_id:

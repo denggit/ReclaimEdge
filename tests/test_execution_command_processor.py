@@ -421,6 +421,53 @@ class TestExecutionCommandProcessor(unittest.IsolatedAsyncioTestCase):
         # When result is None and contracts=0, failure handler rolls back state without halting
         self.assertEqual(len(journal.errors), 1)
 
+    async def test_worker_prioritizes_market_exit_runner_over_update_tp(self) -> None:
+        execution_queue: asyncio.Queue[TradeCommand] = asyncio.Queue(maxsize=1000)
+        strategy = three_stage_strategy("LONG")
+        update_command = make_command(1_000, "UPDATE_TP", snapshot=strategy.state)
+        exit_command = make_command(1_001, "MARKET_EXIT_RUNNER", snapshot=strategy.state)
+        await execution_queue.put(update_command)
+        await execution_queue.put(exit_command)
+
+        execution_state = ExecutionState("pos-1", 100.0, pending_order_count=2)
+        trader = FakeTrader()
+        journal = FakeJournal()
+
+        task = asyncio.create_task(
+            execution_worker(
+                execution_queue=execution_queue,
+                state_lock=asyncio.Lock(),
+                execution_state=execution_state,
+                account_snapshot=AccountSnapshot(long_position(), 1000.0, 1000.0, 0.0, 0, 1),
+                trader=trader,  # type: ignore[arg-type]
+                strategy=strategy,
+                journal=journal,  # type: ignore[arg-type]
+                state_store=FakeStateStore(),  # type: ignore[arg-type]
+                email_sender=FakeEmailSender(),  # type: ignore[arg-type]
+                backlog_log_seconds=999,
+            )
+        )
+        await asyncio.wait_for(execution_queue.join(), timeout=1)
+        task.cancel()
+        with __import__("contextlib").suppress(asyncio.CancelledError):
+            await task
+
+        self.assertEqual(trader.executed_intents[0].intent_type, "MARKET_EXIT_RUNNER")
+        reorder_events = [e for e in journal.events if e[0] == "TRADE_COMMAND_PRIORITY_REORDERED"]
+        self.assertEqual(len(reorder_events), 1)
+
+    async def test_market_exit_runner_allowed_during_full_halt(self) -> None:
+        execution_state = ExecutionState(
+            "pos-1", 100.0, trading_halted=True, halt_reason="execution_failure_live_position"
+        )
+        trader = FakeTrader()
+        processor, _, _, _ = make_processor(execution_state=execution_state, trader=trader)
+
+        result = await processor.process(make_command(1_000, "MARKET_EXIT_RUNNER"))
+
+        self.assertIsNotNone(result)
+        self.assertEqual(trader.executed_intents[0].intent_type, "MARKET_EXIT_RUNNER")
+
     # ── dirty post-TP1 SL guard ──────────────────────────────────────────
 
     async def test_dirty_post_tp1_sl_guard_blocks_command(self) -> None:
@@ -633,6 +680,153 @@ class TestExecutionCommandProcessor(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(strategy.state.tp_order_id, "tp-1000")
         self.assertEqual(len(journal.tp_updates), 1)
         self.assertGreaterEqual(len(state_store.saved), 1)
+
+    async def test_stale_update_tp_result_journals_and_preserves_existing_tp(self) -> None:
+        strategy = three_stage_strategy("LONG")
+        strategy.state.tp_order_id = "old-tp"
+        strategy.state.tp_order_ids = ["old-tp"]
+        execution_state = ExecutionState("pos-1", 100.0)
+        trader = FakeTrader()
+        journal = FakeJournal()
+        state_store = FakeStateStore()
+
+        async def execute_stale(trade_intent: TradeIntent) -> LiveTradeResult:
+            return LiveTradeResult(
+                ok=True,
+                action="UPDATE_TP",
+                order_id=None,
+                tp_order_id=None,
+                contracts="0.71",
+                tp_price="101.00",
+                message="stale_tp_update_skipped_net_reduced",
+                entry_filled=False,
+                tp_ok=True,
+            )
+
+        trader.execute_intent = execute_stale  # type: ignore[method-assign]
+        processor, _, _, _ = make_processor(
+            execution_state=execution_state,
+            strategy=strategy,
+            trader=trader,
+            journal=journal,
+            state_store=state_store,
+        )
+        intent = TradeIntent(
+            **{
+                **make_intent(1_000, "UPDATE_TP").__dict__,
+                "managed_core_contracts": "1.41",
+            }
+        )
+
+        result = await processor.process(
+            TradeCommand(intent, copy.deepcopy(strategy.state), 1_000, 0.0, 0, "test")
+        )
+
+        self.assertIsNotNone(result)
+        self.assertFalse(execution_state.trading_halted)
+        self.assertEqual(strategy.state.tp_order_id, "old-tp")
+        stale_events = [e for e in journal.events if e[0] == "STALE_TP_UPDATE_SKIPPED_NET_REDUCED"]
+        self.assertEqual(len(stale_events), 1)
+
+    async def test_update_tp_partial_success_persists_tp_id_before_sl_failure(self) -> None:
+        strategy = three_stage_strategy("LONG")
+        execution_state = ExecutionState("pos-1", 100.0)
+        trader = FakeTrader()
+        journal = FakeJournal()
+        state_store = FakeStateStore()
+
+        async def execute_with_partial_success(trade_intent: TradeIntent) -> LiveTradeResult:
+            callback = getattr(trader, "_on_tp_order_placed_after_place", None)
+            self.assertIsNotNone(callback)
+            await callback(
+                intent=trade_intent,
+                label="final",
+                contracts=Decimal("1.00"),
+                price=trade_intent.tp_price,
+                order_id="tp-new",
+                placed_order_ids=("tp-new",),
+            )
+            return LiveTradeResult(
+                ok=False,
+                action="UPDATE_TP",
+                order_id=None,
+                tp_order_id="tp-new",
+                contracts="1",
+                tp_price="110.00",
+                message="trend_runner_protective_sl_failed: 51280",
+                entry_filled=False,
+                tp_ok=True,
+                tp_order_ids=("tp-new",),
+                protective_sl_ok=False,
+            )
+
+        trader.execute_intent = execute_with_partial_success  # type: ignore[method-assign]
+        processor, _, _, _ = make_processor(
+            execution_state=execution_state,
+            strategy=strategy,
+            trader=trader,
+            journal=journal,
+            state_store=state_store,
+        )
+
+        result = await processor.process(make_command(1_000, "UPDATE_TP", snapshot=strategy.state))
+
+        self.assertIsNotNone(result)
+        self.assertEqual(strategy.state.tp_order_id, "tp-new")
+        self.assertEqual(state_store.saved[-1].tp_order_id, "tp-new")
+        persisted = [e for e in journal.events if e[0] == "TP_ORDER_ID_PERSISTED_AFTER_PLACE"]
+        self.assertEqual(len(persisted), 1)
+
+    async def test_update_tp_invalid_runner_sl_old_sl_active_journals_no_halt(self) -> None:
+        strategy = three_stage_strategy("LONG")
+        execution_state = ExecutionState("pos-1", 100.0)
+        trader = FakeTrader()
+        journal = FakeJournal()
+
+        async def execute_invalid_old_sl(trade_intent: TradeIntent) -> LiveTradeResult:
+            return LiveTradeResult(
+                ok=True,
+                action="UPDATE_TP",
+                order_id=None,
+                tp_order_id="tp-new",
+                contracts="1",
+                tp_price="110.00",
+                message="trend_runner_sl_update_skipped_invalid_but_old_sl_active",
+                entry_filled=False,
+                tp_ok=True,
+                tp_order_ids=("tp-new",),
+                protective_sl_order_id="old-sl",
+                protective_sl_price="1670.00",
+                protective_sl_ok=True,
+            )
+
+        trader.execute_intent = execute_invalid_old_sl  # type: ignore[method-assign]
+        processor, _, _, _ = make_processor(
+            execution_state=execution_state,
+            strategy=strategy,
+            trader=trader,
+            journal=journal,
+        )
+        intent = TradeIntent(
+            **{
+                **make_intent(1_000, "UPDATE_TP").__dict__,
+                "trend_runner_active": True,
+                "trend_runner_sl_price": 1679.22,
+                "trend_runner_sl_order_id": "old-sl",
+            }
+        )
+
+        result = await processor.process(
+            TradeCommand(intent, copy.deepcopy(strategy.state), 1_000, 0.0, 0, "test")
+        )
+
+        self.assertIsNotNone(result)
+        self.assertFalse(execution_state.trading_halted)
+        events = [
+            e for e in journal.events
+            if e[0] == "TREND_RUNNER_SL_UPDATE_SKIPPED_INVALID_BUT_OLD_SL_ACTIVE"
+        ]
+        self.assertEqual(len(events), 1)
 
     async def test_update_tp_middle_runner_journal_append(self) -> None:
         """UPDATE_TP with middle_runner_active appends MIDDLE_RUNNER_TP_UPDATED."""

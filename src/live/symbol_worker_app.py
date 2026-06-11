@@ -598,6 +598,8 @@ class SymbolWorkerApp:
                 startup_position=startup_position,
                 trader=trader,
                 journal=journal,
+                strategy=strategy,
+                state_store=state_store,
             )
             await startup_order_recovery.apply_sidecar_startup_recovery(
                 strategy=strategy,

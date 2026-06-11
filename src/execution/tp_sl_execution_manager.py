@@ -49,7 +49,7 @@ class TpSlExecutionManager:
     # cancel / protect helpers for replace_take_profit
     # ------------------------------------------------------------------
 
-    async def _cancel_existing_take_profit_orders_for_intent(self, intent: TradeIntent) -> None:
+    async def _cancel_existing_take_profit_orders_for_intent(self, intent: TradeIntent) -> bool:
         return await self.core_tp._cancel_existing_take_profit_orders_for_intent(intent)
 
     async def _cancel_stale_runner_protective_stops_for_degrade(self, intent: TradeIntent) -> None:
@@ -188,7 +188,7 @@ class TpSlExecutionManager:
     # cancel reduce-only orders
     # ------------------------------------------------------------------
 
-    async def cancel_existing_reduce_only_orders(self) -> None:
+    async def cancel_existing_reduce_only_orders(self, *, phase: str = "normal_cancel") -> bool:
         t = self.trader
         orders = await t.fetch_pending_orders()
         protected_order_ids = set(getattr(t, "_protected_reduce_only_order_ids", set()) or set())
@@ -201,15 +201,27 @@ class TpSlExecutionManager:
                 continue
             ord_id = item.get("ordId")
             if not ord_id:
-                raise RuntimeError("reduce_only_order_identity_unknown")
+                return self._handle_reduce_only_identity_unknown(
+                    phase=phase,
+                    orders=orders,
+                    action_taken="skip_risky_cancel_missing_order_id",
+                )
             ord_id = str(ord_id)
             if ord_id in protected_order_ids:
                 logger.info("Protected reduce-only order skipped | ordId=%s", ord_id)
                 continue
             if managed_order_ids and ord_id not in managed_order_ids:
-                raise RuntimeError("reduce_only_order_identity_unknown")
+                return self._handle_reduce_only_identity_unknown(
+                    phase=phase,
+                    orders=orders,
+                    action_taken="skip_risky_cancel_unmanaged_order",
+                )
             if not managed_order_ids and not allow_unmanaged:
-                raise RuntimeError("reduce_only_order_identity_unknown")
+                return self._handle_reduce_only_identity_unknown(
+                    phase=phase,
+                    orders=orders,
+                    action_taken="skip_risky_cancel_no_managed_identity",
+                )
             try:
                 await t.request("POST", "/api/v5/trade/cancel-order", order_specs.build_cancel_order_body(
                     inst_id=t.symbol,
@@ -218,6 +230,64 @@ class TpSlExecutionManager:
                 logger.info("Canceled existing reduce-only order | ordId=%s", ord_id)
             except Exception:
                 logger.exception("Failed to cancel existing reduce-only order | ordId=%s", ord_id)
+        return True
+
+    def _handle_reduce_only_identity_unknown(
+        self,
+        *,
+        phase: str,
+        orders: list[dict[str, Any]],
+        action_taken: str,
+    ) -> bool:
+        t = self.trader
+        if phase in {"startup_reconcile", "update_tp", "market_exit_runner"}:
+            known_order_ids = [
+                str(item.get("ordId"))
+                for item in orders
+                if item.get("instId") == t.symbol and item.get("ordId")
+            ]
+            unknown_summary = [
+                {
+                    "instId": item.get("instId"),
+                    "side": item.get("side"),
+                    "ordId": item.get("ordId"),
+                    "px": item.get("px"),
+                    "sz": item.get("sz"),
+                }
+                for item in orders
+                if item.get("instId") == t.symbol and str(item.get("reduceOnly", "")).lower() == "true"
+            ]
+            logger.warning(
+                "REDUCE_ONLY_ORDER_IDENTITY_UNKNOWN_DEGRADED | symbol=%s phase=%s candidate_count=%s known_order_ids=%s unknown_order_summary=%s action_taken=%s no_halt=true",
+                t.symbol,
+                phase,
+                len(unknown_summary),
+                known_order_ids,
+                unknown_summary,
+                action_taken,
+            )
+            callback = getattr(t, "_on_reduce_only_identity_unknown_degraded", None)
+            if callable(callback):
+                try:
+                    maybe_awaitable = callback(
+                        phase=phase,
+                        candidate_count=len(unknown_summary),
+                        known_order_ids=tuple(known_order_ids),
+                        unknown_order_summary=tuple(unknown_summary),
+                        action_taken=action_taken,
+                    )
+                    if hasattr(maybe_awaitable, "send"):
+                        logger.debug(
+                            "REDUCE_ONLY_ORDER_IDENTITY_UNKNOWN_DEGRADED | async callback scheduled by caller"
+                        )
+                except Exception:
+                    logger.exception(
+                        "REDUCE_ONLY_ORDER_IDENTITY_UNKNOWN_DEGRADED_CALLBACK_FAILED | symbol=%s phase=%s",
+                        t.symbol,
+                        phase,
+                    )
+            return False
+        raise RuntimeError("reduce_only_order_identity_unknown")
 
     # ------------------------------------------------------------------
     # sidecar fixed TP

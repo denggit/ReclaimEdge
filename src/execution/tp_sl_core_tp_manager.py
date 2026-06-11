@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import os
 from decimal import Decimal
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from src.execution import middle_bucket_split_size as _split_size
 from src.execution import order_specs
 from src.execution.trader import LiveTradeResult
+from src.position_management.runner.sl_validation import validate_runner_protective_sl_price
 from src.position_management.middle_bucket_split_state import (
     MIDDLE_BUCKET_SPLIT_DISABLED_ORDER_PLACEMENT_FAILED_FALLBACK_FINAL,
 )
@@ -171,8 +172,6 @@ class CoreTakeProfitManager:
                 "failed to fetch position and no managed_core_contracts",
             )
 
-        t.position_contracts = core_contracts_for_tp
-
         if net_contracts_for_sl <= 0:
             return LiveTradeResult(
                 False,
@@ -186,6 +185,29 @@ class CoreTakeProfitManager:
 
         # Sanity check: core cannot exceed net (only when there is a net position)
         if managed_core_contracts is not None and core_contracts_for_tp > net_contracts_for_sl:
+            if intent.intent_type == "UPDATE_TP" and net_contracts_for_sl > 0:
+                logger.warning(
+                    "STALE_TP_UPDATE_SKIPPED_NET_REDUCED | symbol=%s side=%s intent_type=%s core=%s net=%s avg_entry=%s current_price=%s position_id=%s reason=managed_core_contracts_exceeds_net_position no_halt=true no_order_cancel=true no_new_tp=true",
+                    getattr(t, "symbol", ""),
+                    intent.side,
+                    intent.intent_type,
+                    t.decimal_to_str(core_contracts_for_tp),
+                    t.decimal_to_str(net_contracts_for_sl),
+                    getattr(intent, "avg_entry_price", None),
+                    getattr(intent, "price", None),
+                    getattr(intent, "position_id", None),
+                )
+                return LiveTradeResult(
+                    True,
+                    intent.intent_type,
+                    None,
+                    None,
+                    t.decimal_to_str(net_contracts_for_sl),
+                    t.price_to_str(intent.tp_price),
+                    "stale_tp_update_skipped_net_reduced",
+                    entry_filled=False,
+                    tp_ok=True,
+                )
             raise RuntimeError(
                 f"managed_core_contracts_exceeds_net_position "
                 f"core={t.decimal_to_str(core_contracts_for_tp)} net={t.decimal_to_str(net_contracts_for_sl)}"
@@ -202,7 +224,22 @@ class CoreTakeProfitManager:
                 "no core position for TP",
             )
 
-        await self.trader._cancel_existing_take_profit_orders_for_intent(intent)
+        t.position_contracts = core_contracts_for_tp
+
+        cancel_ok = await self.trader._cancel_existing_take_profit_orders_for_intent(intent)
+        if cancel_ok is False:
+            return LiveTradeResult(
+                True,
+                intent.intent_type,
+                None,
+                t.tp_order_id,
+                t.decimal_to_str(core_contracts_for_tp),
+                t.price_to_str(intent.tp_price),
+                "reduce_only_order_identity_unknown_update_tp_skipped",
+                entry_filled=False,
+                tp_ok=True,
+                tp_order_ids=tuple(self._split_order_ids(t.tp_order_id)),
+            )
         await self.trader._cancel_stale_runner_protective_stops_for_degrade(intent)
 
         specs, split_disabled_reason = self._build_take_profit_order_specs(intent)
@@ -301,6 +338,85 @@ class CoreTakeProfitManager:
                 and trend_runner_sl_price is not None
         ):
             old_sl_order_id = getattr(intent, "trend_runner_sl_order_id", None) or t.trend_runner_sl_order_id
+            current_price = Decimal(str(getattr(intent, "price", 0) or 0))
+            new_sl_decimal = Decimal(str(trend_runner_sl_price))
+            validation = validate_runner_protective_sl_price(
+                side=intent.side,
+                current_price=current_price,
+                new_sl_price=new_sl_decimal,
+            )
+            if not validation.valid:
+                old_sl_price = getattr(intent, "trend_runner_sl_price", None)
+                protection_state = await self._trend_runner_sl_protection_state(
+                    side=intent.side,
+                    old_sl_order_id=old_sl_order_id,
+                    old_sl_price=old_sl_price,
+                )
+                protective_sl_price_text = t.price_to_str(float(trend_runner_sl_price))
+                if protection_state == "active":
+                    logger.warning(
+                        "TREND_RUNNER_SL_UPDATE_SKIPPED_INVALID_BUT_OLD_SL_ACTIVE | symbol=%s side=%s current_price=%s old_sl_price=%s old_sl_order_id=%s new_sl_price=%s reason=%s no_halt=true old_sl_preserved=true",
+                        getattr(t, "symbol", ""),
+                        intent.side,
+                        t.price_to_str(float(current_price)),
+                        old_sl_price,
+                        old_sl_order_id,
+                        protective_sl_price_text,
+                        validation.reason,
+                    )
+                    return LiveTradeResult(
+                        True,
+                        intent.intent_type,
+                        None,
+                        tp_order_id,
+                        t.decimal_to_str(core_contracts_for_tp),
+                        tp_price_text,
+                        "trend_runner_sl_update_skipped_invalid_but_old_sl_active",
+                        entry_filled=False,
+                        tp_ok=True,
+                        tp_order_ids=tuple(placed_order_ids),
+                        protective_sl_order_id=old_sl_order_id,
+                        protective_sl_price=str(old_sl_price or ""),
+                        protective_sl_ok=True,
+                        middle_bucket_split_executed=middle_bucket_split_executed,
+                        middle_bucket_split_disabled_reason=middle_bucket_split_disabled_reason_val,
+                        middle_bucket_split_actual_order_mode=middle_bucket_split_actual_order_mode_val,
+                    )
+                if protection_state == "absent":
+                    logger.warning(
+                        "TREND_RUNNER_SL_INVALID_NO_PROTECTION_MARKET_EXIT | symbol=%s side=%s current_price=%s new_sl_price=%s reason=%s no_sl_protection=true market_exit_runner=true",
+                        getattr(t, "symbol", ""),
+                        intent.side,
+                        t.price_to_str(float(current_price)),
+                        protective_sl_price_text,
+                        validation.reason,
+                    )
+                    return await self.trader.execute_market_exit_runner(intent)
+                logger.warning(
+                    "TREND_RUNNER_SL_UPDATE_SKIPPED_PROTECTION_UNKNOWN | symbol=%s side=%s current_price=%s new_sl_price=%s reason=%s no_halt=true action_taken=skip_invalid_sl_update",
+                    getattr(t, "symbol", ""),
+                    intent.side,
+                    t.price_to_str(float(current_price)),
+                    protective_sl_price_text,
+                    validation.reason,
+                )
+                return LiveTradeResult(
+                    True,
+                    intent.intent_type,
+                    None,
+                    tp_order_id,
+                    t.decimal_to_str(core_contracts_for_tp),
+                    tp_price_text,
+                    "trend_runner_sl_update_skipped_protection_unknown",
+                    entry_filled=False,
+                    tp_ok=True,
+                    tp_order_ids=tuple(placed_order_ids),
+                    protective_sl_price=protective_sl_price_text,
+                    protective_sl_ok=True,
+                    middle_bucket_split_executed=middle_bucket_split_executed,
+                    middle_bucket_split_disabled_reason=middle_bucket_split_disabled_reason_val,
+                    middle_bucket_split_actual_order_mode=middle_bucket_split_actual_order_mode_val,
+                )
             sl_contracts = self.trader._trend_runner_sl_contracts(intent, net_contracts_for_sl)
             sl_ok, sl_order_id, sl_message = await self.trader.place_trend_runner_protective_stop_with_retries(
                 intent.side,
@@ -413,13 +529,17 @@ class CoreTakeProfitManager:
             middle_bucket_split_actual_order_mode=middle_bucket_split_actual_order_mode_val,
         )
 
-    async def _cancel_existing_take_profit_orders_for_intent(self, intent: TradeIntent) -> None:
+    async def _cancel_existing_take_profit_orders_for_intent(self, intent: TradeIntent) -> bool:
         t = self.trader
         t._protected_reduce_only_order_ids = self.trader._protected_order_ids_from_intent(intent)
         t._managed_reduce_only_order_ids = self._split_order_ids(t.tp_order_id)
         t._allow_cancel_unmanaged_reduce_only = False
         try:
-            await self.trader.cancel_existing_reduce_only_orders()
+            try:
+                return await self.trader.cancel_existing_reduce_only_orders(phase="update_tp")
+            except TypeError:
+                await self.trader.cancel_existing_reduce_only_orders()
+                return True
         finally:
             t._protected_reduce_only_order_ids = set()
             t._managed_reduce_only_order_ids = set()
@@ -668,6 +788,47 @@ class CoreTakeProfitManager:
             trend_runner_active=bool(getattr(intent, "trend_runner_active", False)),
         )
 
+    async def _trend_runner_sl_protection_state(
+        self,
+        *,
+        side: str,
+        old_sl_order_id: str | None,
+        old_sl_price: Any,
+    ) -> str:
+        t = self.trader
+        if old_sl_order_id:
+            return "active"
+        if not hasattr(t, "fetch_pending_algo_orders"):
+            return "unknown"
+        try:
+            orders = await t.fetch_pending_algo_orders()
+        except Exception:
+            logger.exception("TREND_RUNNER_SL_PROTECTION_QUERY_FAILED | symbol=%s side=%s", getattr(t, "symbol", ""), side)
+            return "unknown"
+        close_side = "sell" if str(side).upper() == "LONG" else "buy"
+        candidates = []
+        for item in orders:
+            if item.get("instId") != getattr(t, "symbol", ""):
+                continue
+            if str(item.get("side", "")).lower() != close_side:
+                continue
+            algo_id = item.get("algoId") or item.get("ordId")
+            if not algo_id:
+                continue
+            if old_sl_price is not None:
+                raw_trigger = item.get("slTriggerPx") or item.get("triggerPx")
+                try:
+                    if raw_trigger is not None and abs(Decimal(str(raw_trigger)) - Decimal(str(old_sl_price))) > Decimal("0.01"):
+                        continue
+                except Exception:
+                    continue
+            candidates.append(item)
+        if len(candidates) == 1:
+            return "active"
+        if len(candidates) == 0:
+            return "absent"
+        return "unknown"
+
     async def _place_reduce_only_take_profit_orders(self, intent: TradeIntent,
                                                     specs: list[tuple[str, Decimal, float]]) -> list[str]:
         t = self.trader
@@ -677,6 +838,27 @@ class CoreTakeProfitManager:
             res = await t.request("POST", "/api/v5/trade/order", body)
             order_id = t.extract_order_id(res)
             placed_order_ids.append(order_id)
+            callback = getattr(t, "_on_tp_order_placed_after_place", None)
+            if callable(callback):
+                try:
+                    maybe_awaitable = callback(
+                        intent=intent,
+                        label=label,
+                        contracts=contracts,
+                        price=price,
+                        order_id=order_id,
+                        placed_order_ids=tuple(placed_order_ids),
+                    )
+                    if hasattr(maybe_awaitable, "__await__"):
+                        await maybe_awaitable
+                except Exception:
+                    logger.exception(
+                        "TP_ORDER_ID_PERSIST_FAILED_AFTER_PLACE | symbol=%s side=%s label=%s ordId=%s phase=update_tp reason=state_persist_failed no_halt=true action_taken=continue_with_order_identity_in_memory",
+                        getattr(t, "symbol", ""),
+                        intent.side,
+                        label,
+                        order_id,
+                    )
             logger.info(
                 "TP_ORDER_PLACED | label=%s side=%s tp_contracts=%s core_contracts=%s price=%s ordId=%s",
                 label,

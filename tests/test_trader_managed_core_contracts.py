@@ -207,6 +207,153 @@ class TraderManagedCoreContractsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.contracts, "10")
         self.assertEqual(placed, [("final", Decimal("10"), 3100.0)])
 
+    async def test_stale_update_tp_core_exceeds_net_skips_without_cancel_or_place(self) -> None:
+        trader = make_trader()
+        cancelled = False
+        placed = False
+
+        async def mock_fetch_snapshot():  # type: ignore[no-untyped-def]
+            return trader_module.PositionSnapshot("LONG", Decimal("0.71"), 3000.0, 0.071, Decimal("0.71"))
+
+        async def mock_cancel_existing():  # type: ignore[no-untyped-def]
+            nonlocal cancelled
+            cancelled = True
+
+        async def mock_place_tp(_intent, _specs):  # type: ignore[no-untyped-def]
+            nonlocal placed
+            placed = True
+            return ["tp-new"]
+
+        trader.fetch_position_snapshot = mock_fetch_snapshot
+        trader.cancel_existing_reduce_only_orders = mock_cancel_existing
+        trader._place_reduce_only_take_profit_orders = mock_place_tp
+
+        result = await trader.replace_take_profit(make_intent(managed_core_contracts="1.41"))
+
+        self.assertTrue(result.ok)
+        self.assertTrue(result.tp_ok)
+        self.assertEqual(result.message, "stale_tp_update_skipped_net_reduced")
+        self.assertFalse(cancelled)
+        self.assertFalse(placed)
+
+    async def test_non_update_tp_core_exceeds_net_still_raises(self) -> None:
+        trader = make_trader()
+
+        async def mock_fetch_snapshot():  # type: ignore[no-untyped-def]
+            return trader_module.PositionSnapshot("LONG", Decimal("0.71"), 3000.0, 0.071, Decimal("0.71"))
+
+        trader.fetch_position_snapshot = mock_fetch_snapshot
+
+        with self.assertRaisesRegex(RuntimeError, "managed_core_contracts_exceeds_net_position"):
+            await trader.replace_take_profit(
+                make_intent(intent_type="OPEN_LONG", managed_core_contracts="1.41")
+            )
+
+    async def test_invalid_trend_runner_sl_with_old_sl_active_skips_ok(self) -> None:
+        trader = make_trader()
+        trader.tp_order_id = "old-tp"
+        sl_place_called = False
+        cancelled = False
+
+        async def mock_fetch_snapshot():  # type: ignore[no-untyped-def]
+            return trader_module.PositionSnapshot("LONG", Decimal("1.00"), 1670.0, 0.1, Decimal("1.00"))
+
+        async def mock_cancel_existing(*args, **kwargs):  # type: ignore[no-untyped-def]
+            nonlocal cancelled
+            cancelled = True
+            return True
+
+        async def mock_place_tp(_intent, _specs):  # type: ignore[no-untyped-def]
+            return ["tp-new"]
+
+        async def mock_place_sl(*args, **kwargs):  # type: ignore[no-untyped-def]
+            nonlocal sl_place_called
+            sl_place_called = True
+            return True, "sl-new", "ok"
+
+        trader.fetch_position_snapshot = mock_fetch_snapshot
+        trader.cancel_existing_reduce_only_orders = mock_cancel_existing
+        trader._place_reduce_only_take_profit_orders = mock_place_tp
+        trader.place_trend_runner_protective_stop_with_retries = mock_place_sl
+
+        result = await trader.replace_take_profit(
+            make_intent(
+                price=1678.18,
+                trend_runner_active=True,
+                trend_runner_sl_price=1679.22,
+                trend_runner_sl_order_id="old-sl",
+                managed_core_contracts="1.00",
+            )
+        )
+
+        self.assertTrue(result.ok)
+        self.assertTrue(result.protective_sl_ok)
+        self.assertEqual(result.message, "trend_runner_sl_update_skipped_invalid_but_old_sl_active")
+        self.assertFalse(sl_place_called)
+        self.assertTrue(cancelled)
+
+    async def test_invalid_trend_runner_sl_without_old_sl_market_exits(self) -> None:
+        trader = make_trader()
+        sl_place_called = False
+        market_exit_called = False
+
+        async def mock_fetch_snapshot():  # type: ignore[no-untyped-def]
+            return trader_module.PositionSnapshot("LONG", Decimal("1.00"), 1670.0, 0.1, Decimal("1.00"))
+
+        async def mock_cancel_existing(*args, **kwargs):  # type: ignore[no-untyped-def]
+            return True
+
+        async def mock_place_tp(_intent, _specs):  # type: ignore[no-untyped-def]
+            return ["tp-new"]
+
+        async def mock_fetch_pending_algo_orders():  # type: ignore[no-untyped-def]
+            return []
+
+        async def mock_place_sl(*args, **kwargs):  # type: ignore[no-untyped-def]
+            nonlocal sl_place_called
+            sl_place_called = True
+            return True, "sl-new", "ok"
+
+        async def mock_market_exit(intent):  # type: ignore[no-untyped-def]
+            nonlocal market_exit_called
+            market_exit_called = True
+            return trader_module.LiveTradeResult(
+                True,
+                "MARKET_EXIT_RUNNER",
+                None,
+                None,
+                "1",
+                "1700.00",
+                "market_exit_order_id=exit-1",
+                reduce_filled=True,
+                near_tp_exit_all=True,
+                contracts_before="1",
+                contracts_reduced="1",
+                contracts_after="0",
+            )
+
+        trader.fetch_position_snapshot = mock_fetch_snapshot
+        trader.cancel_existing_reduce_only_orders = mock_cancel_existing
+        trader._place_reduce_only_take_profit_orders = mock_place_tp
+        trader.fetch_pending_algo_orders = mock_fetch_pending_algo_orders
+        trader.place_trend_runner_protective_stop_with_retries = mock_place_sl
+        trader.execute_market_exit_runner = mock_market_exit
+
+        result = await trader.replace_take_profit(
+            make_intent(
+                price=1678.18,
+                trend_runner_active=True,
+                trend_runner_sl_price=1679.22,
+                trend_runner_sl_order_id=None,
+                managed_core_contracts="1.00",
+            )
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.action, "MARKET_EXIT_RUNNER")
+        self.assertFalse(sl_place_called)
+        self.assertTrue(market_exit_called)
+
 
 if __name__ == "__main__":
     unittest.main()

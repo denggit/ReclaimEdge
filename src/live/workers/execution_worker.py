@@ -5,6 +5,7 @@ import time
 from typing import TYPE_CHECKING
 
 from src.execution.trader import Trader
+from src.live.command_priority import pop_next_priority_command
 from src.live import queue_helpers as live_queue_helpers
 from src.live import runtime_types as live_runtime_types
 from src.live.workers import execution_failure as execution_failure_handler
@@ -55,8 +56,25 @@ async def execution_worker(
     last_backlog_log = 0.0
     while True:
         command = await execution_queue.get()
+        reorder_result = pop_next_priority_command(command, execution_queue)
+        command = reorder_result.command
         result = None
         try:
+            if reorder_result.reordered and hasattr(journal, "append"):
+                journal.append(
+                    "TRADE_COMMAND_PRIORITY_REORDERED",
+                    {
+                        "symbol": trader.symbol,
+                        "side": getattr(command.intent, "side", None),
+                        "position_id": execution_state.current_position_id,
+                        "before_intents": list(reorder_result.before_intents),
+                        "after_intents": list(reorder_result.after_intents),
+                        "reason": "risk_reducing_intent_priority",
+                        "no_halt": True,
+                        "action_taken": "reorder_execution_command_batch",
+                    },
+                    position_id=execution_state.current_position_id,
+                )
             queue_size = execution_queue.qsize()
             level = live_queue_helpers.queue_log_level(queue_size)
             now = time.monotonic()

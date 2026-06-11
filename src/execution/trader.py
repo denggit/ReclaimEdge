@@ -317,7 +317,7 @@ class Trader:
     async def replace_take_profit(self, intent: TradeIntent) -> LiveTradeResult:
         return await self._tp_sl_manager.replace_take_profit(intent)
 
-    async def _cancel_existing_take_profit_orders_for_intent(self, intent: TradeIntent) -> None:
+    async def _cancel_existing_take_profit_orders_for_intent(self, intent: TradeIntent) -> bool:
         return await self._tp_sl_manager._cancel_existing_take_profit_orders_for_intent(intent)
 
     async def _cancel_stale_runner_protective_stops_for_degrade(self, intent: TradeIntent) -> None:
@@ -476,8 +476,8 @@ class Trader:
     def _tp_price_summary(self, specs: list[tuple[str, Decimal, float]]) -> str:
         return self._tp_sl_manager._tp_price_summary(specs)
 
-    async def cancel_existing_reduce_only_orders(self) -> None:
-        return await self._tp_sl_manager.cancel_existing_reduce_only_orders()
+    async def cancel_existing_reduce_only_orders(self, *, phase: str = "normal_cancel") -> bool:
+        return await self._tp_sl_manager.cancel_existing_reduce_only_orders(phase=phase)
 
     async def place_sidecar_market_order(self, *, side: PositionSide, eth_qty: float) -> dict[str, Any]:
         contracts = self.eth_qty_to_contracts(Decimal(str(eth_qty)))

@@ -9,6 +9,7 @@ from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any
 
 from src.execution.trader import LiveTradeResult, PositionSnapshot, Trader
+from src.live.command_priority import is_risk_reducing_intent
 from src.live import config_helpers as live_config_helpers
 from src.live import runtime_types as live_runtime_types
 from src.live.account_sync import flat_balance as live_flat_balance
@@ -287,6 +288,8 @@ class ExecutionCommandProcessor:
                 self.execution_state.trading_halted = True
                 self.execution_state.halt_reason = runner_live_helpers.THREE_STAGE_RUNTIME_DIRTY_HALT_REASON
                 self.execution_state.halt_until_ts_ms = None
+        if dirty_post_tp1_sl_blocked and is_risk_reducing_intent(command.intent.intent_type):
+            dirty_post_tp1_sl_blocked = False
         if dirty_post_tp1_sl_blocked:
             if dirty_post_tp1_sl_should_record:
                 runner_live_helpers.append_three_stage_dirty_post_tp1_event(
@@ -312,7 +315,10 @@ class ExecutionCommandProcessor:
             if self.execution_state.trading_halted:
                 halt_mode = resolve_halt_mode(self.execution_state.halt_reason)
                 allowed_intents = allowed_intents_for_halt_mode(halt_mode)
-                if command.intent.intent_type not in allowed_intents:
+                if (
+                    command.intent.intent_type not in allowed_intents
+                    and not is_risk_reducing_intent(command.intent.intent_type)
+                ):
                     logger.warning(
                         "EXECUTION_SKIPPED | reason=trading_halted halt_reason=%s halt_mode=%s intent_type=%s allowed_intents=%s side=%s tick_ts_ms=%s",
                         self.execution_state.halt_reason,
@@ -560,7 +566,7 @@ class ExecutionCommandProcessor:
                 return alignment_result
 
         # ── execute intent ───────────────────────────────────────────────
-        result = await self.trader.execute_intent(command.intent)
+        result = await self._execute_intent_with_tp_persist_callback(command)
 
         # ── G06a: commit projected snapshot after fill ──────────────────
         if precheck_result is not None and self.portfolio_allocator_enforcer is not None:
@@ -771,7 +777,27 @@ class ExecutionCommandProcessor:
             return result
 
         # ── apply result ─────────────────────────────────────────────────
-        if command.intent.intent_type == "UPDATE_TP":
+        if getattr(result, "action", None) == "MARKET_EXIT_RUNNER":
+            if command.intent.intent_type == "UPDATE_TP" and hasattr(self.journal, "append"):
+                self.journal.append(
+                    "TREND_RUNNER_SL_INVALID_NO_PROTECTION_MARKET_EXIT",
+                    {
+                        "symbol": self.trader.symbol,
+                        "side": command.intent.side,
+                        "position_id": current_position_id,
+                        "current_price": getattr(command.intent, "price", None),
+                        "new_sl_price": getattr(command.intent, "trend_runner_sl_price", None)
+                        or getattr(command.intent, "three_stage_runner_sl_price", None),
+                        "reason": "runner_sl_invalid_no_protection",
+                        "no_sl_protection": True,
+                        "market_exit_runner": True,
+                        "no_halt": True,
+                        "action_taken": "market_exit_runner",
+                    },
+                    position_id=current_position_id,
+                )
+            await self._apply_market_exit_runner_result(command, result)
+        elif command.intent.intent_type == "UPDATE_TP":
             await self._apply_update_tp_result(command, result)
         elif command.intent.intent_type == "NEAR_TP_REDUCE":
             await self._apply_near_tp_reduce_result(command, result)
@@ -781,6 +807,130 @@ class ExecutionCommandProcessor:
             await self._apply_entry_result(command, result, entry_cash_before, sidecar_plan)
 
         return result
+
+    async def _execute_intent_with_tp_persist_callback(
+        self,
+        command: live_runtime_types.TradeCommand,
+    ) -> LiveTradeResult:
+        def _journal_reduce_unknown_degraded(
+            *,
+            phase: str,
+            candidate_count: int,
+            known_order_ids: tuple[str, ...],
+            unknown_order_summary: tuple[dict, ...],
+            action_taken: str,
+        ) -> None:
+            if not hasattr(self.journal, "append"):
+                return
+            current_position_id = self.execution_state.current_position_id
+            self.journal.append(
+                "REDUCE_ONLY_ORDER_IDENTITY_UNKNOWN_DEGRADED",
+                {
+                    "symbol": self.trader.symbol,
+                    "side": command.intent.side,
+                    "position_id": current_position_id,
+                    "phase": phase,
+                    "candidate_count": candidate_count,
+                    "known_order_ids": list(known_order_ids),
+                    "unknown_order_summary": list(unknown_order_summary),
+                    "reason": "reduce_only_order_identity_unknown",
+                    "action_taken": action_taken,
+                    "no_halt": True,
+                },
+                position_id=current_position_id,
+            )
+
+        old_reduce_callback = getattr(self.trader, "_on_reduce_only_identity_unknown_degraded", None)
+        setattr(self.trader, "_on_reduce_only_identity_unknown_degraded", _journal_reduce_unknown_degraded)
+
+        if command.intent.intent_type != "UPDATE_TP":
+            try:
+                return await self.trader.execute_intent(command.intent)
+            finally:
+                if old_reduce_callback is None:
+                    with __import__("contextlib").suppress(Exception):
+                        delattr(self.trader, "_on_reduce_only_identity_unknown_degraded")
+                else:
+                    setattr(self.trader, "_on_reduce_only_identity_unknown_degraded", old_reduce_callback)
+
+        async def _persist_after_place(
+            *,
+            intent: TradeIntent,
+            label: str,
+            contracts: Decimal,
+            price: float,
+            order_id: str,
+            placed_order_ids: tuple[str, ...],
+        ) -> None:
+            placed_ids = list(placed_order_ids)
+            async with self.state_lock:
+                current_position_id = self.execution_state.current_position_id
+                cash_before_position = self.execution_state.cash_before_position
+                tp_order_id = ",".join(placed_ids)
+                self.strategy.state.tp_order_id = tp_order_id
+                self.strategy.state.tp_order_ids = list(placed_ids)
+                if getattr(intent, "trend_runner_active", False):
+                    self.strategy.state.trend_runner_tp_order_id = tp_order_id
+                strategy_state_for_save = copy.deepcopy(self.strategy.state)
+            payload = {
+                "symbol": self.trader.symbol,
+                "side": intent.side,
+                "position_id": current_position_id,
+                "tp_label": label,
+                "order_id": order_id,
+                "algo_id": None,
+                "tp_price": price,
+                "qty": (
+                    self.trader.decimal_to_str(contracts)
+                    if hasattr(self.trader, "decimal_to_str")
+                    else str(contracts)
+                ),
+                "phase": "update_tp",
+                "persisted_before_sl_update": True,
+                "reason": "tp_order_placed",
+                "no_halt": True,
+                "action_taken": "persist_tp_order_id_after_place",
+            }
+            try:
+                self.state_store.save(
+                    LiveStateStore.from_strategy_state(
+                        position_id=current_position_id,
+                        symbol=self.trader.symbol,
+                        strategy_state=strategy_state_for_save,
+                        cash_before_position=cash_before_position,
+                    )
+                )
+                if hasattr(self.journal, "append"):
+                    self.journal.append("TP_ORDER_ID_PERSISTED_AFTER_PLACE", payload, position_id=current_position_id)
+            except Exception as exc:
+                if hasattr(self.journal, "append"):
+                    self.journal.append(
+                        "TP_ORDER_ID_PERSIST_FAILED_AFTER_PLACE",
+                        {
+                            **payload,
+                            "reason": "state_persist_failed_after_tp_place",
+                            "error": str(exc),
+                            "action_taken": "keep_tp_identity_in_memory",
+                        },
+                        position_id=current_position_id,
+                    )
+                logger.exception("TP_ORDER_ID_PERSIST_FAILED_AFTER_PLACE | symbol=%s order_id=%s", self.trader.symbol, order_id)
+
+        old_callback = getattr(self.trader, "_on_tp_order_placed_after_place", None)
+        setattr(self.trader, "_on_tp_order_placed_after_place", _persist_after_place)
+        try:
+            return await self.trader.execute_intent(command.intent)
+        finally:
+            if old_callback is None:
+                with __import__("contextlib").suppress(Exception):
+                    delattr(self.trader, "_on_tp_order_placed_after_place")
+            else:
+                setattr(self.trader, "_on_tp_order_placed_after_place", old_callback)
+            if old_reduce_callback is None:
+                with __import__("contextlib").suppress(Exception):
+                    delattr(self.trader, "_on_reduce_only_identity_unknown_degraded")
+            else:
+                setattr(self.trader, "_on_reduce_only_identity_unknown_degraded", old_reduce_callback)
 
     # ── sidecar core final exit safety guard ────────────────────────────
 
@@ -1172,6 +1322,70 @@ class ExecutionCommandProcessor:
         command: live_runtime_types.TradeCommand,
         result: Any,
     ) -> None:
+        message = str(getattr(result, "message", "") or "")
+        if message == "stale_tp_update_skipped_net_reduced":
+            async with self.state_lock:
+                current_position_id = self.execution_state.current_position_id
+                cash_before_position = self.execution_state.cash_before_position
+                self.execution_state.last_order_ts_ms = command.intent.ts_ms
+                strategy_state_for_save = copy.deepcopy(self.strategy.state)
+                equity = self.account_snapshot.equity
+            managed_core_contracts = getattr(command.intent, "managed_core_contracts", None)
+            if hasattr(self.journal, "append"):
+                self.journal.append(
+                    "STALE_TP_UPDATE_SKIPPED_NET_REDUCED",
+                    {
+                        "symbol": self.trader.symbol,
+                        "side": command.intent.side,
+                        "position_id": current_position_id,
+                        "intent_type": command.intent.intent_type,
+                        "managed_core_contracts": managed_core_contracts,
+                        "net_contracts": getattr(result, "contracts", ""),
+                        "avg_entry": getattr(command.intent, "avg_entry_price", None),
+                        "current_price": getattr(command.intent, "price", None),
+                        "reason": "managed_core_contracts_exceeds_net_position",
+                        "no_halt": True,
+                        "no_order_cancel": True,
+                        "no_new_tp": True,
+                        "action_taken": "skip_stale_update_tp",
+                    },
+                    position_id=current_position_id,
+                )
+            self.journal.record_tp_update(
+                position_id=current_position_id, intent=command.intent, result=result, equity=equity
+            )
+            self.state_store.save(
+                LiveStateStore.from_strategy_state(
+                    position_id=current_position_id,
+                    symbol=self.trader.symbol,
+                    strategy_state=strategy_state_for_save,
+                    cash_before_position=cash_before_position,
+                )
+            )
+            return
+
+        if message == "reduce_only_order_identity_unknown_update_tp_skipped":
+            async with self.state_lock:
+                current_position_id = self.execution_state.current_position_id
+            if hasattr(self.journal, "append"):
+                self.journal.append(
+                    "REDUCE_ONLY_ORDER_IDENTITY_UNKNOWN_DEGRADED",
+                    {
+                        "symbol": self.trader.symbol,
+                        "side": command.intent.side,
+                        "position_id": current_position_id,
+                        "phase": "update_tp",
+                        "candidate_count": None,
+                        "known_order_ids": getattr(result, "tp_order_ids", ()),
+                        "unknown_order_summary": [],
+                        "reason": "reduce_only_order_identity_unknown",
+                        "action_taken": "skip_update_tp_preserve_existing_orders",
+                        "no_halt": True,
+                    },
+                    position_id=current_position_id,
+                )
+            return
+
         async with self.state_lock:
             current_position_id = self.execution_state.current_position_id
             cash_before_position = self.execution_state.cash_before_position
@@ -1249,6 +1463,42 @@ class ExecutionCommandProcessor:
                 position_id=current_position_id,
             )
         if getattr(command.intent, "trend_runner_active", False) and hasattr(self.journal, "append"):
+            if message == "trend_runner_sl_update_skipped_invalid_but_old_sl_active":
+                self.journal.append(
+                    "TREND_RUNNER_SL_UPDATE_SKIPPED_INVALID_BUT_OLD_SL_ACTIVE",
+                    {
+                        "symbol": self.trader.symbol,
+                        "side": command.intent.side,
+                        "position_id": current_position_id,
+                        "current_price": getattr(command.intent, "price", None),
+                        "old_sl_price": getattr(command.intent, "trend_runner_sl_price", None),
+                        "old_sl_order_id": getattr(command.intent, "trend_runner_sl_order_id", None),
+                        "old_sl_algo_id": getattr(command.intent, "trend_runner_sl_order_id", None),
+                        "new_sl_price": getattr(command.intent, "trend_runner_sl_price", None)
+                        or getattr(command.intent, "three_stage_runner_sl_price", None),
+                        "reason": "runner_sl_invalid_but_old_sl_active",
+                        "no_halt": True,
+                        "old_sl_preserved": True,
+                        "action_taken": "skip_invalid_sl_update",
+                    },
+                    position_id=current_position_id,
+                )
+            elif message == "trend_runner_sl_update_skipped_protection_unknown":
+                self.journal.append(
+                    "TREND_RUNNER_SL_UPDATE_SKIPPED_PROTECTION_UNKNOWN",
+                    {
+                        "symbol": self.trader.symbol,
+                        "side": command.intent.side,
+                        "position_id": current_position_id,
+                        "current_price": getattr(command.intent, "price", None),
+                        "new_sl_price": getattr(command.intent, "trend_runner_sl_price", None)
+                        or getattr(command.intent, "three_stage_runner_sl_price", None),
+                        "reason": "runner_sl_protection_unknown",
+                        "no_halt": True,
+                        "action_taken": "skip_invalid_sl_update",
+                    },
+                    position_id=current_position_id,
+                )
             self.journal.append(
                 "TREND_RUNNER_UPDATE",
                 {
