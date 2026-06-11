@@ -2419,6 +2419,78 @@ class TestExecutionCommandProcessorEnforce(unittest.IsolatedAsyncioTestCase):
         assert len(trader.executed) == 0
         assert execution_state.trading_halted is False
 
+    # ── G06b: position id rollback on enforce reject ──────────────────────
+
+    async def test_open_long_enforce_rejected_rolls_back_new_position_id(self) -> None:
+        """OPEN_LONG enforce rejected rolls back newly created position_id and cash_before_position."""
+        rejecting = RejectingEnforcer(reason="GLOBAL_NO_NEW_ENTRY")
+        execution_state = ExecutionState(None, None)
+        trader = FakeTrader()
+        journal = FakeJournal()
+        state_store = FakeStateStore()
+        processor, _, _, _ = make_processor(
+            execution_state=execution_state,
+            trader=trader,
+            journal=journal,
+            state_store=state_store,
+        )
+        processor.portfolio_allocator_enforcer = rejecting  # type: ignore[assignment]
+
+        command = make_command(1_000, "OPEN_LONG")
+        result = await processor.process(command)
+
+        assert result is None
+        assert len(trader.executed) == 0
+        assert execution_state.trading_halted is False
+        assert execution_state.current_position_id is None
+        assert execution_state.cash_before_position is None
+
+    async def test_add_long_enforce_rejected_keeps_existing_position_id(self) -> None:
+        """ADD_LONG enforce rejected keeps existing position_id and cash_before_position."""
+        rejecting = RejectingEnforcer(reason="GLOBAL_NO_NEW_ENTRY")
+        execution_state = ExecutionState("pos-existing", 123.45)
+        trader = FakeTrader()
+        journal = FakeJournal()
+        state_store = FakeStateStore()
+        processor, _, _, _ = make_processor(
+            execution_state=execution_state,
+            trader=trader,
+            journal=journal,
+            state_store=state_store,
+        )
+        processor.portfolio_allocator_enforcer = rejecting  # type: ignore[assignment]
+
+        command = make_command(1_000, "ADD_LONG")
+        result = await processor.process(command)
+
+        assert result is None
+        assert len(trader.executed) == 0
+        assert execution_state.current_position_id == "pos-existing"
+        assert execution_state.cash_before_position == 123.45
+
+    async def test_open_long_enforce_allowed_keeps_generated_position_id(self) -> None:
+        """OPEN_LONG enforce allowed keeps generated position_id and cash_before_position."""
+        allowing = AllowingEnforcer()
+        execution_state = ExecutionState(None, None)
+        trader = FakeTrader()
+        journal = FakeJournal()
+        state_store = FakeStateStore()
+        processor, _, _, _ = make_processor(
+            execution_state=execution_state,
+            trader=trader,
+            journal=journal,
+            state_store=state_store,
+        )
+        processor.portfolio_allocator_enforcer = allowing  # type: ignore[assignment]
+
+        command = make_command(1_000, "OPEN_LONG")
+        result = await processor.process(command)
+
+        assert result is not None
+        assert len(trader.executed) >= 1
+        assert execution_state.current_position_id is not None
+        assert execution_state.cash_before_position is not None
+
     async def test_exit_reduce_not_enforced(self) -> None:
         """19. UPDATE_TP, NEAR_TP_REDUCE, MARKET_EXIT_RUNNER: enforcer not called."""
         rejecting = RejectingEnforcer(reason="GLOBAL_NO_NEW_ENTRY")

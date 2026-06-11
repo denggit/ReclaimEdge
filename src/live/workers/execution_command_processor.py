@@ -363,6 +363,7 @@ class ExecutionCommandProcessor:
         raw_entry_command = command
         sidecar_plan: SidecarExecutionPlan | None = None
         precheck_result: "PortfolioAllocatorPrecheckResult | None" = None
+        created_position_id_for_this_command = False
         if command.intent.intent_type in {"OPEN_LONG", "OPEN_SHORT", "ADD_LONG", "ADD_SHORT"}:
             async with self.state_lock:
                 if self.execution_state.current_position_id is None:
@@ -372,6 +373,7 @@ class ExecutionCommandProcessor:
                         command.intent.ts_ms,
                     )
                     self.execution_state.cash_before_position = entry_cash_before
+                    created_position_id_for_this_command = True
                 current_position_id = self.execution_state.current_position_id
             combined_plan = build_combined_entry_intent(
                 intent=command.intent,
@@ -403,6 +405,19 @@ class ExecutionCommandProcessor:
                 position_id=current_position_id,
             )
             if precheck_result is not None and not precheck_result.allowed:
+                if created_position_id_for_this_command:
+                    async with self.state_lock:
+                        if self.execution_state.current_position_id == current_position_id:
+                            self.execution_state.current_position_id = None
+                            self.execution_state.cash_before_position = None
+                            logger.warning(
+                                "PORTFOLIO_ALLOCATOR_ENFORCE_REJECTED_POSITION_ID_ROLLED_BACK | "
+                                "symbol=%s intent_type=%s position_id=%s reason=%s",
+                                getattr(self.trader, "symbol", ""),
+                                getattr(command.intent, "intent_type", ""),
+                                current_position_id,
+                                precheck_result.reason,
+                            )
                 return None
 
             command = replace(command, intent=combined_plan.execution_intent)
