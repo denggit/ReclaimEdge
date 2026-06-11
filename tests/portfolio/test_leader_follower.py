@@ -7,6 +7,7 @@ import pytest
 
 from src.portfolio.capital_ledger import CapitalLedgerSnapshot, SymbolCapitalState
 from src.portfolio.leader_follower import (
+    LeaderFollowerConfig,
     LeaderFollowerError,
     LeaderFollowerPermissions,
     SymbolPermission,
@@ -641,3 +642,455 @@ class TestSymbolPermissionFrozen:
         )
         with pytest.raises(Exception):
             perm.permission_max_layers = 99  # type: ignore[misc]
+
+
+# ===========================================================================
+# G08c: Fixed leader mode tests
+# ===========================================================================
+
+
+class TestLeaderFollowerConfig:
+    """Tests for LeaderFollowerConfig dataclass validation."""
+
+    def test_default_is_fixed_with_eth_leader(self):
+        cfg = LeaderFollowerConfig()
+        assert cfg.leader_mode == "fixed"
+        assert cfg.fixed_leader_symbol == "ETH-USDT-SWAP"
+
+    def test_dynamic_mode_without_fixed_symbol(self):
+        cfg = LeaderFollowerConfig(leader_mode="dynamic")
+        assert cfg.leader_mode == "dynamic"
+        # fixed_leader_symbol is ignored in dynamic mode
+        assert cfg.fixed_leader_symbol is None or cfg.fixed_leader_symbol == "ETH-USDT-SWAP"
+
+    def test_dynamic_mode_with_fixed_symbol_ignored(self):
+        cfg = LeaderFollowerConfig(leader_mode="dynamic", fixed_leader_symbol="BTC-USDT-SWAP")
+        assert cfg.leader_mode == "dynamic"
+        # fixed_leader_symbol may be stored but is ignored in dynamic mode
+
+    def test_fixed_mode_with_custom_leader(self):
+        cfg = LeaderFollowerConfig(leader_mode="fixed", fixed_leader_symbol="BTC-USDT-SWAP")
+        assert cfg.leader_mode == "fixed"
+        assert cfg.fixed_leader_symbol == "BTC-USDT-SWAP"
+
+    def test_invalid_leader_mode_raises(self):
+        with pytest.raises(LeaderFollowerError, match="leader_mode"):
+            LeaderFollowerConfig(leader_mode="invalid")  # type: ignore[arg-type]
+
+    def test_missing_fixed_leader_symbol_raises(self):
+        with pytest.raises(LeaderFollowerError, match="fixed_leader_symbol"):
+            LeaderFollowerConfig(leader_mode="fixed", fixed_leader_symbol=None)
+
+    def test_empty_fixed_leader_symbol_raises(self):
+        with pytest.raises(LeaderFollowerError, match="fixed_leader_symbol"):
+            LeaderFollowerConfig(leader_mode="fixed", fixed_leader_symbol="")
+
+    def test_whitespace_only_fixed_leader_symbol_raises(self):
+        with pytest.raises(LeaderFollowerError, match="fixed_leader_symbol"):
+            LeaderFollowerConfig(leader_mode="fixed", fixed_leader_symbol="   ")
+
+    def test_fixed_leader_symbol_is_stripped(self):
+        cfg = LeaderFollowerConfig(leader_mode="fixed", fixed_leader_symbol="  ETH-USDT-SWAP  ")
+        assert cfg.fixed_leader_symbol == "ETH-USDT-SWAP"
+
+
+class TestResolveLeaderSymbolFixedMode:
+    """Tests for resolve_leader_symbol in fixed mode."""
+
+    def test_fixed_leader_active_returns_leader(self):
+        snap = _snapshot(
+            symbols={
+                _ETH: _state(state="OPEN", used_layers=1, sidecar_enabled=True),
+                _BTC: _state(state="OPEN", used_layers=5),
+            },
+        )
+        cfg = LeaderFollowerConfig(leader_mode="fixed", fixed_leader_symbol=_ETH)
+        assert resolve_leader_symbol(snap, config=cfg) == _ETH
+
+    def test_fixed_leader_at_layer5_btc_higher_still_eth_leader(self):
+        """BTC has 5 layers but ETH is fixed leader — ETH wins."""
+        snap = _snapshot(
+            symbols={
+                _ETH: _state(state="OPEN", used_layers=1, sidecar_enabled=True),
+                _BTC: _state(state="OPEN", used_layers=5),
+            },
+        )
+        cfg = LeaderFollowerConfig(leader_mode="fixed", fixed_leader_symbol=_ETH)
+        assert resolve_leader_symbol(snap, config=cfg) == _ETH
+
+    def test_fixed_leader_flat_returns_none(self):
+        """Fixed leader flat → no leader, no pressure."""
+        snap = _snapshot(
+            symbols={
+                _ETH: _state(state="FLAT", used_layers=0, sidecar_enabled=True),
+                _BTC: _state(state="OPEN", used_layers=5),
+            },
+        )
+        cfg = LeaderFollowerConfig(leader_mode="fixed", fixed_leader_symbol=_ETH)
+        assert resolve_leader_symbol(snap, config=cfg) is None
+
+    def test_fixed_leader_used_layers_zero_returns_none(self):
+        """Fixed leader OPEN but used_layers=0 → is_active returns False → no leader."""
+        snap = _snapshot(
+            symbols={
+                _ETH: _state(state="OPEN", used_layers=0, sidecar_enabled=True),
+                _BTC: _state(state="OPEN", used_layers=5),
+            },
+        )
+        cfg = LeaderFollowerConfig(leader_mode="fixed", fixed_leader_symbol=_ETH)
+        assert resolve_leader_symbol(snap, config=cfg) is None
+
+    def test_fixed_leader_flat_btc_cannot_become_leader(self):
+        """Even if BTC has layer5, it can't become leader in fixed mode."""
+        snap = _snapshot(
+            symbols={
+                _ETH: _state(state="FLAT", used_layers=0, sidecar_enabled=True),
+                _BTC: _state(state="OPEN", used_layers=5),
+            },
+        )
+        cfg = LeaderFollowerConfig(leader_mode="fixed", fixed_leader_symbol=_ETH)
+        assert resolve_leader_symbol(snap, config=cfg) is None
+
+    def test_fixed_leader_symbol_not_in_snapshot_raises(self):
+        snap = _snapshot(
+            symbols={
+                _BTC: _state(state="OPEN", used_layers=1),
+            },
+        )
+        cfg = LeaderFollowerConfig(leader_mode="fixed", fixed_leader_symbol=_ETH)
+        with pytest.raises(LeaderFollowerError, match=_ETH):
+            resolve_leader_symbol(snap, config=cfg)
+
+    def test_dynamic_mode_still_works_with_config(self):
+        """Explicit dynamic config → original behavior."""
+        snap = _snapshot(
+            symbols={
+                _ETH: _state(state="OPEN", used_layers=3, sidecar_enabled=True),
+                _BTC: _state(state="OPEN", used_layers=1),
+            },
+        )
+        cfg = LeaderFollowerConfig(leader_mode="dynamic")
+        assert resolve_leader_symbol(snap, config=cfg) == _ETH
+
+    def test_config_none_defaults_to_dynamic(self):
+        """config=None → backward compatible dynamic behavior."""
+        snap = _snapshot(
+            symbols={
+                _ETH: _state(state="OPEN", used_layers=3, sidecar_enabled=True),
+                _BTC: _state(state="OPEN", used_layers=1),
+            },
+        )
+        assert resolve_leader_symbol(snap) == _ETH
+
+    def test_fixed_leader_flat_sticky_ignored(self):
+        """Sticky leader_symbol in snapshot is ignored in fixed mode."""
+        snap = _snapshot(
+            leader_symbol=_BTC,
+            symbols={
+                _ETH: _state(state="FLAT", used_layers=0, sidecar_enabled=True),
+                _BTC: _state(state="OPEN", used_layers=5),
+            },
+        )
+        cfg = LeaderFollowerConfig(leader_mode="fixed", fixed_leader_symbol=_ETH)
+        assert resolve_leader_symbol(snap, config=cfg) is None
+
+
+class TestBuildLeaderFollowerPermissionsFixedMode:
+    """Tests for build_leader_follower_permissions in fixed mode."""
+
+    def _fixed_cfg(self, leader: str = _ETH) -> LeaderFollowerConfig:
+        return LeaderFollowerConfig(leader_mode="fixed", fixed_leader_symbol=leader)
+
+    # -- fixed leader flat (no pressure) ----------------------------------------
+
+    def test_fixed_leader_flat_all_neutral(self):
+        """ETH flat → no leader → all NEUTRAL with FIXED_LEADER_FLAT_NO_PRESSURE."""
+        snap = _snapshot(
+            symbols={
+                _ETH: _state(state="FLAT", used_layers=0, sidecar_enabled=True),
+                _BTC: _state(state="OPEN", used_layers=2, plan_max_layers=8),
+            },
+        )
+        result = build_leader_follower_permissions(snap, config=self._fixed_cfg())
+
+        assert result.leader_symbol is None
+
+        eth = result.permission_for(_ETH)
+        assert eth.role == "NEUTRAL"
+        assert eth.reason == "FIXED_LEADER_FLAT_NO_PRESSURE"
+        assert eth.permission_max_layers == 8
+        assert eth.no_new_entry is False
+
+        btc = result.permission_for(_BTC)
+        assert btc.role == "NEUTRAL"
+        assert btc.reason == "FIXED_LEADER_FLAT_NO_PRESSURE"
+        assert btc.permission_max_layers == 8
+        assert btc.no_new_entry is False
+
+    # -- fixed leader active below pressure (layer 1-2) ------------------------
+
+    def test_fixed_leader_layer1_follower_no_restrictions(self):
+        """ETH layer1 → ETH LEADER, BTC FOLLOWER but no restrictions."""
+        snap = _snapshot(
+            symbols={
+                _ETH: _state(state="OPEN", used_layers=1, sidecar_enabled=True, plan_max_layers=8),
+                _BTC: _state(state="OPEN", used_layers=0, plan_max_layers=8),
+            },
+        )
+        result = build_leader_follower_permissions(snap, config=self._fixed_cfg())
+
+        assert result.leader_symbol == _ETH
+
+        eth = result.permission_for(_ETH)
+        assert eth.role == "LEADER"
+        assert eth.leader_used_layers == 1
+        assert eth.permission_max_layers == 8
+        assert eth.add_gap_multiplier == "1.0"
+        assert eth.add_freeze_multiplier == "1.0"
+        assert eth.reason == "FIXED_LEADER_ACTIVE_BELOW_PRESSURE"
+
+        btc = result.permission_for(_BTC)
+        assert btc.role == "FOLLOWER"
+        assert btc.leader_symbol == _ETH
+        assert btc.permission_max_layers == 8  # plan_max_layers, not capped
+        assert btc.add_gap_multiplier == "1.0"
+        assert btc.add_freeze_multiplier == "1.0"
+        assert btc.no_new_entry is False
+        assert btc.no_add_layer is False
+        assert btc.no_new_sidecar_leg is False
+        assert btc.reason == "FIXED_LEADER_ACTIVE_BELOW_PRESSURE"
+
+    def test_fixed_leader_layer2_follower_no_restrictions(self):
+        """ETH layer2 → ETH LEADER, BTC FOLLOWER but no restrictions."""
+        snap = _snapshot(
+            symbols={
+                _ETH: _state(state="OPEN", used_layers=2, sidecar_enabled=True, plan_max_layers=8),
+                _BTC: _state(state="OPEN", used_layers=1, plan_max_layers=8),
+            },
+        )
+        result = build_leader_follower_permissions(snap, config=self._fixed_cfg())
+
+        assert result.leader_symbol == _ETH
+
+        btc = result.permission_for(_BTC)
+        assert btc.role == "FOLLOWER"
+        assert btc.permission_max_layers == 8
+        assert btc.no_new_entry is False
+        assert btc.reason == "FIXED_LEADER_ACTIVE_BELOW_PRESSURE"
+
+    # -- fixed leader layer3 (caution) -----------------------------------------
+
+    def test_fixed_leader_layer3_follower_caution(self):
+        """ETH layer3 → BTC max_layers=5, gap/freeze=1.5."""
+        snap = _snapshot(
+            symbols={
+                _ETH: _state(state="OPEN", used_layers=3, sidecar_enabled=True, plan_max_layers=8),
+                _BTC: _state(state="OPEN", used_layers=1, plan_max_layers=8),
+            },
+        )
+        result = build_leader_follower_permissions(snap, config=self._fixed_cfg())
+
+        assert result.leader_symbol == _ETH
+
+        btc = result.permission_for(_BTC)
+        assert btc.role == "FOLLOWER"
+        assert btc.permission_max_layers == 5  # min(8, 5)
+        assert btc.add_gap_multiplier == "1.5"
+        assert btc.add_freeze_multiplier == "1.5"
+        assert btc.no_new_entry is False
+        assert btc.no_add_layer is False
+        assert btc.no_new_sidecar_leg is False
+        assert btc.reason == "FIXED_LEADER_LAYER_3_FOLLOWER_CAUTION"
+
+    # -- fixed leader layer4 (defensive) ---------------------------------------
+
+    def test_fixed_leader_layer4_follower_defensive(self):
+        """ETH layer4 → BTC max_layers=4, gap/freeze=2.0."""
+        snap = _snapshot(
+            symbols={
+                _ETH: _state(state="OPEN", used_layers=4, sidecar_enabled=True, plan_max_layers=8),
+                _BTC: _state(state="OPEN", used_layers=1, plan_max_layers=8),
+            },
+        )
+        result = build_leader_follower_permissions(snap, config=self._fixed_cfg())
+
+        btc = result.permission_for(_BTC)
+        assert btc.role == "FOLLOWER"
+        assert btc.permission_max_layers == 4
+        assert btc.add_gap_multiplier == "2.0"
+        assert btc.add_freeze_multiplier == "2.0"
+        assert btc.no_new_entry is False
+        assert btc.no_add_layer is False
+        assert btc.no_new_sidecar_leg is False
+        assert btc.reason == "FIXED_LEADER_LAYER_4_FOLLOWER_DEFENSIVE"
+
+    # -- fixed leader layer5+ (no new risk) ------------------------------------
+
+    def test_fixed_leader_layer5_follower_no_new_risk(self):
+        """ETH layer5 → BTC flat, all blocked."""
+        snap = _snapshot(
+            symbols={
+                _ETH: _state(state="OPEN", used_layers=5, sidecar_enabled=True, plan_max_layers=8),
+                _BTC: _state(state="FLAT", used_layers=0, plan_max_layers=8),
+            },
+        )
+        result = build_leader_follower_permissions(snap, config=self._fixed_cfg())
+
+        btc = result.permission_for(_BTC)
+        assert btc.role == "FOLLOWER"
+        assert btc.permission_max_layers == 0  # min(8, 0)
+        assert btc.add_gap_multiplier == "2.0"
+        assert btc.add_freeze_multiplier == "2.0"
+        assert btc.no_new_entry is True
+        assert btc.no_add_layer is True
+        assert btc.no_new_sidecar_leg is True
+        assert btc.reason == "FIXED_LEADER_LAYER_5_PLUS_FOLLOWER_NO_NEW_RISK"
+
+    def test_fixed_leader_layer6_follower_open_no_new_risk(self):
+        """ETH layer6 → BTC has 2 layers, frozen at 2."""
+        snap = _snapshot(
+            symbols={
+                _ETH: _state(state="OPEN", used_layers=6, sidecar_enabled=True, plan_max_layers=8),
+                _BTC: _state(state="OPEN", used_layers=2, plan_max_layers=8),
+            },
+        )
+        result = build_leader_follower_permissions(snap, config=self._fixed_cfg())
+
+        btc = result.permission_for(_BTC)
+        assert btc.role == "FOLLOWER"
+        assert btc.permission_max_layers == 2  # min(8, 2)
+        assert btc.no_new_entry is True
+        assert btc.no_add_layer is True
+        assert btc.no_new_sidecar_leg is True
+        assert btc.reason == "FIXED_LEADER_LAYER_5_PLUS_FOLLOWER_NO_NEW_RISK"
+
+    # -- BTC cannot become leader or restrict ETH ------------------------------
+
+    def test_btc_layer5_eth_flat_btc_not_leader(self):
+        """BTC layer5, ETH flat → no leader, BTC does NOT become leader."""
+        snap = _snapshot(
+            symbols={
+                _ETH: _state(state="FLAT", used_layers=0, sidecar_enabled=True),
+                _BTC: _state(state="OPEN", used_layers=5, plan_max_layers=8),
+            },
+        )
+        result = build_leader_follower_permissions(snap, config=self._fixed_cfg())
+
+        assert result.leader_symbol is None
+        assert result.permission_for(_ETH).role == "NEUTRAL"
+        assert result.permission_for(_BTC).role == "NEUTRAL"
+
+    def test_btc_layer5_eth_layer1_btc_cannot_restrict_eth(self):
+        """BTC layer5, ETH layer1 → ETH is leader, BTC is follower.
+        BTC does NOT restrict ETH despite having 5 layers."""
+        snap = _snapshot(
+            symbols={
+                _ETH: _state(state="OPEN", used_layers=1, sidecar_enabled=True, plan_max_layers=8),
+                _BTC: _state(state="OPEN", used_layers=5, plan_max_layers=8),
+            },
+        )
+        result = build_leader_follower_permissions(snap, config=self._fixed_cfg())
+
+        assert result.leader_symbol == _ETH
+
+        # ETH is leader, not restricted
+        eth = result.permission_for(_ETH)
+        assert eth.role == "LEADER"
+        assert eth.permission_max_layers == 8
+        assert eth.no_new_entry is False
+
+        # BTC is follower with no restrictions (leader only at layer1)
+        btc = result.permission_for(_BTC)
+        assert btc.role == "FOLLOWER"
+        assert btc.permission_max_layers == 8
+        assert btc.no_new_entry is False
+        assert btc.reason == "FIXED_LEADER_ACTIVE_BELOW_PRESSURE"
+
+    # -- plan_max_layers respected ---------------------------------------------
+
+    def test_permission_respects_plan_max_layers_3_fixed(self):
+        """follower plan_max_layers=3, leader layer3 → permission=3 (not 5)."""
+        snap = _snapshot(
+            symbols={
+                _ETH: _state(state="OPEN", used_layers=3, sidecar_enabled=True),
+                _BTC: _state(state="OPEN", used_layers=0, plan_max_layers=3),
+            },
+        )
+        result = build_leader_follower_permissions(snap, config=self._fixed_cfg())
+        btc = result.permission_for(_BTC)
+        assert btc.permission_max_layers == 3  # min(3, 5) = 3
+
+    # -- fixed leader with BTC as leader (non-default config) ------------------
+
+    def test_fixed_leader_btc_active_eth_follower(self):
+        """If BTC is fixed leader and active, ETH is follower."""
+        snap = _snapshot(
+            symbols={
+                _ETH: _state(state="OPEN", used_layers=2, sidecar_enabled=True, plan_max_layers=8),
+                _BTC: _state(state="OPEN", used_layers=3, plan_max_layers=8),
+            },
+        )
+        cfg = LeaderFollowerConfig(leader_mode="fixed", fixed_leader_symbol=_BTC)
+        result = build_leader_follower_permissions(snap, config=cfg)
+
+        assert result.leader_symbol == _BTC
+        assert result.permission_for(_BTC).role == "LEADER"
+        assert result.permission_for(_ETH).role == "FOLLOWER"
+        assert result.permission_for(_ETH).reason == "FIXED_LEADER_LAYER_3_FOLLOWER_CAUTION"
+
+    # -- dynamic mode unchanged with explicit config ---------------------------
+
+    def test_dynamic_mode_unchanged_with_explicit_config(self):
+        """With explicit dynamic config, behavior matches old (no config) behavior."""
+        snap = _snapshot(
+            symbols={
+                _ETH: _state(state="OPEN", used_layers=3, sidecar_enabled=True),
+                _BTC: _state(state="OPEN", used_layers=1, plan_max_layers=8),
+            },
+        )
+        cfg = LeaderFollowerConfig(leader_mode="dynamic")
+        result_with = build_leader_follower_permissions(snap, config=cfg)
+        result_without = build_leader_follower_permissions(snap)
+
+        assert result_with.leader_symbol == result_without.leader_symbol
+        for inst_id in (_ETH, _BTC):
+            p1 = result_with.permission_for(inst_id)
+            p2 = result_without.permission_for(inst_id)
+            assert p1.role == p2.role
+            assert p1.permission_max_layers == p2.permission_max_layers
+            assert p1.add_gap_multiplier == p2.add_gap_multiplier
+            assert p1.add_freeze_multiplier == p2.add_freeze_multiplier
+            assert p1.no_new_entry == p2.no_new_entry
+            assert p1.no_add_layer == p2.no_add_layer
+            assert p1.no_new_sidecar_leg == p2.no_new_sidecar_leg
+            # reason may differ (NO_PRESSURE_LEADER vs LEADER_LAYER_...)
+
+    def test_config_none_dynamic_behavior(self):
+        """config=None → backward compatible (all existing tests valid)."""
+        # This test replicates test_first_pressure_leader from dynamic tests
+        snap = _snapshot(
+            symbols={
+                _ETH: _state(state="OPEN", used_layers=3, sidecar_enabled=True),
+                _BTC: _state(state="OPEN", used_layers=1),
+            },
+        )
+        result = build_leader_follower_permissions(snap)  # config=None
+
+        assert result.leader_symbol == _ETH
+        assert result.permission_for(_ETH).role == "LEADER"
+        assert result.permission_for(_BTC).role == "FOLLOWER"
+        assert result.permission_for(_BTC).reason == "LEADER_LAYER_3_FOLLOWER_CAUTION"
+
+    # -- sticky leader is ignored in fixed mode -------------------------------
+
+    def test_sticky_leader_ignored_in_fixed_mode(self):
+        """In fixed mode, snapshot.leader_symbol is ignored."""
+        snap = _snapshot(
+            leader_symbol=_BTC,
+            symbols={
+                _ETH: _state(state="OPEN", used_layers=1, sidecar_enabled=True),
+                _BTC: _state(state="OPEN", used_layers=5),
+            },
+        )
+        result = build_leader_follower_permissions(snap, config=self._fixed_cfg())
+        assert result.leader_symbol == _ETH  # not BTC (sticky ignored)

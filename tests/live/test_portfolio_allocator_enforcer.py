@@ -445,7 +445,12 @@ class TestEnforcerAddMain(unittest.IsolatedAsyncioTestCase):
             PortfolioAllocatorEnforceConfig,
             PortfolioAllocatorEnforcer,
         )
-        config = PortfolioAllocatorEnforceConfig(enabled=True)
+        from src.portfolio.leader_follower import LeaderFollowerConfig
+
+        config = PortfolioAllocatorEnforceConfig(
+            enabled=True,
+            leader_follower_config=LeaderFollowerConfig(leader_mode="dynamic"),
+        )
         enforcer = PortfolioAllocatorEnforcer.from_config(config)
 
         # ETH has used_layers=1, leader is BTC with max_layers=1

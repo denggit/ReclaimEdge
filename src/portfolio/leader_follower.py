@@ -14,6 +14,8 @@ G03: Leader/Follower Permission —— 动态限制 follower 最大层数、加�
   - 写入 CapitalLedger
   - 下单 / OKX 请求 / 邮件发送 / 策略信号判断
   - live path 接入（G04 才会接入 allocator dry-run）
+
+G08c: 新增 fixed leader mode —— 固定 leader symbol，保护实盘 ETH。
 """
 
 from __future__ import annotations
@@ -37,6 +39,48 @@ class LeaderFollowerError(ValueError):
 # ---------------------------------------------------------------------------
 
 SymbolRole = Literal["LEADER", "FOLLOWER", "NEUTRAL"]
+
+LeaderMode = Literal["dynamic", "fixed"]
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class LeaderFollowerConfig:
+    """Immutable configuration for leader/follower mode.
+
+    Attributes
+    ----------
+    leader_mode:
+        ``"dynamic"`` — first symbol reaching layer3 becomes leader (current behaviour).
+        ``"fixed"`` — *fixed_leader_symbol* is the only leader when active.
+    fixed_leader_symbol:
+        The inst_id of the fixed leader.  Required when *leader_mode* is
+        ``"fixed"``; ignored (may be ``None``) for ``"dynamic"`` mode.
+    """
+
+    leader_mode: LeaderMode = "fixed"
+    fixed_leader_symbol: str | None = "ETH-USDT-SWAP"
+
+    _VALID_MODES: tuple[str, ...] = ("dynamic", "fixed")
+
+    def __post_init__(self) -> None:
+        if self.leader_mode not in self._VALID_MODES:
+            raise LeaderFollowerError(
+                f"leader_mode must be 'dynamic' or 'fixed', got {self.leader_mode!r}"
+            )
+        if self.leader_mode == "fixed":
+            if not self.fixed_leader_symbol or not self.fixed_leader_symbol.strip():
+                raise LeaderFollowerError(
+                    "fixed_leader_symbol must be a non-empty string when "
+                    "leader_mode='fixed'"
+                )
+            # Strip and re-set via object.__setattr__ (frozen dataclass)
+            stripped = self.fixed_leader_symbol.strip()
+            if stripped != self.fixed_leader_symbol:
+                object.__setattr__(self, "fixed_leader_symbol", stripped)
 
 # ---------------------------------------------------------------------------
 # DTOs
@@ -100,10 +144,14 @@ def is_active_symbol_state(state: SymbolCapitalState) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def resolve_leader_symbol(snapshot: CapitalLedgerSnapshot) -> str | None:
+def resolve_leader_symbol(
+    snapshot: CapitalLedgerSnapshot,
+    *,
+    config: LeaderFollowerConfig | None = None,
+) -> str | None:
     """Determine the current leader symbol from *snapshot*.
 
-    Rules (in order):
+    **Dynamic mode** (``config is None`` or ``config.leader_mode == "dynamic"``):
 
     1. **Sticky leader**: If ``snapshot.leader_symbol`` is set AND that symbol
        is still active with ``used_layers >= 3``, keep it.
@@ -113,11 +161,41 @@ def resolve_leader_symbol(snapshot: CapitalLedgerSnapshot) -> str | None:
     3. **No leader**: If no active symbol has ``used_layers >= 3``, return
        ``None``.
 
+    **Fixed mode** (``config.leader_mode == "fixed"``):
+
+    1. ``config.fixed_leader_symbol`` **must** exist in ``snapshot.symbols``,
+       otherwise ``LeaderFollowerError`` is raised.
+    2. If the fixed leader is active (``is_active_symbol_state``) **and**
+       ``used_layers > 0``, return ``config.fixed_leader_symbol``.
+    3. If the fixed leader is flat or ``used_layers == 0``, return ``None``
+       (no pressure — the fixed leader does not restrict followers when flat).
+
     Returns
     -------
     str or None
         The ``inst_id`` of the leader, or ``None`` if no leader exists.
+
+    Raises
+    ------
+    LeaderFollowerError
+        If fixed mode and *fixed_leader_symbol* is not in *snapshot.symbols*.
     """
+    cfg = config if config is not None else LeaderFollowerConfig(leader_mode="dynamic")
+
+    # ── Fixed mode ──────────────────────────────────────────────────────────
+    if cfg.leader_mode == "fixed":
+        fixed_symbol = cfg.fixed_leader_symbol  # type: ignore[assignment]
+        if fixed_symbol not in snapshot.symbols:
+            raise LeaderFollowerError(
+                f"fixed_leader_symbol '{fixed_symbol}' not found in "
+                f"snapshot symbols: {list(snapshot.symbols)}"
+            )
+        fixed_state = snapshot.symbols[fixed_symbol]
+        if is_active_symbol_state(fixed_state) and fixed_state.used_layers > 0:
+            return fixed_symbol
+        return None
+
+    # ── Dynamic mode (original logic) ──────────────────────────────────────
     # 1. Sticky leader check
     if snapshot.leader_symbol is not None:
         leader_state = snapshot.symbols.get(snapshot.leader_symbol)
@@ -148,13 +226,25 @@ def resolve_leader_symbol(snapshot: CapitalLedgerSnapshot) -> str | None:
 
 def build_leader_follower_permissions(
     snapshot: CapitalLedgerSnapshot,
+    config: LeaderFollowerConfig | None = None,
 ) -> LeaderFollowerPermissions:
     """Build leader/follower permissions for every symbol in *snapshot*.
+
+    Parameters
+    ----------
+    snapshot:
+        Current capital ledger snapshot.
+    config:
+        Leader/follower config.  ``None`` defaults to dynamic mode for backward
+        compatibility.
 
     Returns a ``LeaderFollowerPermissions`` containing a ``SymbolPermission``
     for each symbol in ``snapshot.symbols``.
     """
-    leader_symbol = resolve_leader_symbol(snapshot)
+    cfg = config if config is not None else LeaderFollowerConfig(leader_mode="dynamic")
+    is_fixed = cfg.leader_mode == "fixed"
+
+    leader_symbol = resolve_leader_symbol(snapshot, config=cfg)
     leader_state = (
         snapshot.symbols[leader_symbol] if leader_symbol is not None else None
     )
@@ -164,6 +254,11 @@ def build_leader_follower_permissions(
     for inst_id, state in snapshot.symbols.items():
         if leader_symbol is None:
             # -- No leader → every symbol is NEUTRAL -------------------------
+            reason = (
+                "FIXED_LEADER_FLAT_NO_PRESSURE"
+                if is_fixed
+                else "NO_PRESSURE_LEADER"
+            )
             permissions[inst_id] = SymbolPermission(
                 inst_id=inst_id,
                 role="NEUTRAL",
@@ -175,10 +270,15 @@ def build_leader_follower_permissions(
                 no_new_entry=False,
                 no_add_layer=False,
                 no_new_sidecar_leg=False,
-                reason="NO_PRESSURE_LEADER",
+                reason=reason,
             )
         elif inst_id == leader_symbol:
             # -- Leader -------------------------------------------------------
+            reason = (
+                "FIXED_LEADER_ACTIVE_BELOW_PRESSURE"
+                if is_fixed and leader_state.used_layers < 3
+                else "ACTIVE_LEADER"
+            )
             permissions[inst_id] = SymbolPermission(
                 inst_id=inst_id,
                 role="LEADER",
@@ -190,12 +290,34 @@ def build_leader_follower_permissions(
                 no_new_entry=False,
                 no_add_layer=False,
                 no_new_sidecar_leg=False,
-                reason="ACTIVE_LEADER",
+                reason=reason,
             )
         else:
             # -- Follower — restrictions depend on leader layer count --------
             leader_layers = leader_state.used_layers
-            if leader_layers == 3:
+
+            if is_fixed and leader_layers < 3:
+                # Fixed leader active but below pressure threshold →
+                # followers are NEUTRAL-like with no restrictions.
+                permissions[inst_id] = _follower_permission(
+                    inst_id=inst_id,
+                    leader_symbol=leader_symbol,
+                    leader_used_layers=leader_layers,
+                    state=state,
+                    cap=state.plan_max_layers,
+                    gap="1.0",
+                    freeze="1.0",
+                    no_new_entry=False,
+                    no_add_layer=False,
+                    no_new_sidecar_leg=False,
+                    reason="FIXED_LEADER_ACTIVE_BELOW_PRESSURE",
+                )
+            elif leader_layers == 3:
+                reason = (
+                    "FIXED_LEADER_LAYER_3_FOLLOWER_CAUTION"
+                    if is_fixed
+                    else "LEADER_LAYER_3_FOLLOWER_CAUTION"
+                )
                 permissions[inst_id] = _follower_permission(
                     inst_id=inst_id,
                     leader_symbol=leader_symbol,
@@ -207,9 +329,14 @@ def build_leader_follower_permissions(
                     no_new_entry=False,
                     no_add_layer=False,
                     no_new_sidecar_leg=False,
-                    reason="LEADER_LAYER_3_FOLLOWER_CAUTION",
+                    reason=reason,
                 )
             elif leader_layers == 4:
+                reason = (
+                    "FIXED_LEADER_LAYER_4_FOLLOWER_DEFENSIVE"
+                    if is_fixed
+                    else "LEADER_LAYER_4_FOLLOWER_DEFENSIVE"
+                )
                 permissions[inst_id] = _follower_permission(
                     inst_id=inst_id,
                     leader_symbol=leader_symbol,
@@ -221,9 +348,14 @@ def build_leader_follower_permissions(
                     no_new_entry=False,
                     no_add_layer=False,
                     no_new_sidecar_leg=False,
-                    reason="LEADER_LAYER_4_FOLLOWER_DEFENSIVE",
+                    reason=reason,
                 )
             else:  # leader_layers >= 5
+                reason = (
+                    "FIXED_LEADER_LAYER_5_PLUS_FOLLOWER_NO_NEW_RISK"
+                    if is_fixed
+                    else "LEADER_LAYER_5_PLUS_FOLLOWER_NO_NEW_RISK"
+                )
                 permissions[inst_id] = _follower_permission(
                     inst_id=inst_id,
                     leader_symbol=leader_symbol,
@@ -235,7 +367,7 @@ def build_leader_follower_permissions(
                     no_new_entry=True,
                     no_add_layer=True,
                     no_new_sidecar_leg=True,
-                    reason="LEADER_LAYER_5_PLUS_FOLLOWER_NO_NEW_RISK",
+                    reason=reason,
                 )
 
     return LeaderFollowerPermissions(

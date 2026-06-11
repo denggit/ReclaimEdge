@@ -23,6 +23,7 @@ from typing import Literal, Mapping
 
 from src.portfolio.capital_ledger import CapitalLedgerSnapshot, SymbolCapitalState
 from src.portfolio.leader_follower import (
+    LeaderFollowerConfig,
     LeaderFollowerPermissions,
     SymbolPermission,
     apply_permission_overlay,
@@ -153,12 +154,25 @@ def check_allocation_dry_run(
     *,
     snapshot: CapitalLedgerSnapshot,
     request: AllocationCheckRequest,
+    leader_follower_config: LeaderFollowerConfig | None = None,
 ) -> AllocationDecision:
     """Core entry point for G04: check an allocation intent against *snapshot*.
+
+    Parameters
+    ----------
+    snapshot:
+        Current capital ledger snapshot.
+    request:
+        Allocation check request.
+    leader_follower_config:
+        Leader/follower config.  ``None`` defaults to dynamic mode for backward
+        compatibility.
 
     Returns an ``AllocationDecision``.  This function is pure — it never
     reads/writes files or calls external services.
     """
+    cfg = leader_follower_config  # local alias for passing through
+
     # -- Exit / reduce: always allowed ----------------------------------------
     if is_exit_or_reduce_action(request.action):
         return _decision(
@@ -194,13 +208,13 @@ def check_allocation_dry_run(
         )
 
     # Build permissions (needed for OPEN_MAIN, ADD_MAIN, OPEN_SIDECAR)
-    permissions = build_leader_follower_permissions(snapshot)
+    permissions = build_leader_follower_permissions(snapshot, config=cfg)
 
     # -- Dispatch by action ---------------------------------------------------
     if request.action == "OPEN_MAIN":
-        return _check_open_main(snapshot, request, main_delta, permissions)
+        return _check_open_main(snapshot, request, main_delta, permissions, cfg)
     elif request.action == "ADD_MAIN":
-        return _check_add_main(snapshot, request, main_delta, permissions)
+        return _check_add_main(snapshot, request, main_delta, permissions, cfg)
     elif request.action == "OPEN_SIDECAR":
         return _check_open_sidecar(snapshot, request, permissions)
 
@@ -224,6 +238,7 @@ def _check_open_main(
     request: AllocationCheckRequest,
     main_delta: Decimal,
     permissions: LeaderFollowerPermissions,
+    leader_follower_config: LeaderFollowerConfig | None = None,
 ) -> AllocationDecision:
     """Validate an OPEN_MAIN request."""
     inst_id = request.inst_id
@@ -393,7 +408,7 @@ def _check_open_main(
 
     # Resolve leader on the projected snapshot (without sticky leader bias),
     # then sync it back into the projected snapshot.
-    projected_leader = resolve_leader_symbol(projected)
+    projected_leader = resolve_leader_symbol(projected, config=leader_follower_config)
     projected = _replace_leader_symbol(projected, projected_leader)
 
     return _decision(
@@ -416,6 +431,7 @@ def _check_add_main(
     request: AllocationCheckRequest,
     main_delta: Decimal,
     permissions: LeaderFollowerPermissions,
+    leader_follower_config: LeaderFollowerConfig | None = None,
 ) -> AllocationDecision:
     """Validate an ADD_MAIN request."""
     inst_id = request.inst_id
@@ -589,7 +605,7 @@ def _check_add_main(
     projected = _replace_symbol_state(snapshot, inst_id, new_state)
 
     # Resolve leader on the projected snapshot, then sync it back.
-    projected_leader = resolve_leader_symbol(projected)
+    projected_leader = resolve_leader_symbol(projected, config=leader_follower_config)
     projected = _replace_leader_symbol(projected, projected_leader)
 
     return _decision(

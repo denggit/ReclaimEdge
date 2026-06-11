@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -29,6 +29,7 @@ from src.portfolio import (
     AllocationDecision,
     CapitalLedger,
     CapitalLedgerSnapshot,
+    LeaderFollowerConfig,
     check_allocation_dry_run,
     create_main_position_plan,
 )
@@ -51,6 +52,24 @@ logger = get_logger(__name__)
 _ENV_PREFIX = "PORTFOLIO_ALLOCATOR"
 _DEFAULT_GLOBAL_MAIN_CAP_PCT = "0.70"
 _DEFAULT_LOCK_TIMEOUT_SECONDS = 1.0
+
+# G08c: leader/follower fixed mode env keys
+_ENV_LEADER_MODE = "PORTFOLIO_LEADER_MODE"
+_ENV_FIXED_LEADER_SYMBOL = "PORTFOLIO_FIXED_LEADER_SYMBOL"
+
+
+def _leader_follower_config_from_env() -> LeaderFollowerConfig:
+    """Build a ``LeaderFollowerConfig`` from environment variables."""
+    from src.portfolio.leader_follower import LeaderFollowerConfig as LFC
+
+    mode_raw = os.getenv(_ENV_LEADER_MODE, "fixed").strip().lower()
+    fixed_symbol_raw = os.getenv(_ENV_FIXED_LEADER_SYMBOL, "").strip()
+    if fixed_symbol_raw:
+        return LFC(leader_mode=mode_raw, fixed_leader_symbol=fixed_symbol_raw)  # type: ignore[arg-type]
+    elif mode_raw == "fixed":
+        return LFC(leader_mode="fixed")
+    else:
+        return LFC(leader_mode="dynamic")
 
 _ENTRY_INTENT_TYPES: frozenset[str] = frozenset({
     "OPEN_LONG",
@@ -80,6 +99,9 @@ class PortfolioAllocatorEnforceConfig:
     ledger_path: Path = Path("runtime/portfolio/capital_ledger.json")
     lock_path: Path = Path("runtime/portfolio/capital_ledger.lock")
     lock_timeout_seconds: float = _DEFAULT_LOCK_TIMEOUT_SECONDS
+    leader_follower_config: LeaderFollowerConfig = field(
+        default_factory=_leader_follower_config_from_env,
+    )
 
     @classmethod
     def from_env(
@@ -126,6 +148,7 @@ class PortfolioAllocatorEnforceConfig:
             ledger_path=Path(ledger_path_str) if ledger_path_str else _rd / "portfolio" / "capital_ledger.json",
             lock_path=Path(lock_path_str) if lock_path_str else _rd / "portfolio" / "capital_ledger.lock",
             lock_timeout_seconds=lock_timeout_seconds,
+            leader_follower_config=_leader_follower_config_from_env(),
         )
 
 
@@ -293,6 +316,7 @@ class PortfolioAllocatorEnforcer:
 
             main_decision = check_allocation_dry_run(
                 snapshot=snapshot, request=main_request,
+                leader_follower_config=self.config.leader_follower_config,
             )
 
             # ── Journal main precheck ────────────────────────────────────
@@ -356,6 +380,7 @@ class PortfolioAllocatorEnforcer:
                 )
                 sidecar_decision = check_allocation_dry_run(
                     snapshot=projected, request=sidecar_request,
+                    leader_follower_config=self.config.leader_follower_config,
                 )
 
                 # ── Journal sidecar precheck ────────────────────────────

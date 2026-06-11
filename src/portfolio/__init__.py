@@ -32,8 +32,10 @@ from src.portfolio.capital_ledger import (
 )
 
 from src.portfolio.leader_follower import (
+    LeaderFollowerConfig,
     LeaderFollowerError,
     LeaderFollowerPermissions,
+    LeaderMode,
     SymbolPermission,
     apply_permission_overlay,
     build_leader_follower_permissions,
@@ -62,8 +64,10 @@ __all__ = [
     "PositionPlanError",
     "create_main_position_plan",
     # -- G03 --
+    "LeaderFollowerConfig",
     "LeaderFollowerError",
     "LeaderFollowerPermissions",
+    "LeaderMode",
     "SymbolPermission",
     "apply_permission_overlay",
     "build_leader_follower_permissions",
