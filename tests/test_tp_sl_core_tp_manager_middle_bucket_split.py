@@ -638,6 +638,85 @@ class TestClassifierDirect:
         assert reason is None
         assert mode == "PARTIAL_SPLIT_FAST_PENDING"
 
+    # ── Partial consumed fallback → tp2_outer only → FINAL_FULL_SIZE ───
+
+    def test_fast_consumed_slow_too_small_tp2_only_fallback(self):
+        """fast consumed + slow too small → only tp2_outer → FINAL_FULL_SIZE.
+
+        When partial consumed produces only tp2_outer because the remaining
+        unconsumed leg is too small, the classifier must return
+        FINAL_FULL_SIZE, NOT POST_TP1_TP2_ONLY.
+        """
+        executed, reason, mode = self._classify(
+            split_was_active=True,
+            labels=["tp2_outer"],
+            reason="MIDDLE_BUCKET_SPLIT_FAST_CONSUMED_SLOW_TOO_SMALL",
+        )
+        assert executed is False, (
+            "Partial consumed tp2-only fallback must NOT be classified as executed"
+        )
+        assert reason == "MIDDLE_BUCKET_SPLIT_FAST_CONSUMED_SLOW_TOO_SMALL"
+        assert mode == "FINAL_FULL_SIZE", (
+            f"Expected FINAL_FULL_SIZE, got: {mode}"
+        )
+
+    def test_slow_consumed_fast_too_small_tp2_only_fallback(self):
+        """slow consumed + fast too small → only tp2_outer → FINAL_FULL_SIZE.
+
+        When partial consumed produces only tp2_outer because the remaining
+        unconsumed leg is too small, the classifier must return
+        FINAL_FULL_SIZE, NOT POST_TP1_TP2_ONLY.
+        """
+        executed, reason, mode = self._classify(
+            split_was_active=True,
+            labels=["tp2_outer"],
+            reason="MIDDLE_BUCKET_SPLIT_SLOW_CONSUMED_FAST_TOO_SMALL",
+        )
+        assert executed is False, (
+            "Partial consumed tp2-only fallback must NOT be classified as executed"
+        )
+        assert reason == "MIDDLE_BUCKET_SPLIT_SLOW_CONSUMED_FAST_TOO_SMALL"
+        assert mode == "FINAL_FULL_SIZE", (
+            f"Expected FINAL_FULL_SIZE, got: {mode}"
+        )
+
+    def test_fast_consumed_invalid_remaining_ratio_tp2_only_fallback(self):
+        """fast consumed + invalid remaining ratio → FINAL_FULL_SIZE."""
+        executed, reason, mode = self._classify(
+            split_was_active=True,
+            labels=["tp2_outer"],
+            reason="MIDDLE_BUCKET_SPLIT_FAST_CONSUMED_INVALID_REMAINING_RATIO",
+        )
+        assert executed is False
+        assert reason == "MIDDLE_BUCKET_SPLIT_FAST_CONSUMED_INVALID_REMAINING_RATIO"
+        assert mode == "FINAL_FULL_SIZE"
+
+    def test_slow_consumed_invalid_remaining_ratio_tp2_only_fallback(self):
+        """slow consumed + invalid remaining ratio → FINAL_FULL_SIZE."""
+        executed, reason, mode = self._classify(
+            split_was_active=True,
+            labels=["tp2_outer"],
+            reason="MIDDLE_BUCKET_SPLIT_SLOW_CONSUMED_INVALID_REMAINING_RATIO",
+        )
+        assert executed is False
+        assert reason == "MIDDLE_BUCKET_SPLIT_SLOW_CONSUMED_INVALID_REMAINING_RATIO"
+        assert mode == "FINAL_FULL_SIZE"
+
+    def test_tp2_only_without_partial_consumed_reason_stays_post_tp1(self):
+        """labels={"tp2_outer"} without partial consumed reason stays POST_TP1_TP2_ONLY.
+
+        This is the normal post-TP1 phase — the classifier must NOT
+        degrade it to FINAL_FULL_SIZE.
+        """
+        executed, reason, mode = self._classify(
+            split_was_active=True,
+            labels=["tp2_outer"],
+            reason=None,
+        )
+        assert executed is True
+        assert reason is None
+        assert mode == "POST_TP1_TP2_ONLY"
+
 
 # ── Integration: Three-Stage TP2/runner too small → FINAL_FULL_SIZE ────
 
@@ -1312,3 +1391,143 @@ class TestPartialSplitOrderSpecsClassifierIntegration:
             f"Expected PARTIAL_SPLIT_FAST_PENDING, got: {mode}"
         )
         assert mode != "FINAL_FULL_SIZE"
+
+    # ── Round-trip: partial consumed fallback → tp2_outer only ──────────
+
+    def test_fast_consumed_slow_too_small_fallback_round_trip(self):
+        """fast_consumed=True, slow leg too small → only tp2_outer + fallback_reason
+        → classifier returns FINAL_FULL_SIZE."""
+        from src.execution.order_specs import (
+            MiddleBucketSplitOrderInput,
+            build_take_profit_order_specs,
+        )
+        from decimal import Decimal
+
+        # fast_total is large (will be consumed), slow_total is tiny (too small)
+        middle_bucket_ratio = Decimal("0.50")
+        fast_total = Decimal("0.49")
+        slow_total = Decimal("0.01")
+        split = MiddleBucketSplitOrderInput(
+            active=True,
+            fast_price=1638.73,
+            slow_price=1634.46,
+            effective_price=1637.0,
+            middle_bucket_ratio=middle_bucket_ratio,
+            fast_ratio_of_bucket=Decimal("0.98"),
+            slow_ratio_of_bucket=Decimal("0.02"),
+            fast_total_ratio=fast_total,
+            slow_total_ratio=slow_total,
+            fast_consumed=True,
+            slow_consumed=False,
+        )
+        decision = build_take_profit_order_specs(
+            position_contracts=Decimal("10"),
+            min_contracts=Decimal("1"),
+            contract_precision=Decimal("1"),
+            tp_plan="THREE_STAGE_RUNNER",
+            final_tp_price=1609.44,
+            partial_tp_price=None,
+            partial_tp_ratio=Decimal("0"),
+            partial_tp_consumed=False,
+            middle_runner_active=False,
+            three_stage_tp1_price=1637.0,
+            three_stage_tp2_price=1609.44,
+            three_stage_tp1_ratio=Decimal("0.70"),
+            three_stage_tp2_ratio=Decimal("0.20"),
+            three_stage_tp1_consumed=False,
+            three_stage_tp2_consumed=False,
+            three_stage_runner_ratio=Decimal("0.10"),
+            middle_bucket_split=split,
+        )
+
+        labels = [s.label for s in decision.specs]
+        assert labels == ["tp2_outer"], (
+            f"Expected fallback to only tp2_outer, got: {labels}"
+        )
+        assert decision.fallback_reason is not None
+        assert "FAST_CONSUMED_SLOW_TOO_SMALL" in decision.fallback_reason, (
+            f"Expected FAST_CONSUMED_SLOW_TOO_SMALL in reason, got: {decision.fallback_reason}"
+        )
+
+        # Classify: labels + fallback_reason → FINAL_FULL_SIZE
+        executed, reason, mode = self._classify(
+            split_was_active=True,
+            labels=labels,
+            reason=decision.fallback_reason,
+        )
+        assert executed is False, (
+            "Partial consumed tp2-only fallback must be classified as non-split"
+        )
+        assert reason == "MIDDLE_BUCKET_SPLIT_FAST_CONSUMED_SLOW_TOO_SMALL"
+        assert mode == "FINAL_FULL_SIZE", (
+            f"Expected FINAL_FULL_SIZE, got: {mode}"
+        )
+
+    def test_slow_consumed_fast_too_small_fallback_round_trip(self):
+        """slow_consumed=True, fast leg too small → only tp2_outer + fallback_reason
+        → classifier returns FINAL_FULL_SIZE."""
+        from src.execution.order_specs import (
+            MiddleBucketSplitOrderInput,
+            build_take_profit_order_specs,
+        )
+        from decimal import Decimal
+
+        # slow_total is large (will be consumed), fast_total is tiny (too small)
+        middle_bucket_ratio = Decimal("0.50")
+        fast_total = Decimal("0.01")
+        slow_total = Decimal("0.49")
+        split = MiddleBucketSplitOrderInput(
+            active=True,
+            fast_price=1638.73,
+            slow_price=1634.46,
+            effective_price=1637.0,
+            middle_bucket_ratio=middle_bucket_ratio,
+            fast_ratio_of_bucket=Decimal("0.02"),
+            slow_ratio_of_bucket=Decimal("0.98"),
+            fast_total_ratio=fast_total,
+            slow_total_ratio=slow_total,
+            fast_consumed=False,
+            slow_consumed=True,
+        )
+        decision = build_take_profit_order_specs(
+            position_contracts=Decimal("10"),
+            min_contracts=Decimal("1"),
+            contract_precision=Decimal("1"),
+            tp_plan="THREE_STAGE_RUNNER",
+            final_tp_price=1609.44,
+            partial_tp_price=None,
+            partial_tp_ratio=Decimal("0"),
+            partial_tp_consumed=False,
+            middle_runner_active=False,
+            three_stage_tp1_price=1637.0,
+            three_stage_tp2_price=1609.44,
+            three_stage_tp1_ratio=Decimal("0.70"),
+            three_stage_tp2_ratio=Decimal("0.20"),
+            three_stage_tp1_consumed=False,
+            three_stage_tp2_consumed=False,
+            three_stage_runner_ratio=Decimal("0.10"),
+            middle_bucket_split=split,
+        )
+
+        labels = [s.label for s in decision.specs]
+        assert labels == ["tp2_outer"], (
+            f"Expected fallback to only tp2_outer, got: {labels}"
+        )
+        assert decision.fallback_reason is not None
+        assert "SLOW_CONSUMED_FAST_TOO_SMALL" in decision.fallback_reason, (
+            f"Expected SLOW_CONSUMED_FAST_TOO_SMALL in reason, got: {decision.fallback_reason}"
+        )
+
+        # Classify: labels + fallback_reason → FINAL_FULL_SIZE
+        executed, reason, mode = self._classify(
+            split_was_active=True,
+            labels=labels,
+            reason=decision.fallback_reason,
+        )
+        assert executed is False, (
+            "Partial consumed tp2-only fallback must be classified as non-split"
+        )
+        assert reason == "MIDDLE_BUCKET_SPLIT_SLOW_CONSUMED_FAST_TOO_SMALL"
+        assert mode == "FINAL_FULL_SIZE", (
+            f"Expected FINAL_FULL_SIZE, got: {mode}"
+        )

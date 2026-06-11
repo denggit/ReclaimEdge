@@ -21,6 +21,16 @@ logger = get_logger(__name__)
 
 # ── Label-based classifier ──────────────────────────────────────────────
 
+_PARTIAL_CONSUMED_TP2_ONLY_FALLBACK_REASONS = {
+    "MIDDLE_BUCKET_SPLIT_FAST_CONSUMED_SLOW_TOO_SMALL",
+    "MIDDLE_BUCKET_SPLIT_FAST_CONSUMED_TP2_RUNNER_TOO_SMALL",
+    "MIDDLE_BUCKET_SPLIT_SLOW_CONSUMED_FAST_TOO_SMALL",
+    "MIDDLE_BUCKET_SPLIT_SLOW_CONSUMED_TP2_RUNNER_TOO_SMALL",
+    "MIDDLE_BUCKET_SPLIT_FAST_CONSUMED_INVALID_REMAINING_RATIO",
+    "MIDDLE_BUCKET_SPLIT_SLOW_CONSUMED_INVALID_REMAINING_RATIO",
+    "MIDDLE_BUCKET_SPLIT_PARTIAL_CONSUMED_UNEXPECTED_STATE",
+}
+
 
 def _classify_middle_bucket_split_actual_order_mode(
     *,
@@ -71,7 +81,19 @@ def _classify_middle_bucket_split_actual_order_mode(
         return False, reason, "UNSPLIT_MIDDLE_BUCKET"
 
     # ── POST_TP1_TP2_ONLY: Three-Stage after TP1 consumed, only TP2 order remains ─
+    # IMPORTANT: partial consumed fallback that produces only tp2_outer
+    # (e.g. fast consumed + slow too small → merged into tp2) is NOT a
+    # legitimate post-TP1 state — it is a degraded non-split state.
     if labels == {"tp2_outer"}:
+        if split_disabled_reason in _PARTIAL_CONSUMED_TP2_ONLY_FALLBACK_REASONS:
+            logger.warning(
+                "MIDDLE_BUCKET_SPLIT_PARTIAL_TP2_ONLY_FALLBACK | "
+                "split_was_active=true labels=%s reason=%s action=degrade_to_non_split "
+                "actual_order_mode=FINAL_FULL_SIZE",
+                sorted(labels),
+                split_disabled_reason,
+            )
+            return False, split_disabled_reason, "FINAL_FULL_SIZE"
         logger.info(
             "MIDDLE_BUCKET_SPLIT_POST_TP1_TP2_ONLY_ORDER_STRUCTURE | "
             "split_was_active=true labels=%s action=keep_three_stage_state "
@@ -613,6 +635,8 @@ class CoreTakeProfitManager:
             }
             if reason in _fr_map:
                 split_disabled_reason = "split_fallback_final_order_structure"
+            elif reason in _PARTIAL_CONSUMED_TP2_ONLY_FALLBACK_REASONS:
+                split_disabled_reason = reason
 
         specs = [(spec.label, spec.contracts, spec.price) for spec in decision.specs]
         return specs, split_disabled_reason
