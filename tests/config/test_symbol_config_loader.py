@@ -95,7 +95,7 @@ class TestPartialTomlUsesDefaults:
         assert self.config(tmp_path).market.bar == "15m"
 
     def test_capital_max_layers_default(self, tmp_path: Path) -> None:
-        assert self.config(tmp_path).capital.max_layers == 3
+        assert self.config(tmp_path).capital.max_layers == 8
 
     def test_risk_order_failure_market_exit_delay(self, tmp_path: Path) -> None:
         c = self.config(tmp_path)

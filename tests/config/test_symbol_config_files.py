@@ -67,7 +67,7 @@ def test_default_eth_toml_matches_live_config() -> None:
     # capital (live values)
     assert loaded.capital.layer_margin_pct == Decimal("0.06")
     assert loaded.capital.leverage == Decimal("15")
-    assert loaded.capital.max_layers == 10
+    assert loaded.capital.max_layers == 8
     assert loaded.capital.dry_run_equity_usdt == Decimal("1000")
 
     # entry (live values)

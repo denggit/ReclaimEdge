@@ -97,7 +97,7 @@ class SymbolCapitalConfig:
     dry_run_equity_usdt: Decimal = Decimal("1000")
     layer_margin_pct: Decimal = Decimal("0.03")
     leverage: Decimal = Decimal("50")
-    max_layers: int = 3
+    max_layers: int = 8
     layer_multiplier_step: Decimal = Decimal("0.15")
 
 

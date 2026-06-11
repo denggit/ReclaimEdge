@@ -55,7 +55,7 @@ min_outside_pct = "0.0005"
 dry_run_equity_usdt = "1000"
 layer_margin_pct = "0.03"
 leverage = "50"
-max_layers = 3
+max_layers = 8
 layer_multiplier_step = "0.15"
 
 [entry]

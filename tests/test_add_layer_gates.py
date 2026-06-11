@@ -279,8 +279,8 @@ class AddLayerGateTest(unittest.TestCase):
         self.assertEqual(result.intent_type, "ADD_LONG")
         self.assertEqual(result.layer_index, 3)
 
-    def test_legacy_interval_bypass_config_does_not_control_dynamic_bypass(self) -> None:
-        strat = strategy(add_min_interval_bypass_gap_pct=0.003)
+    def test_dynamic_bypass_uses_double_target_layer_gap(self) -> None:
+        strat = strategy()
         strat.state = long_state(layers=10, last_order_ts_ms=NOW_MS - 5 * 60 * 1000)
 
         # L11 gap = 0.003 + (11-2)*0.001 = 0.012, bypass = 0.012 * 2 = 0.024

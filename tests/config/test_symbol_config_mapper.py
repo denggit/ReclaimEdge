@@ -123,7 +123,7 @@ def test_to_strategy_config_default_eth() -> None:
     assert mapped.add_gap_mode == "linear"
     assert mapped.add_gap_base_pct == 0.003
     assert mapped.add_gap_step_pct == 0.001
-    assert mapped.max_layers == 3
+    assert mapped.max_layers == 8
     assert mapped.tp_min_net_profit_pct == 0.002
     assert mapped.tp_boll_enabled is True
     assert mapped.tp_boll_window == 15
