@@ -48,8 +48,8 @@ min_outside_pct = "0.0005"
 # SimplePositionSizerConfig and strategy config.
 # leverage is mapped into TraderMarketSettings on TOML-backed live workers.
 dry_run_equity_usdt = "1000"
-layer_margin_pct = "0.02"
-leverage = "5"
+layer_margin_pct = "0.01"
+leverage = "3"
 max_layers = 5
 layer_multiplier_step = "0.15"
 
