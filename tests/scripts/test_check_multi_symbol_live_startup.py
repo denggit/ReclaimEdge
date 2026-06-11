@@ -30,7 +30,7 @@ _ETH_TOML_ENABLED = textwrap.dedent("""\
     [symbol]
     inst_id = "ETH-USDT-SWAP"
     enabled = true
-    live_trading = false
+    live_trading = true
 
     [market]
     bar = "15m"
@@ -127,7 +127,7 @@ _BTC_TOML_ENABLED = textwrap.dedent("""\
     [symbol]
     inst_id = "BTC-USDT-SWAP"
     enabled = true
-    live_trading = false
+    live_trading = true
 
     [market]
     bar = "15m"

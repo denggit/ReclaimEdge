@@ -171,6 +171,7 @@ def test_symbol_worker_app_run_has_expected_runtime_order() -> None:
         # G09c: for live mode, pre-runtime-configs and metadata extraction
         # happen BEFORE create_trader (inside the if mode == "live" block).
         "_build_pre_trader_runtime_configs_for_mode(",
+        "_assert_symbol_live_trading_enabled_for_worker_mode(",
         "_build_live_trader_metadata_from_runtime_configs(",
         "factory.create_trader(",
         "await trader.start()",
@@ -218,6 +219,7 @@ def test_symbol_worker_app_run_has_expected_runtime_order() -> None:
             idx = source.rfind(token)
         elif token in (
             "_build_pre_trader_runtime_configs_for_mode(",
+            "_assert_symbol_live_trading_enabled_for_worker_mode(",
             "_build_live_trader_metadata_from_runtime_configs(",
             "_override_runtime_config_account_equity(",
         ):
@@ -550,20 +552,45 @@ class TestG09cBuildLiveTraderMetadata:
         assert metadata is None
         assert market_settings is None
 
-    def test_returns_none_for_eth_usdt_swap(self) -> None:
-        """ETH-USDT-SWAP must return (None, None) to preserve env defaults."""
+    def test_returns_metadata_for_eth_usdt_swap(self) -> None:
+        """ETH-USDT-SWAP TOML path must inject metadata/settings."""
+        from decimal import Decimal
         from unittest.mock import MagicMock
 
+        from config.symbol_config import (
+            SymbolCapitalConfig,
+            SymbolConfig,
+            SymbolIdentityConfig,
+            SymbolMarketConfig,
+        )
         from src.live.symbol_worker_app import (
             _build_live_trader_metadata_from_runtime_configs,
         )
 
+        eth_cfg = SymbolConfig(
+            symbol=SymbolIdentityConfig(inst_id="ETH-USDT-SWAP"),
+            market=SymbolMarketConfig(
+                contract_value=Decimal("0.1"),
+                contract_precision=Decimal("0.01"),
+                min_contracts=Decimal("0.01"),
+                td_mode="isolated",
+                pos_side_mode="net",
+            ),
+            capital=SymbolCapitalConfig(leverage=Decimal("15")),
+        )
+
         fake = MagicMock()
-        fake.symbol_config.symbol.inst_id = "ETH-USDT-SWAP"
+        fake.symbol_config = eth_cfg
 
         metadata, market_settings = _build_live_trader_metadata_from_runtime_configs(fake)
-        assert metadata is None
-        assert market_settings is None
+        assert metadata is not None
+        assert metadata.inst_id == "ETH-USDT-SWAP"
+        assert metadata.contract_multiplier == Decimal("0.1")
+        assert market_settings is not None
+        assert market_settings.inst_id == "ETH-USDT-SWAP"
+        assert market_settings.td_mode == "isolated"
+        assert market_settings.pos_side_mode == "net"
+        assert market_settings.leverage == Decimal("15")
 
     def test_returns_metadata_for_btc_usdt_swap(self) -> None:
         """BTC-USDT-SWAP must return non-None metadata/settings from TOML."""
@@ -604,6 +631,131 @@ class TestG09cBuildLiveTraderMetadata:
         assert market_settings.inst_id == "BTC-USDT-SWAP"
         assert market_settings.td_mode == "isolated"
         assert market_settings.leverage == Decimal("15")
+
+    def test_eth_market_settings_do_not_need_env_market_vars(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """ETH TOML path must source market settings from TOML, not env."""
+        from decimal import Decimal
+        from unittest.mock import MagicMock
+
+        from config.symbol_config import (
+            SymbolCapitalConfig,
+            SymbolConfig,
+            SymbolIdentityConfig,
+            SymbolMarketConfig,
+        )
+        from src.live.symbol_worker_app import (
+            _build_live_trader_metadata_from_runtime_configs,
+        )
+
+        monkeypatch.delenv("LEVERAGE", raising=False)
+        monkeypatch.delenv("OKX_TD_MODE", raising=False)
+        monkeypatch.delenv("OKX_POS_SIDE_MODE", raising=False)
+
+        eth_cfg = SymbolConfig(
+            symbol=SymbolIdentityConfig(inst_id="ETH-USDT-SWAP"),
+            market=SymbolMarketConfig(
+                contract_value=Decimal("0.1"),
+                contract_precision=Decimal("0.01"),
+                min_contracts=Decimal("0.01"),
+                td_mode="cross",
+                pos_side_mode="long_short",
+            ),
+            capital=SymbolCapitalConfig(leverage=Decimal("7")),
+        )
+        fake = MagicMock()
+        fake.symbol_config = eth_cfg
+
+        metadata, market_settings = _build_live_trader_metadata_from_runtime_configs(fake)
+
+        assert metadata is not None
+        assert metadata.inst_id == "ETH-USDT-SWAP"
+        assert market_settings is not None
+        assert market_settings.inst_id == "ETH-USDT-SWAP"
+        assert market_settings.td_mode == "cross"
+        assert market_settings.pos_side_mode == "long_short"
+        assert market_settings.leverage == Decimal("7")
+
+
+class TestG09eAssertSymbolLiveTradingEnabled:
+    def _runtime_configs_for(self, symbol: str, live_trading: bool):
+        from unittest.mock import MagicMock
+
+        from config.symbol_config import SymbolConfig, SymbolIdentityConfig
+
+        fake = MagicMock()
+        fake.symbol_config = SymbolConfig(
+            symbol=SymbolIdentityConfig(
+                inst_id=symbol,
+                enabled=True,
+                live_trading=live_trading,
+            ),
+        )
+        return fake
+
+    def test_live_worker_eth_live_trading_false_raises(self) -> None:
+        from src.live.symbol_worker_app import (
+            _assert_symbol_live_trading_enabled_for_worker_mode,
+        )
+
+        runtime_configs = self._runtime_configs_for("ETH-USDT-SWAP", False)
+
+        with pytest.raises(RuntimeError) as exc:
+            _assert_symbol_live_trading_enabled_for_worker_mode(
+                mode="live",
+                runtime_configs=runtime_configs,
+            )
+
+        msg = str(exc.value)
+        assert "ETH-USDT-SWAP" in msg
+        assert "symbol.live_trading" in msg
+        assert "worker_mode=live" in msg
+
+    def test_live_worker_btc_live_trading_false_raises(self) -> None:
+        from src.live.symbol_worker_app import (
+            _assert_symbol_live_trading_enabled_for_worker_mode,
+        )
+
+        runtime_configs = self._runtime_configs_for("BTC-USDT-SWAP", False)
+
+        with pytest.raises(RuntimeError) as exc:
+            _assert_symbol_live_trading_enabled_for_worker_mode(
+                mode="live",
+                runtime_configs=runtime_configs,
+            )
+
+        msg = str(exc.value)
+        assert "BTC-USDT-SWAP" in msg
+        assert "symbol.live_trading" in msg
+        assert "worker_mode=live" in msg
+
+    def test_paper_worker_live_trading_false_does_not_raise(self) -> None:
+        from src.live.symbol_worker_app import (
+            _assert_symbol_live_trading_enabled_for_worker_mode,
+        )
+
+        runtime_configs = self._runtime_configs_for("ETH-USDT-SWAP", False)
+
+        _assert_symbol_live_trading_enabled_for_worker_mode(
+            mode="paper",
+            runtime_configs=runtime_configs,
+        )
+
+    def test_legacy_env_path_does_not_raise(self) -> None:
+        from unittest.mock import MagicMock
+
+        from src.live.symbol_worker_app import (
+            _assert_symbol_live_trading_enabled_for_worker_mode,
+        )
+
+        runtime_configs = MagicMock()
+        runtime_configs.symbol_config = None
+
+        _assert_symbol_live_trading_enabled_for_worker_mode(
+            mode="live",
+            runtime_configs=runtime_configs,
+        )
 
 
 class TestG09cOverrideRuntimeConfigAccountEquity:

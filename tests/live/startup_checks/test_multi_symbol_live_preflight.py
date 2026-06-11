@@ -227,7 +227,7 @@ _BTC_TOML_TEMPLATE = textwrap.dedent("""\
 
 
 def _make_toml_dir(tmp_path: Path, eth_enabled: bool = True, btc_enabled: bool = True,
-                   eth_live_trading: bool = False, btc_live_trading: bool = False) -> Path:
+                   eth_live_trading: bool = True, btc_live_trading: bool = True) -> Path:
     """Create a temporary TOML config directory with ETH and BTC configs."""
     toml_dir = tmp_path / "symbols"
     toml_dir.mkdir(parents=True, exist_ok=True)
@@ -475,6 +475,85 @@ class TestLiveTradingFalse:
 
         assert result.ok is False
         assert any("LIVE_TRADING" in e for e in result.errors)
+
+
+# ---------------------------------------------------------------------------
+# 5b. TOML symbol.live_trading=false but mode=live
+# ---------------------------------------------------------------------------
+
+
+class TestSymbolLiveTradingFalse:
+    def test_eth_symbol_live_trading_false_is_error(self, tmp_path: Path) -> None:
+        toml_dir = _make_toml_dir(
+            tmp_path,
+            eth_enabled=True,
+            btc_enabled=True,
+            eth_live_trading=False,
+            btc_live_trading=True,
+        )
+        env = _base_env(
+            tmp_path,
+            toml_dir,
+            RECLAIM_SYMBOLS="ETH-USDT-SWAP",
+            RECLAIM_WORKER_MODES="ETH-USDT-SWAP:live",
+            RECLAIM_ALLOWED_LIVE_SYMBOLS="ETH-USDT-SWAP",
+        )
+
+        result = run_multi_symbol_live_preflight(env=env)
+
+        assert result.ok is False
+        assert any(
+            "ETH-USDT-SWAP" in e
+            and "worker_mode=live" in e
+            and "symbol.live_trading is false" in e
+            for e in result.errors
+        )
+        assert not any("symbol.live_trading is false" in w for w in result.warnings)
+
+    def test_btc_symbol_live_trading_false_is_error(self, tmp_path: Path) -> None:
+        toml_dir = _make_toml_dir(
+            tmp_path,
+            eth_enabled=True,
+            btc_enabled=True,
+            eth_live_trading=True,
+            btc_live_trading=False,
+        )
+        env = _base_env(
+            tmp_path,
+            toml_dir,
+            RECLAIM_SYMBOLS="BTC-USDT-SWAP",
+            RECLAIM_WORKER_MODES="BTC-USDT-SWAP:live",
+            RECLAIM_ALLOWED_LIVE_SYMBOLS="BTC-USDT-SWAP",
+        )
+
+        result = run_multi_symbol_live_preflight(env=env)
+
+        assert result.ok is False
+        assert any(
+            "BTC-USDT-SWAP" in e
+            and "worker_mode=live" in e
+            and "symbol.live_trading is false" in e
+            for e in result.errors
+        )
+
+    def test_paper_mode_allows_symbol_live_trading_false(self, tmp_path: Path) -> None:
+        toml_dir = _make_toml_dir(
+            tmp_path,
+            eth_enabled=True,
+            btc_enabled=True,
+            eth_live_trading=False,
+            btc_live_trading=False,
+        )
+        env = _base_env(
+            tmp_path,
+            toml_dir,
+            RECLAIM_WORKER_MODES="ETH-USDT-SWAP:paper,BTC-USDT-SWAP:paper",
+            LIVE_TRADING="false",
+        )
+
+        result = run_multi_symbol_live_preflight(env=env)
+
+        assert not any("symbol.live_trading is false" in e for e in result.errors)
 
 
 # ---------------------------------------------------------------------------

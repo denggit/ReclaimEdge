@@ -222,14 +222,10 @@ def _build_live_trader_metadata_from_runtime_configs(
     """Extract Trader metadata / market settings from a TOML-backed
     ``LiveSymbolRuntimeConfigs``.
 
-    Returns ``(None, None)`` when:
-
-    * the legacy ``.env`` path is active (``symbol_config`` is ``None``), or
-    * the symbol is ``ETH-USDT-SWAP`` — ETH already has hardcoded defaults
-      and must preserve its existing env-based behaviour (leverage, etc.).
-
-    For all other symbols the metadata and market settings are built
-    from the TOML ``SymbolConfig``.
+    Returns ``(None, None)`` when the legacy ``.env`` path is active
+    (``symbol_config`` is ``None``).  When a TOML ``SymbolConfig`` is
+    available, metadata and market settings are built from that config for
+    every supported symbol.
     """
     from src.live.symbol_trader_config import (
         build_trader_instrument_metadata,
@@ -240,14 +236,34 @@ def _build_live_trader_metadata_from_runtime_configs(
     if symbol_config is None:
         return None, None
 
-    # ETH has hardcoded defaults — preserve existing env-based behaviour.
-    if symbol_config.symbol.inst_id == "ETH-USDT-SWAP":
-        return None, None
-
     return (
         build_trader_instrument_metadata(symbol_config),
         build_trader_market_settings(symbol_config),
     )
+
+
+def _assert_symbol_live_trading_enabled_for_worker_mode(
+    *,
+    mode: str,
+    runtime_configs: "LiveSymbolRuntimeConfigs",
+) -> None:
+    """Enforce the TOML per-symbol live gate for live workers.
+
+    Legacy ``.env`` runtime configs do not have a ``SymbolConfig`` and remain
+    compatible.  Paper workers can load TOML without requiring live trading.
+    """
+    if mode != "live":
+        return
+
+    symbol_config = runtime_configs.symbol_config
+    if symbol_config is None:
+        return
+
+    if symbol_config.symbol.live_trading is False:
+        raise RuntimeError(
+            "TOML symbol.live_trading is false for live worker: "
+            f"symbol={symbol_config.symbol.inst_id} worker_mode=live"
+        )
 
 
 def _override_runtime_config_account_equity(
@@ -387,6 +403,10 @@ class SymbolWorkerApp:
             pre_runtime_configs = _build_pre_trader_runtime_configs_for_mode(
                 mode=mode,
                 trader_symbol=os.getenv("OKX_INST_ID", "ETH-USDT-SWAP").strip(),
+            )
+            _assert_symbol_live_trading_enabled_for_worker_mode(
+                mode=mode,
+                runtime_configs=pre_runtime_configs,
             )
             metadata, market_settings = _build_live_trader_metadata_from_runtime_configs(
                 pre_runtime_configs,

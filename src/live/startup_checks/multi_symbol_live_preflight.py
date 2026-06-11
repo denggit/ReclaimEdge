@@ -545,12 +545,11 @@ def run_multi_symbol_live_preflight(
                 f"{symbol}: worker_mode=live but TOML symbol.enabled is false"
             )
 
-        # ── 9e. live_trading warning ────────────────────────────────────────
+        # ── 9e. live_trading gate ───────────────────────────────────────────
         if mode == "live" and symbol_config is not None and symbol_config.symbol.live_trading is False:
-            warnings.append(
+            errors.append(
                 f"{symbol}: worker_mode=live but TOML "
-                f"symbol.live_trading is false (live gate is primarily "
-                f"LIVE_TRADING + RECLAIM_ALLOWED_LIVE_SYMBOLS)"
+                f"symbol.live_trading is false"
             )
 
         # ── 9f. Build metadata and market settings ──────────────────────────

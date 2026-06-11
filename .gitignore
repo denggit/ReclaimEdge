@@ -4,3 +4,4 @@
 /.claude/
 /.pytest_cache/
 /runtime/private_write_limiter/
+/.env.bak
