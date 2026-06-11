@@ -102,25 +102,19 @@ class SymbolCapitalState:
 
     @classmethod
     def from_dict(cls, d: Mapping[str, Any]) -> SymbolCapitalState:
-        planned = d.get("planned_main_contracts", ())
-        if isinstance(planned, list):
-            planned = tuple(planned)
-        elif not isinstance(planned, tuple):
-            planned = tuple(planned)
-
         return cls(
             state=_require_str(d, "state"),
-            side=d.get("side"),
+            side=_require_optional_str(d, "side"),
             used_layers=_require_int(d, "used_layers"),
-            position_plan_id=d.get("position_plan_id"),
-            planned_main_contracts=planned,
+            position_plan_id=_require_optional_str(d, "position_plan_id"),
+            planned_main_contracts=_require_str_tuple(d, "planned_main_contracts"),
             base_main_contracts=_require_str(d, "base_main_contracts"),
             plan_max_layers=_require_int(d, "plan_max_layers"),
             permission_max_layers=_require_int(d, "permission_max_layers"),
             add_gap_multiplier=_require_str(d, "add_gap_multiplier"),
             add_freeze_multiplier=_require_str(d, "add_freeze_multiplier"),
             main_used_margin_usdt=_require_str(d, "main_used_margin_usdt"),
-            sidecar_enabled=bool(d.get("sidecar_enabled", False)),
+            sidecar_enabled=_require_bool(d, "sidecar_enabled"),
             sidecar_used_margin_usdt=_require_str(d, "sidecar_used_margin_usdt"),
         )
 
@@ -192,8 +186,8 @@ class CapitalLedgerSnapshot:
         return cls(
             version=d["version"],
             updated_ms=_require_int(d, "updated_ms"),
-            leader_symbol=d.get("leader_symbol"),
-            global_no_new_entry=bool(d.get("global_no_new_entry", False)),
+            leader_symbol=_require_optional_str(d, "leader_symbol"),
+            global_no_new_entry=_require_bool(d, "global_no_new_entry"),
             symbols=symbols,
         )
 
@@ -227,6 +221,27 @@ def _require_str(d: Mapping[str, Any], key: str) -> str:
     return val
 
 
+def _require_optional_str(d: Mapping[str, Any], key: str) -> str | None:
+    val = d.get(key)
+    if val is None:
+        return None
+    if not isinstance(val, str):
+        raise CapitalLedgerSchemaError(
+            f"'{key}' must be a string or null, "
+            f"got {type(val).__name__}: {val!r}"
+        )
+    return val
+
+
+def _require_bool(d: Mapping[str, Any], key: str) -> bool:
+    val = d.get(key)
+    if not isinstance(val, bool):
+        raise CapitalLedgerSchemaError(
+            f"'{key}' must be a bool, got {type(val).__name__}: {val!r}"
+        )
+    return val
+
+
 def _require_int(d: Mapping[str, Any], key: str) -> int:
     val = d.get(key)
     if isinstance(val, bool) or not isinstance(val, int):
@@ -234,6 +249,22 @@ def _require_int(d: Mapping[str, Any], key: str) -> int:
             f"'{key}' must be an int, got {type(val).__name__}: {val!r}"
         )
     return val
+
+
+def _require_str_tuple(d: Mapping[str, Any], key: str) -> tuple[str, ...]:
+    val = d.get(key)
+    if not isinstance(val, (list, tuple)):
+        raise CapitalLedgerSchemaError(
+            f"'{key}' must be a list or tuple, "
+            f"got {type(val).__name__}: {val!r}"
+        )
+    for i, item in enumerate(val):
+        if not isinstance(item, str):
+            raise CapitalLedgerSchemaError(
+                f"'{key}' item at index {i} must be a string, "
+                f"got {type(item).__name__}: {item!r}"
+            )
+    return tuple(val)
 
 
 def _validate_version(d: Mapping[str, Any]) -> None:
@@ -297,17 +328,37 @@ class _FileLock:
         self._fd = fd
 
         deadline = time.monotonic() + self._timeout
-        while True:
+        try:
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    return  # acquired
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        self._close_fd_without_unlock()
+                        raise CapitalLedgerLockTimeout(
+                            f"could not acquire lock on {self._path} "
+                            f"within {self._timeout:.1f}s"
+                        ) from None
+                    time.sleep(self._poll)
+        except Exception:
+            if self._fd is not None:
+                self._close_fd_without_unlock()
+            raise
+
+    def _close_fd_without_unlock(self) -> None:
+        """Close the underlying fd without releasing the flock.
+
+        Used when we haven't acquired the lock yet (timeout / error path)
+        so there is no lock to release.
+        """
+        fd = self._fd
+        self._fd = None
+        if fd is not None:
             try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                return  # acquired
-            except BlockingIOError:
-                if time.monotonic() >= deadline:
-                    raise CapitalLedgerLockTimeout(
-                        f"could not acquire lock on {self._path} "
-                        f"within {self._timeout:.1f}s"
-                    ) from None
-                time.sleep(self._poll)
+                os.close(fd)
+            except Exception:
+                pass
 
     def release(self) -> None:
         fd = self._fd

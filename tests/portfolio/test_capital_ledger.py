@@ -413,6 +413,54 @@ class TestInvalidSchema:
         with pytest.raises(CapitalLedgerSchemaError, match="'used_layers' must be an int"):
             CapitalLedgerSnapshot.from_dict(d)
 
+    # -- strict bool checks ---------------------------------------------------
+
+    def test_sidecar_enabled_must_be_bool(self):
+        d = default_snapshot().to_dict()
+        d["symbols"]["ETH-USDT-SWAP"]["sidecar_enabled"] = "false"
+        with pytest.raises(CapitalLedgerSchemaError, match="sidecar_enabled.*bool"):
+            CapitalLedgerSnapshot.from_dict(d)
+
+    def test_global_no_new_entry_must_be_bool(self):
+        d = default_snapshot().to_dict()
+        d["global_no_new_entry"] = "false"
+        with pytest.raises(CapitalLedgerSchemaError, match="global_no_new_entry.*bool"):
+            CapitalLedgerSnapshot.from_dict(d)
+
+    # -- strict nullable str checks -------------------------------------------
+
+    def test_leader_symbol_must_be_str_or_none(self):
+        d = default_snapshot().to_dict()
+        d["leader_symbol"] = 123
+        with pytest.raises(CapitalLedgerSchemaError, match="leader_symbol"):
+            CapitalLedgerSnapshot.from_dict(d)
+
+    def test_side_must_be_str_or_none(self):
+        d = default_snapshot().to_dict()
+        d["symbols"]["ETH-USDT-SWAP"]["side"] = 123
+        with pytest.raises(CapitalLedgerSchemaError, match="side"):
+            CapitalLedgerSnapshot.from_dict(d)
+
+    def test_position_plan_id_must_be_str_or_none(self):
+        d = default_snapshot().to_dict()
+        d["symbols"]["ETH-USDT-SWAP"]["position_plan_id"] = True
+        with pytest.raises(CapitalLedgerSchemaError, match="position_plan_id"):
+            CapitalLedgerSnapshot.from_dict(d)
+
+    # -- strict planned_main_contracts checks ---------------------------------
+
+    def test_planned_main_contracts_must_not_be_string(self):
+        d = default_snapshot().to_dict()
+        d["symbols"]["ETH-USDT-SWAP"]["planned_main_contracts"] = "123"
+        with pytest.raises(CapitalLedgerSchemaError, match="planned_main_contracts"):
+            CapitalLedgerSnapshot.from_dict(d)
+
+    def test_planned_main_contracts_items_must_be_strings(self):
+        d = default_snapshot().to_dict()
+        d["symbols"]["ETH-USDT-SWAP"]["planned_main_contracts"] = ["1", 2]
+        with pytest.raises(CapitalLedgerSchemaError, match="planned_main_contracts"):
+            CapitalLedgerSnapshot.from_dict(d)
+
 
 # ===================================================================
 # 11. lock timeout
@@ -444,6 +492,27 @@ class TestLockTimeout:
         # second lock should succeed immediately
         lock2.acquire()
         lock2.release()
+
+    def test_lock_timeout_allows_reacquire(self, tmp_path: Path):
+        """After a lock times out, a new lock on the same path can acquire.
+
+        This guards against leaked fd / lock state from the timeout path.
+        """
+        lock_path = tmp_path / "timeout_reacquire.lock"
+        lock1 = _FileLock(lock_path, timeout_seconds=0.3, poll_seconds=0.02)
+        lock2 = _FileLock(lock_path, timeout_seconds=0.05, poll_seconds=0.01)
+
+        lock1.acquire()
+        try:
+            with pytest.raises(CapitalLedgerLockTimeout):
+                lock2.acquire()
+        finally:
+            lock1.release()
+
+        # lock2 timed out; a fresh lock should still be able to acquire
+        lock3 = _FileLock(lock_path, timeout_seconds=0.5, poll_seconds=0.01)
+        lock3.acquire()
+        lock3.release()
 
 
 # ===================================================================
