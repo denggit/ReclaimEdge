@@ -1,12 +1,9 @@
 from __future__ import annotations
 
-import asyncio
 import base64
 import datetime
 import hmac
 import json
-import os
-import time
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -26,48 +23,21 @@ class OkxPrivateClientConfig:
     timeout_seconds: float = 10.0
 
 
-class PrivateWriteRateLimiter:
-    """Lightweight, conservative rate limiter for OKX private write operations.
+from src.execution.private_write_limiter import (
+    LocalPrivateWriteRateLimiter,
+    PrivateWriteRateLimiter,
+    SharedPrivateWriteLimiter,
+    SharedPrivateWriteLimiterConfig,
+    SharedPrivateWriteLimiterTimeout,
+)
 
-    Uses asyncio.Lock + monotonic time + sleep. No complex queue.
-    Does NOT affect public market data / websocket / tick path.
-
-    Config:
-        OKX_PRIVATE_WRITE_MIN_INTERVAL_SECONDS (default 0.25)
-        OKX_PRIVATE_WRITE_RATE_LIMIT_ENABLED (default "true")
-
-    Set OKX_PRIVATE_WRITE_RATE_LIMIT_ENABLED=false to disable entirely.
-    """
-
-    def __init__(self) -> None:
-        enabled_str = os.getenv("OKX_PRIVATE_WRITE_RATE_LIMIT_ENABLED", "true").strip().lower()
-        self._enabled = enabled_str in {"1", "true", "yes", "y", "on"}
-        self._min_interval = float(os.getenv("OKX_PRIVATE_WRITE_MIN_INTERVAL_SECONDS", "0.25"))
-        self._lock = asyncio.Lock()
-        self._last_write_time: float = 0.0
-
-    @property
-    def enabled(self) -> bool:
-        return self._enabled
-
-    async def acquire(self) -> None:
-        """Wait until the rate limiter allows the next private write."""
-        if not self._enabled:
-            return
-        async with self._lock:
-            now = time.monotonic()
-            elapsed = now - self._last_write_time
-            if elapsed < self._min_interval:
-                wait = self._min_interval - elapsed
-                _logger.debug(
-                    "OKX_PRIVATE_WRITE_RATE_LIMITER | waiting=%.3fs min_interval=%.3fs",
-                    wait,
-                    self._min_interval,
-                )
-                await asyncio.sleep(wait)
-                self._last_write_time = time.monotonic()
-            else:
-                self._last_write_time = now
+__all__ = [
+    "LocalPrivateWriteRateLimiter",
+    "PrivateWriteRateLimiter",
+    "SharedPrivateWriteLimiter",
+    "SharedPrivateWriteLimiterConfig",
+    "SharedPrivateWriteLimiterTimeout",
+]
 
 
 class OkxPrivateClient:
