@@ -2385,11 +2385,13 @@ class TestExecutionCommandProcessorEnforce(unittest.IsolatedAsyncioTestCase):
         trader = FakeTrader()
         journal = FakeJournal()
         state_store = FakeStateStore()
+        email_sender = FakeEmailSender()
         processor, _, _, _ = make_processor(
             execution_state=execution_state,
             trader=trader,
             journal=journal,
             state_store=state_store,
+            email_sender=email_sender,
         )
         processor.portfolio_allocator_enforcer = allowing  # type: ignore[assignment]
 
@@ -2401,6 +2403,7 @@ class TestExecutionCommandProcessorEnforce(unittest.IsolatedAsyncioTestCase):
         # Commit should have been called
         assert allowing.committed is True
         assert len(allowing.precheck_calls) == 1
+        assert allowing.commit_calls[0]["email_sender"] is email_sender
 
     async def test_enforce_rejected_skips_order(self) -> None:
         """17. enforce rejected: returns None, trader.execute_intent not called, no halt."""

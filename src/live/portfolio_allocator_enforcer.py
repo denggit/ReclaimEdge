@@ -1,11 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-G06a: Portfolio allocator enforce mode —— 下单前同步检查，成功成交后写 ledger。
+G06a: Portfolio allocator enforce mode —— 下单前同步检查，成功成交后提交 ledger。
 
 与 G05 shadow mode 的区别:
   - enforce mode **同步等待** allocator precheck 结果。
   - rejected 时**跳过真实下单**（fail closed）。
-  - allowed 时继续下单，并在成交后把 projected_snapshot 写回 CapitalLedger。
+  - allowed 时 precheck 会生成 projected_snapshot。
+  - 成交后 commit 时不会整体写回 projected_snapshot；commit 会在 ledger
+    lock 内重新读取 current snapshot，只合并当前 symbol 的 projected
+    SymbolCapitalState，避免双 worker stale snapshot 覆盖其他 symbol。
 
 延迟原则:
   - 只在 ExecutionCommandProcessor 的 OPEN/ADD/SIDECAR 执行路径里做。
@@ -19,12 +22,16 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from src.execution import order_specs
+from src.live.alerts.portfolio_allocator_alerts import (
+    send_allocator_commit_failed_alert,
+)
 from src.portfolio import (
     AllocationCheckRequest,
     AllocationDecision,
@@ -34,6 +41,7 @@ from src.portfolio import (
     check_allocation_dry_run,
     create_main_position_plan,
 )
+from src.portfolio.leader_follower import resolve_leader_symbol
 from src.utils.log import get_logger
 
 if TYPE_CHECKING:
@@ -41,6 +49,7 @@ if TYPE_CHECKING:
     from src.position_management.sidecar.planner import SidecarExecutionPlan
     from src.reporting.trade_journal import LiveTradeJournal
     from src.strategies.boll_cvd_shock_reclaim_strategy import BollCvdShockReclaimStrategy
+    from src.utils.email_sender import EmailSender
 
     from src.live import runtime_types as _rt
 
@@ -84,6 +93,10 @@ _ENTRY_INTENT_TYPES: frozenset[str] = frozenset({
 })
 
 _OPEN_INTENT_TYPES: frozenset[str] = frozenset({"OPEN_LONG", "OPEN_SHORT"})
+
+
+def _now_ms() -> int:
+    return int(time.time() * 1000)
 
 
 # ---------------------------------------------------------------------------
@@ -180,8 +193,16 @@ class PortfolioAllocatorPrecheckResult:
     sidecar_decision:
         The raw AllocationDecision from the sidecar check (``None`` when not run).
     projected_snapshot:
-        The snapshot to write to ledger after a successful fill.
+        The projected snapshot calculated during precheck.
         Must be non-``None`` when ``allowed=True``.
+    inst_id:
+        Symbol for this allocator precheck, e.g. ``"ETH-USDT-SWAP"``.
+    action:
+        Allocator action, e.g. ``"OPEN_MAIN"`` / ``"ADD_MAIN"`` /
+        ``"OPEN_SIDECAR"``.
+    base_snapshot_updated_ms:
+        ``snapshot.updated_ms`` read during precheck. Used for journal tracing
+        only; it does not force commit failure.
     message:
         Optional human-readable additional detail.
     """
@@ -192,7 +213,61 @@ class PortfolioAllocatorPrecheckResult:
     main_decision: AllocationDecision | None = None
     sidecar_decision: AllocationDecision | None = None
     projected_snapshot: CapitalLedgerSnapshot | None = None
+    inst_id: str | None = None
+    action: str | None = None
+    base_snapshot_updated_ms: int | None = None
     message: str = ""
+
+
+def _resolve_commit_inst_id(
+    precheck_result: PortfolioAllocatorPrecheckResult,
+) -> str:
+    """Resolve the symbol whose projected state should be committed."""
+    for candidate in (
+        precheck_result.inst_id,
+        getattr(precheck_result.sidecar_decision, "inst_id", None),
+        getattr(precheck_result.main_decision, "inst_id", None),
+    ):
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+    raise ValueError("missing inst_id for allocator enforce commit")
+
+
+def _merge_projected_symbol_state(
+    *,
+    current: CapitalLedgerSnapshot,
+    projected: CapitalLedgerSnapshot,
+    inst_id: str,
+    leader_follower_config: LeaderFollowerConfig,
+) -> CapitalLedgerSnapshot:
+    """Merge only ``inst_id`` from a projected snapshot into current ledger."""
+    if inst_id not in projected.symbols:
+        raise ValueError(f"symbol '{inst_id}' not found in projected snapshot")
+    if inst_id not in current.symbols:
+        raise ValueError(f"symbol '{inst_id}' not found in current snapshot")
+
+    new_symbols = dict(current.symbols)
+    new_symbols[inst_id] = projected.symbols[inst_id]
+
+    temp_snapshot = CapitalLedgerSnapshot(
+        version=current.version,
+        updated_ms=current.updated_ms,
+        leader_symbol=current.leader_symbol,
+        global_no_new_entry=current.global_no_new_entry,
+        symbols=new_symbols,
+    )
+    leader_symbol = resolve_leader_symbol(
+        temp_snapshot,
+        config=leader_follower_config,
+    )
+
+    return CapitalLedgerSnapshot(
+        version=current.version,
+        updated_ms=_now_ms(),
+        leader_symbol=leader_symbol,
+        global_no_new_entry=current.global_no_new_entry,
+        symbols=new_symbols,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -450,6 +525,13 @@ class PortfolioAllocatorEnforcer:
                 main_decision=main_decision,
                 sidecar_decision=sidecar_decision,
                 projected_snapshot=projected,
+                inst_id=getattr(trader, "symbol", None),
+                action=(
+                    "OPEN_MAIN+OPEN_SIDECAR"
+                    if sidecar_decision is not None
+                    else main_request.action
+                ),
+                base_snapshot_updated_ms=snapshot.updated_ms,
             )
 
         except Exception as exc:
@@ -491,8 +573,9 @@ class PortfolioAllocatorEnforcer:
         live_result: "LiveTradeResult",
         journal: "LiveTradeJournal",
         position_id: str | None,
+        email_sender: "EmailSender | None" = None,
     ) -> None:
-        """Write the projected snapshot back to CapitalLedger after a successful fill.
+        """Commit the filled symbol's projected state to CapitalLedger.
 
         This method is called **after** the real order has been placed.
         It catches all exceptions internally — a commit failure must never
@@ -506,6 +589,8 @@ class PortfolioAllocatorEnforcer:
         4. Only writes when ``live_result.entry_filled=True`` or ``live_result.ok=True``.
         5. If ``live_result.ok=False`` and ``entry_filled=False``, does NOT write.
         6. Write failure is caught, journaled, and never raised.
+        7. Commit merges only this symbol's projected state into the latest
+           snapshot read under the ledger lock.
         """
         if not self.config.enabled:
             return
@@ -522,18 +607,32 @@ class PortfolioAllocatorEnforcer:
         if not entry_filled and not ok:
             return
 
+        inst_id: str | None = None
         try:
-            # The mutator simply returns the pre-computed projected snapshot.
-            def _mutator(_current: CapitalLedgerSnapshot) -> CapitalLedgerSnapshot:
-                return precheck_result.projected_snapshot  # type: ignore[return-value]
+            projected = precheck_result.projected_snapshot
+            inst_id = _resolve_commit_inst_id(precheck_result)
 
-            await asyncio.to_thread(self.ledger.update_locked, _mutator)
+            def _mutator(current: CapitalLedgerSnapshot) -> CapitalLedgerSnapshot:
+                return _merge_projected_symbol_state(
+                    current=current,
+                    projected=projected,
+                    inst_id=inst_id,
+                    leader_follower_config=self.config.leader_follower_config,
+                )
+
+            committed_snapshot = await asyncio.to_thread(self.ledger.update_locked, _mutator)
 
             try:
                 journal.append(
                     "PORTFOLIO_ALLOCATOR_ENFORCE_COMMITTED",
                     {
-                        "symbol": getattr(live_result, "action", "?"),
+                        "symbol": inst_id,
+                        "action": precheck_result.action,
+                        "commit_mode": "MERGE_PROJECTED_SYMBOL_STATE",
+                        "base_snapshot_updated_ms": precheck_result.base_snapshot_updated_ms,
+                        "committed_snapshot_updated_ms": committed_snapshot.updated_ms,
+                        "leader_symbol": committed_snapshot.leader_symbol,
+                        "global_no_new_entry": committed_snapshot.global_no_new_entry,
                         "entry_filled": entry_filled,
                         "ok": ok,
                         "enforce_mode": True,
@@ -544,7 +643,8 @@ class PortfolioAllocatorEnforcer:
                 logger.exception("PORTFOLIO_ALLOCATOR_ENFORCE_COMMITTED_JOURNAL_FAILED")
 
             logger.info(
-                "PORTFOLIO_ALLOCATOR_ENFORCE_COMMITTED | entry_filled=%s ok=%s",
+                "PORTFOLIO_ALLOCATOR_ENFORCE_COMMITTED | symbol=%s entry_filled=%s ok=%s",
+                inst_id,
                 entry_filled,
                 ok,
             )
@@ -558,16 +658,35 @@ class PortfolioAllocatorEnforcer:
                 journal.append(
                     "PORTFOLIO_ALLOCATOR_ENFORCE_COMMIT_FAILED",
                     {
+                        "symbol": inst_id,
+                        "action": precheck_result.action,
+                        "live_action": getattr(live_result, "action", None),
+                        "order_id": getattr(live_result, "order_id", None),
                         "error_type": type(exc).__name__,
                         "error": str(exc)[:500],
                         "entry_filled": entry_filled,
                         "ok": ok,
                         "enforce_mode": True,
+                        "manual_reconciliation_recommended": True,
+                        "no_auto_close": True,
+                        "no_order_cancel": True,
                     },
                     position_id=position_id,
                 )
             except Exception:
                 logger.exception("PORTFOLIO_ALLOCATOR_ENFORCE_COMMIT_FAILED_JOURNAL_FAILED")
+            await send_allocator_commit_failed_alert(
+                email_sender=email_sender,
+                symbol=inst_id,
+                position_id=position_id,
+                action=precheck_result.action,
+                live_action=getattr(live_result, "action", None),
+                order_id=getattr(live_result, "order_id", None),
+                entry_filled=entry_filled,
+                ok=ok,
+                error_type=type(exc).__name__,
+                error=str(exc)[:500],
+            )
 
 
 # ---------------------------------------------------------------------------

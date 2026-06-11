@@ -569,6 +569,7 @@ class ExecutionCommandProcessor:
                 live_result=result,
                 journal=self.journal,
                 position_id=current_position_id,
+                email_sender=self.email_sender,
             )
 
         if not result.ok:

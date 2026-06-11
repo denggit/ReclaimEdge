@@ -64,6 +64,20 @@ class FakeJournal:
         return f"{symbol}:{side}:{ts_ms}"
 
 
+class FakeEmailSender:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, str]] = []
+
+    async def send_email_async(
+        self,
+        subject: str,
+        content: str,
+        content_type: str = "html",
+    ) -> bool:
+        self.calls.append((subject, content, content_type))
+        return True
+
+
 class FakeTradeCommand:
     def __init__(
         self,
@@ -806,6 +820,9 @@ class TestEnforcerCommit(unittest.IsolatedAsyncioTestCase):
             allowed=True,
             reason="ALLOCATOR_ENFORCE_ALLOWED",
             projected_snapshot=snapshot,
+            inst_id="ETH-USDT-SWAP",
+            action="OPEN_MAIN",
+            base_snapshot_updated_ms=1000,
         )
 
         journal = FakeJournal()
@@ -838,6 +855,106 @@ class TestEnforcerCommit(unittest.IsolatedAsyncioTestCase):
             if e[0] == "PORTFOLIO_ALLOCATOR_ENFORCE_COMMITTED"
         ]
         assert len(committed_events) == 1
+        assert committed_events[0][1]["symbol"] == "ETH-USDT-SWAP"
+        assert committed_events[0][1]["commit_mode"] == "MERGE_PROJECTED_SYMBOL_STATE"
+
+    async def test_commit_merges_only_target_symbol_and_preserves_other_symbol(self) -> None:
+        from src.live.portfolio_allocator_enforcer import (
+            PortfolioAllocatorEnforceConfig,
+            PortfolioAllocatorEnforcer,
+            PortfolioAllocatorPrecheckResult,
+        )
+
+        config = PortfolioAllocatorEnforceConfig(enabled=True)
+        enforcer = PortfolioAllocatorEnforcer.from_config(config)
+
+        base_current = default_snapshot(updated_ms=2000)
+        current_symbols = dict(base_current.symbols)
+        current_symbols["BTC-USDT-SWAP"] = SymbolCapitalState(
+            state="OPEN",
+            side="LONG",
+            used_layers=1,
+            position_plan_id="btc-pos",
+        )
+        current_snapshot = CapitalLedgerSnapshot(
+            version=base_current.version,
+            updated_ms=base_current.updated_ms,
+            leader_symbol=base_current.leader_symbol,
+            global_no_new_entry=True,
+            symbols=current_symbols,
+        )
+
+        base_projected = default_snapshot(updated_ms=1000)
+        projected_symbols = dict(base_projected.symbols)
+        projected_symbols["ETH-USDT-SWAP"] = SymbolCapitalState(
+            state="OPEN",
+            side="LONG",
+            used_layers=1,
+            position_plan_id="eth-pos",
+        )
+        projected_symbols["BTC-USDT-SWAP"] = SymbolCapitalState()
+        stale_projected_snapshot = CapitalLedgerSnapshot(
+            version=base_projected.version,
+            updated_ms=base_projected.updated_ms,
+            leader_symbol=base_projected.leader_symbol,
+            global_no_new_entry=False,
+            symbols=projected_symbols,
+        )
+
+        captured: dict[str, CapitalLedgerSnapshot] = {}
+
+        def _update_locked(mutator):
+            new_snapshot = mutator(current_snapshot)
+            captured["snapshot"] = new_snapshot
+            return new_snapshot
+
+        enforcer.ledger = MagicMock()
+        enforcer.ledger.update_locked.side_effect = _update_locked
+
+        precheck = PortfolioAllocatorPrecheckResult(
+            enabled=True,
+            allowed=True,
+            reason="ALLOCATOR_ENFORCE_ALLOWED",
+            projected_snapshot=stale_projected_snapshot,
+            inst_id="ETH-USDT-SWAP",
+            action="OPEN_MAIN",
+            base_snapshot_updated_ms=1000,
+        )
+        journal = FakeJournal()
+        live_result = LiveTradeResult(
+            ok=True,
+            action="OPEN_LONG",
+            order_id="ord-1",
+            tp_order_id="tp-1",
+            contracts="10",
+            tp_price="101",
+            message="ok",
+            entry_filled=True,
+            tp_ok=True,
+        )
+
+        await enforcer.commit_projected_snapshot_after_fill(
+            precheck_result=precheck,
+            live_result=live_result,
+            journal=journal,  # type: ignore[arg-type]
+            position_id="pos-1",
+        )
+
+        new_snapshot = captured["snapshot"]
+        assert new_snapshot.symbols["ETH-USDT-SWAP"].state == "OPEN"
+        assert new_snapshot.symbols["ETH-USDT-SWAP"].used_layers == 1
+        assert new_snapshot.symbols["BTC-USDT-SWAP"].state == "OPEN"
+        assert new_snapshot.symbols["BTC-USDT-SWAP"].used_layers == 1
+        assert new_snapshot.symbols["BTC-USDT-SWAP"].position_plan_id == "btc-pos"
+        assert new_snapshot.global_no_new_entry == current_snapshot.global_no_new_entry
+
+        committed_events = [
+            e
+            for e in journal.events
+            if e[0] == "PORTFOLIO_ALLOCATOR_ENFORCE_COMMITTED"
+        ]
+        assert len(committed_events) == 1
+        assert committed_events[0][1]["commit_mode"] == "MERGE_PROJECTED_SYMBOL_STATE"
 
     async def test_no_commit_when_order_failed_not_filled(self) -> None:
         """11. ok=False, entry_filled=False: no write."""
@@ -855,6 +972,9 @@ class TestEnforcerCommit(unittest.IsolatedAsyncioTestCase):
             allowed=True,
             reason="ALLOCATOR_ENFORCE_ALLOWED",
             projected_snapshot=default_snapshot(),
+            inst_id="ETH-USDT-SWAP",
+            action="OPEN_MAIN",
+            base_snapshot_updated_ms=1000,
         )
 
         journal = FakeJournal()
@@ -898,6 +1018,9 @@ class TestEnforcerCommit(unittest.IsolatedAsyncioTestCase):
             allowed=True,
             reason="ALLOCATOR_ENFORCE_ALLOWED",
             projected_snapshot=snapshot,
+            inst_id="ETH-USDT-SWAP",
+            action="OPEN_MAIN",
+            base_snapshot_updated_ms=1000,
         )
 
         journal = FakeJournal()
@@ -939,6 +1062,9 @@ class TestEnforcerCommit(unittest.IsolatedAsyncioTestCase):
             allowed=True,
             reason="ENFORCE_DISABLED",
             projected_snapshot=default_snapshot(),
+            inst_id="ETH-USDT-SWAP",
+            action="OPEN_MAIN",
+            base_snapshot_updated_ms=1000,
         )
 
         journal = FakeJournal()
@@ -1021,6 +1147,9 @@ class TestEnforcerFailClosed(unittest.IsolatedAsyncioTestCase):
             allowed=True,
             reason="ALLOCATOR_ENFORCE_ALLOWED",
             projected_snapshot=default_snapshot(),
+            inst_id="ETH-USDT-SWAP",
+            action="OPEN_MAIN",
+            base_snapshot_updated_ms=1000,
         )
 
         journal = FakeJournal()
@@ -1051,6 +1180,73 @@ class TestEnforcerFailClosed(unittest.IsolatedAsyncioTestCase):
             if e[0] == "PORTFOLIO_ALLOCATOR_ENFORCE_COMMIT_FAILED"
         ]
         assert len(failed_events) == 1
+
+    async def test_commit_failure_sends_email_only_and_does_not_raise(self) -> None:
+        from src.live.portfolio_allocator_enforcer import (
+            PortfolioAllocatorEnforceConfig,
+            PortfolioAllocatorEnforcer,
+            PortfolioAllocatorPrecheckResult,
+        )
+
+        config = PortfolioAllocatorEnforceConfig(enabled=True)
+        enforcer = PortfolioAllocatorEnforcer.from_config(config)
+        enforcer.ledger = MagicMock()
+        enforcer.ledger.update_locked.side_effect = RuntimeError("write failed")
+
+        precheck = PortfolioAllocatorPrecheckResult(
+            enabled=True,
+            allowed=True,
+            reason="ALLOCATOR_ENFORCE_ALLOWED",
+            projected_snapshot=default_snapshot(),
+            inst_id="ETH-USDT-SWAP",
+            action="OPEN_MAIN",
+            base_snapshot_updated_ms=1000,
+        )
+        journal = FakeJournal()
+        email_sender = FakeEmailSender()
+        live_result = LiveTradeResult(
+            ok=True,
+            action="OPEN_LONG",
+            order_id="ord-1",
+            tp_order_id="tp-1",
+            contracts="10",
+            tp_price="101",
+            message="ok",
+            entry_filled=True,
+            tp_ok=True,
+        )
+
+        await enforcer.commit_projected_snapshot_after_fill(
+            precheck_result=precheck,
+            live_result=live_result,
+            journal=journal,  # type: ignore[arg-type]
+            position_id="pos-1",
+            email_sender=email_sender,  # type: ignore[arg-type]
+        )
+
+        failed_events = [
+            e
+            for e in journal.events
+            if e[0] == "PORTFOLIO_ALLOCATOR_ENFORCE_COMMIT_FAILED"
+        ]
+        assert len(failed_events) == 1
+        payload = failed_events[0][1]
+        assert payload["symbol"] == "ETH-USDT-SWAP"
+        assert payload["no_auto_close"] is True
+        assert payload["no_order_cancel"] is True
+        assert payload["manual_reconciliation_recommended"] is True
+
+        assert len(email_sender.calls) == 1
+        subject, content, content_type = email_sender.calls[0]
+        assert "Portfolio Ledger Commit Failed" in subject
+        assert "No market close was triggered" in content
+        assert "ETH-USDT-SWAP" in content
+        assert content_type == "html"
+
+        event_names = [event[0] for event in journal.events]
+        assert not any("HALT" in name for name in event_names)
+        assert not any("CANCEL" in name for name in event_names)
+        assert not any("CLOSE" in name for name in event_names)
 
 
 if __name__ == "__main__":
