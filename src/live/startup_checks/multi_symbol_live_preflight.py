@@ -11,7 +11,8 @@ Design rules
 ------------
 * Read-only — never starts a Trader, never connects to OKX, never places orders.
 * Only imports pure functions from config and startup layers.
-* Never imports Trader, OKX private/public client, websocket monitor.
+* Never instantiates Trader, never calls OKX private/public client, never opens
+  websocket connections.
 * Each worker is checked in isolation with its own single-symbol env.
 * Does not modify config files, env vars, or runtime state.
 * Does not change strategy, tick path, portfolio allocator, or ledger.
@@ -378,7 +379,13 @@ def run_multi_symbol_live_preflight(
     raw_live_trading = str(env.get("LIVE_TRADING", "")).strip().lower()
     live_trading_enabled = raw_live_trading in ("1", "true", "yes", "on")
 
-    worker_modes = parse_worker_modes(env)
+    try:
+        worker_modes = parse_worker_modes(env)
+    except Exception as exc:
+        errors.append(
+            f"RECLAIM_WORKER_MODES parse failed: {type(exc).__name__}: {exc}"
+        )
+        worker_modes = {}
     has_live_worker = any(
         worker_modes.get(sym, "live") == "live"
         for sym in requested_symbols

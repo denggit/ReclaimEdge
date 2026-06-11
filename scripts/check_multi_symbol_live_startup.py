@@ -33,13 +33,15 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 def main() -> int:
     # Late imports keep the script-startup footprint minimal.
-    from config.env_loader import load_env_config
+    from dotenv import load_dotenv
     from src.live.startup_checks.multi_symbol_live_preflight import (
         run_multi_symbol_live_preflight,
     )
 
     # Load .env into os.environ so that the preflight sees real config.
-    load_env_config()
+    # dotenv.load_dotenv mutates os.environ; if the .env file is missing it
+    # returns False without raising (behaviour matches run_reclaim_supervisor).
+    load_dotenv(_PROJECT_ROOT / ".env")
 
     result = run_multi_symbol_live_preflight(
         env=None,  # read os.environ

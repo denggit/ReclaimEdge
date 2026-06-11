@@ -451,3 +451,108 @@ class TestScriptSourceSafety:
     def test_script_does_not_import_websocket(self) -> None:
         source = _CLI_SCRIPT.read_text(encoding="utf-8")
         assert "websocket" not in source.lower() or "websocket" not in source
+
+    def test_script_does_not_use_load_env_config_to_load_os_environ(self) -> None:
+        """The old load_env_config() only returns a dict — it does NOT mutate
+        os.environ.  The script must use load_dotenv (python-dotenv) instead,
+        which actually writes .env values into os.environ.
+        """
+        source = _CLI_SCRIPT.read_text(encoding="utf-8")
+        assert "load_env_config()" not in source
+
+    def test_script_uses_load_dotenv(self) -> None:
+        source = _CLI_SCRIPT.read_text(encoding="utf-8")
+        assert "from dotenv import load_dotenv" in source
+        assert "load_dotenv(" in source
+
+
+# ---------------------------------------------------------------------------
+# 6. dotenv integration
+# ---------------------------------------------------------------------------
+
+
+class TestDotenvIntegration:
+    def test_main_calls_load_dotenv(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Verify that main() calls load_dotenv with the project root .env path."""
+        called_with: list = []
+
+        def _fake_load_dotenv(path: object, **kwargs: object) -> bool:
+            called_with.append(path)
+            return True
+
+        # Stub run_multi_symbol_live_preflight so main() doesn't need real config.
+        monkeypatch.setattr(
+            "src.live.startup_checks.multi_symbol_live_preflight.run_multi_symbol_live_preflight",
+            lambda **kw: type(
+                "FakeResult",
+                (),
+                {
+                    "ok": True,
+                    "requested_symbols": (),
+                    "enabled_symbols": (),
+                    "skipped_disabled_symbols": (),
+                    "worker_results": (),
+                    "errors": (),
+                    "warnings": (),
+                },
+            )(),
+        )
+
+        # The late import inside main() does 'from dotenv import load_dotenv'.
+        # Patch the dotenv *module* so the import resolves to our spy.
+        import dotenv as _dotenv_mod
+        monkeypatch.setattr(_dotenv_mod, "load_dotenv", _fake_load_dotenv)
+
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "check_multi_symbol_live_startup",
+            str(_CLI_SCRIPT),
+        )
+        mod = importlib.util.module_from_spec(spec)
+
+        spec.loader.exec_module(mod)
+        rc = mod.main()
+        assert rc == 0
+
+        assert len(called_with) >= 1, "load_dotenv was never called"
+        path_arg = called_with[0]
+        assert str(path_arg).endswith(".env"), (
+            f"Expected load_dotenv to be called with a .env path, got {path_arg!r}"
+        )
+
+    def test_main_with_missing_env_file_does_not_crash(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """If .env does not exist, load_dotenv returns False without raising."""
+        monkeypatch.setattr(
+            "src.live.startup_checks.multi_symbol_live_preflight.run_multi_symbol_live_preflight",
+            lambda **kw: type(
+                "FakeResult",
+                (),
+                {
+                    "ok": True,
+                    "requested_symbols": (),
+                    "enabled_symbols": (),
+                    "skipped_disabled_symbols": (),
+                    "worker_results": (),
+                    "errors": (),
+                    "warnings": (),
+                },
+            )(),
+        )
+
+        import dotenv as _dotenv_mod
+        monkeypatch.setattr(_dotenv_mod, "load_dotenv", lambda path: False)
+
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "check_multi_symbol_live_startup",
+            str(_CLI_SCRIPT),
+        )
+        mod = importlib.util.module_from_spec(spec)
+
+        spec.loader.exec_module(mod)
+        rc = mod.main()
+        assert rc == 0, "main() should not crash when .env is missing"

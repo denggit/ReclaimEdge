@@ -735,6 +735,43 @@ class TestNoSideEffects:
 
 
 # ---------------------------------------------------------------------------
+# 15. Invalid RECLAIM_WORKER_MODES must not traceback
+# ---------------------------------------------------------------------------
+
+
+class TestInvalidWorkerModes:
+    def test_invalid_mode_returns_errors_not_traceback(self, tmp_path: Path) -> None:
+        """G09d-fix: parse_worker_modes with an invalid mode must not raise —
+        the error must land in result.errors instead.
+        """
+        toml_dir = _make_toml_dir(tmp_path, eth_enabled=True, btc_enabled=True)
+        env = _base_env(
+            tmp_path, toml_dir,
+            RECLAIM_WORKER_MODES="ETH-USDT-SWAP:not-a-mode",
+        )
+
+        result = run_multi_symbol_live_preflight(env=env)
+
+        assert result.ok is False
+        assert any("RECLAIM_WORKER_MODES" in e for e in result.errors), (
+            f"Expected RECLAIM_WORKER_MODES in errors, got: {result.errors}"
+        )
+
+    def test_invalid_format_returns_errors_not_traceback(self, tmp_path: Path) -> None:
+        """Missing colon in RECLAIM_WORKER_MODES entry should also be caught."""
+        toml_dir = _make_toml_dir(tmp_path, eth_enabled=True, btc_enabled=True)
+        env = _base_env(
+            tmp_path, toml_dir,
+            RECLAIM_WORKER_MODES="ETH-USDT-SWAP",
+        )
+
+        result = run_multi_symbol_live_preflight(env=env)
+
+        assert result.ok is False
+        assert any("RECLAIM_WORKER_MODES" in e for e in result.errors)
+
+
+# ---------------------------------------------------------------------------
 # 15. Result type consistency
 # ---------------------------------------------------------------------------
 
