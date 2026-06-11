@@ -589,7 +589,8 @@ max_layers = 3
 
 [entry]
 add_gap_pct = 0.006
-add_freeze_seconds = 3600
+first_add_block_seconds = 3600
+add_min_interval_seconds = 1800
 
 [tp]
 tp_min_net_profit_pct = 0.002

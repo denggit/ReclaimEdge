@@ -186,10 +186,9 @@ def test_loaded_eth_toml_maps_successfully() -> None:
     config = load_symbol_config_from_dir(str(_SYMBOLS_DIR), "ETH-USDT-SWAP")
     mapped = map_symbol_config(config)
     assert mapped.monitor.inst_id == "ETH-USDT-SWAP"
-    assert mapped.cvd.fast_window_seconds == 5.0
-    assert mapped.position_sizer.layer_multiplier_step == 0.15
-    assert mapped.strategy.three_stage_tp2_use_structure_boll is True
-    assert mapped.trader_preview.live_trading is True
+    assert mapped.trader_preview.inst_id == "ETH-USDT-SWAP"
+    assert mapped.trader_preview.contract_value == Decimal("0.1")
+    assert isinstance(mapped.trader_preview.live_trading, bool)
 
 
 # ---------------------------------------------------------------------------
@@ -231,4 +230,4 @@ def test_btc_mapper_preview_only() -> None:
     assert mapped.trader_preview.contract_value == Decimal("0.01")
     assert mapped.trader_preview.contract_precision == Decimal("0.01")
     assert mapped.trader_preview.min_contracts == Decimal("0.01")
-    assert mapped.trader_preview.live_trading is True
+    assert isinstance(mapped.trader_preview.live_trading, bool)

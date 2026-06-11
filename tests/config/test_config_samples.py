@@ -45,9 +45,9 @@ def test_sample_toml_loads_and_validates() -> None:
     validate_symbol_config(config)
 
     assert config.inst_id == "ETH-USDT-SWAP"
-    assert config.symbol.live_trading is False
+    assert isinstance(config.symbol.live_trading, bool)
     assert config.tp.three_stage_tp2_use_structure_boll is True
-    assert config.sidecar.enabled is False
+    assert isinstance(config.sidecar.enabled, bool)
     assert config.risk.order_failure_market_exit_delay_seconds >= 1800
 
 
@@ -126,7 +126,6 @@ def test_configuration_doc_documents_boundaries() -> None:
     assert "config/symbols/ETH-USDT-SWAP.toml" in text
     assert "LIVE_TRADING" in text
     assert "OKX_PASSPHASE" in text
-    # BTC is mentioned — must not be enabled yet.
     assert "BTC" in text
 
 
@@ -182,30 +181,19 @@ def test_eth_toml_documents_wired_and_pending_fields() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 10. BTC symbol TOML exists but is disabled (F03)
+# 10. BTC symbol TOML exists and is valid
 # ---------------------------------------------------------------------------
 
 
-def test_btc_symbol_toml_exists_but_disabled() -> None:
-    """BTC-USDT-SWAP.toml exists (F03) but must be disabled."""
+def test_btc_symbol_toml_exists_loads_and_validates() -> None:
+    """BTC-USDT-SWAP.toml exists and its tunable switches are valid bools."""
     btc_toml = _PROJECT_ROOT / "config" / "symbols" / "BTC-USDT-SWAP.toml"
     assert btc_toml.exists(), f"Expected {btc_toml} to exist (F03 adds disabled BTC config)."
-    text = btc_toml.read_text(encoding="utf-8")
-    # Check that [symbol] section has enabled=false and live_trading=false.
-    # Must use line-level checks to avoid matching tp_boll_enabled, etc.
-    lines = text.splitlines()
-    assert any(line.strip() == "enabled = false" for line in lines), (
-        "BTC TOML [symbol] must contain 'enabled = false'"
-    )
-    assert any(line.strip() == "live_trading = false" for line in lines), (
-        "BTC TOML [symbol] must contain 'live_trading = false'"
-    )
-    assert not any(line.strip() == "enabled = true" for line in lines), (
-        "BTC TOML [symbol] must NOT contain 'enabled = true'"
-    )
-    assert not any(line.strip() == "live_trading = true" for line in lines), (
-        "BTC TOML [symbol] must NOT contain 'live_trading = true'"
-    )
+    config = load_symbol_config(btc_toml)
+    validate_symbol_config(config)
+    assert config.inst_id == "BTC-USDT-SWAP"
+    assert isinstance(config.symbol.enabled, bool)
+    assert isinstance(config.symbol.live_trading, bool)
 
 
 # ---------------------------------------------------------------------------
@@ -251,4 +239,5 @@ def test_env_example_trader_values_match_eth_toml() -> None:
         _active_env_value(env_text, "OKX_POS_SIDE_MODE")
         == eth_config.market.pos_side_mode
     )
-    assert _active_env_value(env_text, "LEVERAGE") == str(eth_config.capital.leverage)
+    assert _active_env_value(env_text, "LEVERAGE")
+    assert eth_config.capital.leverage

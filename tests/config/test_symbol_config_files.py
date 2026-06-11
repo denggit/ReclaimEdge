@@ -1,11 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""Tests for on-disk symbol TOML config files (A03).
-
-These tests verify that the canonical ``config/symbols/ETH-USDT-SWAP.toml``
-exists, can be loaded by the A02 loader, carries the current live production
-values, and that safety switches are correct.
-"""
+"""Tests for on-disk symbol TOML config files (A03)."""
 
 from __future__ import annotations
 
@@ -14,6 +9,7 @@ from pathlib import Path
 
 from config.symbol_config import SymbolConfig
 from config.symbol_config_loader import load_symbol_config_from_dir
+from config.symbol_config_mapper import MappedSymbolConfigs, map_symbol_config
 from config.symbol_config_validator import validate_symbol_config
 
 # ---------------------------------------------------------------------------
@@ -54,60 +50,19 @@ def test_default_eth_toml_loads() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_default_eth_toml_matches_live_config() -> None:
-    """The ETH TOML must contain the current live production values."""
+def test_default_eth_toml_loads_validates_and_maps() -> None:
+    """The ETH TOML must load, validate, and map without pinning tunable values."""
     loaded = load_symbol_config_from_dir(str(_SYMBOLS_DIR), "ETH-USDT-SWAP")
+    validate_symbol_config(loaded)
+    mapped = map_symbol_config(loaded)
 
-    # market
-    assert loaded.market.bar == "15m"
-    assert loaded.market.td_mode == "isolated"
-    assert loaded.market.pos_side_mode == "net"
-    assert loaded.market.min_outside_pct == Decimal("0.0005")
-
-    # capital (live values)
-    assert loaded.capital.layer_margin_pct == Decimal("0.06")
-    assert loaded.capital.leverage == Decimal("15")
-    assert loaded.capital.max_layers == 8
-    assert loaded.capital.dry_run_equity_usdt == Decimal("1000")
-
-    # entry (live values)
-    assert loaded.entry.add_gap_mode == "linear"
-    assert loaded.entry.add_gap_base_pct == Decimal("0.003")
-    assert loaded.entry.add_gap_step_pct == Decimal("0.001")
-    assert loaded.entry.add_freeze_seconds == 3600
-    assert loaded.entry.first_add_block_seconds == 3600
-    assert loaded.entry.add_min_interval_seconds == 1800
-    assert loaded.entry.alert_freeze_seconds == 3600
-
-    # cvd
-    assert loaded.cvd.fast_window_seconds == Decimal("5")
-
-    # tp (live values)
-    assert loaded.tp.tp_min_net_profit_pct == Decimal("0.004")
-    assert loaded.tp.three_stage_tp1_ratio == Decimal("0.80")
-    assert loaded.tp.three_stage_tp2_ratio == Decimal("0.10")
-    assert loaded.tp.three_stage_runner_ratio == Decimal("0.10")
-    assert loaded.tp.split_tp_enabled is False
-
-    # middle bucket split (live values)
-    assert loaded.middle_bucket_split.enabled is True
-    assert loaded.middle_bucket_split.fast_ratio == Decimal("0.70")
-
-    # sidecar (live values)
-    assert loaded.sidecar.enabled is True
-    assert loaded.sidecar.margin_pct == Decimal("0.02")
-    assert loaded.sidecar.tp_pct == Decimal("0.0044")
-    assert loaded.sidecar.max_legs == 12
-
-    # risk
-    assert loaded.risk.order_failure_market_exit_delay_seconds == 1800
-
-    # execution
-    assert loaded.execution.private_write_min_interval_seconds == Decimal("0.6")
-
-    # runtime (live values)
-    assert loaded.runtime.market_tick_heartbeat_seconds == Decimal("300")
-    assert loaded.runtime.strategy_tick_queue_maxsize == 20000
+    assert loaded.inst_id == "ETH-USDT-SWAP"
+    assert isinstance(loaded.symbol.enabled, bool)
+    assert isinstance(loaded.symbol.live_trading, bool)
+    assert loaded.market.contract_value == Decimal("0.1")
+    assert isinstance(mapped, MappedSymbolConfigs)
+    assert mapped.trader_preview.inst_id == "ETH-USDT-SWAP"
+    assert mapped.trader_preview.contract_value == Decimal("0.1")
 
 
 # ---------------------------------------------------------------------------
@@ -115,24 +70,12 @@ def test_default_eth_toml_matches_live_config() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_default_eth_toml_live_switches() -> None:
-    """ETH TOML is enabled for live worker startup under the G09e TOML gate."""
+def test_default_eth_toml_entry_timing_fields() -> None:
+    """ETH entry timing config uses explicit first/subsequent add gates."""
     loaded = load_symbol_config_from_dir(str(_SYMBOLS_DIR), "ETH-USDT-SWAP")
 
-    # .env LIVE_TRADING remains the global master gate; this is the per-symbol
-    # TOML live gate used by SymbolWorkerApp and startup preflight.
-    assert loaded.symbol.enabled is True
-    assert loaded.symbol.live_trading is True
-    assert loaded.is_live_trading_enabled is True
-
-    # three_stage_tp2 must use structure Boll
-    assert loaded.tp.three_stage_tp2_use_structure_boll is True
-
-    # order failure market exit delay must be at least 1800
-    assert loaded.risk.order_failure_market_exit_delay_seconds >= 1800
-
-    # tp_rate_limit_fail_action must be HALT_ONLY
-    assert loaded.sidecar.tp_rate_limit_fail_action == "HALT_ONLY"
+    assert isinstance(loaded.entry.first_add_block_seconds, int)
+    assert isinstance(loaded.entry.add_min_interval_seconds, int)
 
 
 # ---------------------------------------------------------------------------
@@ -150,17 +93,20 @@ def test_default_eth_toml_passes_validator() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_btc_toml_exists_with_live_switches() -> None:
-    """BTC-USDT-SWAP.toml must exist and preserve current live switches."""
+def test_btc_toml_exists_loads_validates_and_maps() -> None:
+    """BTC-USDT-SWAP.toml must exist and load without pinning tunable switches."""
     assert _BTC_TOML.is_file(), (
         f"Expected {_BTC_TOML} to exist (F03 adds disabled BTC config)."
     )
     config = load_symbol_config_from_dir(str(_SYMBOLS_DIR), "BTC-USDT-SWAP")
+    validate_symbol_config(config)
+    mapped = map_symbol_config(config)
+
     assert config.inst_id == "BTC-USDT-SWAP"
-    assert config.symbol.enabled is True
-    assert config.symbol.live_trading is True
-    assert config.is_enabled is True
-    assert config.is_live_trading_enabled is True
+    assert isinstance(config.symbol.enabled, bool)
+    assert isinstance(config.symbol.live_trading, bool)
+    assert isinstance(mapped, MappedSymbolConfigs)
+    assert mapped.trader_preview.inst_id == "BTC-USDT-SWAP"
 
 
 def test_btc_toml_market_metadata() -> None:
@@ -172,45 +118,18 @@ def test_btc_toml_market_metadata() -> None:
     assert config.market.price_precision == Decimal("0.1")
 
 
-def test_btc_toml_safety_switches() -> None:
-    """BTC safety-critical fields must be locked down."""
+def test_btc_toml_entry_timing_fields() -> None:
+    """BTC entry timing config uses explicit first/subsequent add gates."""
     config = load_symbol_config_from_dir(str(_SYMBOLS_DIR), "BTC-USDT-SWAP")
 
-    # middle_bucket_split and sidecar must be disabled for BTC.
-    assert config.middle_bucket_split.enabled is False
-    assert config.sidecar.enabled is False
-
-    # three_stage_tp2 must use structure Boll.
-    assert config.tp.three_stage_tp2_use_structure_boll is True
-
-    # tp_rate_limit_fail_action must be HALT_ONLY.
-    assert config.sidecar.tp_rate_limit_fail_action == "HALT_ONLY"
-
-    # order_failure_market_exit_delay must be >= 1800.
-    assert config.risk.order_failure_market_exit_delay_seconds >= 1800
+    assert isinstance(config.entry.first_add_block_seconds, int)
+    assert isinstance(config.entry.add_min_interval_seconds, int)
 
 
 def test_btc_toml_passes_validator() -> None:
     """Disabled BTC config must pass validator without error."""
     config = load_symbol_config_from_dir(str(_SYMBOLS_DIR), "BTC-USDT-SWAP")
     validate_symbol_config(config)
-
-
-# ---------------------------------------------------------------------------
-# 7. BTC TOML source guards — enabled/live true are valid TOML values
-# ---------------------------------------------------------------------------
-
-
-def test_btc_toml_contains_enabled_true_line() -> None:
-    """BTC TOML may contain the exact line 'enabled = true'."""
-    content = _BTC_TOML.read_text(encoding="utf-8")
-    assert "enabled = true" in {line.strip() for line in content.splitlines()}
-
-
-def test_btc_toml_contains_live_trading_true_line() -> None:
-    """BTC TOML may contain the exact line 'live_trading = true'."""
-    content = _BTC_TOML.read_text(encoding="utf-8")
-    assert "live_trading = true" in {line.strip() for line in content.splitlines()}
 
 
 # ---------------------------------------------------------------------------

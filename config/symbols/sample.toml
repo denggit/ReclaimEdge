@@ -4,14 +4,13 @@
 # Copy this file to config/symbols/<INST_ID>.toml when adding a new symbol in
 # later phases.
 #
-# Current A08 validator only allows ETH-USDT-SWAP.
-# BTC / SOL must not be enabled until F-phase safety work is complete.
+# The validator currently supports ETH-USDT-SWAP and BTC-USDT-SWAP.
 #
 # Decimal-like values are written as strings to avoid float precision
 # ambiguity.
 #
-# live_trading = false is data only; the actual live gate remains
-# LIVE_TRADING in .env.
+# live_trading is the per-symbol live gate. Effective live still also requires
+# global LIVE_TRADING=true and live allowlist.
 #
 # A08+ wiring status:
 #   - This sample contains both wired and pending fields.
@@ -24,9 +23,10 @@
 [symbol]
 # inst_id: wired for monitor and TOML/env consistency check.
 inst_id = "ETH-USDT-SWAP"
-# enabled: pending / future supervisor use.
+# enabled: per-symbol supervisor selection switch. The value is user-tunable.
 enabled = true
-# live_trading: data only; real live gate remains LIVE_TRADING in .env.
+# live_trading: per-symbol live gate. Effective live still also requires global
+# LIVE_TRADING=true and live allowlist.
 live_trading = false
 
 [market]
@@ -65,16 +65,14 @@ layer_multiplier_step = "0.15"
 add_gap_mode = "linear"
 add_gap_base_pct = "0.006"
 add_gap_step_pct = "0.001"
-# add_freeze_seconds: pending; current live add-freeze behavior still comes
-# from existing strategy defaults/env path until explicitly wired.
-add_freeze_seconds = 3600
-# first_add_block_seconds / add_min_interval_seconds: wired to strategy add
-# timing gates.
+# First add gate: after opening layer 1, block the first add until this many
+# seconds has elapsed.
 first_add_block_seconds = 3600
+# Subsequent add interval: after layer 2+, block the next add until this many
+# seconds has elapsed, unless the adverse move is large enough to bypass the
+# interval gate.
 add_min_interval_seconds = 1800
-# alert_freeze_seconds: wired to monitor alert cooldown only; NOT a live
-# trade entry gate.  Keep here only for backward schema compatibility;
-# future config cleanup may move it to [monitor] or [alert].
+# alert_freeze_seconds: monitor alert cooldown only; not a live trade entry gate.
 alert_freeze_seconds = 3600
 
 [cvd]

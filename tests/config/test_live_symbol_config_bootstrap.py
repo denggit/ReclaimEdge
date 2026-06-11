@@ -143,9 +143,10 @@ def test_toml_flag_loads_btc_symbol() -> None:
     assert result.symbol_config.inst_id == "BTC-USDT-SWAP"
     assert result.monitor.inst_id == "BTC-USDT-SWAP"
 
-    # BTC TOML is currently disabled; the bootstrap must still load it.
-    assert result.symbol_config.symbol.enabled is False
-    assert result.symbol_config.symbol.live_trading is False
+    # Bootstrap must load BTC regardless of user-tunable per-symbol switches;
+    # startup preflight / SymbolWorkerApp enforce live safety.
+    assert isinstance(result.symbol_config.symbol.enabled, bool)
+    assert isinstance(result.symbol_config.symbol.live_trading, bool)
 
 
 # ---------------------------------------------------------------------------

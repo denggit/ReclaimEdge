@@ -206,17 +206,9 @@ def test_rejects_string_for_market_boll_window() -> None:
         validate_symbol_config(config)
 
 
-def test_rejects_bool_for_entry_add_freeze_seconds() -> None:
-    """bool must be rejected for int field add_freeze_seconds."""
-    config = replace(
-        SymbolConfig.default_eth(),
-        entry=replace(
-            SymbolConfig.default_eth().entry,
-            add_freeze_seconds=True,  # type: ignore[arg-type]
-        ),
-    )
-    with pytest.raises(SymbolConfigValidationError, match="add_freeze_seconds"):
-        validate_symbol_config(config)
+def test_entry_timing_fields_validate_without_legacy_freeze_field() -> None:
+    """Entry timing validation only requires the explicit add gate fields."""
+    validate_symbol_config(SymbolConfig.default_eth())
 
 
 def test_rejects_bool_for_sidecar_max_legs() -> None:

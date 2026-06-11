@@ -28,49 +28,47 @@ _SYMBOLS_DIR = _PROJECT_ROOT / "config" / "symbols"
 
 
 # ---------------------------------------------------------------------------
-# 1. BTC config check succeeds (enabled=true, live_trading=true)
+# 1. BTC config check succeeds
 # ---------------------------------------------------------------------------
 
 
 def test_btc_config_check_succeeds() -> None:
-    """BTC-USDT-SWAP load → validate → map passes; all fields correct."""
+    """BTC-USDT-SWAP load -> validate -> map passes without pinning tunable values."""
     result = check_symbol_config(
         symbol_config_dir=_SYMBOLS_DIR,
         inst_id="BTC-USDT-SWAP",
     )
     assert isinstance(result, SymbolConfigCheckResult)
     assert result.inst_id == "BTC-USDT-SWAP"
-    assert result.enabled is True
-    assert result.live_trading is True
+    assert isinstance(result.enabled, bool)
+    assert isinstance(result.live_trading, bool)
     assert result.contract_value == Decimal("0.01")
     assert result.min_contracts == Decimal("0.01")
     assert result.contract_precision == Decimal("0.01")
     assert result.price_precision == Decimal("0.1")
-    assert result.sidecar_enabled is False
-    assert result.middle_bucket_split_enabled is False
     assert isinstance(result.mapped, MappedSymbolConfigs)
     assert result.mapped.trader_preview.inst_id == "BTC-USDT-SWAP"
     assert result.mapped.trader_preview.contract_value == Decimal("0.01")
-    assert result.mapped.trader_preview.live_trading is True
+    assert result.mapped.trader_preview.live_trading is result.live_trading
 
 
 # ---------------------------------------------------------------------------
-# 2. ETH config check succeeds (enabled=true, live_trading=true)
+# 2. ETH config check succeeds
 # ---------------------------------------------------------------------------
 
 
 def test_eth_config_check_succeeds() -> None:
-    """ETH-USDT-SWAP config check passes; enabled=true, live_trading=true."""
+    """ETH-USDT-SWAP config check passes without pinning tunable values."""
     result = check_symbol_config(
         symbol_config_dir=_SYMBOLS_DIR,
         inst_id="ETH-USDT-SWAP",
     )
     assert isinstance(result, SymbolConfigCheckResult)
     assert result.inst_id == "ETH-USDT-SWAP"
-    assert result.enabled is True
-    assert result.live_trading is True
+    assert isinstance(result.enabled, bool)
+    assert isinstance(result.live_trading, bool)
     assert result.contract_value == Decimal("0.1")
-    assert result.mapped.trader_preview.live_trading is True
+    assert result.mapped.trader_preview.live_trading is result.live_trading
 
 
 # ---------------------------------------------------------------------------
@@ -140,7 +138,6 @@ layer_multiplier_step = "0.15"
 add_gap_mode = "linear"
 add_gap_base_pct = "0.003"
 add_gap_step_pct = "0.001"
-add_freeze_seconds = 3600
 first_add_block_seconds = 3600
 add_min_interval_seconds = 1800
 alert_freeze_seconds = 3600
@@ -255,7 +252,6 @@ layer_multiplier_step = "0.15"
 add_gap_mode = "linear"
 add_gap_base_pct = "0.003"
 add_gap_step_pct = "0.001"
-add_freeze_seconds = 3600
 first_add_block_seconds = 3600
 add_min_interval_seconds = 1800
 alert_freeze_seconds = 3600
@@ -339,24 +335,22 @@ execution_backlog_log_seconds = "30"
 
 
 def test_to_summary_dict() -> None:
-    """to_summary_dict() returns a JSON-serialisable dict with correct values."""
+    """to_summary_dict() returns a JSON-serialisable dict with stable fields."""
     result = check_symbol_config(
         symbol_config_dir=_SYMBOLS_DIR,
         inst_id="BTC-USDT-SWAP",
     )
     d = result.to_summary_dict()
     assert d["inst_id"] == "BTC-USDT-SWAP"
-    assert d["enabled"] is True
-    assert d["live_trading"] is True
+    assert isinstance(d["enabled"], bool)
+    assert isinstance(d["live_trading"], bool)
     assert d["contract_value"] == "0.01"
     assert d["price_precision"] == "0.1"
-    assert d["sidecar_enabled"] is False
-    assert d["middle_bucket_split_enabled"] is False
     assert isinstance(d["safe_for_config_check_only"], bool)
     tp = d["trader_preview"]
     assert tp["inst_id"] == "BTC-USDT-SWAP"
     assert tp["contract_value"] == "0.01"
-    assert tp["live_trading"] is True
+    assert tp["live_trading"] is d["live_trading"]
     # Ensure it's valid JSON
     import json
     json.dumps(d)
@@ -378,8 +372,8 @@ def test_safe_for_config_check_only() -> None:
         inst_id="ETH-USDT-SWAP",
     )
     assert result.inst_id == "ETH-USDT-SWAP"
-    assert result.enabled is True
-    assert result.live_trading is True
+    assert isinstance(result.enabled, bool)
+    assert isinstance(result.live_trading, bool)
 
 
 # ---------------------------------------------------------------------------

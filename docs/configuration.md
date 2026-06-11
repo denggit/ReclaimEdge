@@ -7,7 +7,7 @@ As of A08, ReclaimEdge uses a **two-layer configuration model**:
 | Layer | Location | Purpose |
 |-------|----------|---------|
 | **.env** | `.env` (copy from `.env.example`) | Secrets, live gate, Trader env, runtime orchestration, report/email, temporary legacy fallback |
-| **Symbol TOML** | `config/symbols/*.toml` | Per-symbol strategy/trading parameters (BOLL, CVD, TP, Sidecar, position sizing) |
+| **Symbol TOML** | `config/symbols/*.toml` | Per-symbol strategy/trading parameters and per-symbol live gate (BOLL, CVD, TP, Sidecar, position sizing) |
 
 ### Key Files
 
@@ -40,7 +40,7 @@ As of A08, ReclaimEdge uses a **two-layer configuration model**:
 
 ## .env Still Controls
 
-- **`LIVE_TRADING`** — the master live/dry-run gate. `symbol_config.symbol.live_trading` in TOML is data only and does **not** control the real trading switch.
+- **`LIVE_TRADING`** — the global master live/dry-run gate. `[symbol].live_trading` in TOML is the per-symbol live gate; effective live startup requires both gates plus the live allowlist.
 - **OKX credentials** — `OKX_API_KEY`, `OKX_SECRET_KEY`, `OKX_PASSPHASE`.
 - **Trader environment** — `OKX_INST_ID`, `OKX_TD_MODE`, `OKX_POS_SIDE_MODE`, `LEVERAGE`, `OKX_BASE_URL`, `MAX_LIVE_EQUITY_USDT`.
 - **Runtime orchestration** — `RECLAIM_RUN_MODE`, `RECLAIM_SYMBOLS`, `RECLAIM_SYMBOL_CONFIG_DIR`, `RECLAIM_RUNTIME_DIR`.
@@ -72,14 +72,13 @@ Not every field declared in the TOML schema is consumed by live runtime yet.
 | `[market].tp_boll_window` | Wired | TP-only BOLL window |
 | `[market].min_outside_pct` | Wired | Former `BOLL_MIN_OUTSIDE_PCT` — BOLL outside threshold |
 | `[market].td_mode / pos_side_mode` | Checked | Compared against Trader env at startup |
-| `[market].contract_value / min_contracts / contract_precision / price_precision` | Pending | Future Trader/instrument metadata migration |
+| `[market].contract_value / min_contracts / contract_precision / price_precision` | Wired | Trader instrument metadata injection |
 | `[cvd].*` | Wired | CvdTrackerConfig |
 | `[capital].layer_margin_pct / leverage / max_layers / layer_multiplier_step` | Wired | Position sizing / strategy max layers |
 | `[capital].dry_run_equity_usdt` | Partially wired | Overridden by live OKX account equity at startup |
 | `[entry].add_gap_mode` | Wired | Add gap mode — only `"linear"` supported |
 | `[entry].add_gap_base_pct` | Wired | L2 gap; higher layers add `add_gap_step_pct` each |
 | `[entry].add_gap_step_pct` | Wired | Per-layer extra gap; formula: `base + (target_layer - 2) * step` |
-| `[entry].add_freeze_seconds` | Pending | Not yet consumed by live mapper |
 | `[entry].first_add_block_seconds` | Wired | Add timing gate — legacy `FIRST_ADD_BLOCK_SECONDS` |
 | `[entry].add_min_interval_seconds` | Wired | Add timing gate — legacy `ADD_MIN_INTERVAL_SECONDS` |
 | `[entry].alert_freeze_seconds` | Wired to monitor alert only | **Not a live trade entry gate** — monitor alert cooldown. Future cleanup may move it to `[monitor]` or `[alert]`. |
@@ -104,9 +103,9 @@ The project uses `OKX_PASSPHASE` (not `OKX_PASSPHRASE`). This is a deliberate hi
 
 ## Symbol Support
 
-- **Currently only `ETH-USDT-SWAP` is supported.** Attempting to set `RECLAIM_SYMBOLS=BTC-USDT-SWAP` or any other symbol will cause a startup error.
-- BTC / SOL support will be added in a future F-phase after safety work is complete.
-- Do not create `config/symbols/BTC-USDT-SWAP.toml` with `enabled = true` yet.
+- **`ETH-USDT-SWAP` and `BTC-USDT-SWAP` are supported by the symbol config validator.**
+- `[symbol].enabled` selects symbols for supervisor planning.
+- `[symbol].live_trading` is a per-symbol live gate. Live startup still also requires `LIVE_TRADING=true` and allowlist coverage.
 
 ## Add Gap Schedule (Linear)
 
@@ -159,7 +158,7 @@ Only `add_gap_mode = "linear"` is supported. Setting any other value causes a cl
 3. **`OKX_INST_ID` must match `[symbol].inst_id`.**
 4. **`OKX_TD_MODE` must match `[market].td_mode`.**
 5. **`OKX_POS_SIDE_MODE` must match `[market].pos_side_mode`.**
-6. **Do not create `BTC-USDT-SWAP.toml` as enabled yet.**
+6. **Before live startup, verify every requested symbol has `[symbol].enabled = true`, `[symbol].live_trading = true`, and allowlist coverage.**
 7. **Keep `sidecar.tp_rate_limit_fail_action = "HALT_ONLY"`.**
 8. **Keep `risk.order_failure_market_exit_delay_seconds >= 1800`.**
 9. **Do not rely on pending TOML fields for live safety behavior.** Check the wiring status table above before assuming a TOML change takes effect.
