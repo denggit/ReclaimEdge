@@ -206,8 +206,8 @@ class TestDecimalFieldsAreDecimalNotFloat:
         assert isinstance(self.config().capital.leverage, Decimal)
 
     # entry
-    def test_entry_add_gap_pct(self) -> None:
-        assert isinstance(self.config().entry.add_gap_pct, Decimal)
+    def test_entry_add_gap_base_pct(self) -> None:
+        assert isinstance(self.config().entry.add_gap_base_pct, Decimal)
 
     # cvd
     def test_cvd_fast_window_seconds(self) -> None:

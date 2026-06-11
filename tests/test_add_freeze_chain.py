@@ -593,5 +593,61 @@ class CheckShockAddTimingShortSideTest(unittest.TestCase):
         self.assertEqual(decision.reason, "add_freeze")
 
 
+class LinearGapFreezeChainComboTest(unittest.TestCase):
+    """Verify linear add gap combines correctly with freeze chain multipliers."""
+
+    def test_linear_l4_gap_0_005_with_penalty_0_multiplier_2(self) -> None:
+        """L4 gap=0.005, penalty=0 → multiplier=2.0, required=0.010"""
+        target_layer_gap_pct = 0.005
+        multiplier = add_freeze_chain.active_add_freeze_bypass_multiplier(
+            layers=2,
+            penalty_count=0,
+            first_add_block_bypass_multiplier=5.0,
+            add_min_interval_bypass_multiplier=2.0,
+        )
+        self.assertAlmostEqual(multiplier, 2.0)
+        required = target_layer_gap_pct * multiplier
+        self.assertAlmostEqual(required, 0.010)
+
+    def test_linear_l4_gap_0_005_with_penalty_1_multiplier_3(self) -> None:
+        """L4 gap=0.005, penalty=1 → multiplier=3.0, required=0.015"""
+        target_layer_gap_pct = 0.005
+        multiplier = add_freeze_chain.active_add_freeze_bypass_multiplier(
+            layers=2,
+            penalty_count=1,
+            first_add_block_bypass_multiplier=5.0,
+            add_min_interval_bypass_multiplier=2.0,
+        )
+        self.assertAlmostEqual(multiplier, 3.0)
+        required = target_layer_gap_pct * multiplier
+        self.assertAlmostEqual(required, 0.015)
+
+    def test_linear_l4_gap_0_005_with_penalty_2_multiplier_4(self) -> None:
+        """L4 gap=0.005, penalty=2 → multiplier=4.0, required=0.020"""
+        target_layer_gap_pct = 0.005
+        multiplier = add_freeze_chain.active_add_freeze_bypass_multiplier(
+            layers=2,
+            penalty_count=2,
+            first_add_block_bypass_multiplier=5.0,
+            add_min_interval_bypass_multiplier=2.0,
+        )
+        self.assertAlmostEqual(multiplier, 4.0)
+        required = target_layer_gap_pct * multiplier
+        self.assertAlmostEqual(required, 0.020)
+
+    def test_linear_l8_gap_0_009_with_penalty_1_multiplier_3(self) -> None:
+        """L8 gap=0.009, penalty=1 → multiplier=3.0, required=0.027"""
+        target_layer_gap_pct = 0.009
+        multiplier = add_freeze_chain.active_add_freeze_bypass_multiplier(
+            layers=2,
+            penalty_count=1,
+            first_add_block_bypass_multiplier=5.0,
+            add_min_interval_bypass_multiplier=2.0,
+        )
+        self.assertAlmostEqual(multiplier, 3.0)
+        required = target_layer_gap_pct * multiplier
+        self.assertAlmostEqual(required, 0.027)
+
+
 if __name__ == "__main__":
     unittest.main()

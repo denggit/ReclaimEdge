@@ -55,7 +55,9 @@ max_layers = 3
 layer_multiplier_step = "0.15"
 
 [entry]
-add_gap_pct = "0.006"
+add_gap_mode = "linear"
+add_gap_base_pct = "0.006"
+add_gap_step_pct = "0.001"
 add_freeze_seconds = 3600
 first_add_block_seconds = 3600
 add_min_interval_seconds = 1800

@@ -120,7 +120,9 @@ def test_to_strategy_config_default_eth() -> None:
     config = SymbolConfig.default_eth()
     mapped = to_strategy_config(config)
     assert isinstance(mapped, BollCvdReclaimStrategyConfig)
-    assert mapped.add_layer_gap_pct == 0.006
+    assert mapped.add_gap_mode == "linear"
+    assert mapped.add_gap_base_pct == 0.003
+    assert mapped.add_gap_step_pct == 0.001
     assert mapped.max_layers == 3
     assert mapped.tp_min_net_profit_pct == 0.002
     assert mapped.tp_boll_enabled is True

@@ -110,7 +110,9 @@ class SymbolCapitalConfig:
 class SymbolEntryConfig:
     """Add-gap and freeze parameters for staged entry."""
 
-    add_gap_pct: Decimal = Decimal("0.006")
+    add_gap_mode: str = "linear"
+    add_gap_base_pct: Decimal = Decimal("0.003")
+    add_gap_step_pct: Decimal = Decimal("0.001")
     add_freeze_seconds: int = 3600
     first_add_block_seconds: int = 3600
     add_min_interval_seconds: int = 1800

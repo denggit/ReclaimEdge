@@ -76,7 +76,9 @@ Not every field declared in the TOML schema is consumed by live runtime yet.
 | `[cvd].*` | Wired | CvdTrackerConfig |
 | `[capital].layer_margin_pct / leverage / max_layers / layer_multiplier_step` | Wired | Position sizing / strategy max layers |
 | `[capital].dry_run_equity_usdt` | Partially wired | Overridden by live OKX account equity at startup |
-| `[entry].add_gap_pct` | Wired | Strategy add gap |
+| `[entry].add_gap_mode` | Wired | Add gap mode — only `"linear"` supported |
+| `[entry].add_gap_base_pct` | Wired | L2 gap; higher layers add `add_gap_step_pct` each |
+| `[entry].add_gap_step_pct` | Wired | Per-layer extra gap; formula: `base + (target_layer - 2) * step` |
 | `[entry].add_freeze_seconds` | Pending | Not yet consumed by live mapper |
 | `[entry].first_add_block_seconds` | Wired | Add timing gate — legacy `FIRST_ADD_BLOCK_SECONDS` |
 | `[entry].add_min_interval_seconds` | Wired | Add timing gate — legacy `ADD_MIN_INTERVAL_SECONDS` |
@@ -105,6 +107,50 @@ The project uses `OKX_PASSPHASE` (not `OKX_PASSPHRASE`). This is a deliberate hi
 - **Currently only `ETH-USDT-SWAP` is supported.** Attempting to set `RECLAIM_SYMBOLS=BTC-USDT-SWAP` or any other symbol will cause a startup error.
 - BTC / SOL support will be added in a future F-phase after safety work is complete.
 - Do not create `config/symbols/BTC-USDT-SWAP.toml` with `enabled = true` yet.
+
+## Add Gap Schedule (Linear)
+
+The old segmented add gap (L2-L6: 0.3%, L7-L8: 0.4%, L9-L10: 0.6%, L11+: 0.8%) has been replaced with a **linear** add gap schedule.
+
+### Formula
+
+```
+gap = add_gap_base_pct + max(target_layer - 2, 0) * add_gap_step_pct
+```
+
+- **`add_gap_base_pct`** (default `0.003` = 0.3%) — gap for L2 (first add layer).
+- **`add_gap_step_pct`** (default `0.001` = 0.1%) — extra gap added for each layer above L2.
+- No upper limit — the gap grows linearly without a cap.
+
+### Examples
+
+| Target Layer | Gap |
+|-------------|-----|
+| L2 | 0.3% |
+| L3 | 0.4% |
+| L4 | 0.5% |
+| L5 | 0.6% |
+| L6 | 0.7% |
+| L7 | 0.8% |
+| L8 | 0.9% |
+| L9 | 1.0% |
+| L10 | 1.1% |
+
+### Freeze Chain Multiplier (unchanged)
+
+The freeze chain multiplier is **preserved** — it still multiplies the target layer gap:
+
+- `active freeze multiplier = add_min_interval_bypass_multiplier + penalty_count`
+- First freeze-bypass: `2x`, second: `3x`, third: `4x`, etc.
+
+Example with `target_layer_gap_pct = 0.5%` (L4):
+- `penalty_count = 0`: required gap = `0.5% * 2 = 1.0%`
+- `penalty_count = 1`: required gap = `0.5% * 3 = 1.5%`
+- `penalty_count = 2`: required gap = `0.5% * 4 = 2.0%`
+
+### Unsupported Modes
+
+Only `add_gap_mode = "linear"` is supported. Setting any other value causes a clear error — there is no silent fallback.
 
 ## Safety Rules
 

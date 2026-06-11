@@ -90,125 +90,75 @@ def short_state(**overrides) -> StrategyPositionState:
 
 
 class AddLayerGateTest(unittest.TestCase):
-    def test_add_gap_target_layer_2_to_6_uses_0_3_pct(self) -> None:
+    def test_linear_add_gap_target_layer_2_uses_base(self) -> None:
         strat = strategy()
+        self.assertAlmostEqual(strat._add_layer_gap_pct_for_target_layer(2), 0.003)
 
-        for target_layer in range(2, 7):
-            with self.subTest(target_layer=target_layer):
-                self.assertAlmostEqual(strat._add_layer_gap_pct_for_target_layer(target_layer), 0.003)
+    def test_linear_add_gap_target_layer_3_uses_base_plus_step(self) -> None:
+        strat = strategy()
+        self.assertAlmostEqual(strat._add_layer_gap_pct_for_target_layer(3), 0.004)
 
-        strat.state = long_state(layers=5)
-        gap_ok, gap_pct, required_price = strat._add_gap_passed("LONG", 99.70, 6)
-        result = strat._maybe_open_or_add_long(99.70, NOW_MS, boll(), cvd())
+    def test_linear_add_gap_target_layer_4_uses_base_plus_2_step(self) -> None:
+        strat = strategy()
+        self.assertAlmostEqual(strat._add_layer_gap_pct_for_target_layer(4), 0.005)
 
+    def test_linear_add_gap_target_layer_8_uses_base_plus_6_step(self) -> None:
+        strat = strategy()
+        self.assertAlmostEqual(strat._add_layer_gap_pct_for_target_layer(8), 0.009)
+
+    def test_linear_add_gap_target_layer_10_uses_base_plus_8_step(self) -> None:
+        strat = strategy()
+        self.assertAlmostEqual(strat._add_layer_gap_pct_for_target_layer(10), 0.011)
+
+    def test_linear_add_gap_target_layer_20_uses_base_plus_18_step(self) -> None:
+        strat = strategy()
+        self.assertAlmostEqual(strat._add_layer_gap_pct_for_target_layer(20), 0.021)
+
+    def test_long_add_l4_blocked_at_99_60_when_gap_is_0_005(self) -> None:
+        strat = strategy()
+        strat.state = long_state(layers=3)
+        # L4 gap = 0.003 + (4-2)*0.001 = 0.005, required_price = 100 * 0.995 = 99.50
+        gap_ok, gap_pct, required_price = strat._add_gap_passed("LONG", 99.60, 4)
+        blocked = strat._maybe_open_or_add_long(99.60, NOW_MS, boll(), cvd())
+        self.assertFalse(gap_ok)
+        self.assertAlmostEqual(gap_pct, 0.005)
+        self.assertAlmostEqual(required_price, 99.50)
+        self.assertIsNone(blocked)
+
+    def test_long_add_l4_allowed_at_99_50_when_gap_is_0_005(self) -> None:
+        strat = strategy()
+        strat.state = long_state(layers=3)
+        gap_ok, gap_pct, required_price = strat._add_gap_passed("LONG", 99.50, 4)
+        allowed = strat._maybe_open_or_add_long(99.50, NOW_MS, boll(), cvd())
         self.assertTrue(gap_ok)
-        self.assertAlmostEqual(gap_pct, 0.003)
-        self.assertAlmostEqual(required_price, 99.70)
-        self.assertIsNotNone(result)
-        self.assertEqual(result.intent_type, "ADD_LONG")
-        self.assertEqual(result.layer_index, 6)
-        self.assertIn("0.30%", result.reason)
-
-    def test_add_gap_target_layer_7_to_8_uses_0_4_pct(self) -> None:
-        strat = strategy()
-
-        for target_layer in range(7, 9):
-            with self.subTest(target_layer=target_layer):
-                self.assertAlmostEqual(strat._add_layer_gap_pct_for_target_layer(target_layer), 0.004)
-
-        strat.state = long_state(layers=6)
-        gap_ok, gap_pct, required_price = strat._add_gap_passed("LONG", 99.70, 7)
-        blocked = strat._maybe_open_or_add_long(99.70, NOW_MS, boll(), cvd())
-
-        self.assertFalse(gap_ok)
-        self.assertAlmostEqual(gap_pct, 0.004)
-        self.assertAlmostEqual(required_price, 99.60)
-        self.assertIsNone(blocked)
-
-        strat.state = long_state(layers=6)
-        allowed = strat._maybe_open_or_add_long(99.60, NOW_MS, boll(), cvd())
-
+        self.assertAlmostEqual(gap_pct, 0.005)
+        self.assertAlmostEqual(required_price, 99.50)
         self.assertIsNotNone(allowed)
         self.assertEqual(allowed.intent_type, "ADD_LONG")
-        self.assertEqual(allowed.layer_index, 7)
-        self.assertIn("0.40%", allowed.reason)
+        self.assertEqual(allowed.layer_index, 4)
 
-    def test_add_gap_target_layer_9_to_10_uses_0_6_pct(self) -> None:
+    def test_short_add_l4_blocked_at_100_40_when_gap_is_0_005(self) -> None:
         strat = strategy()
-
-        for target_layer in range(9, 11):
-            with self.subTest(target_layer=target_layer):
-                self.assertAlmostEqual(strat._add_layer_gap_pct_for_target_layer(target_layer), 0.006)
-
-        strat.state = long_state(layers=8)
-        gap_ok, gap_pct, required_price = strat._add_gap_passed("LONG", 99.50, 9)
-        blocked = strat._maybe_open_or_add_long(99.50, NOW_MS, boll(), cvd())
-
+        strat.state = short_state(layers=3)
+        # L4 gap = 0.005, required_price = 100 * 1.005 = 100.50
+        gap_ok, gap_pct, required_price = strat._add_gap_passed("SHORT", 100.40, 4)
+        blocked = strat._maybe_open_or_add_short(100.40, NOW_MS, boll(), cvd())
         self.assertFalse(gap_ok)
-        self.assertAlmostEqual(gap_pct, 0.006)
-        self.assertAlmostEqual(required_price, 99.40)
+        self.assertAlmostEqual(gap_pct, 0.005)
+        self.assertAlmostEqual(required_price, 100.50)
         self.assertIsNone(blocked)
 
-        strat.state = long_state(layers=8)
-        allowed = strat._maybe_open_or_add_long(99.40, NOW_MS, boll(), cvd())
-
-        self.assertIsNotNone(allowed)
-        self.assertEqual(allowed.intent_type, "ADD_LONG")
-        self.assertEqual(allowed.layer_index, 9)
-        self.assertIn("0.60%", allowed.reason)
-
-    def test_add_gap_target_layer_11_plus_uses_0_8_pct(self) -> None:
+    def test_short_add_l4_allowed_at_100_50_when_gap_is_0_005(self) -> None:
         strat = strategy()
-
-        for target_layer in (11, 12, 20):
-            with self.subTest(target_layer=target_layer):
-                self.assertAlmostEqual(strat._add_layer_gap_pct_for_target_layer(target_layer), 0.008)
-
-        strat.state = long_state(layers=10)
-
-        gap_ok, gap_pct, required_price = strat._add_gap_passed("LONG", 99.30, 11)
-        blocked = strat._maybe_open_or_add_long(99.30, NOW_MS, boll(), cvd())
-
-        self.assertFalse(gap_ok)
-        self.assertAlmostEqual(gap_pct, 0.008)
-        self.assertAlmostEqual(required_price, 99.20)
-        self.assertIsNone(blocked)
-
-        strat.state = long_state(layers=10)
-        allowed = strat._maybe_open_or_add_long(99.20, NOW_MS, boll(), cvd())
-
+        strat.state = short_state(layers=3)
+        gap_ok, gap_pct, required_price = strat._add_gap_passed("SHORT", 100.50, 4)
+        allowed = strat._maybe_open_or_add_short(100.50, NOW_MS, boll(), cvd())
+        self.assertTrue(gap_ok)
+        self.assertAlmostEqual(gap_pct, 0.005)
+        self.assertAlmostEqual(required_price, 100.50)
         self.assertIsNotNone(allowed)
-        self.assertEqual(allowed.intent_type, "ADD_LONG")
-        self.assertEqual(allowed.layer_index, 11)
-        self.assertIn("0.80%", allowed.reason)
-
-    def test_short_add_gap_tiers_are_symmetric(self) -> None:
-        strat = strategy()
-
-        cases = [
-            (1, 2, 100.20, 100.30, 0.003),
-            (6, 7, 100.30, 100.40, 0.004),
-            (8, 9, 100.50, 100.60, 0.006),
-            (10, 11, 100.70, 100.80, 0.008),
-        ]
-        for layers, target_layer, blocked_price, allowed_price, expected_gap in cases:
-            with self.subTest(target_layer=target_layer):
-                strat.state = short_state(layers=layers)
-                gap_ok, gap_pct, required_price = strat._add_gap_passed("SHORT", blocked_price, target_layer)
-                blocked = strat._maybe_open_or_add_short(blocked_price, NOW_MS, boll(), cvd())
-
-                self.assertFalse(gap_ok)
-                self.assertAlmostEqual(gap_pct, expected_gap)
-                self.assertAlmostEqual(required_price, allowed_price)
-                self.assertIsNone(blocked)
-
-                strat.state = short_state(layers=layers)
-                allowed = strat._maybe_open_or_add_short(allowed_price, NOW_MS, boll(), cvd())
-
-                self.assertIsNotNone(allowed)
-                self.assertEqual(allowed.intent_type, "ADD_SHORT")
-                self.assertEqual(allowed.layer_index, target_layer)
-                self.assertIn(f"{expected_gap * 100:.2f}%", allowed.reason)
+        self.assertEqual(allowed.intent_type, "ADD_SHORT")
+        self.assertEqual(allowed.layer_index, 4)
 
     def test_first_add_block_prevents_add_within_30_minutes(self) -> None:
         strat = strategy()
@@ -271,6 +221,7 @@ class AddLayerGateTest(unittest.TestCase):
         strat = strategy()
         strat.state = long_state(layers=2, last_order_ts_ms=NOW_MS - 5 * 60 * 1000)
 
+        # bypass_gap = 0.003 * 2 = 0.006, adverse = (100 - 99.39) / 100 = 0.0061 >= 0.006
         gap_ok, gap_pct, _ = strat._add_gap_passed("LONG", 99.39, 2)
         passed, reason = strat._add_timing_passed("LONG", 99.39, NOW_MS, 2)
 
@@ -279,27 +230,31 @@ class AddLayerGateTest(unittest.TestCase):
         self.assertTrue(passed)
         self.assertEqual(reason, "ok")
 
-    def test_add_interval_target_layer_9_blocks_when_gap_below_dynamic_bypass(self) -> None:
+    def test_add_interval_target_layer_4_blocks_when_gap_below_dynamic_bypass(self) -> None:
         strat = strategy()
-        strat.state = long_state(layers=8, last_order_ts_ms=NOW_MS - 5 * 60 * 1000)
+        strat.state = long_state(layers=3, last_order_ts_ms=NOW_MS - 5 * 60 * 1000)
 
-        gap_ok, gap_pct, _ = strat._add_gap_passed("LONG", 99.30, 9)
-        passed, reason = strat._add_timing_passed("LONG", 99.30, NOW_MS, 9)
+        # L4 gap = 0.005, bypass_gap = 0.005 * 2 = 0.010
+        # price=99.10, adverse = 0.009 < 0.010 → blocked
+        gap_ok, gap_pct, _ = strat._add_gap_passed("LONG", 99.10, 4)
+        passed, reason = strat._add_timing_passed("LONG", 99.10, NOW_MS, 4)
 
         self.assertTrue(gap_ok)
-        self.assertAlmostEqual(gap_pct, 0.006)
+        self.assertAlmostEqual(gap_pct, 0.005)
         self.assertFalse(passed)
         self.assertEqual(reason, "add_interval")
 
-    def test_add_interval_target_layer_9_bypassed_when_gap_reaches_dynamic_bypass(self) -> None:
+    def test_add_interval_target_layer_4_bypassed_when_gap_reaches_dynamic_bypass(self) -> None:
         strat = strategy()
-        strat.state = long_state(layers=8, last_order_ts_ms=NOW_MS - 5 * 60 * 1000)
+        strat.state = long_state(layers=3, last_order_ts_ms=NOW_MS - 5 * 60 * 1000)
 
-        gap_ok, gap_pct, _ = strat._add_gap_passed("LONG", 98.79, 9)
-        passed, reason = strat._add_timing_passed("LONG", 98.79, NOW_MS, 9)
+        # L4 gap = 0.005, bypass_gap = 0.005 * 2 = 0.010
+        # price=98.99, adverse = 0.0101 >= 0.010 → bypassed
+        gap_ok, gap_pct, _ = strat._add_gap_passed("LONG", 98.99, 4)
+        passed, reason = strat._add_timing_passed("LONG", 98.99, NOW_MS, 4)
 
         self.assertTrue(gap_ok)
-        self.assertAlmostEqual(gap_pct, 0.006)
+        self.assertAlmostEqual(gap_pct, 0.005)
         self.assertTrue(passed)
         self.assertEqual(reason, "ok")
 
@@ -307,15 +262,18 @@ class AddLayerGateTest(unittest.TestCase):
         strat = strategy()
 
         self.assertAlmostEqual(strat._add_min_interval_bypass_gap_pct_for_target_layer(2), 0.006)
-        self.assertAlmostEqual(strat._add_min_interval_bypass_gap_pct_for_target_layer(7), 0.008)
-        self.assertAlmostEqual(strat._add_min_interval_bypass_gap_pct_for_target_layer(9), 0.012)
-        self.assertAlmostEqual(strat._add_min_interval_bypass_gap_pct_for_target_layer(11), 0.016)
+        self.assertAlmostEqual(strat._add_min_interval_bypass_gap_pct_for_target_layer(4), 0.010)
+        self.assertAlmostEqual(strat._add_min_interval_bypass_gap_pct_for_target_layer(8), 0.018)
+        self.assertAlmostEqual(strat._add_min_interval_bypass_gap_pct_for_target_layer(11), 0.024)
 
     def test_add_interval_bypassed_when_gap_reaches_target_layer_gap_times_2(self) -> None:
         strat = strategy()
         strat.state = long_state(layers=2, last_order_ts_ms=NOW_MS - 5 * 60 * 1000)
 
-        result = strat._maybe_open_or_add_long(99.39, NOW_MS, boll(), cvd())
+        # target_layer=3, linear gap = 0.003 + (3-2)*0.001 = 0.004
+        # bypass_gap = 0.004 * 2 = 0.008
+        # adverse = (100 - 99.19) / 100 = 0.0081 >= 0.008 → bypassed
+        result = strat._maybe_open_or_add_long(99.19, NOW_MS, boll(), cvd())
 
         self.assertIsNotNone(result)
         self.assertEqual(result.intent_type, "ADD_LONG")
@@ -325,13 +283,15 @@ class AddLayerGateTest(unittest.TestCase):
         strat = strategy(add_min_interval_bypass_gap_pct=0.003)
         strat.state = long_state(layers=10, last_order_ts_ms=NOW_MS - 5 * 60 * 1000)
 
+        # L11 gap = 0.003 + (11-2)*0.001 = 0.012, bypass = 0.012 * 2 = 0.024
+        # price=99.20, adverse = 0.008 < 0.024 → blocked
         blocked = strat._maybe_open_or_add_long(99.20, NOW_MS, boll(), cvd())
 
         self.assertIsNone(blocked)
         self.assertEqual(strat.state.layers, 10)
 
         strat.state = long_state(layers=10, last_order_ts_ms=NOW_MS - 5 * 60 * 1000)
-        allowed = strat._maybe_open_or_add_long(98.39, NOW_MS, boll(), cvd())
+        allowed = strat._maybe_open_or_add_long(97.59, NOW_MS, boll(), cvd())
 
         self.assertIsNotNone(allowed)
         self.assertEqual(allowed.intent_type, "ADD_LONG")
@@ -485,129 +445,135 @@ class AddLayerGateTest(unittest.TestCase):
 class AddLayerGatesPureTest(unittest.TestCase):
     """Direct tests for src.strategies.add_layer_gates pure functions."""
 
-    def test_add_layer_gap_pct_layer_2_to_6_uses_base(self) -> None:
+    def test_linear_add_layer_gap_vs_target_layer(self) -> None:
         from src.strategies.add_layer_gates import add_layer_gap_pct_for_target_layer
 
-        for target_layer in range(2, 7):
+        cases = [
+            (2, 0.003),
+            (3, 0.004),
+            (4, 0.005),
+            (5, 0.006),
+            (6, 0.007),
+            (7, 0.008),
+            (8, 0.009),
+            (9, 0.010),
+            (10, 0.011),
+            (20, 0.021),
+        ]
+        for target_layer, expected in cases:
             with self.subTest(target_layer=target_layer):
                 result = add_layer_gap_pct_for_target_layer(
                     target_layer=target_layer,
-                    add_layer_gap_pct=0.003,
-                    add_layer_gap_pct_layer_7_8=0.004,
-                    add_layer_gap_pct_layer_9_10=0.006,
-                    add_layer_gap_pct_layer_11_plus=0.008,
+                    add_gap_mode="linear",
+                    add_gap_base_pct=0.003,
+                    add_gap_step_pct=0.001,
                 )
-                self.assertAlmostEqual(result, 0.003)
+                self.assertAlmostEqual(result, expected)
 
-    def test_add_layer_gap_pct_layer_7_to_8_uses_layer_7_8(self) -> None:
+    def test_add_layer_gap_step_pct_zero_all_layers_equal_base(self) -> None:
         from src.strategies.add_layer_gates import add_layer_gap_pct_for_target_layer
 
-        for target_layer in range(7, 9):
+        for target_layer in (2, 5, 10, 20):
             with self.subTest(target_layer=target_layer):
                 result = add_layer_gap_pct_for_target_layer(
                     target_layer=target_layer,
-                    add_layer_gap_pct=0.003,
-                    add_layer_gap_pct_layer_7_8=0.004,
-                    add_layer_gap_pct_layer_9_10=0.006,
-                    add_layer_gap_pct_layer_11_plus=0.008,
+                    add_gap_mode="linear",
+                    add_gap_base_pct=0.005,
+                    add_gap_step_pct=0.0,
                 )
-                self.assertAlmostEqual(result, 0.004)
+                self.assertAlmostEqual(result, 0.005)
 
-    def test_add_layer_gap_pct_layer_9_to_10_uses_layer_9_10(self) -> None:
+    def test_unsupported_add_gap_mode_raises_value_error(self) -> None:
         from src.strategies.add_layer_gates import add_layer_gap_pct_for_target_layer
 
-        for target_layer in range(9, 11):
-            with self.subTest(target_layer=target_layer):
-                result = add_layer_gap_pct_for_target_layer(
-                    target_layer=target_layer,
-                    add_layer_gap_pct=0.003,
-                    add_layer_gap_pct_layer_7_8=0.004,
-                    add_layer_gap_pct_layer_9_10=0.006,
-                    add_layer_gap_pct_layer_11_plus=0.008,
-                )
-                self.assertAlmostEqual(result, 0.006)
+        for bad_mode in ("", "segmented", "fixed"):
+            with self.subTest(mode=bad_mode):
+                with self.assertRaises(ValueError):
+                    add_layer_gap_pct_for_target_layer(
+                        target_layer=2,
+                        add_gap_mode=bad_mode,
+                        add_gap_base_pct=0.003,
+                        add_gap_step_pct=0.001,
+                    )
 
-    def test_add_layer_gap_pct_layer_11_plus_uses_layer_11_plus(self) -> None:
+    def test_space_trimmed_mode_linear_passes(self) -> None:
         from src.strategies.add_layer_gates import add_layer_gap_pct_for_target_layer
 
-        for target_layer in (11, 12, 15, 20):
-            with self.subTest(target_layer=target_layer):
-                result = add_layer_gap_pct_for_target_layer(
-                    target_layer=target_layer,
-                    add_layer_gap_pct=0.003,
-                    add_layer_gap_pct_layer_7_8=0.004,
-                    add_layer_gap_pct_layer_9_10=0.006,
-                    add_layer_gap_pct_layer_11_plus=0.008,
-                )
-                self.assertAlmostEqual(result, 0.008)
+        # " linear " should be trimmed and lowered to "linear"
+        result = add_layer_gap_pct_for_target_layer(
+            target_layer=2,
+            add_gap_mode=" linear ",
+            add_gap_base_pct=0.003,
+            add_gap_step_pct=0.001,
+        )
+        self.assertAlmostEqual(result, 0.003)
 
-    def test_check_add_gap_long_passed(self) -> None:
+    def test_check_add_gap_long_passed_linear(self) -> None:
         from src.strategies.add_layer_gates import check_add_gap
 
         decision = check_add_gap(
             side="LONG",
-            price=99.70,
+            price=99.50,
             last_entry_price=100.0,
-            target_layer=2,
-            add_layer_gap_pct=0.003,
-            add_layer_gap_pct_layer_7_8=0.004,
-            add_layer_gap_pct_layer_9_10=0.006,
-            add_layer_gap_pct_layer_11_plus=0.008,
+            target_layer=4,
+            add_gap_mode="linear",
+            add_gap_base_pct=0.003,
+            add_gap_step_pct=0.001,
         )
         self.assertTrue(decision.ok)
-        self.assertAlmostEqual(decision.gap_pct, 0.003)
-        self.assertAlmostEqual(decision.required_price, 99.70)
+        # L4 gap = 0.003 + (4-2)*0.001 = 0.005, required_price = 100 * 0.995 = 99.50
+        self.assertAlmostEqual(decision.gap_pct, 0.005)
+        self.assertAlmostEqual(decision.required_price, 99.50)
 
-    def test_check_add_gap_long_blocked(self) -> None:
+    def test_check_add_gap_long_blocked_linear(self) -> None:
         from src.strategies.add_layer_gates import check_add_gap
 
         decision = check_add_gap(
             side="LONG",
-            price=99.80,
+            price=99.60,
             last_entry_price=100.0,
-            target_layer=2,
-            add_layer_gap_pct=0.003,
-            add_layer_gap_pct_layer_7_8=0.004,
-            add_layer_gap_pct_layer_9_10=0.006,
-            add_layer_gap_pct_layer_11_plus=0.008,
+            target_layer=4,
+            add_gap_mode="linear",
+            add_gap_base_pct=0.003,
+            add_gap_step_pct=0.001,
         )
         self.assertFalse(decision.ok)
-        self.assertAlmostEqual(decision.gap_pct, 0.003)
-        self.assertAlmostEqual(decision.required_price, 99.70)
+        self.assertAlmostEqual(decision.gap_pct, 0.005)
+        # required_price = 100 * 0.995 = 99.50, price 99.60 > 99.50 → blocked
+        self.assertAlmostEqual(decision.required_price, 99.50)
 
-    def test_check_add_gap_short_passed(self) -> None:
+    def test_check_add_gap_short_passed_linear(self) -> None:
         from src.strategies.add_layer_gates import check_add_gap
 
         decision = check_add_gap(
             side="SHORT",
-            price=100.30,
+            price=100.50,
             last_entry_price=100.0,
-            target_layer=2,
-            add_layer_gap_pct=0.003,
-            add_layer_gap_pct_layer_7_8=0.004,
-            add_layer_gap_pct_layer_9_10=0.006,
-            add_layer_gap_pct_layer_11_plus=0.008,
+            target_layer=4,
+            add_gap_mode="linear",
+            add_gap_base_pct=0.003,
+            add_gap_step_pct=0.001,
         )
         self.assertTrue(decision.ok)
-        self.assertAlmostEqual(decision.gap_pct, 0.003)
-        self.assertAlmostEqual(decision.required_price, 100.30)
+        # L4 gap = 0.005, required_price = 100 * 1.005 = 100.50
+        self.assertAlmostEqual(decision.gap_pct, 0.005)
+        self.assertAlmostEqual(decision.required_price, 100.50)
 
-    def test_check_add_gap_short_blocked(self) -> None:
+    def test_check_add_gap_short_blocked_linear(self) -> None:
         from src.strategies.add_layer_gates import check_add_gap
 
         decision = check_add_gap(
             side="SHORT",
-            price=100.20,
+            price=100.40,
             last_entry_price=100.0,
-            target_layer=2,
-            add_layer_gap_pct=0.003,
-            add_layer_gap_pct_layer_7_8=0.004,
-            add_layer_gap_pct_layer_9_10=0.006,
-            add_layer_gap_pct_layer_11_plus=0.008,
+            target_layer=4,
+            add_gap_mode="linear",
+            add_gap_base_pct=0.003,
+            add_gap_step_pct=0.001,
         )
         self.assertFalse(decision.ok)
-        self.assertAlmostEqual(decision.gap_pct, 0.003)
-        self.assertAlmostEqual(decision.required_price, 100.30)
+        self.assertAlmostEqual(decision.gap_pct, 0.005)
+        self.assertAlmostEqual(decision.required_price, 100.50)
 
     def test_check_add_gap_missing_last_entry(self) -> None:
         from src.strategies.add_layer_gates import check_add_gap
@@ -619,10 +585,9 @@ class AddLayerGatesPureTest(unittest.TestCase):
                     price=99.0,
                     last_entry_price=bad_price,
                     target_layer=2,
-                    add_layer_gap_pct=0.003,
-                    add_layer_gap_pct_layer_7_8=0.004,
-                    add_layer_gap_pct_layer_9_10=0.006,
-                    add_layer_gap_pct_layer_11_plus=0.008,
+                    add_gap_mode="linear",
+                    add_gap_base_pct=0.003,
+                    add_gap_step_pct=0.001,
                 )
                 self.assertFalse(decision.ok)
                 self.assertAlmostEqual(decision.gap_pct, 0.003)
@@ -641,10 +606,9 @@ class AddLayerGatesPureTest(unittest.TestCase):
             last_order_ts_ms=0,
             first_add_block_seconds=1800,
             add_min_interval_seconds=600,
-            add_layer_gap_pct=0.003,
-            add_layer_gap_pct_layer_7_8=0.004,
-            add_layer_gap_pct_layer_9_10=0.006,
-            add_layer_gap_pct_layer_11_plus=0.008,
+            add_gap_mode="linear",
+            add_gap_base_pct=0.003,
+            add_gap_step_pct=0.001,
         )
         self.assertFalse(decision.ok)
         self.assertEqual(decision.reason, "missing_last_entry")
@@ -662,10 +626,9 @@ class AddLayerGatesPureTest(unittest.TestCase):
             last_order_ts_ms=900_000,  # 100s ago, < 1800s
             first_add_block_seconds=1800,
             add_min_interval_seconds=600,
-            add_layer_gap_pct=0.003,
-            add_layer_gap_pct_layer_7_8=0.004,
-            add_layer_gap_pct_layer_9_10=0.006,
-            add_layer_gap_pct_layer_11_plus=0.008,
+            add_gap_mode="linear",
+            add_gap_base_pct=0.003,
+            add_gap_step_pct=0.001,
         )
         self.assertFalse(decision.ok)
         self.assertEqual(decision.reason, "first_add_block")
@@ -683,10 +646,9 @@ class AddLayerGatesPureTest(unittest.TestCase):
             last_order_ts_ms=1_000_000,  # 2000s ago, > 1800s
             first_add_block_seconds=1800,
             add_min_interval_seconds=600,
-            add_layer_gap_pct=0.003,
-            add_layer_gap_pct_layer_7_8=0.004,
-            add_layer_gap_pct_layer_9_10=0.006,
-            add_layer_gap_pct_layer_11_plus=0.008,
+            add_gap_mode="linear",
+            add_gap_base_pct=0.003,
+            add_gap_step_pct=0.001,
         )
         self.assertTrue(decision.ok)
         self.assertEqual(decision.reason, "ok")
@@ -704,10 +666,9 @@ class AddLayerGatesPureTest(unittest.TestCase):
             last_order_ts_ms=1_000_000,  # 500s ago < 600s
             first_add_block_seconds=1800,
             add_min_interval_seconds=600,
-            add_layer_gap_pct=0.003,
-            add_layer_gap_pct_layer_7_8=0.004,
-            add_layer_gap_pct_layer_9_10=0.006,
-            add_layer_gap_pct_layer_11_plus=0.008,
+            add_gap_mode="linear",
+            add_gap_base_pct=0.003,
+            add_gap_step_pct=0.001,
         )
         self.assertFalse(decision.ok)
         self.assertEqual(decision.reason, "add_interval")
@@ -726,10 +687,9 @@ class AddLayerGatesPureTest(unittest.TestCase):
             last_order_ts_ms=1_000_000,  # 500s ago < 600s
             first_add_block_seconds=1800,
             add_min_interval_seconds=600,
-            add_layer_gap_pct=0.003,
-            add_layer_gap_pct_layer_7_8=0.004,
-            add_layer_gap_pct_layer_9_10=0.006,
-            add_layer_gap_pct_layer_11_plus=0.008,
+            add_gap_mode="linear",
+            add_gap_base_pct=0.003,
+            add_gap_step_pct=0.001,
         )
         self.assertTrue(decision.ok)
         self.assertEqual(decision.reason, "ok")
@@ -747,10 +707,9 @@ class AddLayerGatesPureTest(unittest.TestCase):
             last_order_ts_ms=1_000_000,  # 1000s ago > 600s
             first_add_block_seconds=1800,
             add_min_interval_seconds=600,
-            add_layer_gap_pct=0.003,
-            add_layer_gap_pct_layer_7_8=0.004,
-            add_layer_gap_pct_layer_9_10=0.006,
-            add_layer_gap_pct_layer_11_plus=0.008,
+            add_gap_mode="linear",
+            add_gap_base_pct=0.003,
+            add_gap_step_pct=0.001,
         )
         self.assertTrue(decision.ok)
         self.assertEqual(decision.reason, "ok")

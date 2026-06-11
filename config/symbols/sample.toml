@@ -59,8 +59,12 @@ max_layers = 3
 layer_multiplier_step = "0.15"
 
 [entry]
-# add_gap_pct: wired to strategy add_layer_gap_pct.
-add_gap_pct = "0.006"
+# add_gap_mode: must be "linear".
+# L2 uses add_gap_base_pct. From L3 onward, each layer adds add_gap_step_pct.
+# Formula: base + (target_layer - 2) * step.
+add_gap_mode = "linear"
+add_gap_base_pct = "0.006"
+add_gap_step_pct = "0.001"
 # add_freeze_seconds: pending; current live add-freeze behavior still comes
 # from existing strategy defaults/env path until explicitly wired.
 add_freeze_seconds = 3600

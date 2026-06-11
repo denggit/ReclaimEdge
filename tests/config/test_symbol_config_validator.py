@@ -302,6 +302,71 @@ def test_rejects_bool_for_entry_add_min_interval_seconds() -> None:
         validate_symbol_config(config)
 
 
+def test_rejects_add_gap_mode_not_linear() -> None:
+    """add_gap_mode must be 'linear'."""
+    config = replace(
+        SymbolConfig.default_eth(),
+        entry=replace(
+            SymbolConfig.default_eth().entry,
+            add_gap_mode="segmented",
+        ),
+    )
+    with pytest.raises(SymbolConfigValidationError, match="add_gap_mode"):
+        validate_symbol_config(config)
+
+
+def test_rejects_add_gap_base_pct_zero() -> None:
+    """add_gap_base_pct must be > 0."""
+    config = replace(
+        SymbolConfig.default_eth(),
+        entry=replace(
+            SymbolConfig.default_eth().entry,
+            add_gap_base_pct=Decimal("0"),
+        ),
+    )
+    with pytest.raises(SymbolConfigValidationError, match="add_gap_base_pct"):
+        validate_symbol_config(config)
+
+
+def test_rejects_add_gap_base_pct_negative() -> None:
+    """add_gap_base_pct must be > 0."""
+    config = replace(
+        SymbolConfig.default_eth(),
+        entry=replace(
+            SymbolConfig.default_eth().entry,
+            add_gap_base_pct=Decimal("-0.001"),
+        ),
+    )
+    with pytest.raises(SymbolConfigValidationError, match="add_gap_base_pct"):
+        validate_symbol_config(config)
+
+
+def test_rejects_add_gap_step_pct_negative() -> None:
+    """add_gap_step_pct must be >= 0."""
+    config = replace(
+        SymbolConfig.default_eth(),
+        entry=replace(
+            SymbolConfig.default_eth().entry,
+            add_gap_step_pct=Decimal("-0.001"),
+        ),
+    )
+    with pytest.raises(SymbolConfigValidationError, match="add_gap_step_pct"):
+        validate_symbol_config(config)
+
+
+def test_accepts_add_gap_step_pct_zero() -> None:
+    """add_gap_step_pct = 0 is valid (all layers use base)."""
+    config = replace(
+        SymbolConfig.default_eth(),
+        entry=replace(
+            SymbolConfig.default_eth().entry,
+            add_gap_step_pct=Decimal("0"),
+        ),
+    )
+    # Should not raise.
+    validate_symbol_config(config)
+
+
 def test_rejects_non_bool_for_tp_split_tp_enabled() -> None:
     """non-bool must be rejected for split_tp_enabled."""
     config = replace(

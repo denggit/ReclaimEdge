@@ -121,7 +121,9 @@ def to_strategy_config(
     """
     validate_symbol_config(config)
     return BollCvdReclaimStrategyConfig(
-        add_layer_gap_pct=decimal_to_float(config.entry.add_gap_pct),
+        add_gap_mode=config.entry.add_gap_mode,
+        add_gap_base_pct=decimal_to_float(config.entry.add_gap_base_pct),
+        add_gap_step_pct=decimal_to_float(config.entry.add_gap_step_pct),
         max_layers=config.capital.max_layers,
         tp_min_net_profit_pct=decimal_to_float(config.tp.tp_min_net_profit_pct),
         tp_boll_enabled=config.tp.tp_boll_enabled,

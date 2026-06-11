@@ -26,37 +26,46 @@ class AddAvgImprovementDecision:
     projected_avg: float
 
 
+def linear_add_gap_pct_for_target_layer(
+        *,
+        target_layer: int,
+        add_gap_base_pct: float,
+        add_gap_step_pct: float,
+) -> float:
+    if target_layer <= 2:
+        return add_gap_base_pct
+    return add_gap_base_pct + (target_layer - 2) * add_gap_step_pct
+
+
 def add_layer_gap_pct_for_target_layer(
         *,
         target_layer: int,
-        add_layer_gap_pct: float,
-        add_layer_gap_pct_layer_7_8: float,
-        add_layer_gap_pct_layer_9_10: float,
-        add_layer_gap_pct_layer_11_plus: float,
+        add_gap_mode: str,
+        add_gap_base_pct: float,
+        add_gap_step_pct: float,
 ) -> float:
-    if target_layer >= 11:
-        return add_layer_gap_pct_layer_11_plus
-    if target_layer >= 9:
-        return add_layer_gap_pct_layer_9_10
-    if target_layer >= 7:
-        return add_layer_gap_pct_layer_7_8
-    return add_layer_gap_pct
+    mode = (add_gap_mode or "").strip().lower()
+    if mode != "linear":
+        raise ValueError(f"Unsupported add_gap_mode: {add_gap_mode!r}")
+    return linear_add_gap_pct_for_target_layer(
+        target_layer=target_layer,
+        add_gap_base_pct=add_gap_base_pct,
+        add_gap_step_pct=add_gap_step_pct,
+    )
 
 
 def add_min_interval_bypass_gap_pct_for_target_layer(
         *,
         target_layer: int,
-        add_layer_gap_pct: float,
-        add_layer_gap_pct_layer_7_8: float,
-        add_layer_gap_pct_layer_9_10: float,
-        add_layer_gap_pct_layer_11_plus: float,
+        add_gap_mode: str,
+        add_gap_base_pct: float,
+        add_gap_step_pct: float,
 ) -> float:
     return add_layer_gap_pct_for_target_layer(
         target_layer=target_layer,
-        add_layer_gap_pct=add_layer_gap_pct,
-        add_layer_gap_pct_layer_7_8=add_layer_gap_pct_layer_7_8,
-        add_layer_gap_pct_layer_9_10=add_layer_gap_pct_layer_9_10,
-        add_layer_gap_pct_layer_11_plus=add_layer_gap_pct_layer_11_plus,
+        add_gap_mode=add_gap_mode,
+        add_gap_base_pct=add_gap_base_pct,
+        add_gap_step_pct=add_gap_step_pct,
     ) * 2
 
 
@@ -78,17 +87,15 @@ def check_add_gap(
         price: float,
         last_entry_price: float | None,
         target_layer: int,
-        add_layer_gap_pct: float,
-        add_layer_gap_pct_layer_7_8: float,
-        add_layer_gap_pct_layer_9_10: float,
-        add_layer_gap_pct_layer_11_plus: float,
+        add_gap_mode: str,
+        add_gap_base_pct: float,
+        add_gap_step_pct: float,
 ) -> AddGapDecision:
     gap_pct = add_layer_gap_pct_for_target_layer(
         target_layer=target_layer,
-        add_layer_gap_pct=add_layer_gap_pct,
-        add_layer_gap_pct_layer_7_8=add_layer_gap_pct_layer_7_8,
-        add_layer_gap_pct_layer_9_10=add_layer_gap_pct_layer_9_10,
-        add_layer_gap_pct_layer_11_plus=add_layer_gap_pct_layer_11_plus,
+        add_gap_mode=add_gap_mode,
+        add_gap_base_pct=add_gap_base_pct,
+        add_gap_step_pct=add_gap_step_pct,
     )
     if last_entry_price is None or last_entry_price <= 0:
         return AddGapDecision(False, gap_pct, 0.0)
@@ -112,10 +119,9 @@ def check_base_add_timing(
         last_order_ts_ms: int,
         first_add_block_seconds: int,
         add_min_interval_seconds: int,
-        add_layer_gap_pct: float,
-        add_layer_gap_pct_layer_7_8: float,
-        add_layer_gap_pct_layer_9_10: float,
-        add_layer_gap_pct_layer_11_plus: float,
+        add_gap_mode: str,
+        add_gap_base_pct: float,
+        add_gap_step_pct: float,
 ) -> AddTimingDecision:
     if last_entry_price is None or last_entry_price <= 0:
         return AddTimingDecision(False, "missing_last_entry")
@@ -130,10 +136,9 @@ def check_base_add_timing(
         adverse_gap_pct_val = adverse_gap_pct(side=side, price=price, last_entry_price=last_entry_price)
         bypass_gap_pct = add_min_interval_bypass_gap_pct_for_target_layer(
             target_layer=target_layer,
-            add_layer_gap_pct=add_layer_gap_pct,
-            add_layer_gap_pct_layer_7_8=add_layer_gap_pct_layer_7_8,
-            add_layer_gap_pct_layer_9_10=add_layer_gap_pct_layer_9_10,
-            add_layer_gap_pct_layer_11_plus=add_layer_gap_pct_layer_11_plus,
+            add_gap_mode=add_gap_mode,
+            add_gap_base_pct=add_gap_base_pct,
+            add_gap_step_pct=add_gap_step_pct,
         )
         if elapsed_seconds < add_min_interval_seconds and adverse_gap_pct_val < bypass_gap_pct:
             return AddTimingDecision(False, "add_interval")

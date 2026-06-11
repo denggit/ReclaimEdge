@@ -229,7 +229,10 @@ def _validate_entry(config: SymbolConfig) -> None:
     e = config.entry
     sec = "entry"
 
-    _ensure_pct_open_closed(sec, "add_gap_pct", e.add_gap_pct)
+    if e.add_gap_mode != "linear":
+        _fail(sec, "add_gap_mode", f"must be 'linear', got {e.add_gap_mode!r}")
+    _ensure_positive_decimal(sec, "add_gap_base_pct", e.add_gap_base_pct)
+    _ensure_non_negative_decimal(sec, "add_gap_step_pct", e.add_gap_step_pct)
     _ensure_non_negative_int(sec, "add_freeze_seconds", e.add_freeze_seconds)
     _ensure_non_negative_int(sec, "first_add_block_seconds", e.first_add_block_seconds)
     _ensure_non_negative_int(sec, "add_min_interval_seconds", e.add_min_interval_seconds)

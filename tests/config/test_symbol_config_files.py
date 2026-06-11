@@ -71,7 +71,9 @@ def test_default_eth_toml_matches_live_config() -> None:
     assert loaded.capital.dry_run_equity_usdt == Decimal("1000")
 
     # entry (live values)
-    assert loaded.entry.add_gap_pct == Decimal("0.003")
+    assert loaded.entry.add_gap_mode == "linear"
+    assert loaded.entry.add_gap_base_pct == Decimal("0.003")
+    assert loaded.entry.add_gap_step_pct == Decimal("0.001")
     assert loaded.entry.add_freeze_seconds == 3600
     assert loaded.entry.first_add_block_seconds == 3600
     assert loaded.entry.add_min_interval_seconds == 1800
