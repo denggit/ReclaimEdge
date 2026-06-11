@@ -477,7 +477,13 @@ class Trader:
         return self._tp_sl_manager._tp_price_summary(specs)
 
     async def cancel_existing_reduce_only_orders(self, *, phase: str = "normal_cancel") -> bool:
-        return await self._tp_sl_manager.cancel_existing_reduce_only_orders(phase=phase)
+        try:
+            return await self._tp_sl_manager.cancel_existing_reduce_only_orders(phase=phase)
+        except TypeError as exc:
+            message = str(exc)
+            if "unexpected keyword" in message or "positional" in message or "argument" in message:
+                return await self._tp_sl_manager.cancel_existing_reduce_only_orders()
+            raise
 
     async def place_sidecar_market_order(self, *, side: PositionSide, eth_qty: float) -> dict[str, Any]:
         contracts = self.eth_qty_to_contracts(Decimal(str(eth_qty)))

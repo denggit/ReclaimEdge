@@ -137,6 +137,7 @@ class StrategyIntentFactory:
             protected_order_ids=self.protected_order_ids(),
             managed_core_contracts=self.managed_core_contracts_for_intent(intent_type),
             managed_core_eth_qty=self.managed_core_eth_qty_for_intent(intent_type),
+            allow_stale_tp_update_skip=(intent_type == "UPDATE_TP"),
             # ── Middle Bucket Split fields ────────────────────────────
             middle_bucket_split_active=bool(getattr(state, "middle_bucket_split_active", False)),
             middle_bucket_split_fast_consumed=bool(getattr(state, "middle_bucket_split_fast_consumed", False)),

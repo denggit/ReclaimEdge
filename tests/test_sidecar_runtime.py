@@ -869,7 +869,16 @@ async def test_startup_restores_main_tp_order_id() -> None:
 @pytest.mark.asyncio
 async def test_startup_missing_main_tp_order_id_halts_when_reduce_only_exists() -> None:
     trader = Trader()
-    trader.pending_orders = [{"instId": "ETH-USDT-SWAP", "reduceOnly": "true", "ordId": "unknown-tp"}]
+    trader.pending_orders = [
+        {
+            "instId": "ETH-USDT-SWAP",
+            "reduceOnly": "true",
+            "side": "sell",
+            "ordId": "unknown-tp",
+            "px": "3100",
+            "sz": "5",
+        }
+    ]
     execution = ExecutionState("pos-1", 1000.0)
     journal = Journal()
 
@@ -881,9 +890,9 @@ async def test_startup_missing_main_tp_order_id_halts_when_reduce_only_exists() 
         journal=journal,
     )
 
-    assert execution.trading_halted
-    assert execution.halt_reason == "main_tp_order_id_missing_on_startup"
-    assert journal.events[0][0] == "MAIN_TP_ORDER_ID_MISSING_ON_STARTUP"
+    assert not execution.trading_halted
+    assert getattr(trader, "tp_order_id") == "unknown-tp"
+    assert journal.events[0][0] == "STARTUP_REDUCE_ONLY_TP_IDENTITY_RECONSTRUCTED"
 
 
 def test_flat_cleanup_resets_sidecar_fields() -> None:

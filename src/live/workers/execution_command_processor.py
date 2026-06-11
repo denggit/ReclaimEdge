@@ -779,8 +779,14 @@ class ExecutionCommandProcessor:
         # ── apply result ─────────────────────────────────────────────────
         if getattr(result, "action", None) == "MARKET_EXIT_RUNNER":
             if command.intent.intent_type == "UPDATE_TP" and hasattr(self.journal, "append"):
+                market_exit_source = getattr(command.intent, "_trend_runner_market_exit_source", "")
+                event_name = "TREND_RUNNER_SL_INVALID_NO_PROTECTION_MARKET_EXIT"
+                reason = "runner_sl_invalid_no_protection"
+                if market_exit_source == "sl_update_failed_no_protection":
+                    event_name = "TREND_RUNNER_SL_UPDATE_FAILED_NO_PROTECTION_MARKET_EXIT"
+                    reason = "trend_runner_sl_place_failed_no_protection"
                 self.journal.append(
-                    "TREND_RUNNER_SL_INVALID_NO_PROTECTION_MARKET_EXIT",
+                    event_name,
                     {
                         "symbol": self.trader.symbol,
                         "side": command.intent.side,
@@ -788,7 +794,7 @@ class ExecutionCommandProcessor:
                         "current_price": getattr(command.intent, "price", None),
                         "new_sl_price": getattr(command.intent, "trend_runner_sl_price", None)
                         or getattr(command.intent, "three_stage_runner_sl_price", None),
-                        "reason": "runner_sl_invalid_no_protection",
+                        "reason": reason,
                         "no_sl_protection": True,
                         "market_exit_runner": True,
                         "no_halt": True,
@@ -1496,6 +1502,41 @@ class ExecutionCommandProcessor:
                         "reason": "runner_sl_protection_unknown",
                         "no_halt": True,
                         "action_taken": "skip_invalid_sl_update",
+                    },
+                    position_id=current_position_id,
+                )
+            elif message == "trend_runner_sl_update_failed_but_old_sl_active":
+                self.journal.append(
+                    "TREND_RUNNER_SL_UPDATE_FAILED_BUT_OLD_SL_ACTIVE",
+                    {
+                        "symbol": self.trader.symbol,
+                        "side": command.intent.side,
+                        "position_id": current_position_id,
+                        "current_price": getattr(command.intent, "price", None),
+                        "old_sl_price": getattr(result, "protective_sl_price", ""),
+                        "old_sl_order_id": getattr(result, "protective_sl_order_id", None),
+                        "attempted_new_sl_price": getattr(command.intent, "trend_runner_sl_price", None)
+                        or getattr(command.intent, "three_stage_runner_sl_price", None),
+                        "reason": "trend_runner_sl_place_failed_but_old_sl_active",
+                        "no_halt": True,
+                        "old_sl_preserved": True,
+                        "action_taken": "skip_failed_sl_update_keep_old_sl",
+                    },
+                    position_id=current_position_id,
+                )
+            elif message == "trend_runner_sl_update_failed_protection_unknown":
+                self.journal.append(
+                    "TREND_RUNNER_SL_UPDATE_FAILED_PROTECTION_UNKNOWN",
+                    {
+                        "symbol": self.trader.symbol,
+                        "side": command.intent.side,
+                        "position_id": current_position_id,
+                        "current_price": getattr(command.intent, "price", None),
+                        "attempted_new_sl_price": getattr(command.intent, "trend_runner_sl_price", None)
+                        or getattr(command.intent, "three_stage_runner_sl_price", None),
+                        "reason": "trend_runner_sl_place_failed_protection_unknown",
+                        "no_halt": True,
+                        "action_taken": "skip_failed_sl_update_protection_unknown",
                     },
                     position_id=current_position_id,
                 )

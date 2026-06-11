@@ -1134,8 +1134,8 @@ class TestThreeStagePostTp1SlFailurePreservesActualOrderModeUnsplitMiddleBucket:
 
 
 class TestTrendRunnerSlFailurePreservesActualOrderModeSplitFastSlow:
-    """When trend runner protective SL fails and specs were real split labels,
-    the classifier must return SPLIT_FAST_SLOW and the early return must carry it."""
+    """When trend runner protective SL fails and protection is unknown, the
+    safe skip result must still carry the split classifier fields."""
 
     @pytest.mark.asyncio
     async def test_trend_runner_sl_failure_preserves_actual_order_mode_split_fast_slow(self):
@@ -1241,8 +1241,8 @@ class TestTrendRunnerSlFailurePreservesActualOrderModeSplitFastSlow:
 
         result = await facade.replace_take_profit(intent)
 
-        assert result.ok is False
-        assert "trend_runner_protective_sl_failed" in result.message
+        assert result.ok is True
+        assert result.message == "trend_runner_sl_update_failed_protection_unknown"
         assert result.middle_bucket_split_executed is True
         assert result.middle_bucket_split_actual_order_mode == "SPLIT_FAST_SLOW"
         assert result.middle_bucket_split_disabled_reason is None

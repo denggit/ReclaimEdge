@@ -194,6 +194,9 @@ class TpSlExecutionManager:
         protected_order_ids = set(getattr(t, "_protected_reduce_only_order_ids", set()) or set())
         managed_order_ids = set(getattr(t, "_managed_reduce_only_order_ids", set()) or set())
         allow_unmanaged = bool(getattr(t, "_allow_cancel_unmanaged_reduce_only", True))
+        orders_to_cancel: list[str] = []
+        unknown_action: str | None = None
+
         for item in orders:
             if item.get("instId") != t.symbol:
                 continue
@@ -201,27 +204,35 @@ class TpSlExecutionManager:
                 continue
             ord_id = item.get("ordId")
             if not ord_id:
-                return self._handle_reduce_only_identity_unknown(
-                    phase=phase,
-                    orders=orders,
-                    action_taken="skip_risky_cancel_missing_order_id",
-                )
+                unknown_action = unknown_action or "skip_risky_cancel_missing_order_id"
+                continue
             ord_id = str(ord_id)
             if ord_id in protected_order_ids:
-                logger.info("Protected reduce-only order skipped | ordId=%s", ord_id)
                 continue
             if managed_order_ids and ord_id not in managed_order_ids:
-                return self._handle_reduce_only_identity_unknown(
-                    phase=phase,
-                    orders=orders,
-                    action_taken="skip_risky_cancel_unmanaged_order",
-                )
+                unknown_action = unknown_action or "skip_risky_cancel_unmanaged_order"
+                continue
             if not managed_order_ids and not allow_unmanaged:
-                return self._handle_reduce_only_identity_unknown(
-                    phase=phase,
-                    orders=orders,
-                    action_taken="skip_risky_cancel_no_managed_identity",
-                )
+                unknown_action = unknown_action or "skip_risky_cancel_no_managed_identity"
+                continue
+            orders_to_cancel.append(ord_id)
+
+        if unknown_action is not None:
+            return self._handle_reduce_only_identity_unknown(
+                phase=phase,
+                orders=orders,
+                action_taken=unknown_action,
+            )
+
+        for item in orders:
+            if item.get("instId") != t.symbol:
+                continue
+            if str(item.get("reduceOnly", "")).lower() != "true":
+                continue
+            ord_id = item.get("ordId")
+            if ord_id and str(ord_id) in protected_order_ids:
+                logger.info("Protected reduce-only order skipped | ordId=%s", ord_id)
+        for ord_id in orders_to_cancel:
             try:
                 await t.request("POST", "/api/v5/trade/cancel-order", order_specs.build_cancel_order_body(
                     inst_id=t.symbol,

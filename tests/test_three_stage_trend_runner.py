@@ -1844,6 +1844,7 @@ class ThreeStageTrendRunnerTraderTest(unittest.IsolatedAsyncioTestCase):
             intent(
                 intent_type="UPDATE_TP",
                 tp_plan="SINGLE",
+                price=102.0,
                 tp_price=111.1,
                 trend_runner_active=True,
                 trend_runner_tp_price=111.1,
@@ -1924,6 +1925,7 @@ class ThreeStageTrendRunnerTraderTest(unittest.IsolatedAsyncioTestCase):
             intent(
                 intent_type="UPDATE_TP",
                 tp_plan="SINGLE",
+                price=102.0,
                 tp_price=111.1,
                 trend_runner_active=True,
                 trend_runner_tp_price=111.1,

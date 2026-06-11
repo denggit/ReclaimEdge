@@ -245,6 +245,54 @@ class TpSlExecutionManagerTest(unittest.IsolatedAsyncioTestCase):
             await manager.cancel_existing_reduce_only_orders()
         self.assertIn("reduce_only_order_identity_unknown", str(ctx.exception))
 
+    async def test_cancel_reduce_only_update_tp_prescans_unknown_before_cancel(self) -> None:
+        trader = make_trader()
+        trader._managed_reduce_only_order_ids = {"known-id"}
+        requests = []
+
+        async def fake_fetch_pending():  # type: ignore[no-untyped-def]
+            return [
+                {"instId": trader.symbol, "reduceOnly": "true", "ordId": "known-id"},
+                {"instId": trader.symbol, "reduceOnly": "true", "ordId": "unknown-id"},
+            ]
+
+        async def fake_request(method, path, body):  # type: ignore[no-untyped-def]
+            requests.append((method, path, body))
+            return {"code": "0", "data": []}
+
+        trader.fetch_pending_orders = fake_fetch_pending
+        trader.request = fake_request  # type: ignore[method-assign]
+
+        manager = TpSlExecutionManager(trader)
+        result = await manager.cancel_existing_reduce_only_orders(phase="update_tp")
+
+        self.assertFalse(result)
+        self.assertEqual(requests, [])
+
+    async def test_cancel_reduce_only_normal_cancel_prescans_unknown_before_raise(self) -> None:
+        trader = make_trader()
+        trader._managed_reduce_only_order_ids = {"known-id"}
+        requests = []
+
+        async def fake_fetch_pending():  # type: ignore[no-untyped-def]
+            return [
+                {"instId": trader.symbol, "reduceOnly": "true", "ordId": "known-id"},
+                {"instId": trader.symbol, "reduceOnly": "true", "ordId": "unknown-id"},
+            ]
+
+        async def fake_request(method, path, body):  # type: ignore[no-untyped-def]
+            requests.append((method, path, body))
+            return {"code": "0", "data": []}
+
+        trader.fetch_pending_orders = fake_fetch_pending
+        trader.request = fake_request  # type: ignore[method-assign]
+
+        manager = TpSlExecutionManager(trader)
+        with self.assertRaises(RuntimeError):
+            await manager.cancel_existing_reduce_only_orders(phase="normal_cancel")
+
+        self.assertEqual(requests, [])
+
     # ------------------------------------------------------------------
     # cancel_sidecar_take_profit
     # ------------------------------------------------------------------

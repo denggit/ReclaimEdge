@@ -337,6 +337,7 @@ class TradeIntent:
     protected_order_ids: tuple[str, ...] = ()
     managed_core_contracts: str | None = None
     managed_core_eth_qty: float = 0.0
+    allow_stale_tp_update_skip: bool = False
 
     # ── Middle Bucket Split fields ────────────────────────────────────
     middle_bucket_split_active: bool = False

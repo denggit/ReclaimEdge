@@ -185,7 +185,11 @@ class CoreTakeProfitManager:
 
         # Sanity check: core cannot exceed net (only when there is a net position)
         if managed_core_contracts is not None and core_contracts_for_tp > net_contracts_for_sl:
-            if intent.intent_type == "UPDATE_TP" and net_contracts_for_sl > 0:
+            if (
+                    intent.intent_type == "UPDATE_TP"
+                    and net_contracts_for_sl > 0
+                    and bool(getattr(intent, "allow_stale_tp_update_skip", False))
+            ):
                 logger.warning(
                     "STALE_TP_UPDATE_SKIPPED_NET_REDUCED | symbol=%s side=%s intent_type=%s core=%s net=%s avg_entry=%s current_price=%s position_id=%s reason=managed_core_contracts_exceeds_net_position no_halt=true no_order_cancel=true no_new_tp=true",
                     getattr(t, "symbol", ""),
@@ -225,6 +229,40 @@ class CoreTakeProfitManager:
             )
 
         t.position_contracts = core_contracts_for_tp
+
+        trend_runner_sl_price = getattr(intent, "trend_runner_sl_price", None) or getattr(intent,
+                                                                                          "three_stage_runner_sl_price",
+                                                                                          None)
+        if (
+                intent.intent_type == "UPDATE_TP"
+                and getattr(intent, "trend_runner_active", False)
+                and trend_runner_sl_price is not None
+        ):
+            current_price = self._intent_current_price_decimal(intent)
+            validation = validate_runner_protective_sl_price(
+                side=intent.side,
+                current_price=current_price,
+                new_sl_price=Decimal(str(trend_runner_sl_price)),
+            )
+            if not validation.valid:
+                old_sl_order_id = getattr(intent, "trend_runner_sl_order_id", None) or t.trend_runner_sl_order_id
+                old_sl_price = getattr(intent, "trend_runner_existing_sl_price", None)
+                protection_state = await self._trend_runner_sl_protection_state(
+                    side=intent.side,
+                    old_sl_order_id=old_sl_order_id,
+                    old_sl_price=old_sl_price,
+                )
+                if protection_state == "absent":
+                    object.__setattr__(intent, "_trend_runner_market_exit_source", "invalid_no_protection")
+                    logger.warning(
+                        "TREND_RUNNER_SL_INVALID_NO_PROTECTION_MARKET_EXIT | symbol=%s side=%s current_price=%s new_sl_price=%s reason=%s no_sl_protection=true market_exit_runner=true action_taken=preflight_market_exit_runner no_tp_cancel=true no_new_tp=true",
+                        getattr(t, "symbol", ""),
+                        intent.side,
+                        t.price_to_str(float(current_price)),
+                        t.price_to_str(float(trend_runner_sl_price)),
+                        validation.reason,
+                    )
+                    return await self.trader.execute_market_exit_runner(intent)
 
         cancel_ok = await self.trader._cancel_existing_take_profit_orders_for_intent(intent)
         if cancel_ok is False:
@@ -330,15 +368,12 @@ class CoreTakeProfitManager:
                 old_sl_order_id,
                 sl_order_id,
             )
-        trend_runner_sl_price = getattr(intent, "trend_runner_sl_price", None) or getattr(intent,
-                                                                                          "three_stage_runner_sl_price",
-                                                                                          None)
         if (
                 getattr(intent, "trend_runner_active", False)
                 and trend_runner_sl_price is not None
         ):
             old_sl_order_id = getattr(intent, "trend_runner_sl_order_id", None) or t.trend_runner_sl_order_id
-            current_price = Decimal(str(getattr(intent, "price", 0) or 0))
+            current_price = self._intent_current_price_decimal(intent)
             new_sl_decimal = Decimal(str(trend_runner_sl_price))
             validation = validate_runner_protective_sl_price(
                 side=intent.side,
@@ -346,7 +381,7 @@ class CoreTakeProfitManager:
                 new_sl_price=new_sl_decimal,
             )
             if not validation.valid:
-                old_sl_price = getattr(intent, "trend_runner_sl_price", None)
+                old_sl_price = getattr(intent, "trend_runner_existing_sl_price", None)
                 protection_state = await self._trend_runner_sl_protection_state(
                     side=intent.side,
                     old_sl_order_id=old_sl_order_id,
@@ -383,6 +418,7 @@ class CoreTakeProfitManager:
                         middle_bucket_split_actual_order_mode=middle_bucket_split_actual_order_mode_val,
                     )
                 if protection_state == "absent":
+                    object.__setattr__(intent, "_trend_runner_market_exit_source", "invalid_no_protection")
                     logger.warning(
                         "TREND_RUNNER_SL_INVALID_NO_PROTECTION_MARKET_EXIT | symbol=%s side=%s current_price=%s new_sl_price=%s reason=%s no_sl_protection=true market_exit_runner=true",
                         getattr(t, "symbol", ""),
@@ -427,19 +463,74 @@ class CoreTakeProfitManager:
             )
             protective_sl_price_text = t.price_to_str(float(trend_runner_sl_price))
             if not sl_ok:
+                old_sl_price = getattr(intent, "trend_runner_existing_sl_price", None)
+                current_price_text = self._current_price_text(current_price)
+                protection_state = await self._trend_runner_sl_protection_state(
+                    side=intent.side,
+                    old_sl_order_id=old_sl_order_id,
+                    old_sl_price=old_sl_price,
+                )
+                if protection_state == "active":
+                    logger.warning(
+                        "TREND_RUNNER_SL_UPDATE_FAILED_BUT_OLD_SL_ACTIVE | symbol=%s side=%s current_price=%s old_sl_order_id=%s old_sl_price=%s attempted_new_sl_price=%s sl_message=%s no_halt=true old_sl_preserved=true action_taken=skip_failed_sl_update_keep_old_sl",
+                        getattr(t, "symbol", ""),
+                        intent.side,
+                        current_price_text,
+                        old_sl_order_id,
+                        old_sl_price,
+                        protective_sl_price_text,
+                        sl_message,
+                    )
+                    return LiveTradeResult(
+                        True,
+                        intent.intent_type,
+                        None,
+                        tp_order_id,
+                        t.decimal_to_str(core_contracts_for_tp),
+                        tp_price_text,
+                        "trend_runner_sl_update_failed_but_old_sl_active",
+                        entry_filled=False,
+                        tp_ok=True,
+                        tp_order_ids=tuple(placed_order_ids),
+                        protective_sl_order_id=old_sl_order_id,
+                        protective_sl_price=str(old_sl_price or ""),
+                        protective_sl_ok=True,
+                        middle_bucket_split_executed=middle_bucket_split_executed,
+                        middle_bucket_split_disabled_reason=middle_bucket_split_disabled_reason_val,
+                        middle_bucket_split_actual_order_mode=middle_bucket_split_actual_order_mode_val,
+                    )
+                if protection_state == "absent":
+                    object.__setattr__(intent, "_trend_runner_market_exit_source", "sl_update_failed_no_protection")
+                    logger.warning(
+                        "TREND_RUNNER_SL_UPDATE_FAILED_NO_PROTECTION_MARKET_EXIT | symbol=%s side=%s current_price=%s attempted_new_sl_price=%s sl_message=%s no_sl_protection=true market_exit_runner=true",
+                        getattr(t, "symbol", ""),
+                        intent.side,
+                        current_price_text,
+                        protective_sl_price_text,
+                        sl_message,
+                    )
+                    return await self.trader.execute_market_exit_runner(intent)
+                logger.warning(
+                    "TREND_RUNNER_SL_UPDATE_FAILED_PROTECTION_UNKNOWN | symbol=%s side=%s current_price=%s attempted_new_sl_price=%s sl_message=%s no_halt=true action_taken=skip_failed_sl_update_protection_unknown",
+                    getattr(t, "symbol", ""),
+                    intent.side,
+                    current_price_text,
+                    protective_sl_price_text,
+                    sl_message,
+                )
                 return LiveTradeResult(
-                    False,
+                    True,
                     intent.intent_type,
                     None,
                     tp_order_id,
                     t.decimal_to_str(core_contracts_for_tp),
                     tp_price_text,
-                    f"trend_runner_protective_sl_failed: {sl_message}",
+                    "trend_runner_sl_update_failed_protection_unknown",
                     entry_filled=False,
                     tp_ok=True,
                     tp_order_ids=tuple(placed_order_ids),
                     protective_sl_price=protective_sl_price_text,
-                    protective_sl_ok=False,
+                    protective_sl_ok=True,
                     middle_bucket_split_executed=middle_bucket_split_executed,
                     middle_bucket_split_disabled_reason=middle_bucket_split_disabled_reason_val,
                     middle_bucket_split_actual_order_mode=middle_bucket_split_actual_order_mode_val,
@@ -582,6 +673,18 @@ class CoreTakeProfitManager:
         if not value:
             return set()
         return {item.strip() for item in str(value).split(",") if item.strip()}
+
+    @staticmethod
+    def _intent_current_price_decimal(intent: TradeIntent) -> Decimal:
+        try:
+            return Decimal(str(getattr(intent, "price", 0) or 0))
+        except Exception:
+            return Decimal("0")
+
+    def _current_price_text(self, current_price: Decimal) -> str:
+        if current_price <= 0:
+            return ""
+        return self.trader.price_to_str(float(current_price))
 
     def _managed_core_contracts_from_intent(self, intent: TradeIntent) -> Decimal | None:
         t = self.trader

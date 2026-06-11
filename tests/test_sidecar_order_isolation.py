@@ -199,5 +199,9 @@ async def test_unknown_reduce_only_order_blocks_tp_update() -> None:
     trader = UnknownReduceOnlyTrader()
     trader.tp_order_id = None
 
-    with pytest.raises(RuntimeError, match="reduce_only_order_identity_unknown"):
-        await trader.replace_take_profit(intent(protected_order_ids=("sidecar-tp",)))
+    result = await trader.replace_take_profit(intent(protected_order_ids=("sidecar-tp",)))
+
+    assert result.ok
+    assert result.message == "reduce_only_order_identity_unknown_update_tp_skipped"
+    assert trader.cancelled == []
+    assert trader.placed == []

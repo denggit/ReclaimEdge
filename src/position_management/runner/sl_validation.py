@@ -18,6 +18,8 @@ def validate_runner_protective_sl_price(
     tick_size: Decimal | None = None,
 ) -> RunnerSlValidationResult:
     _ = tick_size
+    if current_price <= 0:
+        return RunnerSlValidationResult(True, "missing_current_price_skip_validation")
     normalized_side = str(side or "").upper()
     if normalized_side == "LONG":
         if new_sl_price < current_price:
