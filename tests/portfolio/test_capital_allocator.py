@@ -1935,3 +1935,160 @@ class TestSourcePurity:
                         assert alias.name != "CapitalLedger", (
                             "capital_allocator.py must not import CapitalLedger class"
                         )
+
+
+# ===================================================================
+# 25. G04b: projected_snapshot.leader_symbol sync
+# ===================================================================
+
+
+class TestProjectedLeaderSync:
+    """G04b: projected_snapshot.leader_symbol must be synced with resolved leader."""
+
+    def test_add_main_layer2_to_layer3_projected_leader_updated(self):
+        """layer2→3 creates new leader → projected_snapshot.leader_symbol synced."""
+        plan = _make_plan(max_layers=8)
+        snap = _snapshot(
+            leader_symbol=None,
+            symbols={
+                _ETH: _state(
+                    state="OPEN",
+                    side="LONG",
+                    used_layers=2,
+                    position_plan_id=plan.plan_id,
+                    planned_main_contracts=plan.planned_main_contracts,
+                    plan_max_layers=8,
+                    main_used_margin_usdt="25",
+                    sidecar_enabled=True,
+                ),
+                _BTC: _state(),
+            },
+        )
+        req = _request(
+            action="ADD_MAIN",
+            side="LONG",
+            requested_layer=3,
+            main_margin_delta_usdt="15",
+            account_equity_usdt="1000",
+        )
+
+        decision = check_allocation_dry_run(snapshot=snap, request=req)
+
+        assert decision.allowed is True
+        assert decision.leader_symbol == _ETH
+        assert decision.projected_snapshot.leader_symbol == _ETH
+
+    def test_add_main_sticky_leader_projected_keeps_old_leader(self):
+        """Sticky leader ETH at layer3, ADD_MAIN → layer4.
+        Projected snapshot must keep ETH as leader."""
+        plan = _make_plan(max_layers=8)
+        snap = _snapshot(
+            leader_symbol=_ETH,
+            symbols={
+                _ETH: _state(
+                    state="OPEN",
+                    side="LONG",
+                    used_layers=3,
+                    position_plan_id=plan.plan_id,
+                    planned_main_contracts=plan.planned_main_contracts,
+                    plan_max_layers=8,
+                    main_used_margin_usdt="40",
+                    sidecar_enabled=True,
+                ),
+                _BTC: _state(),
+            },
+        )
+        req = _request(
+            action="ADD_MAIN",
+            side="LONG",
+            requested_layer=4,
+            main_margin_delta_usdt="15",
+            account_equity_usdt="1000",
+        )
+
+        decision = check_allocation_dry_run(snapshot=snap, request=req)
+
+        assert decision.allowed is True
+        assert decision.leader_symbol == _ETH
+        assert decision.projected_snapshot.leader_symbol == _ETH
+
+    def test_open_main_layer1_projected_leader_remains_none(self):
+        """OPEN_MAIN layer1 should not create a leader."""
+        plan = _make_plan(max_layers=8)
+        snap = _snapshot(
+            symbols={
+                _ETH: _state(sidecar_enabled=True),
+                _BTC: _state(),
+            },
+        )
+        req = _request(
+            action="OPEN_MAIN",
+            side="LONG",
+            requested_layer=1,
+            position_plan=plan,
+            main_margin_delta_usdt="10",
+            account_equity_usdt="1000",
+        )
+
+        decision = check_allocation_dry_run(snapshot=snap, request=req)
+
+        assert decision.allowed is True
+        assert decision.leader_symbol is None
+        assert decision.projected_snapshot.leader_symbol is None
+
+    def test_rejected_decision_returns_original_snapshot(self):
+        """Rejected case returns the original snapshot unchanged."""
+        plan = _make_plan(max_layers=8)
+        snap = _snapshot(
+            global_no_new_entry=True,
+            symbols={
+                _ETH: _state(sidecar_enabled=True),
+                _BTC: _state(),
+            },
+        )
+        req = _request(
+            action="OPEN_MAIN",
+            side="LONG",
+            requested_layer=1,
+            position_plan=plan,
+            main_margin_delta_usdt="10",
+            account_equity_usdt="1000",
+        )
+
+        decision = check_allocation_dry_run(snapshot=snap, request=req)
+
+        assert decision.allowed is False
+        assert decision.projected_snapshot is snap
+
+    def test_open_main_with_existing_leader_projected_keeps_leader(self):
+        """Other symbol is already leader. OPEN_MAIN a new flat symbol → leader
+        unchanged in projected snapshot."""
+        plan = _make_plan(inst_id=_BTC, max_layers=8)
+        snap = _snapshot(
+            leader_symbol=_ETH,
+            symbols={
+                _ETH: _state(
+                    state="OPEN",
+                    side="LONG",
+                    used_layers=3,
+                    main_used_margin_usdt="40",
+                    sidecar_enabled=True,
+                ),
+                _BTC: _state(state="FLAT", used_layers=0),
+            },
+        )
+        req = _request(
+            inst_id=_BTC,
+            action="OPEN_MAIN",
+            side="LONG",
+            requested_layer=1,
+            position_plan=plan,
+            main_margin_delta_usdt="10",
+            account_equity_usdt="1000",
+        )
+
+        decision = check_allocation_dry_run(snapshot=snap, request=req)
+
+        assert decision.allowed is True
+        assert decision.leader_symbol == _ETH
+        assert decision.projected_snapshot.leader_symbol == _ETH

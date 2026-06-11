@@ -391,8 +391,10 @@ def _check_open_main(
 
     projected = _replace_symbol_state(snapshot, inst_id, new_state)
 
-    # Resolve leader on the projected snapshot (without sticky leader bias)
+    # Resolve leader on the projected snapshot (without sticky leader bias),
+    # then sync it back into the projected snapshot.
     projected_leader = resolve_leader_symbol(projected)
+    projected = _replace_leader_symbol(projected, projected_leader)
 
     return _decision(
         allowed=True,
@@ -586,8 +588,9 @@ def _check_add_main(
 
     projected = _replace_symbol_state(snapshot, inst_id, new_state)
 
-    # Resolve leader on the projected snapshot
+    # Resolve leader on the projected snapshot, then sync it back.
     projected_leader = resolve_leader_symbol(projected)
+    projected = _replace_leader_symbol(projected, projected_leader)
 
     return _decision(
         allowed=True,
@@ -773,6 +776,23 @@ def _replace_symbol_state(
         leader_symbol=_leader,
         global_no_new_entry=snapshot.global_no_new_entry,
         symbols=new_symbols,
+    )
+
+
+def _replace_leader_symbol(
+    snapshot: CapitalLedgerSnapshot,
+    leader_symbol: str | None,
+) -> CapitalLedgerSnapshot:
+    """Return a new snapshot with *leader_symbol* replaced.
+
+    All other fields are copied verbatim.  The original snapshot is never mutated.
+    """
+    return CapitalLedgerSnapshot(
+        version=snapshot.version,
+        updated_ms=snapshot.updated_ms,
+        leader_symbol=leader_symbol,
+        global_no_new_entry=snapshot.global_no_new_entry,
+        symbols=snapshot.symbols,
     )
 
 
