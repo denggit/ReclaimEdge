@@ -7,7 +7,7 @@ import sys
 import types
 import unittest
 from decimal import Decimal
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -19,6 +19,7 @@ if importlib.util.find_spec("dotenv") is None:
 from src.execution.trader import LiveTradeResult, PositionSnapshot, Trader
 from src.live.runtime_types import AccountSnapshot, ExecutionState, TradeCommand
 from src.live.workers.execution_command_processor import ExecutionCommandProcessor
+from src.portfolio.capital_ledger import CapitalLedgerSnapshot, SymbolCapitalState, default_snapshot
 from src.live.workers.execution_worker import execution_worker
 from src.reporting.live_state_store import LiveStateStore
 from src.strategies.boll_cvd_reclaim_strategy import (
@@ -127,8 +128,11 @@ class FakeTrader:
     def __init__(self) -> None:
         self.symbol = "ETH-USDT-SWAP"
         self.account_equity_usdt = 1000.0
+        self.contract_multiplier = Decimal("0.1")
+        self.contract_precision = Decimal("0.01")
         self.position_contracts = Decimal("0")
         self.executed: list[int] = []
+        self.executed_intents: list[TradeIntent] = []
         self._next_result: LiveTradeResult | None = None
         self._position: PositionSnapshot = flat_position()
         self._cash_balance: float = 1000.0
@@ -145,6 +149,7 @@ class FakeTrader:
 
     async def execute_intent(self, trade_intent: TradeIntent) -> LiveTradeResult:
         self.executed.append(trade_intent.ts_ms)
+        self.executed_intents.append(trade_intent)
         if self._next_result is not None:
             r = self._next_result
             self._next_result = None
@@ -219,6 +224,30 @@ def make_command(
         asyncio.get_running_loop().time(),
         0,
         "test",
+    )
+
+
+def add_layer_snapshot(planned_main_contracts: tuple[str, ...]) -> CapitalLedgerSnapshot:
+    base = default_snapshot(updated_ms=1000)
+    symbols = dict(base.symbols)
+    symbols["ETH-USDT-SWAP"] = SymbolCapitalState(
+        state="OPEN",
+        side="LONG",
+        used_layers=1,
+        position_plan_id="plan-1",
+        planned_main_contracts=planned_main_contracts,
+        base_main_contracts="1",
+        plan_max_layers=3,
+        permission_max_layers=3,
+        main_used_margin_usdt="30",
+        sidecar_enabled=True,
+    )
+    return CapitalLedgerSnapshot(
+        version=base.version,
+        updated_ms=base.updated_ms,
+        leader_symbol=base.leader_symbol,
+        global_no_new_entry=base.global_no_new_entry,
+        symbols=symbols,
     )
 
 
@@ -2467,6 +2496,184 @@ class TestExecutionCommandProcessorEnforce(unittest.IsolatedAsyncioTestCase):
         assert len(trader.executed) == 0
         assert execution_state.current_position_id == "pos-existing"
         assert execution_state.cash_before_position == 123.45
+
+    async def test_add_long_aligns_execution_intent_to_ledger_plan_before_enforce(self) -> None:
+        """ADD_LONG final execution intent is aligned to planned layer contracts."""
+        from src.live.portfolio_allocator_enforcer import (
+            PortfolioAllocatorEnforceConfig,
+            PortfolioAllocatorEnforcer,
+        )
+        from src.portfolio.capital_allocator import AllocationDecision
+
+        execution_state = ExecutionState("pos-existing", 123.45)
+        trader = FakeTrader()
+        journal = FakeJournal()
+        state_store = FakeStateStore()
+        processor, _, _, _ = make_processor(
+            execution_state=execution_state,
+            trader=trader,
+            journal=journal,
+            state_store=state_store,
+        )
+        enforcer = PortfolioAllocatorEnforcer.from_config(
+            PortfolioAllocatorEnforceConfig(enabled=True),
+        )
+        enforcer.ledger = MagicMock()
+        enforcer.ledger.read_locked.return_value = add_layer_snapshot(
+            ("1", "1.15", "1.30"),
+        )
+        processor.portfolio_allocator_enforcer = enforcer
+
+        captured: dict[str, object] = {}
+
+        def fake_check(*, snapshot, request, leader_follower_config=None):
+            captured["request"] = request
+            return AllocationDecision(
+                allowed=True,
+                reason="ADD_MAIN_ALLOWED",
+                inst_id=request.inst_id,
+                action=request.action,
+                requested_layer=request.requested_layer,
+                leader_symbol=None,
+                permission=None,
+                projected_snapshot=snapshot,
+            )
+
+        raw_intent = make_intent(1_000, "ADD_LONG")
+        add_intent = TradeIntent(
+            **{
+                **raw_intent.__dict__,
+                "layer_index": 2,
+                "size": PositionSize(2.4, 120.0, 0.12, 2, 1.15),
+            }
+        )
+        command = TradeCommand(
+            add_intent,
+            StrategyPositionState(side="LONG", layers=1),
+            1_000,
+            0.0,
+            0,
+            "test",
+        )
+
+        with patch(
+            "src.live.portfolio_allocator_enforcer.check_allocation_dry_run",
+            side_effect=fake_check,
+        ):
+            result = await processor.process(command)
+
+        assert result is not None
+        request = captured["request"]
+        assert request.requested_main_contracts == "1.15"  # type: ignore[attr-defined]
+        assert trader.executed_intents[-1].size.eth_qty == 0.115
+
+    async def test_add_long_missing_expected_contracts_fail_closed(self) -> None:
+        """Missing planned layer keeps original ADD intent and allocator rejects it."""
+        from src.live.portfolio_allocator_enforcer import (
+            PortfolioAllocatorEnforceConfig,
+            PortfolioAllocatorEnforcer,
+        )
+
+        execution_state = ExecutionState("pos-existing", 123.45)
+        trader = FakeTrader()
+        journal = FakeJournal()
+        processor, _, _, _ = make_processor(
+            execution_state=execution_state,
+            trader=trader,
+            journal=journal,
+        )
+        enforcer = PortfolioAllocatorEnforcer.from_config(
+            PortfolioAllocatorEnforceConfig(enabled=True),
+        )
+        enforcer.ledger = MagicMock()
+        enforcer.ledger.read_locked.return_value = add_layer_snapshot(("1",))
+        processor.portfolio_allocator_enforcer = enforcer
+
+        raw_intent = make_intent(1_000, "ADD_LONG")
+        add_intent = TradeIntent(
+            **{
+                **raw_intent.__dict__,
+                "layer_index": 2,
+                "size": PositionSize(2.4, 120.0, 0.12, 2, 1.15),
+            }
+        )
+        command = TradeCommand(
+            add_intent,
+            StrategyPositionState(side="LONG", layers=1),
+            1_000,
+            0.0,
+            0,
+            "test",
+        )
+
+        result = await processor.process(command)
+
+        assert result is None
+        assert len(trader.executed_intents) == 0
+        rejected_events = [
+            event
+            for event in journal.events
+            if event[0] == "PORTFOLIO_ALLOCATOR_ENFORCE_REJECTED"
+        ]
+        assert rejected_events[-1][1]["reason"] == "MISSING_EXPECTED_MAIN_CONTRACTS"
+
+    async def test_open_long_does_not_run_add_alignment(self) -> None:
+        """OPEN_LONG still executes the combined execution intent unchanged."""
+        from src.live.portfolio_allocator_enforcer import (
+            PortfolioAllocatorEnforceConfig,
+            PortfolioAllocatorEnforcer,
+        )
+        from src.portfolio.capital_allocator import AllocationDecision
+
+        execution_state = ExecutionState(None, None)
+        trader = FakeTrader()
+        processor, _, _, _ = make_processor(
+            execution_state=execution_state,
+            trader=trader,
+        )
+        enforcer = PortfolioAllocatorEnforcer.from_config(
+            PortfolioAllocatorEnforceConfig(enabled=True),
+        )
+        enforcer.ledger = MagicMock()
+        enforcer.ledger.read_locked.return_value = default_snapshot(updated_ms=1000)
+        processor.portfolio_allocator_enforcer = enforcer
+
+        def fake_check(*, snapshot, request, leader_follower_config=None):
+            return AllocationDecision(
+                allowed=True,
+                reason="OPEN_MAIN_ALLOWED",
+                inst_id=request.inst_id,
+                action=request.action,
+                requested_layer=request.requested_layer,
+                leader_symbol=None,
+                permission=None,
+                projected_snapshot=snapshot,
+            )
+
+        raw_intent = make_intent(1_000, "OPEN_LONG")
+        open_intent = TradeIntent(
+            **{
+                **raw_intent.__dict__,
+                "size": PositionSize(2.0, 100.0, 1.0, 1, 1.0),
+            }
+        )
+        command = TradeCommand(
+            open_intent,
+            StrategyPositionState(side="LONG"),
+            1_000,
+            0.0,
+            0,
+            "test",
+        )
+
+        with patch(
+            "src.live.portfolio_allocator_enforcer.check_allocation_dry_run",
+            side_effect=fake_check,
+        ):
+            result = await processor.process(command)
+
+        assert result is not None
+        assert trader.executed_intents[-1].size.eth_qty == 1.0
 
     async def test_open_long_enforce_allowed_keeps_generated_position_id(self) -> None:
         """OPEN_LONG enforce allowed keeps generated position_id and cash_before_position."""

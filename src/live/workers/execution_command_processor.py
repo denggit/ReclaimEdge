@@ -5,7 +5,7 @@ import copy
 import html
 import os
 from dataclasses import dataclass, field, replace
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any
 
 from src.execution.trader import LiveTradeResult, PositionSnapshot, Trader
@@ -26,6 +26,7 @@ from src.live.halt_modes import (
     resolve_halt_mode,
 )
 from src.live.startup_recovery import basic_restore as startup_basic_restore
+from src.portfolio.capital_ledger import CapitalLedgerSnapshot
 from src.position_management import core_position_view as core_position_view_helpers
 from src.position_management import cost_runtime as position_cost_runtime
 from src.position_management import runner_live_helpers
@@ -49,6 +50,7 @@ from src.position_management.sidecar.planner import (
 from src.reporting.live_state_store import LiveStateStore
 from src.reporting.trade_journal import LiveTradeJournal
 from src.strategies.boll_cvd_shock_reclaim_strategy import BollCvdShockReclaimStrategy
+from src.strategies.boll_cvd_reclaim_strategy import TradeIntent
 from src.utils.email_sender import EmailSender
 from src.utils.log import get_logger
 
@@ -60,6 +62,77 @@ if TYPE_CHECKING:
     )
 
 logger = get_logger(__name__)
+
+
+def _planned_contracts_for_add_layer_from_snapshot(
+    *,
+    snapshot: CapitalLedgerSnapshot,
+    inst_id: str,
+    requested_layer: int,
+) -> Decimal | None:
+    state = snapshot.symbols.get(inst_id)
+    if state is None:
+        return None
+
+    index = requested_layer - 1
+    if index < 0 or index >= len(state.planned_main_contracts):
+        return None
+
+    try:
+        return Decimal(str(state.planned_main_contracts[index]))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+
+
+def _align_add_intent_size_to_planned_contracts(
+    *,
+    intent: TradeIntent,
+    expected_contracts: Decimal,
+    trader: Trader,
+) -> TradeIntent:
+    if intent.intent_type not in {"ADD_LONG", "ADD_SHORT"}:
+        return intent
+
+    size = getattr(intent, "size", None)
+    if size is None:
+        return intent
+
+    multiplier_raw = getattr(trader, "contract_multiplier", None)
+    if multiplier_raw is None:
+        return intent
+
+    try:
+        multiplier = Decimal(str(multiplier_raw))
+    except (InvalidOperation, TypeError, ValueError):
+        return intent
+    if multiplier <= 0:
+        return intent
+
+    leverage_raw = (
+        getattr(
+            trader,
+            "leverage",
+            getattr(getattr(trader, "config", None), "leverage", 50),
+        )
+        or 50
+    )
+    try:
+        leverage = Decimal(str(leverage_raw))
+    except (InvalidOperation, TypeError, ValueError):
+        return intent
+    if leverage <= 0:
+        return intent
+
+    expected_eth_qty = expected_contracts * multiplier
+    notional_usdt = expected_eth_qty * Decimal(str(intent.price))
+    margin_usdt = notional_usdt / leverage
+    aligned_size = replace(
+        size,
+        eth_qty=float(expected_eth_qty),
+        notional_usdt=float(notional_usdt),
+        margin_usdt=float(margin_usdt),
+    )
+    return replace(intent, size=aligned_size)
 
 
 @dataclass
@@ -360,7 +433,6 @@ class ExecutionCommandProcessor:
             return None
 
         # ── sidecar combined entry plan ──────────────────────────────────
-        raw_entry_command = command
         sidecar_plan: SidecarExecutionPlan | None = None
         precheck_result: "PortfolioAllocatorPrecheckResult | None" = None
         created_position_id_for_this_command = False
@@ -390,17 +462,76 @@ class ExecutionCommandProcessor:
                 contract_precision=getattr(self.trader, "contract_precision", Decimal("0.01")),
             )
             sidecar_plan = combined_plan.sidecar_plan
+            execution_intent = combined_plan.execution_intent
+
+            if execution_intent.intent_type in {"ADD_LONG", "ADD_SHORT"}:
+                ledger_owner = (
+                    self.portfolio_allocator_enforcer
+                    or self.portfolio_allocator_shadow_runner
+                )
+                ledger = getattr(ledger_owner, "ledger", None) if ledger_owner is not None else None
+                if ledger is not None:
+                    try:
+                        snapshot = await asyncio.to_thread(ledger.read_locked)
+                    except Exception:
+                        logger.exception(
+                            "ADD_MAIN_INTENT_PLAN_ALIGNMENT_SKIPPED | "
+                            "symbol=%s layer=%s reason=ledger_read_failed",
+                            getattr(self.trader, "symbol", ""),
+                            execution_intent.layer_index,
+                        )
+                    else:
+                        expected_contracts = _planned_contracts_for_add_layer_from_snapshot(
+                            snapshot=snapshot,
+                            inst_id=self.trader.symbol,
+                            requested_layer=execution_intent.layer_index,
+                        )
+                        if expected_contracts is not None:
+                            old_eth_qty = getattr(
+                                getattr(execution_intent, "size", None),
+                                "eth_qty",
+                                None,
+                            )
+                            execution_intent = _align_add_intent_size_to_planned_contracts(
+                                intent=execution_intent,
+                                expected_contracts=expected_contracts,
+                                trader=self.trader,
+                            )
+                            new_eth_qty = getattr(
+                                getattr(execution_intent, "size", None),
+                                "eth_qty",
+                                None,
+                            )
+                            logger.warning(
+                                "ADD_MAIN_INTENT_ALIGNED_TO_POSITION_PLAN | "
+                                "symbol=%s layer=%s expected_contracts=%s "
+                                "old_eth_qty=%s new_eth_qty=%s",
+                                getattr(self.trader, "symbol", ""),
+                                execution_intent.layer_index,
+                                format(expected_contracts.normalize(), "f"),
+                                old_eth_qty,
+                                new_eth_qty,
+                            )
+                        else:
+                            logger.warning(
+                                "ADD_MAIN_INTENT_PLAN_ALIGNMENT_SKIPPED | "
+                                "symbol=%s layer=%s reason=missing_expected_contracts",
+                                getattr(self.trader, "symbol", ""),
+                                execution_intent.layer_index,
+                            )
+
+            allocation_command = replace(command, intent=execution_intent)
 
             # ── G05: schedule fire-and-forget shadow allocator check ─────
             self._schedule_portfolio_allocator_shadow(
-                command=raw_entry_command,
+                command=allocation_command,
                 sidecar_plan=sidecar_plan,
                 position_id=current_position_id,
             )
 
             # ── G06a: enforce allocator precheck (awaited, may reject) ──
             precheck_result = await self._precheck_portfolio_allocator_enforce(
-                command=raw_entry_command,
+                command=allocation_command,
                 sidecar_plan=sidecar_plan,
                 position_id=current_position_id,
             )
@@ -420,7 +551,7 @@ class ExecutionCommandProcessor:
                             )
                 return None
 
-            command = replace(command, intent=combined_plan.execution_intent)
+            command = allocation_command
 
         # ── sidecar core final exit safety guard ─────────────────────────
         if command.intent.intent_type == "UPDATE_TP":

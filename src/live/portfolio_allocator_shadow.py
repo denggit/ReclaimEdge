@@ -30,6 +30,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from src.execution import order_specs
 from src.portfolio import (
     AllocationCheckRequest,
     CapitalLedger,
@@ -522,8 +523,13 @@ def _intent_requested_main_contracts(
         return None
 
     multiplier = getattr(trader, "contract_multiplier", None)
-    if multiplier is None:
+    precision = getattr(trader, "contract_precision", None)
+    if multiplier is None or precision is None:
         return None
 
-    contracts = Decimal(str(eth_qty)) / Decimal(str(multiplier))
-    return format(contracts, "f")
+    raw_contracts = Decimal(str(eth_qty)) / Decimal(str(multiplier))
+    contracts = order_specs.round_contracts_down(
+        contracts=raw_contracts,
+        contract_precision=Decimal(str(precision)),
+    )
+    return format(contracts.normalize(), "f")

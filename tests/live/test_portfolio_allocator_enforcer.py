@@ -493,6 +493,59 @@ class TestEnforcerAddMain(unittest.IsolatedAsyncioTestCase):
         assert result.allowed is True
         assert captured["request"].requested_main_contracts == "1.15"
 
+    async def test_main_request_rounds_requested_contracts_down_like_trader(self) -> None:
+        from src.live.portfolio_allocator_enforcer import (
+            PortfolioAllocatorEnforceConfig,
+            PortfolioAllocatorEnforcer,
+        )
+
+        config = PortfolioAllocatorEnforceConfig(enabled=True)
+        enforcer = PortfolioAllocatorEnforcer.from_config(config)
+        snapshot = default_snapshot(updated_ms=1000)
+        enforcer.ledger = MagicMock()
+        enforcer.ledger.read_locked.return_value = snapshot
+        captured: dict[str, AllocationCheckRequest] = {}
+
+        def fake_check(*, snapshot, request, leader_follower_config=None):
+            captured["request"] = request
+            return AllocationDecision(
+                allowed=True,
+                reason="ADD_MAIN_ALLOWED",
+                inst_id=request.inst_id,
+                action=request.action,
+                requested_layer=request.requested_layer,
+                leader_symbol=None,
+                permission=None,
+                projected_snapshot=snapshot,
+            )
+
+        journal = FakeJournal()
+        command = FakeTradeCommand(
+            intent_type="ADD_LONG",
+            side="LONG",
+            layer_index=2,
+            margin_usdt=30.0,
+            eth_qty=0.114999999999,
+        )
+        trader = FakeTrader()
+        trader.contract_multiplier = Decimal("0.1")
+        trader.contract_precision = Decimal("0.01")
+
+        with patch(
+            "src.live.portfolio_allocator_enforcer.check_allocation_dry_run",
+            side_effect=fake_check,
+        ):
+            result = await enforcer.precheck_entry_allocation(
+                command=command,  # type: ignore[arg-type]
+                trader=trader,  # type: ignore[arg-type]
+                strategy=make_strategy(),
+                journal=journal,  # type: ignore[arg-type]
+                position_id="pos-1",
+            )
+
+        assert result.allowed is True
+        assert captured["request"].requested_main_contracts == "1.14"
+
     async def test_add_main_allowed(self) -> None:
         """7. ADD_LONG layer2 with ETH OPEN layer1: allowed, used_layers=2."""
         from src.live.portfolio_allocator_enforcer import (

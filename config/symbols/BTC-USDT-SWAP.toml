@@ -51,9 +51,9 @@ min_outside_pct = "0.0005"
 # layer_margin_pct, leverage, max_layers, layer_multiplier_step: wired to
 # SimplePositionSizerConfig and strategy config.
 dry_run_equity_usdt = "1000"
-layer_margin_pct = "0.04"
+layer_margin_pct = "0.03"
 leverage = "15"
-max_layers = 8
+max_layers = 5
 layer_multiplier_step = "0.15"
 
 [entry]
