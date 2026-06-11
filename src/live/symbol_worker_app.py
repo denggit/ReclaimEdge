@@ -119,6 +119,20 @@ def _runtime_config_env_for_worker_mode(
     return env
 
 
+def _decimal_equal(left: object, right: object) -> bool:
+    """Return ``True`` when *left* and *right* represent the same Decimal value.
+
+    ``"50"`` and ``Decimal("50.0")`` are considered equal.  Invalid values
+    (non-numeric strings, None, bool) return ``False``.
+    """
+    from decimal import Decimal, InvalidOperation
+
+    try:
+        return Decimal(str(left)) == Decimal(str(right))
+    except InvalidOperation:
+        return False
+
+
 def _assert_trader_matches_symbol_config(
     trader: Trader | PaperTrader,
     runtime_configs: "LiveSymbolRuntimeConfigs",
@@ -165,7 +179,7 @@ def _assert_trader_matches_symbol_config(
             f"pos_side_mode: trader={trader.pos_side_mode!r} vs TOML={symbol_config.market.pos_side_mode!r}"
         )
 
-    if str(trader.leverage) != str(symbol_config.capital.leverage):
+    if not _decimal_equal(trader.leverage, symbol_config.capital.leverage):
         errors.append(
             f"leverage: trader={trader.leverage!r} vs TOML={symbol_config.capital.leverage!r}"
         )
@@ -187,8 +201,10 @@ def _build_pre_trader_runtime_configs_for_mode(
     extract instrument metadata / market settings from the loaded
     ``SymbolConfig`` and inject them into ``Trader``.
 
-    For **paper** mode the legacy env path is used — ``symbol_config``
-    will be ``None``.
+    For **paper** mode the path depends on the symbol:
+
+    * ``ETH-USDT-SWAP`` — legacy env path (``symbol_config`` is ``None``).
+    * Non-ETH symbols — TOML path (``symbol_config`` is loaded from TOML).
     """
     runtime_config_env = _runtime_config_env_for_worker_mode(
         mode=mode,
