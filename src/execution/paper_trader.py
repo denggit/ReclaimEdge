@@ -8,7 +8,7 @@ from decimal import Decimal
 from typing import Any
 
 from src.execution import order_specs
-from src.execution.trader import (
+from src.execution.trader_types import (
     LiveTradeResult,
     PositionSnapshot,
     TraderInstrumentMetadata,

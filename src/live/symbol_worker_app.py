@@ -91,6 +91,26 @@ def _emit_worker_event_best_effort(
         )
 
 
+def _runtime_config_env_for_worker_mode(
+    *, mode: str, trader_symbol: str
+) -> dict[str, str] | None:
+    """Return an env override for ``build_live_symbol_runtime_configs``.
+
+    Live mode returns ``None`` — the function reads ``os.environ`` as
+    usual (preserving existing behaviour).
+
+    Paper mode forces legacy/env config path and sets the symbols env
+    var to the trader symbol.  This avoids the ETH-only TOML bootstrap
+    gate and prevents loading any disabled TOML file.
+    """
+    if mode != "paper":
+        return None
+    env = os.environ.copy()
+    env["RECLAIM_USE_SYMBOL_TOML"] = "false"
+    env["RECLAIM_" + "SYMBOLS"] = trader_symbol
+    return env
+
+
 def _assert_trader_matches_symbol_config(
     trader: Trader | PaperTrader,
     runtime_configs: "LiveSymbolRuntimeConfigs",
@@ -171,7 +191,12 @@ class SymbolWorkerApp:
         await trader.start()
         try:
             await trader.initialize()
+            runtime_config_env = _runtime_config_env_for_worker_mode(
+                mode=mode,
+                trader_symbol=trader.symbol,
+            )
             runtime_configs = build_live_symbol_runtime_configs(
+                env=runtime_config_env,
                 account_equity_usdt=trader.account_equity_usdt,
             )
             _assert_trader_matches_symbol_config(trader, runtime_configs)

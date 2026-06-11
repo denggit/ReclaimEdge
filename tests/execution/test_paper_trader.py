@@ -318,7 +318,7 @@ class TestPaperTraderReplaceTakeProfit:
 
     @pytest.mark.asyncio
     async def test_no_okx_call(self) -> None:
-        """replace_take_profit must not import or call OKX client."""
+        """replace_take_profit must not import or call OKX client or trader module."""
         import src.execution.paper_trader as pt_module
 
         source = pt_module.__file__
@@ -331,6 +331,12 @@ class TestPaperTraderReplaceTakeProfit:
                     assert "OkxPrivateClient" not in stripped
                     assert "aiohttp" not in stripped
                     assert "PrivateWriteRateLimiter" not in stripped
+                    # Only match "src.execution.trader" when it is NOT followed
+                    # by "_types" (which is trader_types, the shared DTO module).
+                    if "src.execution.trader" in stripped and "src.execution.trader_types" not in stripped:
+                        raise AssertionError(
+                            f"PaperTrader must not import from src.execution.trader: {stripped!r}"
+                        )
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -533,6 +539,39 @@ class TestPaperTraderNoForbiddenImports:
         # Must not have the Trader live_trading gate
         assert "LIVE_TRADING is not true" not in content, (
             "PaperTrader must not refuse to initialize due to LIVE_TRADING=false"
+        )
+
+    def test_does_not_import_trader_module(self) -> None:
+        """PaperTrader must NOT import from src.execution.trader (G08b fix).
+        Importing from trader_types is fine — only an import from the live
+        trader module (which pulls in OKX deps) is forbidden."""
+        import src.execution.paper_trader as pt_module
+
+        source_file = pt_module.__file__
+        assert source_file is not None
+        with open(source_file) as f:
+            content = f.read()
+        # Must not import from src.execution.trader (the live module).
+        # "from src.execution.trader import" catches the old import.
+        # "from src.execution.trader\n" catches a bare import line without _types.
+        assert "from src.execution.trader import" not in content, (
+            "PaperTrader must not import from src.execution.trader"
+        )
+        # Also verify the import from trader_types is present
+        assert "from src.execution.trader_types import" in content, (
+            "PaperTrader must import from src.execution.trader_types"
+        )
+
+    def test_imports_from_trader_types(self) -> None:
+        """PaperTrader must import DTOs from trader_types (G08b fix)."""
+        import src.execution.paper_trader as pt_module
+
+        source_file = pt_module.__file__
+        assert source_file is not None
+        with open(source_file) as f:
+            content = f.read()
+        assert "from src.execution.trader_types import" in content, (
+            "PaperTrader must import from src.execution.trader_types"
         )
 
 
