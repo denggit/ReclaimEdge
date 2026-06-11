@@ -21,7 +21,7 @@ from src.portfolio.capital_ledger import (
     SymbolCapitalState,
     default_snapshot,
 )
-from src.portfolio.leader_follower import SymbolPermission
+from src.portfolio.leader_follower import LeaderFollowerError, SymbolPermission
 from src.portfolio.position_plan import PositionPlan
 from src.risk.simple_position_sizer import PositionSize, SimplePositionSizer, SimplePositionSizerConfig
 from src.strategies.boll_cvd_reclaim_strategy import (
@@ -203,6 +203,46 @@ class TestPortfolioAllocatorShadowConfig:
         with patch.dict(os.environ, {}, clear=True):
             cfg = __import__("src.live.portfolio_allocator_shadow", fromlist=["PortfolioAllocatorShadowConfig"]).PortfolioAllocatorShadowConfig.from_env()
             assert cfg.global_main_cap_pct == "0.70"
+
+    def test_leader_follower_config_defaults_to_fixed_eth(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            cfg = __import__("src.live.portfolio_allocator_shadow", fromlist=["PortfolioAllocatorShadowConfig"]).PortfolioAllocatorShadowConfig.from_env()
+            assert cfg.leader_follower_config.leader_mode == "fixed"
+            assert cfg.leader_follower_config.fixed_leader_symbol == "ETH-USDT-SWAP"
+
+    def test_leader_follower_config_fixed_eth_from_env(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "PORTFOLIO_LEADER_MODE": "fixed",
+                "PORTFOLIO_FIXED_LEADER_SYMBOL": "ETH-USDT-SWAP",
+            },
+            clear=True,
+        ):
+            cfg = __import__("src.live.portfolio_allocator_shadow", fromlist=["PortfolioAllocatorShadowConfig"]).PortfolioAllocatorShadowConfig.from_env()
+            assert cfg.leader_follower_config.leader_mode == "fixed"
+            assert cfg.leader_follower_config.fixed_leader_symbol == "ETH-USDT-SWAP"
+
+    def test_leader_follower_config_dynamic_from_env(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"PORTFOLIO_LEADER_MODE": "dynamic"},
+            clear=True,
+        ):
+            cfg = __import__("src.live.portfolio_allocator_shadow", fromlist=["PortfolioAllocatorShadowConfig"]).PortfolioAllocatorShadowConfig.from_env()
+            assert cfg.leader_follower_config.leader_mode == "dynamic"
+
+    def test_leader_follower_config_invalid_mode_raises(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "PORTFOLIO_LEADER_MODE": "invalid",
+                "PORTFOLIO_FIXED_LEADER_SYMBOL": "",
+            },
+            clear=True,
+        ):
+            with pytest.raises(LeaderFollowerError):
+                __import__("src.live.portfolio_allocator_shadow", fromlist=["PortfolioAllocatorShadowConfig"]).PortfolioAllocatorShadowConfig.from_env()
 
 
 class TestShadowRunnerDisabled(unittest.IsolatedAsyncioTestCase):

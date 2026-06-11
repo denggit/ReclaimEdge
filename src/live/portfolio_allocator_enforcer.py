@@ -64,12 +64,16 @@ def _leader_follower_config_from_env() -> LeaderFollowerConfig:
 
     mode_raw = os.getenv(_ENV_LEADER_MODE, "fixed").strip().lower()
     fixed_symbol_raw = os.getenv(_ENV_FIXED_LEADER_SYMBOL, "").strip()
-    if fixed_symbol_raw:
-        return LFC(leader_mode=mode_raw, fixed_leader_symbol=fixed_symbol_raw)  # type: ignore[arg-type]
-    elif mode_raw == "fixed":
+
+    if mode_raw not in ("fixed", "dynamic"):
+        return LFC(leader_mode=mode_raw)  # type: ignore[arg-type]
+
+    if mode_raw == "fixed":
+        if fixed_symbol_raw:
+            return LFC(leader_mode="fixed", fixed_leader_symbol=fixed_symbol_raw)
         return LFC(leader_mode="fixed")
-    else:
-        return LFC(leader_mode="dynamic")
+
+    return LFC(leader_mode="dynamic")
 
 _ENTRY_INTENT_TYPES: frozenset[str] = frozenset({
     "OPEN_LONG",
