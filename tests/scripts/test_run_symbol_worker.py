@@ -12,6 +12,7 @@ These tests verify:
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -27,6 +28,14 @@ def _env(mode: str, live_trading: str = "false") -> dict[str, str]:
     }
 
 
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+_RUN_SYMBOL_WORKER = _PROJECT_ROOT / "scripts" / "run_symbol_worker.py"
+
+
+def _entry_source() -> str:
+    return _RUN_SYMBOL_WORKER.read_text(encoding="utf-8")
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # 1. Live mode + LIVE_TRADING=false → RuntimeError
 # ═══════════════════════════════════════════════════════════════════════════
@@ -36,12 +45,7 @@ class TestLiveModeRequiresLiveTrading:
     def test_live_mode_live_trading_false_raises(self) -> None:
         """When RECLAIM_WORKER_MODE=live (or unset) and LIVE_TRADING=false,
         the script must raise RuntimeError."""
-        import scripts.run_symbol_worker as entry
-
-        source = entry.__file__
-        assert source is not None
-        with open(source) as f:
-            content = f.read()
+        content = _entry_source()
 
         # Verify the error message still exists
         assert "LIVE_TRADING is not true. Refusing to start symbol worker." in content
@@ -140,26 +144,106 @@ class TestInvalidWorkerMode:
 
 
 class TestRunSymbolWorkerSourceGuard:
-    def test_script_contains_mode_check(self) -> None:
-        """run_symbol_worker.py must contain the RECLAIM_WORKER_MODE check."""
+    def test_load_dotenv_before_symbol_worker_app_import(self) -> None:
+        source = _entry_source()
+
+        assert source.index("load_dotenv()") < source.index(
+            "from src.live.symbol_worker_app import SymbolWorkerApp"
+        )
+
+    def test_worker_logging_env_before_symbol_worker_app_import(self) -> None:
+        source = _entry_source()
+
+        assert source.index("configure_symbol_worker_logging_env(") < source.index(
+            "from src.live.symbol_worker_app import SymbolWorkerApp"
+        )
+
+    def test_main_does_not_load_dotenv_after_logging_setup(self) -> None:
+        source = _entry_source()
+        main_source = source[source.index("async def main()"):]
+
+        assert "load_dotenv()" not in main_source
+
+    def test_worker_symbol_from_env_prefers_okx_inst_id(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        monkeypatch.setenv("WORKER_LOG_BASE_DIR", str(tmp_path))
+        monkeypatch.setenv("OKX_INST_ID", "ETH-USDT-SWAP")
+        monkeypatch.setenv("RECLAIM_SYMBOL", "SOL-USDT-SWAP")
+        monkeypatch.setenv("RECLAIM_SYMBOLS", "BTC-USDT-SWAP,DOGE-USDT-SWAP")
+
         import scripts.run_symbol_worker as entry
 
-        source_file = entry.__file__
-        assert source_file is not None
-        with open(source_file) as f:
-            content = f.read()
+        assert entry._worker_symbol_from_env() == "ETH-USDT-SWAP"
+
+    def test_worker_symbol_from_env_uses_reclaim_symbol(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        monkeypatch.setenv("WORKER_LOG_BASE_DIR", str(tmp_path))
+        monkeypatch.delenv("OKX_INST_ID", raising=False)
+        monkeypatch.setenv("RECLAIM_SYMBOL", "SOL-USDT-SWAP")
+        monkeypatch.setenv("RECLAIM_SYMBOLS", "BTC-USDT-SWAP,DOGE-USDT-SWAP")
+
+        import scripts.run_symbol_worker as entry
+
+        assert entry._worker_symbol_from_env() == "SOL-USDT-SWAP"
+
+    def test_worker_symbol_from_env_uses_first_reclaim_symbols(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        monkeypatch.setenv("WORKER_LOG_BASE_DIR", str(tmp_path))
+        monkeypatch.delenv("OKX_INST_ID", raising=False)
+        monkeypatch.delenv("RECLAIM_SYMBOL", raising=False)
+        monkeypatch.setenv("RECLAIM_SYMBOLS", "BTC-USDT-SWAP,DOGE-USDT-SWAP")
+
+        import scripts.run_symbol_worker as entry
+
+        assert entry._worker_symbol_from_env() == "BTC-USDT-SWAP"
+
+    def test_worker_symbol_from_env_unknown_fallback(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        monkeypatch.setenv("WORKER_LOG_BASE_DIR", str(tmp_path))
+        monkeypatch.delenv("OKX_INST_ID", raising=False)
+        monkeypatch.delenv("RECLAIM_SYMBOL", raising=False)
+        monkeypatch.delenv("RECLAIM_SYMBOLS", raising=False)
+
+        import scripts.run_symbol_worker as entry
+
+        assert entry._worker_symbol_from_env() == "UNKNOWN"
+
+    def test_worker_symbol_from_env_skips_blank_values(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        monkeypatch.setenv("WORKER_LOG_BASE_DIR", str(tmp_path))
+        monkeypatch.setenv("OKX_INST_ID", "   ")
+        monkeypatch.setenv("RECLAIM_SYMBOL", "\t")
+        monkeypatch.setenv("RECLAIM_SYMBOLS", " SOL-USDT-SWAP ,BTC-USDT-SWAP")
+
+        import scripts.run_symbol_worker as entry
+
+        assert entry._worker_symbol_from_env() == "SOL-USDT-SWAP"
+
+    def test_script_contains_mode_check(self) -> None:
+        """run_symbol_worker.py must contain the RECLAIM_WORKER_MODE check."""
+        content = _entry_source()
 
         assert "RECLAIM_WORKER_MODE" in content
         assert "paper" in content
 
     def test_script_does_not_hardcode_btc(self) -> None:
         """run_symbol_worker.py must NOT hardcode BTC-USDT-SWAP."""
-        import scripts.run_symbol_worker as entry
-
-        source_file = entry.__file__
-        assert source_file is not None
-        with open(source_file) as f:
-            content = f.read()
+        content = _entry_source()
 
         assert "BTC-USDT-SWAP" not in content, (
             "run_symbol_worker.py must not hardcode BTC-USDT-SWAP"
@@ -168,11 +252,6 @@ class TestRunSymbolWorkerSourceGuard:
     def test_script_retains_original_live_error_message(self) -> None:
         """run_symbol_worker.py must still contain the original LIVE_TRADING
         error message for live mode."""
-        import scripts.run_symbol_worker as entry
-
-        source_file = entry.__file__
-        assert source_file is not None
-        with open(source_file) as f:
-            content = f.read()
+        content = _entry_source()
 
         assert "LIVE_TRADING is not true. Refusing to start symbol worker." in content
