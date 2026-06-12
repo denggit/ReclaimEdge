@@ -93,8 +93,9 @@ class OkxBrokerSemanticExecutor:
     async def cancel_semantic_orders_by_role(
         self, query: BrokerSemanticOrderQuery
     ) -> tuple[BrokerSemanticResult, ...]:
+        _ensure_executor_exchange(self._broker, query.exchange)
         raise _unsupported(
-            query.exchange,
+            self._broker.exchange,
             "Cancelling semantic orders by role is not implemented",
         )
 
@@ -201,10 +202,22 @@ def _ensure_executor_exchange(broker: BrokerClient, exchange: ExchangeName) -> N
 
 
 def _ensure_cancel_action(request: BrokerSemanticRequest) -> None:
+    if request.action == BrokerSemanticAction.CANCEL_PROTECTIVE_STOP:
+        raise ExchangeError(
+            ExchangeErrorDetail(
+                exchange=request.exchange,
+                kind=ExchangeErrorKind.UNSUPPORTED_OPERATION,
+                message=(
+                    "CANCEL_PROTECTIVE_STOP is not implemented by the OKX "
+                    "semantic executor shell"
+                ),
+                raw={"action": request.action.value},
+            )
+        )
+
     if request.action not in {
         BrokerSemanticAction.CANCEL_ORDER,
         BrokerSemanticAction.SIDECAR_CANCEL,
-        BrokerSemanticAction.CANCEL_PROTECTIVE_STOP,
     }:
         raise ExchangeError(
             ExchangeErrorDetail(

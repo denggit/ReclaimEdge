@@ -204,6 +204,54 @@ async def test_cancel_semantic_order_allows_sidecar_cancel():
 
 
 @pytest.mark.asyncio
+async def test_cancel_semantic_order_rejects_cancel_protective_stop_until_implemented():
+    broker = FakeBroker()
+    executor = OkxBrokerSemanticExecutor(broker)
+    request = _semantic_request(action=BrokerSemanticAction.CANCEL_PROTECTIVE_STOP)
+
+    with pytest.raises(ExchangeError) as exc_info:
+        await executor.cancel_semantic_order(request, "order-1")
+
+    assert exc_info.value.detail.kind == ExchangeErrorKind.UNSUPPORTED_OPERATION
+    assert "CANCEL_PROTECTIVE_STOP" in exc_info.value.detail.message
+    assert broker.cancel_order_calls == []
+
+
+@pytest.mark.asyncio
+async def test_cancel_semantic_orders_by_role_rejects_exchange_mismatch():
+    broker = FakeBroker()
+    executor = OkxBrokerSemanticExecutor(broker)
+    query = BrokerSemanticOrderQuery(
+        exchange=ExchangeName.BINANCE,
+        symbol="ETH-USDT-SWAP",
+    )
+
+    with pytest.raises(ExchangeError) as exc_info:
+        await executor.cancel_semantic_orders_by_role(query)
+
+    assert exc_info.value.detail.kind == ExchangeErrorKind.UNSUPPORTED_OPERATION
+    assert exc_info.value.detail.exchange == ExchangeName.OKX
+    assert broker.cancel_order_calls == []
+    assert broker.fetch_open_orders_calls == []
+
+
+@pytest.mark.asyncio
+async def test_cancel_semantic_orders_by_role_unsupported_uses_broker_exchange():
+    broker = FakeBroker()
+    executor = OkxBrokerSemanticExecutor(broker)
+    query = BrokerSemanticOrderQuery(
+        exchange=ExchangeName.OKX,
+        symbol="ETH-USDT-SWAP",
+    )
+
+    with pytest.raises(ExchangeError) as exc_info:
+        await executor.cancel_semantic_orders_by_role(query)
+
+    assert exc_info.value.detail.kind == ExchangeErrorKind.UNSUPPORTED_OPERATION
+    assert exc_info.value.detail.exchange == ExchangeName.OKX
+
+
+@pytest.mark.asyncio
 async def test_fetch_semantic_orders_calls_fetch_open_orders():
     broker = FakeBroker()
     executor = OkxBrokerSemanticExecutor(broker)
