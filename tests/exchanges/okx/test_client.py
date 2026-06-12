@@ -58,6 +58,8 @@ class FakeTrader:
         position_snapshot: _FakePositionSnapshot | None = None,
         pending_orders: list[dict[str, Any]] | None = None,
         pending_algo_orders: list[dict[str, Any]] | None = None,
+        order_response: dict[str, Any] | None = None,
+        cancel_response: dict[str, Any] | None = None,
     ) -> None:
         self.symbol = symbol
         self.td_mode = td_mode
@@ -69,6 +71,8 @@ class FakeTrader:
         )
         self._pending_orders = pending_orders or []
         self._pending_algo_orders = pending_algo_orders or []
+        self._order_response = order_response
+        self._cancel_response = cancel_response
         self.requests: list[dict[str, Any]] = []
         self._next_order_id = 1
         self.closed = False
@@ -93,10 +97,14 @@ class FakeTrader:
         )
         # Return a fake order response
         if endpoint == "/api/v5/trade/order":
+            if self._order_response is not None:
+                return self._order_response
             ord_id = str(self._next_order_id)
             self._next_order_id += 1
             return {"code": "0", "data": [{"ordId": ord_id, "clOrdId": payload.get("clOrdId", "") if payload else "", "sCode": "0"}]}
         if endpoint == "/api/v5/trade/cancel-order":
+            if self._cancel_response is not None:
+                return self._cancel_response
             return {"code": "0", "data": [{"ordId": payload.get("ordId", ""), "sCode": "0"}]}
         return {"code": "0", "data": []}
 
@@ -352,6 +360,29 @@ class TestPlaceOrderMarketEntry:
         result = await client.place_order(req)
         assert result.order_id == "1"
 
+    @pytest.mark.asyncio
+    async def test_market_entry_item_level_error_raises_exchange_error(self):
+        trader = FakeTrader(
+            order_response={
+                "code": "0",
+                "data": [
+                    {"ordId": "", "sCode": "51008", "sMsg": "Insufficient balance"}
+                ],
+            }
+        )
+        client = OkxBrokerClient(trader)
+        req = _broker_order_request(
+            side=BrokerOrderSide.BUY,
+            position_side=BrokerPositionSide.LONG,
+            order_type=BrokerOrderType.MARKET,
+            quantity=Decimal("1"),
+        )
+        with pytest.raises(ExchangeError) as exc_info:
+            await client.place_order(req)
+        assert exc_info.value.detail.kind == ExchangeErrorKind.INSUFFICIENT_MARGIN
+        assert exc_info.value.detail.code == "51008"
+        assert len(trader.requests) == 1
+
 
 # ---------------------------------------------------------------------------
 # place_order — validation
@@ -497,6 +528,31 @@ class TestPlaceOrderLimitReduceOnlyTP:
             await client.place_order(req)
         assert exc_info.value.detail.kind == ExchangeErrorKind.UNSUPPORTED_OPERATION
 
+    @pytest.mark.asyncio
+    async def test_limit_reduce_only_tp_item_level_error_raises_exchange_error(self):
+        trader = FakeTrader(
+            order_response={
+                "code": "0",
+                "data": [
+                    {"ordId": "", "sCode": "51008", "sMsg": "Insufficient balance"}
+                ],
+            }
+        )
+        client = OkxBrokerClient(trader)
+        req = _broker_order_request(
+            side=BrokerOrderSide.SELL,
+            position_side=BrokerPositionSide.LONG,
+            order_type=BrokerOrderType.LIMIT,
+            quantity=Decimal("1"),
+            price=Decimal("3500.00"),
+            reduce_only=True,
+        )
+        with pytest.raises(ExchangeError) as exc_info:
+            await client.place_order(req)
+        assert exc_info.value.detail.kind == ExchangeErrorKind.INSUFFICIENT_MARGIN
+        assert exc_info.value.detail.code == "51008"
+        assert len(trader.requests) == 1
+
 
 # ---------------------------------------------------------------------------
 # place_order — Unsupported
@@ -588,6 +644,27 @@ class TestCancelOrder:
         with pytest.raises(ExchangeError) as exc_info:
             await client.cancel_order("BTC-USDT-SWAP", "12345")
         assert exc_info.value.detail.kind == ExchangeErrorKind.INVALID_SYMBOL
+
+    @pytest.mark.asyncio
+    async def test_cancel_order_item_level_order_not_found_raises_exchange_error(self):
+        trader = FakeTrader(
+            cancel_response={
+                "code": "0",
+                "data": [
+                    {
+                        "ordId": "12345",
+                        "sCode": "51603",
+                        "sMsg": "Order does not exist",
+                    }
+                ],
+            }
+        )
+        client = OkxBrokerClient(trader)
+        with pytest.raises(ExchangeError) as exc_info:
+            await client.cancel_order("ETH-USDT-SWAP", "12345")
+        assert exc_info.value.detail.kind == ExchangeErrorKind.ORDER_NOT_FOUND
+        assert exc_info.value.detail.code == "51603"
+        assert len(trader.requests) == 1
 
 
 # ---------------------------------------------------------------------------

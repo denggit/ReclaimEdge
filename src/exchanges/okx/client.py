@@ -20,7 +20,10 @@ from src.exchanges.models import (
     BrokerTimeInForce,
     ExchangeName,
 )
-from src.exchanges.okx.errors import okx_exception_to_exchange_error
+from src.exchanges.okx.errors import (
+    okx_exception_to_exchange_error,
+    raise_okx_exchange_error_from_response,
+)
 from src.exchanges.okx.mapper import (
     broker_execution_result_from_live_trade_result,
     broker_instrument_from_trader,
@@ -287,6 +290,10 @@ class OkxBrokerClient(BrokerClient):
 
         try:
             res = await self._trader.request("POST", "/api/v5/trade/order", body)
+            raise_okx_exchange_error_from_response(
+                res,
+                message="Failed to place market entry",
+            )
         except Exception as exc:
             raise okx_exception_to_exchange_error(
                 exc, message=f"Failed to place market entry: {exc}"
@@ -330,6 +337,10 @@ class OkxBrokerClient(BrokerClient):
 
         try:
             res = await self._trader.request("POST", "/api/v5/trade/order", body)
+            raise_okx_exchange_error_from_response(
+                res,
+                message="Failed to place reduce-only TP",
+            )
         except Exception as exc:
             raise okx_exception_to_exchange_error(
                 exc, message=f"Failed to place reduce-only TP: {exc}"
@@ -367,10 +378,14 @@ class OkxBrokerClient(BrokerClient):
                 )
             )
         try:
-            await self._trader.request(
+            res = await self._trader.request(
                 "POST",
                 "/api/v5/trade/cancel-order",
                 {"instId": symbol, "ordId": order_id},
+            )
+            raise_okx_exchange_error_from_response(
+                res,
+                message=f"Failed to cancel order {order_id}",
             )
         except Exception as exc:
             raise okx_exception_to_exchange_error(
