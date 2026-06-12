@@ -8,6 +8,7 @@ from src.execution.broker_semantic_helpers import (
     broker_position_side,
     close_order_side,
     get_broker_semantic_executor,
+    require_semantic_order_id,
 )
 from src.exchanges.models import BrokerOrderSide, BrokerPositionSide, ExchangeName
 from src.exchanges.semantic_models import BrokerSemanticAction, BrokerSemanticOrderRole, BrokerSemanticRequest
@@ -93,9 +94,7 @@ class MarketExitManager:
                             metadata={"context": context},
                         )
                     )
-                    order_id = result.order_id or ""
-                    if not order_id:
-                        raise RuntimeError(f"Missing market exit order_id in broker semantic result: {result}")
+                    order_id = require_semantic_order_id(result, action="MARKET_EXIT")
                 else:
                     body = t._reduce_only_market_order_body(side, position.contracts)
                     res = await t.request("POST", "/api/v5/trade/order", body)

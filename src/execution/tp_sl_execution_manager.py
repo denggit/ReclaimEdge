@@ -4,7 +4,7 @@ from decimal import Decimal
 from typing import Any, TYPE_CHECKING
 
 from src.execution import order_specs
-from src.execution.broker_semantic_helpers import get_broker_semantic_executor
+from src.execution.broker_semantic_helpers import get_broker_semantic_executor, require_semantic_ok
 from src.exchanges.models import ExchangeName
 from src.exchanges.semantic_models import BrokerSemanticAction, BrokerSemanticOrderRole, BrokerSemanticRequest
 from src.execution.tp_sl_core_tp_manager import CoreTakeProfitManager
@@ -239,7 +239,7 @@ class TpSlExecutionManager:
             try:
                 semantic_executor = get_broker_semantic_executor(t)
                 if semantic_executor is not None:
-                    await semantic_executor.execute(
+                    result = await semantic_executor.execute(
                         BrokerSemanticRequest(
                             exchange=ExchangeName.OKX,
                             symbol=t.symbol,
@@ -248,6 +248,7 @@ class TpSlExecutionManager:
                             order_id=ord_id,
                         )
                     )
+                    require_semantic_ok(result, action="CANCEL_REDUCE_ONLY_TP")
                 else:
                     await t.request("POST", "/api/v5/trade/cancel-order", order_specs.build_cancel_order_body(
                         inst_id=t.symbol,
@@ -351,7 +352,7 @@ class TpSlExecutionManager:
         try:
             semantic_executor = get_broker_semantic_executor(t)
             if semantic_executor is not None:
-                await semantic_executor.execute(
+                result = await semantic_executor.execute(
                     BrokerSemanticRequest(
                         exchange=ExchangeName.OKX,
                         symbol=t.symbol,
@@ -360,6 +361,7 @@ class TpSlExecutionManager:
                         order_id=order_id,
                     )
                 )
+                require_semantic_ok(result, action="CANCEL_PROTECTIVE_STOP")
             else:
                 await t.request("POST", "/api/v5/trade/cancel-algos", order_specs.build_cancel_algo_body(
                     inst_id=t.symbol,

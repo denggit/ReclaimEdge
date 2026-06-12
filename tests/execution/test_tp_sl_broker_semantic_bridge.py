@@ -426,13 +426,13 @@ class TestSemanticResultEdgeCases(unittest.IsolatedAsyncioTestCase):
                 side="LONG", contracts="1.0", tp_price=3500.0
             )
 
-    async def test_cancel_result_ok_false_not_swallowed(self) -> None:
-        """When result.ok=False and no order_id, cancel must not silently succeed."""
+    async def test_cancel_reduce_only_loop_catches_ok_false_per_order(self) -> None:
+        """Per-order cancel with ok=False is caught by the loop; overall returns True."""
         fake = FakeBrokerSemanticExecutor()
-        # queue a result with ok=False and no order_id
+        # queue a result with ok=False and no order_id — require_semantic_ok
+        # raises RuntimeError, which is caught per-order by the cancel loop
         fake.queue_result(order_id=None, ok=False, message="some error")
         trader = _make_trader(_broker_semantic_executor=fake)
-        # set up fetch_pending_orders to return a managed order
         trader._managed_reduce_only_order_ids = {"known-id"}
 
         async def fake_fetch():  # type: ignore[no-untyped-def]
@@ -442,14 +442,12 @@ class TestSemanticResultEdgeCases(unittest.IsolatedAsyncioTestCase):
         trader.request = None  # type: ignore[method-assign]
 
         manager = TpSlExecutionManager(trader)
-        # cancel_existing_reduce_only_orders catches per-order exceptions and
-        # returns True overall. The semantic result with ok=False and no order_id
-        # triggers an ExchangeError when the cancel fails.
-        # But the OK=False semantic result causes a conditional branch in
-        # the cancel_near_tp_protective_stop path, not in cancel_existing_reduce_only_orders.
+        # Per-order RuntimeError from require_semantic_ok is caught by the
+        # try/except around each order; the loop continues and returns True.
         result = await manager.cancel_existing_reduce_only_orders(phase="update_tp")
-        # Still True because failures are caught per-order
         self.assertTrue(result)
+        # The single known-id order was attempted (its failure was caught)
+        self.assertEqual(len(fake.requests), 1)
 
 
 # ---------------------------------------------------------------------------
@@ -470,3 +468,287 @@ class TestSidecarEntryBridge(unittest.TestCase):
             symbol="ETH-USDT-SWAP", side="SHORT", contracts=Decimal("1"),
         )
         self.assertEqual(req_short.side, BrokerOrderSide.SELL)
+
+
+# ---------------------------------------------------------------------------
+# 8. Trader broker_semantic_executor injection
+# ---------------------------------------------------------------------------
+
+
+class TestTraderBrokerSemanticExecutorInjection(unittest.TestCase):
+    def test_fake_executor_via_private_attr(self) -> None:
+        """Fake injected via _broker_semantic_executor is retrievable."""
+        from src.execution.broker_semantic_helpers import get_broker_semantic_executor
+
+        fake = FakeBrokerSemanticExecutor()
+        t = _make_trader(_broker_semantic_executor=fake)
+
+        executor = get_broker_semantic_executor(t)
+        self.assertIs(executor, fake)
+
+    def test_get_broker_semantic_executor_lazy_creates_executor(self) -> None:
+        """When no _broker_semantic_executor is set, Trader.__getattr__ creates it lazily."""
+        from src.execution.broker_semantic_helpers import get_broker_semantic_executor
+
+        t = _make_trader()
+        # Remove any pre-existing executor to test lazy creation
+        if hasattr(t, '_broker_semantic_executor'):
+            del t._broker_semantic_executor
+        if hasattr(t, '_broker_client'):
+            del t._broker_client
+
+        # Accessing via get_broker_semantic_executor triggers __getattr__
+        # which lazily constructs OkxBrokerSemanticExecutor
+        executor = get_broker_semantic_executor(t)
+        self.assertIsNotNone(executor)
+
+
+# ---------------------------------------------------------------------------
+# 9. Sidecar market entry bridge (async)
+# ---------------------------------------------------------------------------
+
+
+class TestSidecarMarketEntryBridge(unittest.IsolatedAsyncioTestCase):
+    async def test_uses_sidcar_entry_and_legacy_not_called(self) -> None:
+        """place_sidecar_market_order uses SIDECAR_ENTRY and skips legacy."""
+        fake = FakeBrokerSemanticExecutor()
+        fake.queue_result(order_id="sidecar-mkt-1", ok=True)
+        t = _make_trader(_broker_semantic_executor=fake)
+        t.td_mode = "cross"
+        t.pos_side_mode = "net"
+        t.contract_multiplier = Decimal("0.1")
+
+        async def fake_request(*args, **kwargs):
+            raise AssertionError("legacy path must not be called")
+
+        t.request = fake_request  # type: ignore[method-assign]
+
+        result = await t.place_sidecar_market_order(side="LONG", eth_qty=0.1)
+        self.assertEqual(result["order_id"], "sidecar-mkt-1")
+        self.assertIn("contracts", result)
+        self.assertIn("qty", result)
+        self.assertEqual(len(fake.requests), 1)
+        self.assertEqual(fake.requests[0].action, BrokerSemanticAction.SIDECAR_ENTRY)
+        self.assertEqual(fake.requests[0].role, BrokerSemanticOrderRole.SIDECAR_ENTRY)
+        self.assertEqual(fake.requests[0].side, BrokerOrderSide.BUY)  # LONG entry
+
+    async def test_missing_order_id_raises(self) -> None:
+        """SIDECAR_ENTRY with no order_id must raise, not fake success."""
+        fake = FakeBrokerSemanticExecutor()
+        fake.queue_result(order_id=None, ok=True)
+        t = _make_trader(_broker_semantic_executor=fake)
+        t.td_mode = "cross"
+        t.pos_side_mode = "net"
+        t.contract_multiplier = Decimal("0.1")
+
+        with self.assertRaises(RuntimeError):
+            await t.place_sidecar_market_order(side="LONG", eth_qty=0.1)
+
+    async def test_ok_false_raises(self) -> None:
+        """SIDECAR_ENTRY with ok=False must raise, not fake success."""
+        fake = FakeBrokerSemanticExecutor()
+        fake.queue_result(order_id=None, ok=False, message="exchange error")
+        t = _make_trader(_broker_semantic_executor=fake)
+        t.td_mode = "cross"
+        t.pos_side_mode = "net"
+        t.contract_multiplier = Decimal("0.1")
+
+        with self.assertRaises(RuntimeError):
+            await t.place_sidecar_market_order(side="LONG", eth_qty=0.1)
+
+    async def test_no_executor_falls_back_to_legacy(self) -> None:
+        """When no executor, place_sidecar_market_order uses legacy path."""
+        t = _make_trader()
+        t.td_mode = "cross"
+        t.pos_side_mode = "net"
+        t.contract_multiplier = Decimal("0.1")
+        if hasattr(t, '_broker_semantic_executor'):
+            del t._broker_semantic_executor
+
+        legacy_calls = []
+
+        async def fake_request(method, path, body):
+            legacy_calls.append((method, path, body))
+            return {"code": "0", "data": [{"ordId": "legacy-mkt-1", "sCode": "0"}]}
+
+        t.request = fake_request  # type: ignore[method-assign]
+
+        result = await t.place_sidecar_market_order(side="SHORT", eth_qty=0.1)
+        self.assertEqual(result["order_id"], "legacy-mkt-1")
+        self.assertEqual(len(legacy_calls), 1)
+        self.assertEqual(legacy_calls[0][1], "/api/v5/trade/order")
+
+
+# ---------------------------------------------------------------------------
+# 10. Placement path ok=False / missing order_id
+# ---------------------------------------------------------------------------
+
+
+class TestPlacementResultOkFalse(unittest.IsolatedAsyncioTestCase):
+    """Verify that ok=False or missing order_id causes placement to fail."""
+
+    async def test_core_tp_ok_false_raises(self) -> None:
+        """PLACE_REDUCE_ONLY_TP with ok=False must raise."""
+        fake = FakeBrokerSemanticExecutor()
+        fake.queue_result(order_id=None, ok=False, message="tp error")
+        t = _make_trader(_broker_semantic_executor=fake)
+        from src.execution.tp_sl_core_tp_manager import CoreTakeProfitManager
+        from src.execution.tp_sl_protective_stop_manager import ProtectiveStopManager
+
+        mgr = CoreTakeProfitManager(t, protective_stops=ProtectiveStopManager(t))
+
+        # Minimal intent mock with just the side attribute needed by the bridge
+        class _FakeIntent:
+            side = "LONG"
+
+        with self.assertRaises(RuntimeError):
+            await mgr._place_reduce_only_take_profit_orders(
+                _FakeIntent(), [("tp1", Decimal("1"), 3500.0)]
+            )
+
+    async def test_protective_sl_ok_false_raises(self) -> None:
+        """PLACE_PROTECTIVE_STOP with ok=False must raise."""
+        fake = FakeBrokerSemanticExecutor()
+        fake.queue_result(order_id=None, ok=False, message="sl error")
+        t = _make_trader(_broker_semantic_executor=fake)
+        from src.execution.tp_sl_protective_stop_manager import ProtectiveStopManager
+        from src.exchanges.semantic_models import BrokerSemanticOrderRole
+
+        mgr = ProtectiveStopManager(t)
+        with self.assertRaises(RuntimeError):
+            await mgr._place_protective_stop_semantic(
+                side="LONG",
+                contracts=Decimal("1"),
+                stop_price=2800.0,
+                role=BrokerSemanticOrderRole.PROTECTIVE_SL,
+                metadata={"phase": "primary"},
+            )
+
+
+# ---------------------------------------------------------------------------
+# 11. Cancel path ok=False is treated as failure
+# ---------------------------------------------------------------------------
+
+
+class TestCancelResultOkFalse(unittest.IsolatedAsyncioTestCase):
+    """Verify that cancel paths treat ok=False as failure."""
+
+    async def test_cancel_protective_stop_ok_false_returns_false(self) -> None:
+        """CANCEL_PROTECTIVE_STOP with ok=False returns False (caught exception)."""
+        fake = FakeBrokerSemanticExecutor()
+        fake.queue_result(order_id=None, ok=False, message="cancel error")
+        t = _make_trader(_broker_semantic_executor=fake)
+        t.near_tp_protective_sl_order_id = "algo-1"
+        t.request = None  # type: ignore[method-assign]
+
+        from src.execution.tp_sl_execution_manager import TpSlExecutionManager
+        mgr = TpSlExecutionManager(t)
+        # cancel_near_tp_protective_stop catches exception → returns False
+        result = await mgr.cancel_near_tp_protective_stop("algo-1")
+        self.assertFalse(result)
+
+    async def test_sidecar_cancel_ok_false_returns_false(self) -> None:
+        """Sidecar cancel with ok=False returns False (caught exception)."""
+        fake = FakeBrokerSemanticExecutor()
+        fake.queue_result(order_id=None, ok=False, message="cancel error")
+        t = _make_trader(_broker_semantic_executor=fake)
+        t.request = None  # type: ignore[method-assign]
+
+        from src.execution.tp_sl_execution_manager import TpSlExecutionManager
+        mgr = TpSlExecutionManager(t)
+        result = await mgr.cancel_sidecar_take_profit("sidecar-tp-1")
+        self.assertFalse(result)
+
+    async def test_cancel_reduce_only_loop_ok_false_still_continues(self) -> None:
+        """When a per-order cancel returns ok=False, the loop catches it and continues."""
+        fake = FakeBrokerSemanticExecutor()
+        # First cancel: ok=False (caught, continues), second: ok=True
+        fake.queue_result(order_id=None, ok=False, message="cancel error")
+        fake.queue_result(order_id="ok-1", ok=True)
+        t = _make_trader(_broker_semantic_executor=fake)
+        t._managed_reduce_only_order_ids = {"bad-id", "ok-1"}
+
+        async def fake_fetch():
+            return [
+                {"instId": t.symbol, "reduceOnly": "true", "ordId": "bad-id"},
+                {"instId": t.symbol, "reduceOnly": "true", "ordId": "ok-1"},
+            ]
+
+        t.fetch_pending_orders = fake_fetch
+
+        from src.execution.tp_sl_execution_manager import TpSlExecutionManager
+        mgr = TpSlExecutionManager(t)
+        result = await mgr.cancel_existing_reduce_only_orders(phase="update_tp")
+        # Overall True because loop caught the first failure and continued
+        self.assertTrue(result)
+        self.assertEqual(len(fake.requests), 2)
+
+
+# ---------------------------------------------------------------------------
+# 12. require_semantic_order_id / require_semantic_ok unit tests
+# ---------------------------------------------------------------------------
+
+
+class TestRequireSemanticHelpers(unittest.TestCase):
+    def test_require_semantic_order_id_ok_true_returns_order_id(self) -> None:
+        from src.execution.broker_semantic_helpers import require_semantic_order_id
+        from src.exchanges.models import ExchangeName
+        r = BrokerSemanticResult(
+            exchange=ExchangeName.OKX, symbol="X",
+            action=BrokerSemanticAction.PLACE_REDUCE_ONLY_TP,
+            role=BrokerSemanticOrderRole.CORE_TP,
+            ok=True, order_id="ord-123",
+        )
+        self.assertEqual(require_semantic_order_id(r, action="TEST"), "ord-123")
+
+    def test_require_semantic_order_id_ok_false_raises(self) -> None:
+        from src.execution.broker_semantic_helpers import require_semantic_order_id
+        from src.exchanges.models import ExchangeName
+        r = BrokerSemanticResult(
+            exchange=ExchangeName.OKX, symbol="X",
+            action=BrokerSemanticAction.PLACE_REDUCE_ONLY_TP,
+            role=BrokerSemanticOrderRole.CORE_TP,
+            ok=False, message="exchange rejected",
+        )
+        with self.assertRaises(RuntimeError) as ctx:
+            require_semantic_order_id(r, action="TEST_ACTION")
+        self.assertIn("TEST_ACTION", str(ctx.exception))
+        self.assertIn("exchange rejected", str(ctx.exception))
+
+    def test_require_semantic_order_id_missing_order_id_raises(self) -> None:
+        from src.execution.broker_semantic_helpers import require_semantic_order_id
+        from src.exchanges.models import ExchangeName
+        r = BrokerSemanticResult(
+            exchange=ExchangeName.OKX, symbol="X",
+            action=BrokerSemanticAction.PLACE_REDUCE_ONLY_TP,
+            role=BrokerSemanticOrderRole.CORE_TP,
+            ok=True, order_id=None,
+        )
+        with self.assertRaises(RuntimeError) as ctx:
+            require_semantic_order_id(r, action="TEST_ACTION")
+        self.assertIn("no order_id", str(ctx.exception))
+
+    def test_require_semantic_ok_true_passes(self) -> None:
+        from src.execution.broker_semantic_helpers import require_semantic_ok
+        from src.exchanges.models import ExchangeName
+        r = BrokerSemanticResult(
+            exchange=ExchangeName.OKX, symbol="X",
+            action=BrokerSemanticAction.CANCEL_REDUCE_ONLY_TP,
+            role=BrokerSemanticOrderRole.CORE_TP,
+            ok=True,
+        )
+        # Should not raise
+        require_semantic_ok(r, action="TEST")
+
+    def test_require_semantic_ok_false_raises(self) -> None:
+        from src.execution.broker_semantic_helpers import require_semantic_ok
+        from src.exchanges.models import ExchangeName
+        r = BrokerSemanticResult(
+            exchange=ExchangeName.OKX, symbol="X",
+            action=BrokerSemanticAction.CANCEL_REDUCE_ONLY_TP,
+            role=BrokerSemanticOrderRole.CORE_TP,
+            ok=False, message="cancel rejected",
+        )
+        with self.assertRaises(RuntimeError) as ctx:
+            require_semantic_ok(r, action="CANCEL_TEST")
+        self.assertIn("CANCEL_TEST", str(ctx.exception))

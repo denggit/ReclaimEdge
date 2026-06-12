@@ -9,6 +9,7 @@ from src.execution.broker_semantic_helpers import (
     broker_position_side,
     close_order_side,
     get_broker_semantic_executor,
+    require_semantic_order_id,
 )
 from src.exchanges.models import BrokerOrderSide, BrokerPositionSide, ExchangeName
 from src.exchanges.semantic_models import BrokerSemanticAction, BrokerSemanticOrderRole, BrokerSemanticRequest
@@ -121,9 +122,7 @@ class ProtectiveStopManager:
                     metadata=metadata,
                 )
             )
-            order_id = result.order_id or ""
-            if not order_id:
-                raise RuntimeError(f"Missing protective SL order_id in broker semantic result: {result}")
+            order_id = require_semantic_order_id(result, action="PLACE_PROTECTIVE_STOP")
             return order_id
 
         if metadata.get("phase") == "secondary":

@@ -520,23 +520,34 @@ class Trader:
 
     async def place_sidecar_market_order(self, *, side: PositionSide, eth_qty: float) -> dict[str, Any]:
         contracts = self.eth_qty_to_contracts(Decimal(str(eth_qty)))
+        from src.execution.broker_semantic_helpers import get_broker_semantic_executor, require_semantic_order_id
         from src.exchanges.models import BrokerOrderSide, BrokerPositionSide
         from src.exchanges.semantic_models import BrokerSemanticAction, BrokerSemanticOrderRole, BrokerSemanticRequest
 
-        result = await self.broker_semantic_executor.execute(
-            BrokerSemanticRequest(
-                exchange=self.broker_semantic_executor.exchange,
-                symbol=self.symbol,
-                action=BrokerSemanticAction.SIDECAR_ENTRY,
-                role=BrokerSemanticOrderRole.SIDECAR_ENTRY,
-                side=BrokerOrderSide.BUY if side == "LONG" else BrokerOrderSide.SELL,
-                position_side=BrokerPositionSide.LONG if side == "LONG" else BrokerPositionSide.SHORT,
-                quantity=contracts,
+        semantic_executor = get_broker_semantic_executor(self)
+        if semantic_executor is not None:
+            result = await semantic_executor.execute(
+                BrokerSemanticRequest(
+                    exchange=semantic_executor.exchange,
+                    symbol=self.symbol,
+                    action=BrokerSemanticAction.SIDECAR_ENTRY,
+                    role=BrokerSemanticOrderRole.SIDECAR_ENTRY,
+                    side=BrokerOrderSide.BUY if side == "LONG" else BrokerOrderSide.SELL,
+                    position_side=BrokerPositionSide.LONG if side == "LONG" else BrokerPositionSide.SHORT,
+                    quantity=contracts,
+                )
             )
-        )
-        order_id = result.order_id or ""
-        if not order_id:
-            raise RuntimeError(f"Missing order_id in broker semantic result: {result}")
+            order_id = require_semantic_order_id(result, action="SIDECAR_ENTRY")
+        else:
+            body = order_specs.build_market_entry_order_body(
+                inst_id=self.symbol,
+                td_mode=self.td_mode,
+                side=side,
+                contracts_text=self.decimal_to_str(contracts),
+                pos_side_mode=self.pos_side_mode,
+            )
+            res = await self.request("POST", "/api/v5/trade/order", body)
+            order_id = self.extract_order_id(res)
         return {
             "order_id": order_id,
             "contracts": self.decimal_to_str(contracts),

@@ -10,6 +10,7 @@ from src.execution.broker_semantic_helpers import (
     broker_position_side,
     close_order_side,
     get_broker_semantic_executor,
+    require_semantic_order_id,
     semantic_tp_role,
 )
 from src.execution.trader import LiveTradeResult
@@ -1029,9 +1030,7 @@ class CoreTakeProfitManager:
                         label=label,
                     )
                 )
-                order_id = result.order_id or ""
-                if not order_id:
-                    raise RuntimeError(f"Missing TP order_id in broker semantic result: {result}")
+                order_id = require_semantic_order_id(result, action="PLACE_REDUCE_ONLY_TP")
             else:
                 body = t._reduce_only_tp_order_body(intent.side, contracts, price)
                 res = await t.request("POST", "/api/v5/trade/order", body)

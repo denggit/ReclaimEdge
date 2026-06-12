@@ -8,6 +8,8 @@ from src.execution.broker_semantic_helpers import (
     broker_position_side,
     close_order_side,
     get_broker_semantic_executor,
+    require_semantic_order_id,
+    require_semantic_ok,
 )
 from src.exchanges.models import BrokerOrderSide, BrokerPositionSide, ExchangeName
 from src.exchanges.semantic_models import BrokerSemanticAction, BrokerSemanticOrderRole, BrokerSemanticRequest
@@ -53,9 +55,7 @@ class SidecarTpManager:
                     client_order_id=sent_client_order_id or None,
                 )
             )
-            order_id = result.order_id or ""
-            if not order_id:
-                raise RuntimeError(f"Missing sidecar TP order_id in broker semantic result: {result}")
+            order_id = require_semantic_order_id(result, action="SIDECAR_TP")
         else:
             body = order_specs.build_reduce_only_tp_order_body(
                 inst_id=t.symbol,
@@ -85,7 +85,7 @@ class SidecarTpManager:
         try:
             semantic_executor = get_broker_semantic_executor(t)
             if semantic_executor is not None:
-                await semantic_executor.execute(
+                result = await semantic_executor.execute(
                     BrokerSemanticRequest(
                         exchange=ExchangeName.OKX,
                         symbol=t.symbol,
@@ -94,6 +94,7 @@ class SidecarTpManager:
                         order_id=order_id,
                     )
                 )
+                require_semantic_ok(result, action="SIDECAR_TP_CANCEL")
             else:
                 await t.request("POST", "/api/v5/trade/cancel-order", order_specs.build_cancel_order_body(
                     inst_id=t.symbol,

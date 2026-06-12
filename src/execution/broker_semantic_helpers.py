@@ -315,3 +315,43 @@ def build_sidecar_tp_request(
         reduce_only=True,
         client_order_id=client_order_id,
     )
+
+
+# ---------------------------------------------------------------------------
+# Semantic result validation
+# ---------------------------------------------------------------------------
+
+
+def require_semantic_order_id(result: Any, *, action: str) -> str:
+    """Validate a ``BrokerSemanticResult`` and return its ``order_id``.
+
+    Raises ``RuntimeError`` when ``result.ok`` is ``False`` or when
+    ``result.order_id`` is missing / falsy.
+
+    Use this helper everywhere a placement path reads ``result.order_id``
+    directly, so that ``ok=False`` is never treated as success.
+    """
+    if not result.ok:
+        raise RuntimeError(
+            f"Broker semantic action failed: {action}: {result.message}"
+        )
+    order_id: str | None = result.order_id
+    if not order_id:
+        raise RuntimeError(
+            f"Broker semantic action returned no order_id: {action}"
+        )
+    return order_id
+
+
+def require_semantic_ok(result: Any, *, action: str) -> None:
+    """Validate that a ``BrokerSemanticResult`` is successful.
+
+    Raises ``RuntimeError`` when ``result.ok`` is ``False``.
+
+    Use this for cancel / query paths where the caller doesn't need an
+    ``order_id`` — it just needs to know the operation succeeded.
+    """
+    if not result.ok:
+        raise RuntimeError(
+            f"Broker semantic action failed: {action}: {result.message}"
+        )

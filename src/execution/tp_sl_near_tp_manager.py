@@ -9,6 +9,7 @@ from src.execution.broker_semantic_helpers import (
     broker_position_side,
     close_order_side,
     get_broker_semantic_executor,
+    require_semantic_order_id,
 )
 from src.execution.trader import LiveTradeResult, PositionSnapshot
 from src.exchanges.models import BrokerOrderSide, BrokerPositionSide, ExchangeName
@@ -72,9 +73,7 @@ class NearTpExecutionManager:
                     metadata={"context": "near_tp_reduce"},
                 )
             )
-            order_id = result.order_id or ""
-            if not order_id:
-                raise RuntimeError(f"Missing near TP reduce order_id in broker semantic result: {result}")
+            order_id = require_semantic_order_id(result, action="NEAR_TP_REDUCE")
         else:
             body = t._reduce_only_market_order_body(intent.side, reduce_contracts)
             res = await t.request("POST", "/api/v5/trade/order", body)
