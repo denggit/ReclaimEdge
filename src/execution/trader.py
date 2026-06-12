@@ -520,23 +520,21 @@ class Trader:
 
     async def place_sidecar_market_order(self, *, side: PositionSide, eth_qty: float) -> dict[str, Any]:
         contracts = self.eth_qty_to_contracts(Decimal(str(eth_qty)))
-        from src.execution.broker_semantic_helpers import get_broker_semantic_executor, require_semantic_order_id
-        from src.exchanges.models import BrokerOrderSide, BrokerPositionSide
-        from src.exchanges.semantic_models import BrokerSemanticAction, BrokerSemanticOrderRole, BrokerSemanticRequest
+        from src.execution.broker_semantic_helpers import (
+            build_sidecar_entry_request,
+            get_broker_semantic_executor,
+            require_semantic_order_id,
+        )
 
         semantic_executor = get_broker_semantic_executor(self)
         if semantic_executor is not None:
-            result = await semantic_executor.execute(
-                BrokerSemanticRequest(
-                    exchange=semantic_executor.exchange,
-                    symbol=self.symbol,
-                    action=BrokerSemanticAction.SIDECAR_ENTRY,
-                    role=BrokerSemanticOrderRole.SIDECAR_ENTRY,
-                    side=BrokerOrderSide.BUY if side == "LONG" else BrokerOrderSide.SELL,
-                    position_side=BrokerPositionSide.LONG if side == "LONG" else BrokerPositionSide.SHORT,
-                    quantity=contracts,
-                )
+            request = build_sidecar_entry_request(
+                symbol=self.symbol,
+                side=side,
+                contracts=contracts,
+                exchange=semantic_executor.exchange,
             )
+            result = await semantic_executor.execute(request)
             order_id = require_semantic_order_id(result, action="SIDECAR_ENTRY")
         else:
             body = order_specs.build_market_entry_order_body(

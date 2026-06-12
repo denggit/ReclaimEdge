@@ -7,7 +7,7 @@ broker semantic executor while preserving legacy signatures.
 from __future__ import annotations
 
 import unittest
-from decimal import Decimal
+from decimal import Decimal, ROUND_DOWN
 
 import src.execution.trader as trader_module
 from src.exchanges.errors import ExchangeError, ExchangeErrorDetail, ExchangeErrorKind
@@ -59,6 +59,67 @@ def _make_trader(**overrides) -> Trader:
     return t
 
 
+class LegacyOnlyFakeTrader:
+    """Plain object used in fallback tests — *without* ``broker_semantic_executor``.
+
+    Production ``Trader`` has a ``broker_semantic_executor`` property (and
+    ``__getattr__`` lazy-creation fallback) that always returns an executor,
+    making ``get_broker_semantic_executor(t) is None`` impossible for real
+    ``Trader`` instances.  This class provides the minimal surface needed for
+    legacy-path fallback tests to assert that the legacy code path is taken
+    when no semantic executor is wired in.
+    """
+
+    # Required by all fallback paths
+    symbol: str = "ETH-USDT-SWAP"
+    td_mode: str = "isolated"
+    pos_side_mode: str = "net"
+    leverate: str = "50"
+    contract_multiplier: Decimal = Decimal("0.1")
+    contract_precision: Decimal = Decimal("0.01")
+    min_contracts: Decimal = Decimal("0.01")
+    near_tp_protective_sl_order_id: str | None = None
+    _protected_reduce_only_order_ids: set[str] = set()
+    _managed_reduce_only_order_ids: set[str] = set()
+    _allow_cancel_unmanaged_reduce_only: bool = True
+
+    # Intentionally NO broker_semantic_executor property and NO __getattr__.
+    # Any attribute access that isnʼt explicitly set will raise AttributeError,
+    # which `get_broker_semantic_executor` catches and treats as "no executor".
+
+    async def request(self, method: str, path: str, body: object = None):
+        raise NotImplementedError("override in test")
+
+    async def fetch_pending_orders(self):
+        raise NotImplementedError("override in test")
+
+    def eth_qty_to_contracts(self, eth_qty: Decimal) -> Decimal:
+        raw_contracts = eth_qty / self.contract_multiplier
+        quantized = raw_contracts.quantize(
+            self.contract_precision, rounding=ROUND_DOWN
+        )
+        if quantized < self.min_contracts:
+            raise RuntimeError(
+                f"Order size {quantized} contracts is below minimum {self.min_contracts}"
+            )
+        return quantized
+
+    @staticmethod
+    def decimal_to_str(value) -> str:
+        return str(Decimal(str(value)))
+
+    @staticmethod
+    def price_to_str(price: float) -> str:
+        return f"{price:.2f}"
+
+    @staticmethod
+    def extract_order_id(res: dict) -> str:
+        data = res.get("data", [])
+        if not data or not data[0].get("ordId"):
+            raise RuntimeError(f"Missing ordId in response: {res}")
+        return str(data[0]["ordId"])
+
+
 # ---------------------------------------------------------------------------
 # 1. CANCEL_REDUCE_ONLY_TP bridge
 # ---------------------------------------------------------------------------
@@ -88,7 +149,7 @@ class TestCancelReduceOnlyTPBridge(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fake.requests[0].order_id, "known-id")
 
     async def test_cancel_without_executor_falls_back_to_legacy(self) -> None:
-        trader = _make_trader()
+        trader = LegacyOnlyFakeTrader()
         trader._managed_reduce_only_order_ids = {"known-id"}
         legacy_calls = []
 
@@ -143,7 +204,7 @@ class TestCancelProtectiveStopBridge(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(fake.requests), 0)
 
     async def test_cancel_without_executor_falls_back_to_legacy(self) -> None:
-        trader = _make_trader()
+        trader = LegacyOnlyFakeTrader()
         legacy_calls = []
 
         async def fake_request(method, path, body):  # type: ignore[no-untyped-def]
@@ -239,7 +300,7 @@ class TestSidecarTPBridge(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fake.requests[0].position_side, BrokerPositionSide.LONG)
 
     async def test_sidecar_tp_without_executor_falls_back(self) -> None:
-        trader = _make_trader()
+        trader = LegacyOnlyFakeTrader()
         legacy_calls = []
 
         async def fake_request(method, path, body):  # type: ignore[no-untyped-def]
@@ -559,11 +620,11 @@ class TestSidecarMarketEntryBridge(unittest.IsolatedAsyncioTestCase):
     async def test_no_executor_falls_back_to_legacy(self) -> None:
         """When no executor, place_sidecar_market_order uses legacy path."""
         t = _make_trader()
+        t._broker_semantic_executor = None  # suppress lazy creation
+        t._broker_client = None             # prevent __getattr__ chain
         t.td_mode = "cross"
         t.pos_side_mode = "net"
         t.contract_multiplier = Decimal("0.1")
-        if hasattr(t, '_broker_semantic_executor'):
-            del t._broker_semantic_executor
 
         legacy_calls = []
 
@@ -577,6 +638,67 @@ class TestSidecarMarketEntryBridge(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["order_id"], "legacy-mkt-1")
         self.assertEqual(len(legacy_calls), 1)
         self.assertEqual(legacy_calls[0][1], "/api/v5/trade/order")
+
+    async def test_short_entry_uses_sell_position_short(self) -> None:
+        """place_sidecar_market_order for SHORT uses SIDECAR_ENTRY SELL SHORT."""
+        fake = FakeBrokerSemanticExecutor()
+        fake.queue_result(order_id="sidecar-mkt-short", ok=True)
+        t = _make_trader(_broker_semantic_executor=fake)
+        t.td_mode = "cross"
+        t.pos_side_mode = "net"
+        t.contract_multiplier = Decimal("0.1")
+
+        async def fake_request(*args, **kwargs):
+            raise AssertionError("legacy path must not be called")
+
+        t.request = fake_request  # type: ignore[method-assign]
+
+        result = await t.place_sidecar_market_order(side="SHORT", eth_qty=0.1)
+        self.assertEqual(result["order_id"], "sidecar-mkt-short")
+        self.assertEqual(len(fake.requests), 1)
+        self.assertEqual(fake.requests[0].action, BrokerSemanticAction.SIDECAR_ENTRY)
+        self.assertEqual(fake.requests[0].side, BrokerOrderSide.SELL)
+        self.assertEqual(fake.requests[0].position_side, BrokerPositionSide.SHORT)
+
+    async def test_lowercase_long_accepted_like_uppercase(self) -> None:
+        """place_sidecar_market_order('long') is accepted (normalized to LONG)."""
+        fake = FakeBrokerSemanticExecutor()
+        fake.queue_result(order_id="sidecar-mkt-lower", ok=True)
+        t = _make_trader(_broker_semantic_executor=fake)
+        t.td_mode = "cross"
+        t.pos_side_mode = "net"
+        t.contract_multiplier = Decimal("0.1")
+
+        async def fake_request(*args, **kwargs):
+            raise AssertionError("legacy path must not be called")
+
+        t.request = fake_request  # type: ignore[method-assign]
+
+        result = await t.place_sidecar_market_order(side="long", eth_qty=0.1)
+        self.assertEqual(result["order_id"], "sidecar-mkt-lower")
+        self.assertEqual(len(fake.requests), 1)
+        self.assertEqual(fake.requests[0].side, BrokerOrderSide.BUY)
+        self.assertEqual(fake.requests[0].position_side, BrokerPositionSide.LONG)
+
+    async def test_net_side_raises_valueerror(self) -> None:
+        """SIDECAR_ENTRY with side='NET' raises ValueError before any IO."""
+        fake = FakeBrokerSemanticExecutor()
+        fake.queue_result(order_id="should-not-be-called", ok=True)
+        t = _make_trader(_broker_semantic_executor=fake)
+        t.td_mode = "cross"
+        t.pos_side_mode = "net"
+        t.contract_multiplier = Decimal("0.1")
+
+        async def fake_request(*args, **kwargs):
+            raise AssertionError("legacy path must not be called for NET")
+
+        t.request = fake_request  # type: ignore[method-assign]
+
+        with self.assertRaises(ValueError):
+            await t.place_sidecar_market_order(side="NET", eth_qty=0.1)
+
+        # Neither semantic executor nor legacy was invoked
+        self.assertEqual(len(fake.requests), 0)
 
 
 # ---------------------------------------------------------------------------
