@@ -283,7 +283,7 @@ def test_middle_bucket_full_three_stage_uses_pre_split_plan_for_post_tp1_sl(monk
     ]
 
 
-def test_middle_bucket_slow_three_stage_payload_uses_fast_sl_as_old_protection(monkeypatch) -> None:
+def test_middle_bucket_full_after_fast_fill_uses_fast_sl_as_old_protection(monkeypatch) -> None:
     patch_cost(monkeypatch)
     patch_runner_boll(monkeypatch)
     state = split_state(
@@ -298,8 +298,10 @@ def test_middle_bucket_slow_three_stage_payload_uses_fast_sl_as_old_protection(m
     result, _journal = run_phase(strategy, position(0.50))
 
     assert result.middle_bucket_split_event_payload is not None
-    assert result.middle_bucket_split_event_payload["event"] == "MIDDLE_BUCKET_SLOW"
+    assert result.middle_bucket_split_event_payload["event"] == "MIDDLE_BUCKET_FULL"
+    assert result.middle_bucket_split_event_payload["pre_split_tp_plan"] == "THREE_STAGE_RUNNER"
     assert result.three_stage_post_tp1_sl_payload is not None
+    assert result.three_stage_post_tp1_sl_payload["reason"] == "middle_bucket_full_filled"
     assert result.three_stage_post_tp1_sl_payload["protective_sl_price"] == 99.0
     assert result.three_stage_post_tp1_sl_payload["old_sl_order_id"] == "old-fast-sl"
     assert result.three_stage_post_tp1_sl_payload["old_sl_price"] == 102.0

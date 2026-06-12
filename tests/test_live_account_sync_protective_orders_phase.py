@@ -68,7 +68,17 @@ class FakeTrader:
 
 def strategy_state(**overrides) -> SimpleNamespace:
     values = dict(
+        side="LONG",
+        layers=1,
+        last_entry_price=100.0,
+        tp_price=None,
+        total_entry_qty=1.0,
+        total_entry_notional=100.0,
         avg_entry_price=100.0,
+        breakeven_price=100.0,
+        tp_mode="MIDDLE",
+        last_order_ts_ms=0,
+        last_tp_update_ts_ms=0,
         three_stage_tp1_price=None,
         three_stage_tp1_ratio=0.0,
         three_stage_tp2_price=None,
