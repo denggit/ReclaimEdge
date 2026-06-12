@@ -18,6 +18,18 @@ from src.exchanges.models import (
     ExchangeName,
 )
 from src.exchanges.okx.client import OkxBrokerClient
+from src.exchanges.semantic_models import (
+    BrokerSemanticAction,
+    BrokerSemanticOrderQuery,
+    BrokerSemanticOrderRole,
+    BrokerSemanticRequest,
+    BrokerSemanticResult,
+)
+from src.exchanges.semantics import (
+    BrokerSemanticExecutor,
+    semantic_request_to_broker_order_request,
+    validate_semantic_request,
+)
 
 __all__ = [
     "BrokerBalance",
@@ -33,6 +45,12 @@ __all__ = [
     "BrokerOrderType",
     "BrokerPosition",
     "BrokerPositionSide",
+    "BrokerSemanticAction",
+    "BrokerSemanticExecutor",
+    "BrokerSemanticOrderQuery",
+    "BrokerSemanticOrderRole",
+    "BrokerSemanticRequest",
+    "BrokerSemanticResult",
     "BrokerTimeInForce",
     "ExchangeCapabilities",
     "ExchangeError",
@@ -42,4 +60,6 @@ __all__ = [
     "OkxBrokerClient",
     "binance_usdm_capabilities",
     "okx_capabilities",
+    "semantic_request_to_broker_order_request",
+    "validate_semantic_request",
 ]
