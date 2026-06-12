@@ -124,7 +124,6 @@ def run_account_sync_tp_progress_phase(
                                                                                           base_sl)
                     protective_sl = strategy._tighten_optional_three_stage_post_tp1_sl(core_position.side, base_sl,
                                                                                        extension_sl)
-                strategy.state.three_stage_post_tp1_protective_sl_price = protective_sl
                 # Global protective SL must cover OKX net position (core + sidecar)
                 if not position.has_position or position.side != core_position.side or position.contracts <= 0:
                     execution_state.trading_halted = True
@@ -159,6 +158,8 @@ def run_account_sync_tp_progress_phase(
                         position.contracts if position.has_position else 0,
                     )
                 else:
+                    old_sl_order_id = getattr(strategy.state, "three_stage_post_tp1_protective_sl_order_id", None)
+                    old_sl_price = getattr(strategy.state, "three_stage_post_tp1_protective_sl_price", None)
                     three_stage_post_tp1_sl_payload = {
                         "position_id": execution_state.current_position_id,
                         "side": core_position.side,
@@ -166,7 +167,9 @@ def run_account_sync_tp_progress_phase(
                         "core_contracts": core_position.contracts,
                         "net_contracts": position.contracts,
                         "protective_sl_price": protective_sl,
-                        "old_sl_order_id": getattr(strategy.state, "three_stage_post_tp1_protective_sl_order_id", None),
+                        "old_sl_order_id": old_sl_order_id,
+                        "old_sl_price": old_sl_price,
+                        "old_protected": getattr(strategy.state, "three_stage_post_tp1_protected", False),
                         "current_price": current_price,
                         "current_price_source": price_source,
                         "reason": "three_stage_tp1_filled",
@@ -234,7 +237,6 @@ def run_account_sync_tp_progress_phase(
                 if runner_boll is not None and core_position.side is not None
                 else None
             )
-            strategy.state.middle_runner_protective_sl_price = protective_sl
             # Global protective SL must cover OKX net position (core + sidecar)
             if not position.has_position or position.side != core_position.side or position.contracts <= 0:
                 execution_state.trading_halted = True
@@ -269,6 +271,8 @@ def run_account_sync_tp_progress_phase(
                     position.contracts if position.has_position else 0,
                 )
             else:
+                old_sl_order_id = getattr(strategy.state, "middle_runner_protective_sl_order_id", None)
+                old_sl_price = getattr(strategy.state, "middle_runner_protective_sl_price", None)
                 middle_runner_sl_payload = {
                     "position_id": execution_state.current_position_id,
                     "side": core_position.side,
@@ -276,7 +280,9 @@ def run_account_sync_tp_progress_phase(
                     "core_contracts": core_position.contracts,
                     "net_contracts": position.contracts,
                     "protective_sl_price": protective_sl,
-                    "old_sl_order_id": getattr(strategy.state, "middle_runner_protective_sl_order_id", None),
+                    "old_sl_order_id": old_sl_order_id,
+                    "old_sl_price": old_sl_price,
+                    "old_protected": bool(old_sl_order_id) and old_sl_price is not None,
                     "reason": "partial_tp_filled",
                 }
     elif runner_live_helpers.middle_runner_size_mismatch_needs_degraded_protection(strategy, core_position):
@@ -287,7 +293,6 @@ def run_account_sync_tp_progress_phase(
             if runner_boll is not None and core_position.side is not None
             else None
         )
-        strategy.state.middle_runner_protective_sl_price = protective_sl
         # Global protective SL must cover OKX net position (core + sidecar)
         if not position.has_position or position.side != core_position.side or position.contracts <= 0:
             execution_state.trading_halted = True
@@ -322,6 +327,8 @@ def run_account_sync_tp_progress_phase(
                 position.contracts if position.has_position else 0,
             )
         else:
+            old_sl_order_id = getattr(strategy.state, "middle_runner_protective_sl_order_id", None)
+            old_sl_price = getattr(strategy.state, "middle_runner_protective_sl_price", None)
             middle_runner_sl_payload = {
                 "position_id": execution_state.current_position_id,
                 "side": core_position.side,
@@ -329,7 +336,9 @@ def run_account_sync_tp_progress_phase(
                 "core_contracts": core_position.contracts,
                 "net_contracts": position.contracts,
                 "protective_sl_price": protective_sl,
-                "old_sl_order_id": getattr(strategy.state, "middle_runner_protective_sl_order_id", None),
+                "old_sl_order_id": old_sl_order_id,
+                "old_sl_price": old_sl_price,
+                "old_protected": bool(old_sl_order_id) and old_sl_price is not None,
                 "reason": "partial_size_mismatch_degraded",
             }
         middle_runner_activation_payload = {
@@ -403,6 +412,8 @@ def run_account_sync_tp_progress_phase(
                 "invalid_action": getattr(strategy.config, "middle_bucket_split_fast_sl_invalid_action", "MARKET_EXIT"),
                 "enabled": bool(getattr(strategy.config, "middle_bucket_split_fast_sl_enabled", True)),
                 "old_sl_order_id": getattr(strategy.state, "middle_bucket_split_fast_sl_order_id", None),
+                "old_sl_price": getattr(strategy.state, "middle_bucket_split_fast_sl_price", None),
+                "old_protected": getattr(strategy.state, "middle_bucket_split_fast_sl_protected", False),
             }
 
         # ── Full fill → generate post-TP1 / middle_runner dynamic SL ──
@@ -431,7 +442,6 @@ def run_account_sync_tp_progress_phase(
                             core_position.side, current_price, post_tp1_boll, base_sl)
                         protective_sl = strategy._tighten_optional_three_stage_post_tp1_sl(
                             core_position.side, base_sl, extension_sl)
-                    strategy.state.three_stage_post_tp1_protective_sl_price = protective_sl
                     if not position.has_position or position.side != core_position.side or position.contracts <= 0:
                         execution_state.trading_halted = True
                         execution_state.halt_reason = "middle_bucket_slow_post_tp1_net_position_missing"
@@ -440,6 +450,18 @@ def run_account_sync_tp_progress_phase(
                             execution_state.current_position_id,
                         )
                     else:
+                        old_sl_order_id = old_fast_sl_order_id or getattr(
+                            strategy.state, "three_stage_post_tp1_protective_sl_order_id", None)
+                        old_sl_price = (
+                            getattr(strategy.state, "middle_bucket_split_fast_sl_price", None)
+                            if old_fast_sl_order_id
+                            else getattr(strategy.state, "three_stage_post_tp1_protective_sl_price", None)
+                        )
+                        old_protected = (
+                            getattr(strategy.state, "middle_bucket_split_fast_sl_protected", False)
+                            if old_fast_sl_order_id
+                            else getattr(strategy.state, "three_stage_post_tp1_protected", False)
+                        )
                         three_stage_post_tp1_sl_payload = {
                             "position_id": execution_state.current_position_id,
                             "side": core_position.side,
@@ -447,8 +469,9 @@ def run_account_sync_tp_progress_phase(
                             "core_contracts": core_position.contracts,
                             "net_contracts": position.contracts,
                             "protective_sl_price": protective_sl,
-                            "old_sl_order_id": old_fast_sl_order_id or getattr(
-                                strategy.state, "three_stage_post_tp1_protective_sl_order_id", None),
+                            "old_sl_order_id": old_sl_order_id,
+                            "old_sl_price": old_sl_price,
+                            "old_protected": old_protected,
                             "current_price": current_price,
                             "current_price_source": price_source,
                             "reason": filled_reason,
@@ -485,7 +508,6 @@ def run_account_sync_tp_progress_phase(
                         if runner_boll is not None and core_position.side is not None
                         else None
                     )
-                    strategy.state.middle_runner_protective_sl_price = protective_sl
                     if not position.has_position or position.side != core_position.side or position.contracts <= 0:
                         execution_state.trading_halted = True
                         execution_state.halt_reason = "middle_bucket_slow_middle_runner_net_position_missing"
@@ -494,6 +516,18 @@ def run_account_sync_tp_progress_phase(
                             execution_state.current_position_id,
                         )
                     else:
+                        old_sl_order_id = old_fast_sl_order_id or getattr(
+                            strategy.state, "middle_runner_protective_sl_order_id", None)
+                        old_sl_price = (
+                            getattr(strategy.state, "middle_bucket_split_fast_sl_price", None)
+                            if old_fast_sl_order_id
+                            else getattr(strategy.state, "middle_runner_protective_sl_price", None)
+                        )
+                        old_protected = (
+                            getattr(strategy.state, "middle_bucket_split_fast_sl_protected", False)
+                            if old_fast_sl_order_id
+                            else bool(old_sl_order_id) and old_sl_price is not None
+                        )
                         middle_runner_sl_payload = {
                             "position_id": execution_state.current_position_id,
                             "side": core_position.side,
@@ -501,8 +535,9 @@ def run_account_sync_tp_progress_phase(
                             "core_contracts": core_position.contracts,
                             "net_contracts": position.contracts,
                             "protective_sl_price": protective_sl,
-                            "old_sl_order_id": old_fast_sl_order_id or getattr(
-                                strategy.state, "middle_runner_protective_sl_order_id", None),
+                            "old_sl_order_id": old_sl_order_id,
+                            "old_sl_price": old_sl_price,
+                            "old_protected": old_protected,
                             "reason": filled_reason,
                         }
                     middle_runner_activation_payload = {

@@ -4,6 +4,7 @@ from decimal import Decimal
 from types import SimpleNamespace
 
 from src.execution.trader import PositionSnapshot
+from src.live.account_sync import tp_progress_phase as phase_module
 from src.live import runtime_types as live_runtime_types
 from src.live.account_sync.tp_progress_phase import run_account_sync_tp_progress_phase
 from src.position_management import cost_runtime as position_cost_runtime
@@ -164,6 +165,90 @@ def patch_cost(monkeypatch) -> None:
     monkeypatch.setattr(position_cost_runtime, "sync_strategy_cost_from_position", lambda *a, **k: None)
 
 
+def patch_no_split_progress(monkeypatch, *, three_stage_event=None, middle_runner_activated=False) -> None:
+    monkeypatch.setattr(
+        phase_module.tp_progress_helpers,
+        "mark_middle_bucket_split_progress_if_position_reduced",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        phase_module.tp_progress_helpers,
+        "mark_middle_runner_active_if_position_reduced",
+        lambda *_args, **_kwargs: middle_runner_activated,
+    )
+    monkeypatch.setattr(
+        phase_module.tp_progress_helpers,
+        "mark_three_stage_progress_if_position_reduced",
+        lambda *_args, **_kwargs: three_stage_event,
+    )
+    monkeypatch.setattr(
+        phase_module.tp_progress_helpers,
+        "mark_partial_tp_consumed_if_position_reduced",
+        lambda *_args, **_kwargs: None,
+    )
+
+
+def patch_runner_boll(monkeypatch) -> None:
+    monkeypatch.setattr(
+        phase_module.runner_live_helpers,
+        "three_stage_post_tp1_boll",
+        lambda *_args, **_kwargs: SimpleNamespace(middle=106.0),
+    )
+    monkeypatch.setattr(
+        phase_module.runner_live_helpers,
+        "three_stage_post_tp1_current_price",
+        lambda *_args, **_kwargs: (106.0, "test_price"),
+    )
+    monkeypatch.setattr(
+        phase_module.runner_live_helpers,
+        "middle_runner_activation_boll",
+        lambda *_args, **_kwargs: SimpleNamespace(middle=106.0),
+    )
+
+
+def test_three_stage_post_tp1_payload_keeps_old_sl_price_without_state_candidate_pollution(monkeypatch) -> None:
+    patch_cost(monkeypatch)
+    patch_no_split_progress(monkeypatch, three_stage_event="TP1")
+    patch_runner_boll(monkeypatch)
+    state = split_state(
+        middle_bucket_split_active=False,
+        three_stage_post_tp1_protective_sl_order_id="old-post-sl",
+        three_stage_post_tp1_protective_sl_price=101.0,
+        three_stage_post_tp1_protected=True,
+    )
+    strategy = FakeStrategy(state)
+
+    result, _journal = run_phase(strategy, position(0.50))
+
+    assert result.three_stage_post_tp1_sl_payload is not None
+    assert result.three_stage_post_tp1_sl_payload["protective_sl_price"] == 99.0
+    assert result.three_stage_post_tp1_sl_payload["old_sl_order_id"] == "old-post-sl"
+    assert result.three_stage_post_tp1_sl_payload["old_sl_price"] == 101.0
+    assert result.three_stage_post_tp1_sl_payload["old_protected"] is True
+    assert state.three_stage_post_tp1_protective_sl_price == 101.0
+
+
+def test_middle_runner_payload_keeps_old_sl_price_without_state_candidate_pollution(monkeypatch) -> None:
+    patch_cost(monkeypatch)
+    patch_no_split_progress(monkeypatch, middle_runner_activated=True)
+    patch_runner_boll(monkeypatch)
+    state = split_state(
+        middle_bucket_split_active=False,
+        middle_runner_protective_sl_order_id="old-middle-sl",
+        middle_runner_protective_sl_price=97.0,
+    )
+    strategy = FakeStrategy(state)
+
+    result, _journal = run_phase(strategy, position(0.50))
+
+    assert result.middle_runner_sl_payload is not None
+    assert result.middle_runner_sl_payload["protective_sl_price"] == 98.0
+    assert result.middle_runner_sl_payload["old_sl_order_id"] == "old-middle-sl"
+    assert result.middle_runner_sl_payload["old_sl_price"] == 97.0
+    assert result.middle_runner_sl_payload["old_protected"] is True
+    assert state.middle_runner_protective_sl_price == 97.0
+
+
 def test_middle_bucket_slow_only_does_not_trigger_post_tp1_or_middle_runner_sl(monkeypatch) -> None:
     patch_cost(monkeypatch)
     strategy = FakeStrategy(split_state())
@@ -196,6 +281,30 @@ def test_middle_bucket_full_three_stage_uses_pre_split_plan_for_post_tp1_sl(monk
         "MIDDLE_BUCKET_FULL_FILLED",
         "MIDDLE_BUCKET_SPLIT_COMPLETED",
     ]
+
+
+def test_middle_bucket_slow_three_stage_payload_uses_fast_sl_as_old_protection(monkeypatch) -> None:
+    patch_cost(monkeypatch)
+    patch_runner_boll(monkeypatch)
+    state = split_state(
+        middle_bucket_split_fast_consumed=True,
+        middle_bucket_split_fast_sl_order_id="old-fast-sl",
+        middle_bucket_split_fast_sl_price=102.0,
+        middle_bucket_split_fast_sl_protected=True,
+        three_stage_post_tp1_protective_sl_price=97.0,
+    )
+    strategy = FakeStrategy(state)
+
+    result, _journal = run_phase(strategy, position(0.50))
+
+    assert result.middle_bucket_split_event_payload is not None
+    assert result.middle_bucket_split_event_payload["event"] == "MIDDLE_BUCKET_SLOW"
+    assert result.three_stage_post_tp1_sl_payload is not None
+    assert result.three_stage_post_tp1_sl_payload["protective_sl_price"] == 99.0
+    assert result.three_stage_post_tp1_sl_payload["old_sl_order_id"] == "old-fast-sl"
+    assert result.three_stage_post_tp1_sl_payload["old_sl_price"] == 102.0
+    assert result.three_stage_post_tp1_sl_payload["old_protected"] is True
+    assert state.three_stage_post_tp1_protective_sl_price == 97.0
 
 
 def test_middle_bucket_full_middle_runner_uses_pre_split_plan_after_state_tp_plan_becomes_single(monkeypatch) -> None:
