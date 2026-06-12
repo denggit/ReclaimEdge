@@ -1,3 +1,4 @@
+from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 
@@ -22,6 +23,7 @@ from src.exchanges.okx.semantic_executor import OkxBrokerSemanticExecutor
 from src.exchanges.semantic_models import (
     BrokerSemanticAction,
     BrokerSemanticOrderQuery,
+    BrokerSemanticOrderRole,
     BrokerSemanticRequest,
 )
 
@@ -33,6 +35,8 @@ class FakeBroker:
         exchange: ExchangeName = ExchangeName.OKX,
         result_exchange: ExchangeName | None = None,
         result_symbol: str | None = None,
+        position_exchange: ExchangeName | None = None,
+        position_symbol: str | None = None,
     ) -> None:
         self._exchange = exchange
         self._result_exchange = result_exchange
@@ -43,7 +47,10 @@ class FakeBroker:
         self.fetch_position_calls: list[tuple[str, BrokerPositionSide | None]] = []
         self.closed = False
         self.open_orders = [_broker_order()]
-        self.position = _broker_position()
+        self.position = _broker_position(
+            exchange=position_exchange or exchange,
+            symbol=position_symbol or "ETH-USDT-SWAP",
+        )
 
     @property
     def exchange(self) -> ExchangeName:
@@ -149,6 +156,67 @@ async def test_execute_reduce_only_tp_calls_broker_place_limit_order():
 
 
 @pytest.mark.asyncio
+async def test_execute_sidecar_entry_calls_broker_place_market_order():
+    broker = FakeBroker()
+    executor = OkxBrokerSemanticExecutor(broker)
+    request = _semantic_request(
+        action=BrokerSemanticAction.SIDECAR_ENTRY,
+        role=BrokerSemanticOrderRole.SIDECAR_ENTRY,
+    )
+
+    result = await executor.execute_semantic_order(request)
+
+    assert len(broker.place_order_requests) == 1
+    assert broker.place_order_requests[0].order_type == BrokerOrderType.MARKET
+    assert broker.place_order_requests[0].reduce_only is False
+    assert result.ok is True
+    assert result.action == BrokerSemanticAction.SIDECAR_ENTRY
+    assert result.role == BrokerSemanticOrderRole.SIDECAR_ENTRY
+    assert result.raw == {"source": "fake"}
+
+
+@pytest.mark.asyncio
+async def test_execute_protective_stop_calls_broker_place_stop_market_order():
+    broker = FakeBroker()
+    executor = OkxBrokerSemanticExecutor(broker)
+    request = _semantic_request(
+        action=BrokerSemanticAction.PLACE_PROTECTIVE_STOP,
+        role=BrokerSemanticOrderRole.PROTECTIVE_SL,
+        side=BrokerOrderSide.SELL,
+        trigger_price=Decimal("2800"),
+    )
+
+    result = await executor.execute_semantic_order(request)
+
+    assert len(broker.place_order_requests) == 1
+    assert broker.place_order_requests[0].order_type == BrokerOrderType.STOP_MARKET
+    assert broker.place_order_requests[0].reduce_only is True
+    assert broker.place_order_requests[0].trigger_price == Decimal("2800")
+    assert result.ok is True
+    assert result.role == BrokerSemanticOrderRole.PROTECTIVE_SL
+
+
+@pytest.mark.asyncio
+async def test_execute_market_exit_calls_broker_place_reduce_only_market_order():
+    broker = FakeBroker()
+    executor = OkxBrokerSemanticExecutor(broker)
+    request = _semantic_request(
+        action=BrokerSemanticAction.MARKET_EXIT,
+        role=BrokerSemanticOrderRole.MARKET_EXIT,
+        side=BrokerOrderSide.SELL,
+    )
+
+    result = await executor.execute_semantic_order(request)
+
+    assert len(broker.place_order_requests) == 1
+    assert broker.place_order_requests[0].order_type == BrokerOrderType.MARKET
+    assert broker.place_order_requests[0].reduce_only is True
+    assert broker.place_order_requests[0].close_position is True
+    assert result.ok is True
+    assert result.action == BrokerSemanticAction.MARKET_EXIT
+
+
+@pytest.mark.asyncio
 async def test_cancel_semantic_order_calls_broker_cancel_order():
     broker = FakeBroker()
     executor = OkxBrokerSemanticExecutor(broker)
@@ -204,17 +272,16 @@ async def test_cancel_semantic_order_allows_sidecar_cancel():
 
 
 @pytest.mark.asyncio
-async def test_cancel_semantic_order_rejects_cancel_protective_stop_until_implemented():
+async def test_cancel_semantic_order_allows_cancel_protective_stop():
     broker = FakeBroker()
     executor = OkxBrokerSemanticExecutor(broker)
     request = _semantic_request(action=BrokerSemanticAction.CANCEL_PROTECTIVE_STOP)
 
-    with pytest.raises(ExchangeError) as exc_info:
-        await executor.cancel_semantic_order(request, "order-1")
+    result = await executor.cancel_semantic_order(request, "algo-1")
 
-    assert exc_info.value.detail.kind == ExchangeErrorKind.UNSUPPORTED_OPERATION
-    assert "CANCEL_PROTECTIVE_STOP" in exc_info.value.detail.message
-    assert broker.cancel_order_calls == []
+    assert broker.cancel_order_calls == [("ETH-USDT-SWAP", "algo-1")]
+    assert result.ok is True
+    assert result.action == BrokerSemanticAction.CANCEL_PROTECTIVE_STOP
 
 
 @pytest.mark.asyncio
@@ -236,7 +303,7 @@ async def test_cancel_semantic_orders_by_role_rejects_exchange_mismatch():
 
 
 @pytest.mark.asyncio
-async def test_cancel_semantic_orders_by_role_unsupported_uses_broker_exchange():
+async def test_cancel_semantic_orders_by_role_requires_roles():
     broker = FakeBroker()
     executor = OkxBrokerSemanticExecutor(broker)
     query = BrokerSemanticOrderQuery(
@@ -249,6 +316,32 @@ async def test_cancel_semantic_orders_by_role_unsupported_uses_broker_exchange()
 
     assert exc_info.value.detail.kind == ExchangeErrorKind.UNSUPPORTED_OPERATION
     assert exc_info.value.detail.exchange == ExchangeName.OKX
+
+
+@pytest.mark.asyncio
+async def test_cancel_semantic_orders_by_role_cancels_matching_labelled_orders():
+    broker = FakeBroker()
+    broker.open_orders = [
+        replace(_broker_order(), order_id="tp-1", label=BrokerSemanticOrderRole.SIDECAR_TP.value),
+        replace(_broker_order(), order_id="core-1", label=BrokerSemanticOrderRole.CORE_TP.value),
+        replace(_broker_order(), order_id="unknown-1", label=None),
+    ]
+    executor = OkxBrokerSemanticExecutor(broker)
+    query = BrokerSemanticOrderQuery(
+        exchange=ExchangeName.OKX,
+        symbol="ETH-USDT-SWAP",
+        roles=(BrokerSemanticOrderRole.SIDECAR_TP,),
+        include_algo=False,
+    )
+
+    results = await executor.cancel_semantic_orders_by_role(query)
+
+    assert broker.fetch_open_orders_calls == ["ETH-USDT-SWAP"]
+    assert broker.cancel_order_calls == [("ETH-USDT-SWAP", "tp-1")]
+    assert len(results) == 1
+    assert results[0].ok is True
+    assert results[0].order_id == "tp-1"
+    assert results[0].role == BrokerSemanticOrderRole.SIDECAR_TP
 
 
 @pytest.mark.asyncio
@@ -285,6 +378,40 @@ async def test_fetch_semantic_orders_rejects_query_exchange_mismatch():
 
 
 @pytest.mark.asyncio
+async def test_fetch_semantic_orders_rejects_broker_order_exchange_mismatch():
+    broker = FakeBroker()
+    broker.open_orders = [replace(_broker_order(), exchange=ExchangeName.BINANCE)]
+    executor = OkxBrokerSemanticExecutor(broker)
+    query = BrokerSemanticOrderQuery(
+        exchange=ExchangeName.OKX,
+        symbol="ETH-USDT-SWAP",
+        include_algo=False,
+    )
+
+    with pytest.raises(ExchangeError) as exc_info:
+        await executor.fetch_semantic_orders(query)
+
+    assert exc_info.value.detail.kind == ExchangeErrorKind.UNSUPPORTED_OPERATION
+
+
+@pytest.mark.asyncio
+async def test_fetch_semantic_orders_rejects_broker_order_symbol_mismatch():
+    broker = FakeBroker()
+    broker.open_orders = [replace(_broker_order(), symbol="BTC-USDT-SWAP")]
+    executor = OkxBrokerSemanticExecutor(broker)
+    query = BrokerSemanticOrderQuery(
+        exchange=ExchangeName.OKX,
+        symbol="ETH-USDT-SWAP",
+        include_algo=False,
+    )
+
+    with pytest.raises(ExchangeError) as exc_info:
+        await executor.fetch_semantic_orders(query)
+
+    assert exc_info.value.detail.kind == ExchangeErrorKind.INVALID_SYMBOL
+
+
+@pytest.mark.asyncio
 async def test_fetch_semantic_position_calls_fetch_position():
     broker = FakeBroker()
     executor = OkxBrokerSemanticExecutor(broker)
@@ -299,10 +426,21 @@ async def test_fetch_semantic_position_calls_fetch_position():
 
 
 @pytest.mark.asyncio
+async def test_fetch_semantic_position_rejects_broker_position_symbol_mismatch():
+    broker = FakeBroker(position_symbol="BTC-USDT-SWAP")
+    executor = OkxBrokerSemanticExecutor(broker)
+
+    with pytest.raises(ExchangeError) as exc_info:
+        await executor.fetch_semantic_position("ETH-USDT-SWAP")
+
+    assert exc_info.value.detail.kind == ExchangeErrorKind.INVALID_SYMBOL
+
+
+@pytest.mark.asyncio
 async def test_unsupported_semantic_action_raises_exchange_error():
     broker = FakeBroker()
     executor = OkxBrokerSemanticExecutor(broker)
-    request = _semantic_request(action=BrokerSemanticAction.PLACE_PROTECTIVE_STOP)
+    request = _semantic_request(action=BrokerSemanticAction.FETCH_OPEN_ORDERS)
 
     with pytest.raises(ExchangeError) as exc_info:
         await executor.execute_semantic_order(request)
@@ -358,19 +496,23 @@ def _semantic_request(
     *,
     exchange: ExchangeName = ExchangeName.OKX,
     action: BrokerSemanticAction,
+    role: BrokerSemanticOrderRole = BrokerSemanticOrderRole.UNKNOWN,
     side: BrokerOrderSide = BrokerOrderSide.BUY,
     position_side: BrokerPositionSide = BrokerPositionSide.LONG,
     quantity: Decimal = Decimal("1"),
     price: Decimal | None = None,
+    trigger_price: Decimal | None = None,
 ) -> BrokerSemanticRequest:
     return BrokerSemanticRequest(
         exchange=exchange,
         symbol="ETH-USDT-SWAP",
         action=action,
+        role=role,
         side=side,
         position_side=position_side,
         quantity=quantity,
         price=price,
+        trigger_price=trigger_price,
     )
 
 
@@ -390,10 +532,14 @@ def _broker_order() -> BrokerOrder:
     )
 
 
-def _broker_position() -> BrokerPosition:
+def _broker_position(
+    *,
+    exchange: ExchangeName = ExchangeName.OKX,
+    symbol: str = "ETH-USDT-SWAP",
+) -> BrokerPosition:
     return BrokerPosition(
-        exchange=ExchangeName.OKX,
-        symbol="ETH-USDT-SWAP",
+        exchange=exchange,
+        symbol=symbol,
         side=BrokerPositionSide.LONG,
         contracts=Decimal("1"),
         base_qty=Decimal("0.1"),

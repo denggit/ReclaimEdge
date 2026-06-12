@@ -133,8 +133,65 @@ def test_sidecar_tp_semantic_to_limit_broker_order_request():
     assert broker_request.price == Decimal("3500")
 
 
-def test_unsupported_semantic_action_to_order_request_raises():
+def test_sidecar_entry_semantic_to_market_broker_order_request():
+    request = _semantic_request(action=BrokerSemanticAction.SIDECAR_ENTRY)
+
+    broker_request = semantic_request_to_broker_order_request(
+        request,
+        BrokerOrderType.MARKET,
+    )
+
+    assert broker_request.order_type == BrokerOrderType.MARKET
+    assert broker_request.reduce_only is False
+    assert broker_request.close_position is False
+
+
+def test_protective_stop_semantic_to_stop_market_broker_order_request():
+    request = _semantic_request(
+        action=BrokerSemanticAction.PLACE_PROTECTIVE_STOP,
+        side=BrokerOrderSide.SELL,
+        position_side=BrokerPositionSide.LONG,
+        trigger_price=Decimal("2800"),
+    )
+
+    broker_request = semantic_request_to_broker_order_request(
+        request,
+        BrokerOrderType.STOP_MARKET,
+    )
+
+    assert broker_request.order_type == BrokerOrderType.STOP_MARKET
+    assert broker_request.reduce_only is True
+    assert broker_request.trigger_price == Decimal("2800")
+
+
+def test_market_exit_semantic_to_reduce_only_market_broker_order_request():
+    request = _semantic_request(
+        action=BrokerSemanticAction.MARKET_EXIT,
+        side=BrokerOrderSide.SELL,
+        position_side=BrokerPositionSide.LONG,
+    )
+
+    broker_request = semantic_request_to_broker_order_request(
+        request,
+        BrokerOrderType.MARKET,
+    )
+
+    assert broker_request.order_type == BrokerOrderType.MARKET
+    assert broker_request.reduce_only is True
+    assert broker_request.close_position is True
+
+
+def test_protective_stop_requires_trigger_price():
     request = _semantic_request(action=BrokerSemanticAction.PLACE_PROTECTIVE_STOP)
+
+    with pytest.raises(ExchangeError) as exc_info:
+        semantic_request_to_broker_order_request(request, BrokerOrderType.STOP_MARKET)
+
+    assert exc_info.value.detail.kind == ExchangeErrorKind.INVALID_TRIGGER_PRICE
+
+
+def test_unsupported_semantic_action_to_order_request_raises():
+    request = _semantic_request(action=BrokerSemanticAction.CANCEL_ORDER)
 
     with pytest.raises(ExchangeError) as exc_info:
         semantic_request_to_broker_order_request(request, BrokerOrderType.MARKET)

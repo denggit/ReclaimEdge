@@ -94,6 +94,7 @@ def semantic_request_to_broker_order_request(
     if request.action in {
         BrokerSemanticAction.OPEN_POSITION,
         BrokerSemanticAction.ADD_POSITION,
+        BrokerSemanticAction.SIDECAR_ENTRY,
     }:
         if order_type != BrokerOrderType.MARKET:
             raise _semantic_error(
@@ -105,6 +106,24 @@ def semantic_request_to_broker_order_request(
             request,
             order_type=BrokerOrderType.MARKET,
             reduce_only=False,
+            time_in_force=time_in_force,
+        )
+
+    if request.action in {
+        BrokerSemanticAction.MARKET_EXIT,
+        BrokerSemanticAction.CLOSE_POSITION,
+    }:
+        if order_type != BrokerOrderType.MARKET:
+            raise _semantic_error(
+                request.exchange,
+                ExchangeErrorKind.UNSUPPORTED_OPERATION,
+                f"{request.action.value} can only convert to MARKET order requests",
+            )
+        return _broker_order_request(
+            request,
+            order_type=BrokerOrderType.MARKET,
+            reduce_only=True,
+            close_position=True,
             time_in_force=time_in_force,
         )
 
@@ -131,6 +150,26 @@ def semantic_request_to_broker_order_request(
             time_in_force=time_in_force,
         )
 
+    if request.action == BrokerSemanticAction.PLACE_PROTECTIVE_STOP:
+        if order_type != BrokerOrderType.STOP_MARKET:
+            raise _semantic_error(
+                request.exchange,
+                ExchangeErrorKind.UNSUPPORTED_OPERATION,
+                f"{request.action.value} can only convert to STOP_MARKET order requests",
+            )
+        if request.trigger_price is None:
+            raise _semantic_error(
+                request.exchange,
+                ExchangeErrorKind.INVALID_TRIGGER_PRICE,
+                f"{request.action.value} requires a trigger price",
+            )
+        return _broker_order_request(
+            request,
+            order_type=BrokerOrderType.STOP_MARKET,
+            reduce_only=True,
+            time_in_force=time_in_force,
+        )
+
     raise _semantic_error(
         request.exchange,
         ExchangeErrorKind.UNSUPPORTED_OPERATION,
@@ -144,6 +183,7 @@ def _broker_order_request(
     order_type: BrokerOrderType,
     reduce_only: bool,
     time_in_force: BrokerTimeInForce | None,
+    close_position: bool | None = None,
 ) -> BrokerOrderRequest:
     if request.side is None:
         raise _semantic_error(
@@ -174,7 +214,7 @@ def _broker_order_request(
         price=request.price,
         trigger_price=request.trigger_price,
         reduce_only=reduce_only,
-        close_position=request.close_position,
+        close_position=request.close_position if close_position is None else close_position,
         time_in_force=time_in_force,
         client_order_id=request.client_order_id,
         label=request.label,
