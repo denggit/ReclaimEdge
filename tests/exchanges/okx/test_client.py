@@ -10,6 +10,8 @@ import pytest
 
 from src.exchanges.errors import ExchangeError, ExchangeErrorKind
 from src.exchanges.models import (
+    BrokerExecutionAction,
+    BrokerExecutionResult,
     BrokerOrderRequest,
     BrokerOrderResult,
     BrokerOrderSide,
@@ -55,6 +57,7 @@ class FakeTrader:
         equity: float = 100.0,
         position_snapshot: _FakePositionSnapshot | None = None,
         pending_orders: list[dict[str, Any]] | None = None,
+        pending_algo_orders: list[dict[str, Any]] | None = None,
     ) -> None:
         self.symbol = symbol
         self.td_mode = td_mode
@@ -65,6 +68,7 @@ class FakeTrader:
             side=None, contracts=Decimal("0"), avg_entry_price=0.0, eth_qty=0.0, raw_pos=Decimal("0")
         )
         self._pending_orders = pending_orders or []
+        self._pending_algo_orders = pending_algo_orders or []
         self.requests: list[dict[str, Any]] = []
         self._next_order_id = 1
         self.closed = False
@@ -77,6 +81,9 @@ class FakeTrader:
 
     async def fetch_pending_orders(self) -> list[dict[str, Any]]:
         return list(self._pending_orders)
+
+    async def fetch_pending_algo_orders(self) -> list[dict[str, Any]]:
+        return list(self._pending_algo_orders)
 
     async def request(
         self, method: str, endpoint: str, payload: Any | None = None
@@ -567,3 +574,97 @@ class TestClose:
         client = OkxBrokerClient(trader)
         await client.close()
         assert trader.closed is True
+
+
+# ---------------------------------------------------------------------------
+# fetch_algo_orders
+# ---------------------------------------------------------------------------
+
+
+class TestFetchAlgoOrders:
+    @pytest.mark.asyncio
+    async def test_maps_pending_algo_orders(self):
+        algo_orders = [
+            {
+                "algoId": "algo-100",
+                "algoClOrdId": "algo-client-1",
+                "side": "sell",
+                "posSide": "long",
+                "ordType": "conditional",
+                "state": "live",
+                "slTriggerPx": "3100.00",
+                "sz": "1.0",
+                "accFillSz": "0",
+            }
+        ]
+        client = OkxBrokerClient(FakeTrader(pending_algo_orders=algo_orders))
+        result = await client.fetch_algo_orders("ETH-USDT-SWAP")
+        assert len(result) == 1
+        assert result[0].order_id == "algo-100"
+        assert result[0].client_order_id == "algo-client-1"
+        assert result[0].order_type == BrokerOrderType.STOP_MARKET
+        assert result[0].trigger_price == Decimal("3100.00")
+
+    @pytest.mark.asyncio
+    async def test_empty_algo_orders(self):
+        client = OkxBrokerClient(FakeTrader())
+        result = await client.fetch_algo_orders("ETH-USDT-SWAP")
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_symbol_mismatch(self):
+        client = OkxBrokerClient(FakeTrader())
+        with pytest.raises(ExchangeError) as exc_info:
+            await client.fetch_algo_orders("BTC-USDT-SWAP")
+        assert exc_info.value.detail.kind == ExchangeErrorKind.INVALID_SYMBOL
+
+
+# ---------------------------------------------------------------------------
+# map_live_trade_result
+# ---------------------------------------------------------------------------
+
+
+class TestMapLiveTradeResult:
+    @staticmethod
+    def _fake_result(**overrides: object) -> object:
+        """Build a minimal fake LiveTradeResult-like object."""
+
+        class _FakeResult:
+            ok: bool = True
+            action: str = "OPEN_LONG"
+            order_id: str | None = "order-123"
+            tp_order_id: str | None = "tp-456"
+            tp_order_ids: tuple = ()
+            protective_sl_order_id: str | None = None
+            contracts: str | None = "1.0"
+            tp_price: str | None = "3500.00"
+            message: str = "ok"
+            entry_filled: bool = True
+            tp_ok: bool | None = True
+            protective_sl_price: str | None = ""
+            protective_sl_ok: bool | None = None
+
+            def __init__(self, **kw: object) -> None:
+                for k, v in kw.items():
+                    object.__setattr__(self, k, v)
+
+        return _FakeResult(**overrides)
+
+    def test_returns_broker_execution_result(self):
+        trader = FakeTrader(symbol="ETH-USDT-SWAP")
+        client = OkxBrokerClient(trader)
+        fake = self._fake_result()
+        br = client.map_live_trade_result(fake)
+        assert isinstance(br, BrokerExecutionResult)
+        assert br.exchange == ExchangeName.OKX
+        assert br.symbol == "ETH-USDT-SWAP"
+        assert br.action == BrokerExecutionAction.OPEN_LONG
+        assert br.ok is True
+
+    def test_symbol_comes_from_trader(self):
+        trader = FakeTrader(symbol="BTC-USDT-SWAP")
+        client = OkxBrokerClient(trader)
+        fake = self._fake_result()
+        br = client.map_live_trade_result(fake)
+        assert br.symbol == "BTC-USDT-SWAP"
+        assert br.exchange == ExchangeName.OKX

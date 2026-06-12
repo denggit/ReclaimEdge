@@ -173,6 +173,19 @@ def _okx_side_to_broker_side(side: str) -> BrokerOrderSide:
     return BrokerOrderSide.BUY
 
 
+def broker_order_side_from_okx_side(raw_side: Any) -> BrokerOrderSide:
+    """Map an OKX raw side string to ``BrokerOrderSide``.
+
+    >>> broker_order_side_from_okx_side("buy")
+    <BrokerOrderSide.BUY: 'BUY'>
+    >>> broker_order_side_from_okx_side("sell")
+    <BrokerOrderSide.SELL: 'SELL'>
+
+    Falls back to ``BUY`` for unrecognised values — never raises.
+    """
+    return _okx_side_to_broker_side(str(raw_side) if raw_side is not None else "")
+
+
 def _okx_pos_side_to_broker(pos_side: str) -> BrokerPositionSide:
     s = (pos_side or "").strip().lower()
     if s == "long":
@@ -182,11 +195,28 @@ def _okx_pos_side_to_broker(pos_side: str) -> BrokerPositionSide:
     return BrokerPositionSide.NET
 
 
+def broker_position_side_from_okx_pos_side(raw_pos_side: Any) -> BrokerPositionSide:
+    """Map an OKX raw posSide to ``BrokerPositionSide``.
+
+    >>> broker_position_side_from_okx_pos_side("long")
+    <BrokerPositionSide.LONG: 'LONG'>
+    >>> broker_position_side_from_okx_pos_side("short")
+    <BrokerPositionSide.SHORT: 'SHORT'>
+    >>> broker_position_side_from_okx_pos_side("net")
+    <BrokerPositionSide.NET: 'NET'>
+    >>> broker_position_side_from_okx_pos_side(None)
+    <BrokerPositionSide.NET: 'NET'>
+
+    Falls back to ``NET`` for unrecognised values — never raises.
+    """
+    return _okx_pos_side_to_broker(str(raw_pos_side) if raw_pos_side is not None else "")
+
+
 def _okx_state_to_broker_status(state: str) -> BrokerOrderStatus:
     s = (state or "").strip().lower()
     if s == "live":
         return BrokerOrderStatus.NEW
-    if s == "partially_filled":
+    if s in ("partially_filled", "partially-filled"):
         return BrokerOrderStatus.PARTIALLY_FILLED
     if s == "filled":
         return BrokerOrderStatus.FILLED
@@ -194,19 +224,66 @@ def _okx_state_to_broker_status(state: str) -> BrokerOrderStatus:
         return BrokerOrderStatus.CANCELED
     if s == "rejected":
         return BrokerOrderStatus.REJECTED
+    if s == "expired":
+        return BrokerOrderStatus.EXPIRED
     return BrokerOrderStatus.UNKNOWN
 
 
-def _okx_ord_type_to_broker(ord_type: str) -> BrokerOrderType:
+def broker_order_status_from_okx_state(raw_state: Any) -> BrokerOrderStatus:
+    """Map an OKX raw order/algo state to ``BrokerOrderStatus``.
+
+    >>> broker_order_status_from_okx_state("live")
+    <BrokerOrderStatus.NEW: 'NEW'>
+    >>> broker_order_status_from_okx_state("partially_filled")
+    <BrokerOrderStatus.PARTIALLY_FILLED: 'PARTIALLY_FILLED'>
+    >>> broker_order_status_from_okx_state("filled")
+    <BrokerOrderStatus.FILLED: 'FILLED'>
+    >>> broker_order_status_from_okx_state("expired")
+    <BrokerOrderStatus.EXPIRED: 'EXPIRED'>
+
+    Falls back to ``UNKNOWN`` for unrecognised values — never raises.
+    """
+    return _okx_state_to_broker_status(str(raw_state) if raw_state is not None else "")
+
+
+def _okx_ord_type_to_broker(ord_type: str, *, is_algo: bool = False) -> BrokerOrderType:
     t = (ord_type or "").strip().lower()
+    if is_algo:
+        # Algo orders: conditional, oco, trigger, move_order_stop → STOP_MARKET
+        if t in ("conditional", "oco", "trigger", "move_order_stop"):
+            return BrokerOrderType.STOP_MARKET
+        # Any other algo type → STOP_MARKET (conservative)
+        return BrokerOrderType.STOP_MARKET
+    # Ordinary orders
     if t == "market":
         return BrokerOrderType.MARKET
     if t == "limit":
         return BrokerOrderType.LIMIT
-    if t == "conditional":
-        return BrokerOrderType.STOP_MARKET
     # Conservative fallback
     return BrokerOrderType.LIMIT
+
+
+def broker_order_type_from_okx_ord_type(
+    raw_ord_type: Any, *, is_algo: bool = False
+) -> BrokerOrderType:
+    """Map an OKX raw ordType to ``BrokerOrderType``.
+
+    >>> broker_order_type_from_okx_ord_type("market")
+    <BrokerOrderType.MARKET: 'MARKET'>
+    >>> broker_order_type_from_okx_ord_type("limit")
+    <BrokerOrderType.LIMIT: 'LIMIT'>
+    >>> broker_order_type_from_okx_ord_type("conditional", is_algo=True)
+    <BrokerOrderType.STOP_MARKET: 'STOP_MARKET'>
+    >>> broker_order_type_from_okx_ord_type("oco", is_algo=True)
+    <BrokerOrderType.STOP_MARKET: 'STOP_MARKET'>
+
+    For ordinary orders, falls back to ``LIMIT``.
+    For algo orders, falls back to ``STOP_MARKET``.
+    Never raises.
+    """
+    return _okx_ord_type_to_broker(
+        str(raw_ord_type) if raw_ord_type is not None else "", is_algo=is_algo
+    )
 
 
 def _decimal_or_zero(value: Any) -> Decimal:
@@ -225,6 +302,87 @@ def _decimal_or_none(value: Any) -> Decimal | None:
         return Decimal(str(value))
     except Exception:
         return None
+
+
+def _to_decimal_or_none(value: Any) -> Decimal | None:
+    """Convert *value* to ``Decimal``, returning ``None`` on failure.
+
+    >>> _to_decimal_or_none("3.14")
+    Decimal('3.14')
+    >>> _to_decimal_or_none(None) is None
+    True
+    >>> _to_decimal_or_none("") is None
+    True
+    """
+    if value is None or value == "":
+        return None
+    if isinstance(value, Decimal):
+        return value
+    try:
+        return Decimal(str(value))
+    except Exception:
+        return None
+
+
+def _to_decimal_or_zero(value: Any) -> Decimal:
+    """Convert *value* to ``Decimal``, returning ``Decimal("0")`` on failure."""
+    return _to_decimal_or_none(value) or Decimal("0")
+
+
+# ---------------------------------------------------------------------------
+# OKX raw-field helpers
+# ---------------------------------------------------------------------------
+
+
+def okx_reduce_only_flag(item: Mapping[str, Any]) -> bool:
+    """Extract the reduce-only flag from an OKX raw order dict.
+
+    Checks ``reduceOnly``, ``reduce_only``, and ``reduce-only`` keys.
+    Accepts ``True``, ``"true"``, ``"1"``, ``"yes"``, ``"y"`` (case-insensitive).
+
+    >>> okx_reduce_only_flag({"reduceOnly": "true"})
+    True
+    >>> okx_reduce_only_flag({"reduceOnly": True})
+    True
+    >>> okx_reduce_only_flag({"reduceOnly": "false"})
+    False
+    >>> okx_reduce_only_flag({})
+    False
+    """
+    for key in ("reduceOnly", "reduce_only", "reduce-only"):
+        raw = item.get(key)
+        if raw is None:
+            continue
+        if raw is True:
+            return True
+        if isinstance(raw, str) and raw.strip().lower() in ("true", "1", "yes", "y"):
+            return True
+        return False
+    return False
+
+
+def okx_trigger_price(item: Mapping[str, Any]) -> Decimal | None:
+    """Extract the trigger price from an OKX raw order dict.
+
+    Checks fields in priority order:
+    ``slTriggerPx`` → ``tpTriggerPx`` → ``triggerPx`` → ``ordPx`` → ``px``.
+
+    Returns ``Decimal`` or ``None``.
+    """
+    for key in ("slTriggerPx", "tpTriggerPx", "triggerPx", "ordPx", "px"):
+        raw = item.get(key)
+        if raw is None or raw == "":
+            continue
+        try:
+            return Decimal(str(raw))
+        except Exception:
+            continue
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Order mapping
+# ---------------------------------------------------------------------------
 
 
 def broker_order_from_okx_pending_order(item: Mapping[str, Any], *, symbol: str) -> BrokerOrder:
@@ -250,18 +408,23 @@ def broker_order_from_okx_pending_order(item: Mapping[str, Any], *, symbol: str)
             quantity=Decimal("0"),
             filled_quantity=Decimal("0"),
             reduce_only=False,
+            close_position=False,
+            trigger_price=None,
+            label=None,
             raw=dict(item),
         )
 
     side = _okx_side_to_broker_side(str(item.get("side", "")))
     pos_side = _okx_pos_side_to_broker(str(item.get("posSide", "")))
-    order_type = _okx_ord_type_to_broker(str(item.get("ordType", "")))
+    order_type = _okx_ord_type_to_broker(str(item.get("ordType", "")), is_algo=False)
     status = _okx_state_to_broker_status(str(item.get("state", "")))
     price = _decimal_or_none(item.get("px"))
     quantity = _decimal_or_zero(item.get("sz"))
     filled_qty = _decimal_or_zero(item.get("accFillSz"))
-    reduce_only = True if str(item.get("reduceOnly", "")).lower() == "true" else False
-    client_order_id = str(item.get("clOrdId", "")) or None
+    reduce_only = okx_reduce_only_flag(item)
+    trigger_price = okx_trigger_price(item)
+    client_order_id = str(item.get("clOrdId", "")) or str(item.get("tag", "")) or None
+    label = item.get("label") or item.get("tag") or None
 
     return BrokerOrder(
         exchange=ExchangeName.OKX,
@@ -276,7 +439,175 @@ def broker_order_from_okx_pending_order(item: Mapping[str, Any], *, symbol: str)
         quantity=quantity,
         filled_quantity=filled_qty,
         reduce_only=reduce_only,
+        close_position=False,
+        trigger_price=trigger_price,
+        label=label,
         raw=dict(item),
+    )
+
+
+def broker_order_from_okx_pending_algo_order(
+    item: Mapping[str, Any], *, symbol: str
+) -> BrokerOrder:
+    """Map an OKX pending algo order dict to a ``BrokerOrder``.
+
+    This is a pure function — it does not access the network.
+    It does **not** cancel or modify any algo order.
+    """
+    order_id = str(item.get("algoId", "") or item.get("ordId", "") or "")
+
+    if not order_id:
+        # Missing id → return a placeholder with UNKNOWN status.
+        return BrokerOrder(
+            exchange=ExchangeName.OKX,
+            symbol=symbol,
+            order_id="",
+            client_order_id=None,
+            side=BrokerOrderSide.BUY,
+            position_side=BrokerPositionSide.NET,
+            order_type=BrokerOrderType.STOP_MARKET,
+            status=BrokerOrderStatus.UNKNOWN,
+            price=None,
+            quantity=Decimal("0"),
+            filled_quantity=Decimal("0"),
+            reduce_only=False,
+            close_position=False,
+            trigger_price=None,
+            label=None,
+            raw=dict(item),
+        )
+
+    side = _okx_side_to_broker_side(str(item.get("side", "")))
+    pos_side = _okx_pos_side_to_broker(str(item.get("posSide", "")))
+    order_type = _okx_ord_type_to_broker(str(item.get("ordType", "")), is_algo=True)
+    # algo orders may have state in "state" or "algoState"
+    raw_state = item.get("state") or item.get("algoState")
+    status = _okx_state_to_broker_status(str(raw_state) if raw_state else "")
+    price = _decimal_or_none(item.get("px") or item.get("ordPx"))
+    quantity = _decimal_or_zero(item.get("sz"))
+    filled_qty = _decimal_or_zero(item.get("accFillSz"))
+    reduce_only = okx_reduce_only_flag(item)
+    trigger_price = okx_trigger_price(item)
+    client_order_id = (
+        str(item.get("algoClOrdId", ""))
+        or str(item.get("clOrdId", ""))
+        or str(item.get("tag", ""))
+        or None
+    )
+    label = (
+        item.get("label")
+        or item.get("tag")
+        or item.get("algoClOrdId")
+        or None
+    )
+
+    return BrokerOrder(
+        exchange=ExchangeName.OKX,
+        symbol=symbol,
+        order_id=order_id,
+        client_order_id=client_order_id,
+        side=side,
+        position_side=pos_side,
+        order_type=order_type,
+        status=status,
+        price=price,
+        quantity=quantity,
+        filled_quantity=filled_qty,
+        reduce_only=reduce_only,
+        close_position=False,
+        trigger_price=trigger_price,
+        label=label,
+        raw=dict(item),
+    )
+
+
+# ---------------------------------------------------------------------------
+# LiveTradeResult mapping (anti-corruption layer)
+# ---------------------------------------------------------------------------
+
+
+def broker_execution_result_from_live_trade_result(
+    *,
+    exchange: ExchangeName,
+    symbol: str,
+    result: object,
+) -> "BrokerExecutionResult":
+    """Map a legacy ``LiveTradeResult`` to a unified ``BrokerExecutionResult``.
+
+    This is a pure function — it reads attributes from *result* and never
+    imports or constructs a ``Trader`` instance.
+
+    Compatible with both the real ``LiveTradeResult`` dataclass and lightweight
+    test fakes that expose the same attribute names.
+    """
+    from src.exchanges.models import BrokerExecutionAction, BrokerExecutionResult
+
+    # --- action ---
+    raw_action = str(getattr(result, "action", "") or "")
+    action_map: dict[str, BrokerExecutionAction] = {
+        "OPEN_LONG": BrokerExecutionAction.OPEN_LONG,
+        "OPEN_SHORT": BrokerExecutionAction.OPEN_SHORT,
+        "ADD_LONG": BrokerExecutionAction.ADD_LONG,
+        "ADD_SHORT": BrokerExecutionAction.ADD_SHORT,
+        "UPDATE_TP": BrokerExecutionAction.UPDATE_TP,
+        "NEAR_TP_REDUCE": BrokerExecutionAction.NEAR_TP_REDUCE,
+        "MARKET_EXIT_RUNNER": BrokerExecutionAction.MARKET_EXIT_RUNNER,
+    }
+    action = action_map.get(raw_action, BrokerExecutionAction.UNKNOWN)
+
+    # --- numeric fields ---
+    contracts = _to_decimal_or_none(getattr(result, "contracts", None))
+    tp_price = _to_decimal_or_none(getattr(result, "tp_price", None))
+    protective_sl_price = _to_decimal_or_none(
+        getattr(result, "protective_sl_price", None)
+    )
+
+    # --- tp_order_ids: string "id1,id2" or iterable → tuple ---
+    raw_tp_ids = getattr(result, "tp_order_ids", None)
+    tp_order_ids: tuple[str, ...] = ()
+    if raw_tp_ids:
+        if isinstance(raw_tp_ids, str) and raw_tp_ids.strip():
+            tp_order_ids = tuple(
+                oid.strip() for oid in raw_tp_ids.split(",") if oid.strip()
+            )
+        elif isinstance(raw_tp_ids, (list, tuple, set)):
+            tp_order_ids = tuple(str(oid) for oid in raw_tp_ids if str(oid).strip())
+        elif raw_tp_ids:
+            # Single item fallback
+            tp_order_ids = (str(raw_tp_ids),)
+
+    # --- raw: lightweight metadata only ---
+    raw: dict[str, Any] = {
+        "legacy_type": type(result).__name__,
+        "legacy_action": raw_action or None,
+        "legacy_message": getattr(result, "message", None),
+    }
+
+    return BrokerExecutionResult(
+        exchange=exchange,
+        symbol=symbol,
+        action=action,
+        ok=bool(getattr(result, "ok", False)),
+        message=str(getattr(result, "message", "") or ""),
+        order_id=getattr(result, "order_id", None) or None,
+        tp_order_id=getattr(result, "tp_order_id", None) or None,
+        tp_order_ids=tp_order_ids,
+        protective_sl_order_id=getattr(result, "protective_sl_order_id", None) or None,
+        contracts=contracts,
+        tp_price=tp_price,
+        protective_sl_price=protective_sl_price,
+        entry_filled=bool(getattr(result, "entry_filled", False)),
+        tp_ok=(
+            bool(getattr(result, "tp_ok", None))
+            if getattr(result, "tp_ok", None) is not None
+            else None
+        ),
+        protective_sl_ok=(
+            bool(getattr(result, "protective_sl_ok", None))
+            if getattr(result, "protective_sl_ok", None) is not None
+            else None
+        ),
+        raw=raw,
     )
 
 

@@ -130,6 +130,43 @@ class BrokerOrderResult:
     raw: Mapping[str, Any] = field(default_factory=dict)
 
 
+class BrokerExecutionAction(str, Enum):
+    OPEN_LONG = "OPEN_LONG"
+    OPEN_SHORT = "OPEN_SHORT"
+    ADD_LONG = "ADD_LONG"
+    ADD_SHORT = "ADD_SHORT"
+    UPDATE_TP = "UPDATE_TP"
+    NEAR_TP_REDUCE = "NEAR_TP_REDUCE"
+    MARKET_EXIT_RUNNER = "MARKET_EXIT_RUNNER"
+    UNKNOWN = "UNKNOWN"
+
+
+@dataclass(frozen=True)
+class BrokerExecutionResult:
+    """Unified execution result bridging legacy ``LiveTradeResult``.
+
+    This is a bridge DTO — it does **not** replace ``LiveTradeResult`` yet.
+    The *raw* field carries lightweight metadata, never the full legacy object.
+    """
+
+    exchange: ExchangeName
+    symbol: str
+    action: BrokerExecutionAction
+    ok: bool
+    message: str
+    order_id: str | None = None
+    tp_order_id: str | None = None
+    tp_order_ids: tuple[str, ...] = ()
+    protective_sl_order_id: str | None = None
+    contracts: Decimal | None = None
+    tp_price: Decimal | None = None
+    protective_sl_price: Decimal | None = None
+    entry_filled: bool = False
+    tp_ok: bool | None = None
+    protective_sl_ok: bool | None = None
+    raw: Mapping[str, Any] = field(default_factory=dict)
+
+
 @dataclass(frozen=True)
 class BrokerBalance:
     exchange: ExchangeName

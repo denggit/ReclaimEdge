@@ -7,6 +7,7 @@ from src.exchanges.capabilities import ExchangeCapabilities, okx_capabilities
 from src.exchanges.errors import ExchangeError, ExchangeErrorDetail, ExchangeErrorKind
 from src.exchanges.models import (
     BrokerBalance,
+    BrokerExecutionResult,
     BrokerInstrument,
     BrokerOrder,
     BrokerOrderRequest,
@@ -21,7 +22,9 @@ from src.exchanges.models import (
 )
 from src.exchanges.okx.errors import okx_exception_to_exchange_error
 from src.exchanges.okx.mapper import (
+    broker_execution_result_from_live_trade_result,
     broker_instrument_from_trader,
+    broker_order_from_okx_pending_algo_order,
     broker_order_from_okx_pending_order,
     broker_position_from_snapshot,
     unsupported_okx_order_request_error,
@@ -52,6 +55,8 @@ class _OkxTraderLike(Protocol):
     async def fetch_position_snapshot(self) -> object: ...
 
     async def fetch_pending_orders(self) -> list[dict[str, Any]]: ...
+
+    async def fetch_pending_algo_orders(self) -> list[dict[str, Any]]: ...
 
     async def request(
         self, method: str, endpoint: str, payload: Any | None = None
@@ -384,6 +389,54 @@ class OkxBrokerClient(BrokerClient):
                 except ExchangeError:
                     # Continue cancelling remaining orders even if one fails
                     pass
+
+    # ------------------------------------------------------------------
+    # Algo orders (adapter-specific, not part of BrokerClient interface)
+    # ------------------------------------------------------------------
+
+    async def fetch_algo_orders(self, symbol: str) -> list[BrokerOrder]:
+        """Fetch pending algo orders for *symbol*.
+
+        This is **not** part of the ``BrokerClient`` interface — it is an
+        OKX-adapter-specific method for testing and future migration.
+        It does **not** cancel or modify any algo order.
+        """
+        if symbol != self._trader.symbol:
+            raise ExchangeError(
+                ExchangeErrorDetail(
+                    exchange=ExchangeName.OKX,
+                    kind=ExchangeErrorKind.INVALID_SYMBOL,
+                    message=f"Algo orders not available for symbol {symbol!r}",
+                    raw={"requested": symbol, "configured": self._trader.symbol},
+                )
+            )
+        try:
+            raw_orders = await self._trader.fetch_pending_algo_orders()
+        except Exception as exc:
+            raise okx_exception_to_exchange_error(
+                exc, message=f"Failed to fetch algo orders: {exc}"
+            ) from exc
+
+        return [
+            broker_order_from_okx_pending_algo_order(item, symbol=symbol)
+            for item in raw_orders
+        ]
+
+    # ------------------------------------------------------------------
+    # LiveTradeResult mapping facade
+    # ------------------------------------------------------------------
+
+    def map_live_trade_result(self, result: object) -> BrokerExecutionResult:
+        """Map a legacy ``LiveTradeResult`` to a unified ``BrokerExecutionResult``.
+
+        This is a lightweight adapter method — it does **not** call
+        ``Trader.execute_intent`` and does **not** change any live behaviour.
+        """
+        return broker_execution_result_from_live_trade_result(
+            exchange=ExchangeName.OKX,
+            symbol=self._trader.symbol,
+            result=result,
+        )
 
     # ------------------------------------------------------------------
     # Close
