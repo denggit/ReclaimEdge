@@ -211,6 +211,25 @@ class OkxBrokerSemanticExecutor:
         validate_semantic_request(request)
         _ensure_executor_exchange(self._broker, request.exchange)
         _ensure_cancel_action(request)
+
+        if request.action == BrokerSemanticAction.CANCEL_PROTECTIVE_STOP:
+            cancel_algo_order = getattr(self._broker, "cancel_algo_order", None)
+            if callable(cancel_algo_order):
+                await cancel_algo_order(request.symbol, order_id)
+                return BrokerSemanticResult(
+                    exchange=request.exchange,
+                    symbol=request.symbol,
+                    action=request.action,
+                    role=request.role,
+                    ok=True,
+                    order_id=order_id,
+                )
+            raise _unsupported(
+                request.exchange,
+                "Broker does not support cancel_algo_order; "
+                "cannot cancel protective stop without algo cancel capability",
+            )
+
         await self._broker.cancel_order(request.symbol, order_id)
         return BrokerSemanticResult(
             exchange=request.exchange,
@@ -437,7 +456,17 @@ class OkxBrokerSemanticExecutor:
             role = _semantic_role_from_order(order)
             if role not in wanted_roles:
                 continue
-            await self._broker.cancel_order(query.symbol, order.order_id)
+            if _is_algo_cancel_order(order, role):
+                cancel_algo_order = getattr(self._broker, "cancel_algo_order", None)
+                if not callable(cancel_algo_order):
+                    raise _unsupported(
+                        query.exchange,
+                        "Broker does not support cancel_algo_order; "
+                        "cannot cancel algo order by role",
+                    )
+                await cancel_algo_order(query.symbol, order.order_id)
+            else:
+                await self._broker.cancel_order(query.symbol, order.order_id)
             results.append(
                 BrokerSemanticResult(
                     exchange=query.exchange,
@@ -715,6 +744,34 @@ def _request_order_id(request: BrokerSemanticRequest) -> str:
             raw={"action": request.action.value},
         )
     )
+
+
+_PROTECTIVE_SL_ROLES: frozenset[BrokerSemanticOrderRole] = frozenset(
+    {
+        BrokerSemanticOrderRole.PROTECTIVE_SL,
+        BrokerSemanticOrderRole.MIDDLE_RUNNER_SL,
+        BrokerSemanticOrderRole.THREE_STAGE_SL,
+        BrokerSemanticOrderRole.TREND_RUNNER_SL,
+    }
+)
+
+
+def _is_algo_cancel_order(order: BrokerOrder, role: BrokerSemanticOrderRole) -> bool:
+    """Determine whether *order* should be cancelled via the algo-cancel endpoint.
+
+    Returns ``True`` when any of these conditions hold:
+
+    1. The order type is ``STOP_MARKET`` (protective SL / algo orders).
+    2. The semantic *role* is a known protective SL role.
+    3. The raw order source (set by ``fetch_semantic_orders``) is ``"algo"``.
+    """
+    if order.order_type == BrokerOrderType.STOP_MARKET:
+        return True
+    if role in _PROTECTIVE_SL_ROLES:
+        return True
+    if order.raw.get("source") == "algo":
+        return True
+    return False
 
 
 def _unsupported(exchange: ExchangeName, message: str) -> ExchangeError:

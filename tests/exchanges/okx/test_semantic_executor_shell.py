@@ -297,7 +297,8 @@ async def test_cancel_semantic_order_allows_cancel_protective_stop():
 
     result = await executor.cancel_semantic_order(request, "algo-1")
 
-    assert broker.cancel_order_calls == [("ETH-USDT-SWAP", "algo-1")]
+    assert broker.cancel_algo_order_calls == [("ETH-USDT-SWAP", "algo-1")]
+    assert broker.cancel_order_calls == []
     assert result.ok is True
     assert result.action == BrokerSemanticAction.CANCEL_PROTECTIVE_STOP
 
@@ -458,6 +459,36 @@ async def test_cancel_semantic_orders_by_role_cancels_matching_labelled_orders()
 
 
 @pytest.mark.asyncio
+async def test_cancel_semantic_orders_by_role_mixed_ordinary_and_algo():
+    broker = FakeBroker()
+    broker.open_orders = [
+        replace(_broker_order(), order_id="tp-1", label=BrokerSemanticOrderRole.CORE_TP.value,
+                order_type=BrokerOrderType.LIMIT, raw={"source": "ordinary"}),
+    ]
+    broker.algo_orders = [
+        replace(_broker_order(), order_id="algo-1", label=BrokerSemanticOrderRole.PROTECTIVE_SL.value,
+                order_type=BrokerOrderType.STOP_MARKET, raw={"source": "algo"}),
+    ]
+    executor = OkxBrokerSemanticExecutor(broker)
+    query = BrokerSemanticOrderQuery(
+        exchange=ExchangeName.OKX,
+        symbol="ETH-USDT-SWAP",
+        roles=(BrokerSemanticOrderRole.CORE_TP, BrokerSemanticOrderRole.PROTECTIVE_SL),
+        include_ordinary=True,
+        include_algo=True,
+    )
+
+    results = await executor.cancel_semantic_orders_by_role(query)
+
+    # ordinary TP → cancel_order
+    assert ("ETH-USDT-SWAP", "tp-1") in broker.cancel_order_calls
+    # algo SL → cancel_algo_order
+    assert ("ETH-USDT-SWAP", "algo-1") in broker.cancel_algo_order_calls
+    assert len(results) == 2
+    assert all(r.ok for r in results)
+
+
+@pytest.mark.asyncio
 async def test_fetch_semantic_orders_calls_fetch_open_orders():
     broker = FakeBroker()
     executor = OkxBrokerSemanticExecutor(broker)
@@ -469,7 +500,9 @@ async def test_fetch_semantic_orders_calls_fetch_open_orders():
 
     orders = await executor.fetch_semantic_orders(query)
 
-    assert orders == tuple(broker.open_orders)
+    assert len(orders) == len(broker.open_orders)
+    assert orders[0].order_id == broker.open_orders[0].order_id
+    assert orders[0].raw["source"] == "ordinary"
     assert broker.fetch_open_orders_calls == ["ETH-USDT-SWAP"]
 
 
