@@ -76,7 +76,9 @@ class TestConvenienceMethodsDelegateToExecute:
     """Every convenience method must record exactly one request."""
 
     @pytest.mark.asyncio
-    async def test_place_reduce_only_tp_action(self, executor: RecordingSemanticExecutor) -> None:
+    async def test_place_reduce_only_tp_action_default_role_is_core_tp(
+        self, executor: RecordingSemanticExecutor,
+    ) -> None:
         await executor.place_reduce_only_tp(
             symbol="BTC-USDT-SWAP",
             side=BrokerPositionSide.LONG,
@@ -88,6 +90,25 @@ class TestConvenienceMethodsDelegateToExecute:
         req = executor.requests[0]
         assert req.action == BrokerSemanticAction.PLACE_REDUCE_ONLY_TP
         assert req.role == BrokerSemanticOrderRole.CORE_TP
+        assert req.reduce_only is True
+        assert req.trigger_price == Decimal("52000")
+
+    @pytest.mark.asyncio
+    async def test_place_reduce_only_tp_action_explicit_role_tp1(
+        self, executor: RecordingSemanticExecutor,
+    ) -> None:
+        await executor.place_reduce_only_tp(
+            symbol="BTC-USDT-SWAP",
+            side=BrokerPositionSide.LONG,
+            quantity=Decimal("1"),
+            trigger_price=Decimal("52000"),
+            quantity_unit=BrokerQuantityUnit.CONTRACTS,
+            role=BrokerSemanticOrderRole.TP1,
+        )
+        assert len(executor.requests) == 1
+        req = executor.requests[0]
+        assert req.action == BrokerSemanticAction.PLACE_REDUCE_ONLY_TP
+        assert req.role == BrokerSemanticOrderRole.TP1
         assert req.reduce_only is True
         assert req.trigger_price == Decimal("52000")
 

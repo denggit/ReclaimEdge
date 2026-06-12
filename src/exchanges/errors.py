@@ -55,7 +55,7 @@ class ExchangeError(Exception):
         super().__init__(str(self))
 
     def __str__(self) -> str:
-        return f"[{self.exchange.value}] {self.kind.value}: {self.message}"
+        return f"[{self.exchange.value}:{self.kind.value}] {self.message}"
 
     def __repr__(self) -> str:
         return (

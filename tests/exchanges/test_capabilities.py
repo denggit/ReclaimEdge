@@ -60,6 +60,10 @@ class TestBinanceUsdmCapabilities:
         caps = binance_usdm_default_capabilities()
         assert caps.supports_reduce_only is True
 
+    def test_supports_conditional_orders(self) -> None:
+        caps = binance_usdm_default_capabilities()
+        assert caps.supports_conditional_orders is True
+
     def test_supports_close_position(self) -> None:
         caps = binance_usdm_default_capabilities()
         assert caps.supports_close_position is True
@@ -67,6 +71,18 @@ class TestBinanceUsdmCapabilities:
     def test_exchange_is_binance(self) -> None:
         caps = binance_usdm_default_capabilities()
         assert caps.exchange == ExchangeName.BINANCE
+
+
+class TestBothExchangesCommonCapabilities:
+    """OKX and Binance share several capabilities – verify explicitly."""
+
+    def test_both_support_reduce_only(self) -> None:
+        assert okx_default_capabilities().supports_reduce_only is True
+        assert binance_usdm_default_capabilities().supports_reduce_only is True
+
+    def test_both_support_conditional_orders(self) -> None:
+        assert okx_default_capabilities().supports_conditional_orders is True
+        assert binance_usdm_default_capabilities().supports_conditional_orders is True
 
 
 class TestCapabilitiesDiffer:

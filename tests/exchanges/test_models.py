@@ -15,6 +15,7 @@ from decimal import Decimal
 import pytest
 
 from src.exchanges.models import (
+    BrokerBalance,
     BrokerCancelResult,
     BrokerMarketType,
     BrokerOrder,
@@ -320,3 +321,117 @@ class TestBrokerSymbol:
         )
         assert sym.base_asset == "BTC"
         assert sym.quote_asset == "USDT"
+
+
+# ---------------------------------------------------------------------------
+# BrokerBalance
+# ---------------------------------------------------------------------------
+
+
+class TestBrokerBalance:
+    def test_total_available_frozen(self) -> None:
+        bal = BrokerBalance(
+            exchange=ExchangeName.OKX,
+            asset="USDT",
+            total=Decimal("10000"),
+            available=Decimal("8000"),
+            frozen=Decimal("2000"),
+        )
+        assert bal.asset == "USDT"
+        assert bal.total == Decimal("10000")
+        assert bal.available == Decimal("8000")
+        assert bal.frozen == Decimal("2000")
+
+    def test_available_and_frozen_default_to_none(self) -> None:
+        bal = BrokerBalance(
+            exchange=ExchangeName.BINANCE,
+            asset="BTC",
+            total=Decimal("1.5"),
+        )
+        assert bal.available is None
+        assert bal.frozen is None
+
+    def test_raw_and_metadata_defaults(self) -> None:
+        bal = BrokerBalance(
+            exchange=ExchangeName.BYBIT,
+            asset="ETH",
+            total=Decimal("50"),
+        )
+        assert isinstance(bal.raw, dict)
+        assert len(bal.raw) == 0
+        assert isinstance(bal.metadata, dict)
+        assert len(bal.metadata) == 0
+
+    def test_no_okx_or_binance_private_fields(self) -> None:
+        """BrokerBalance must never expose exchange-specific attrs."""
+        bal = BrokerBalance(
+            exchange=ExchangeName.OKX,
+            asset="USDT",
+            total=Decimal("100"),
+        )
+        for field_name in ("ordId", "algoId", "instId", "posSide", "tdMode",
+                           "slTriggerPx", "algoClOrdId", "orderId", "clientOrderId",
+                           "positionSide", "reduceOnly", "stopPrice",
+                           "timeInForce", "workingType"):
+            assert not hasattr(bal, field_name), f"BrokerBalance MUST NOT have {field_name}"
+
+
+# ---------------------------------------------------------------------------
+# BrokerOrder – anti-corruption check for Binance fields
+# ---------------------------------------------------------------------------
+
+
+class TestBrokerOrderAntiCorruptionBinance:
+    """Prove generic BrokerOrder does not leak Binance private field names."""
+
+    BINANCE_PRIVATE_FIELDS = [
+        "orderId", "clientOrderId", "positionSide",
+        "reduceOnly", "stopPrice", "timeInForce", "workingType",
+    ]
+
+    def test_no_binance_private_fields_as_attrs(self) -> None:
+        order = BrokerOrder(
+            exchange=ExchangeName.BINANCE,
+            symbol="BTCUSDT",
+            order_id="binance-order-1",
+            client_order_id="cid-1",
+            side=BrokerOrderSide.BUY,
+            position_side=BrokerPositionSide.LONG,
+            order_type=BrokerOrderType.LIMIT,
+            status=BrokerOrderStatus.OPEN,
+            price=Decimal("50000"),
+            quantity=Decimal("1"),
+            quantity_unit=BrokerQuantityUnit.BASE_ASSET,
+            raw={
+                "orderId": 123456,
+                "clientOrderId": "xyz",
+                "positionSide": "LONG",
+                "reduceOnly": False,
+                "stopPrice": "0",
+                "timeInForce": "GTC",
+                "workingType": "CONTRACT_PRICE",
+            },
+        )
+        # raw carries them
+        assert order.raw["orderId"] == 123456
+        # but they must NOT be first-class attributes
+        for field_name in self.BINANCE_PRIVATE_FIELDS:
+            assert not hasattr(order, field_name), (
+                f"BrokerOrder MUST NOT have Binance field '{field_name}' as attr"
+            )
+
+    def test_raw_is_mapping(self) -> None:
+        order = BrokerOrder(
+            exchange=ExchangeName.BINANCE,
+            symbol="BTCUSDT",
+            order_id="binance-order-1",
+            client_order_id="cid-1",
+            side=BrokerOrderSide.SELL,
+            position_side=BrokerPositionSide.SHORT,
+            order_type=BrokerOrderType.MARKET,
+            status=BrokerOrderStatus.FILLED,
+            price=Decimal("50000"),
+            quantity=Decimal("1"),
+            quantity_unit=BrokerQuantityUnit.BASE_ASSET,
+        )
+        assert isinstance(order.raw, dict)

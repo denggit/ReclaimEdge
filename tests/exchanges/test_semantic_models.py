@@ -99,6 +99,46 @@ class TestBrokerSemanticRequest:
         )
         assert req.metadata == {}
 
+    def test_sidecar_entry(self) -> None:
+        req = BrokerSemanticRequest(
+            exchange=ExchangeName.OKX,
+            symbol="BTC-USDT-SWAP",
+            action=BrokerSemanticAction.SIDECAR_ENTRY,
+            role=BrokerSemanticOrderRole.SIDECAR_ENTRY,
+            side=BrokerPositionSide.LONG,
+            quantity=Decimal("1"),
+            quantity_unit=BrokerQuantityUnit.CONTRACTS,
+            price=Decimal("50000"),
+        )
+        assert req.action == BrokerSemanticAction.SIDECAR_ENTRY
+        assert req.role == BrokerSemanticOrderRole.SIDECAR_ENTRY
+        assert req.side == BrokerPositionSide.LONG
+        assert req.price == Decimal("50000")
+
+    def test_no_okx_or_binance_private_fields(self) -> None:
+        """BrokerSemanticRequest must NOT expose exchange-specific attrs."""
+        req = BrokerSemanticRequest(
+            exchange=ExchangeName.OKX,
+            symbol="BTC-USDT-SWAP",
+            action=BrokerSemanticAction.OPEN_POSITION,
+            role=BrokerSemanticOrderRole.ENTRY,
+            side=BrokerPositionSide.LONG,
+            quantity=Decimal("1"),
+            quantity_unit=BrokerQuantityUnit.CONTRACTS,
+        )
+        all_pvt = [
+            # OKX
+            "ordId", "algoId", "instId", "posSide", "tdMode",
+            "reduceOnly", "slTriggerPx", "algoClOrdId",
+            # Binance
+            "orderId", "clientOrderId", "positionSide",
+            "stopPrice", "timeInForce", "workingType",
+        ]
+        for field_name in all_pvt:
+            assert not hasattr(req, field_name), (
+                f"BrokerSemanticRequest MUST NOT have field '{field_name}'"
+            )
+
 
 # ---------------------------------------------------------------------------
 # BrokerSemanticResult
