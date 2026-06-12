@@ -133,7 +133,7 @@ class BollCvdShockReclaimStrategyTest(unittest.TestCase):
         self.assertEqual(strat.state.add_freeze_penalty_count, 0)
 
     def test_first_add_in_freeze_requires_first_bypass_multiplier(self) -> None:
-        strat = strategy(first_add_block_seconds=2700, add_layer_gap_pct=0.003)
+        strat = strategy(first_add_block_seconds=2700)
         strat.state.layers = 1
         strat.state.last_entry_price = 100.0
         strat.state.last_order_ts_ms = 100_000
@@ -147,7 +147,7 @@ class BollCvdShockReclaimStrategyTest(unittest.TestCase):
         self.assertEqual(reason, "add_freeze")
 
     def test_first_add_in_freeze_bypasses_at_5x_and_extends_freeze(self) -> None:
-        strat = strategy(first_add_block_seconds=2700, add_min_interval_seconds=1800, add_layer_gap_pct=0.003)
+        strat = strategy(first_add_block_seconds=2700, add_min_interval_seconds=1800)
         ts_ms = 100_000
         strat._open_position("LONG", "OPEN_LONG", 100.0, ts_ms, boll_snapshot(), cvd_snapshot(), "test")
         old_freeze_until = strat.state.add_freeze_until_ts_ms
@@ -163,14 +163,16 @@ class BollCvdShockReclaimStrategyTest(unittest.TestCase):
         self.assertEqual(strat.state.first_entry_ts_ms, ts_ms)
 
     def test_second_add_same_freeze_requires_3x(self) -> None:
-        strat = strategy(add_layer_gap_pct=0.003, add_min_interval_bypass_multiplier=2.0)
+        # L3 linear gap = 0.004, multiplier = 2+1 = 3, required = 0.012
+        # Price 99.0 → gap=1% < 1.2% → blocked. Price 98.79 → gap=1.21% >= 1.2% → allowed
+        strat = strategy(add_min_interval_bypass_multiplier=2.0)
         strat.state.layers = 2
         strat.state.last_entry_price = 100.0
         strat.state.add_freeze_until_ts_ms = 2_000_000
         strat.state.add_freeze_penalty_count = 1
 
-        too_small, reason = strat._add_timing_passed("LONG", 99.2, 1_000_000, 3)
-        enough, enough_reason = strat._add_timing_passed("LONG", 99.1, 1_000_000, 3)
+        too_small, reason = strat._add_timing_passed("LONG", 99.0, 1_000_000, 3)
+        enough, enough_reason = strat._add_timing_passed("LONG", 98.79, 1_000_000, 3)
 
         self.assertFalse(too_small)
         self.assertEqual(reason, "add_freeze")
@@ -178,7 +180,7 @@ class BollCvdShockReclaimStrategyTest(unittest.TestCase):
         self.assertEqual(enough_reason, "add_freeze_bypassed")
 
     def test_add_freeze_skipped_log_is_throttled_by_time_and_key(self) -> None:
-        strat = strategy(add_layer_gap_pct=0.003, add_min_interval_bypass_multiplier=2.0)
+        strat = strategy(add_min_interval_bypass_multiplier=2.0)
         strat.state.layers = 2
         strat.state.last_entry_price = 100.0
         strat.state.add_freeze_until_ts_ms = 2_000_000
@@ -204,7 +206,7 @@ class BollCvdShockReclaimStrategyTest(unittest.TestCase):
             self.assertEqual(log_info.call_count, 4)
 
     def test_penalty_increments_to_4x_after_second_freeze_add(self) -> None:
-        strat = strategy(add_layer_gap_pct=0.003, add_min_interval_seconds=1800, add_min_interval_bypass_multiplier=2.0)
+        strat = strategy(add_min_interval_seconds=1800, add_min_interval_bypass_multiplier=2.0)
         strat.state.side = "LONG"
         strat.state.layers = 2
         strat.state.last_entry_price = 100.0
@@ -220,14 +222,16 @@ class BollCvdShockReclaimStrategyTest(unittest.TestCase):
         self.assertAlmostEqual(strat._active_add_freeze_bypass_multiplier(), 4.0)
 
     def test_freeze_expiry_resets_penalty(self) -> None:
-        strat = strategy(add_layer_gap_pct=0.003)
+        # L3 linear gap = 0.004, bypass = 0.004 * 2 = 0.008
+        # Price 99.19 → gap=0.81% >= 0.8% → passes timing
+        strat = strategy()
         strat.state.layers = 2
         strat.state.last_entry_price = 100.0
         strat.state.last_order_ts_ms = 900_000
         strat.state.add_freeze_until_ts_ms = 1_000_000
         strat.state.add_freeze_penalty_count = 2
 
-        ok, reason = strat._add_timing_passed("LONG", 99.39, 1_000_001, 3)
+        ok, reason = strat._add_timing_passed("LONG", 99.19, 1_000_001, 3)
 
         self.assertTrue(ok)
         self.assertEqual(reason, "ok")
@@ -338,7 +342,6 @@ class BollCvdShockCoordinatorFreezeBlockTest(unittest.TestCase):
             add_freeze_chain_enabled=True,
             first_add_block_seconds=3600,
             add_min_interval_seconds=1800,
-            add_layer_gap_pct=0.003,
             add_min_avg_improvement_pct=0.0,
         )
         strat.first_add_block_bypass_multiplier = 5.0
@@ -378,7 +381,6 @@ class BollCvdShockCoordinatorFreezeBlockTest(unittest.TestCase):
             add_freeze_chain_enabled=True,
             first_add_block_seconds=3600,
             add_min_interval_seconds=1800,
-            add_layer_gap_pct=0.003,
             add_min_avg_improvement_pct=0.0,
         )
         strat.first_add_block_bypass_multiplier = 5.0
@@ -418,7 +420,6 @@ class BollCvdShockCoordinatorFreezeBypassTest(unittest.TestCase):
             add_freeze_chain_enabled=True,
             first_add_block_seconds=3600,
             add_min_interval_seconds=1800,
-            add_layer_gap_pct=0.003,
             add_min_avg_improvement_pct=0.0,
         )
         strat.first_add_block_bypass_multiplier = 5.0
@@ -453,7 +454,6 @@ class BollCvdShockCoordinatorFreezeBypassTest(unittest.TestCase):
             add_freeze_chain_enabled=True,
             first_add_block_seconds=3600,
             add_min_interval_seconds=1800,
-            add_layer_gap_pct=0.003,
             add_min_avg_improvement_pct=0.0,
         )
         strat.first_add_block_bypass_multiplier = 5.0

@@ -49,10 +49,9 @@ def _interpolate_to_middle(anchor: float, middle: float, ratio: float) -> float:
 class BollCvdReclaimStrategyConfig:
     min_buy_ratio: float = 0.55
     min_sell_ratio: float = 0.55
-    add_layer_gap_pct: float = 0.003
-    add_layer_gap_pct_layer_7_8: float = 0.004
-    add_layer_gap_pct_layer_9_10: float = 0.006
-    add_layer_gap_pct_layer_11_plus: float = 0.008
+    add_gap_mode: str = "linear"
+    add_gap_base_pct: float = 0.003
+    add_gap_step_pct: float = 0.001
     add_min_avg_improvement_pct: float = 0.0012
     max_layers: int = 3
     order_cooldown_seconds: int = 10
@@ -142,6 +141,13 @@ class BollCvdReclaimStrategyConfig:
     three_stage_tp2_use_structure_boll: bool = True
 
     def __post_init__(self) -> None:
+        mode = str(self.add_gap_mode or "linear").strip().lower()
+        if mode != "linear":
+            raise RuntimeError(f"ADD_GAP_MODE={self.add_gap_mode!r} is not supported; currently supports only 'linear'")
+        if self.add_gap_base_pct <= 0:
+            raise RuntimeError(f"ADD_GAP_BASE_PCT={self.add_gap_base_pct} must be > 0")
+        if self.add_gap_step_pct < 0:
+            raise RuntimeError(f"ADD_GAP_STEP_PCT={self.add_gap_step_pct} must be >= 0")
         if (
                 self.three_stage_pre_tp1_degrade_enabled
                 and self.three_stage_pre_tp1_single_after_seconds <= self.three_stage_pre_tp1_middle_runner_after_seconds
@@ -174,10 +180,9 @@ class BollCvdReclaimStrategyConfig:
         return cls(
             min_buy_ratio=float(os.getenv("CVD_MIN_BUY_RATIO", "0.55")),
             min_sell_ratio=float(os.getenv("CVD_MIN_SELL_RATIO", "0.55")),
-            add_layer_gap_pct=float(os.getenv("ADD_LAYER_GAP_PCT", "0.003")),
-            add_layer_gap_pct_layer_7_8=float(os.getenv("ADD_LAYER_GAP_PCT_LAYER_7_8", "0.004")),
-            add_layer_gap_pct_layer_9_10=float(os.getenv("ADD_LAYER_GAP_PCT_LAYER_9_10", "0.006")),
-            add_layer_gap_pct_layer_11_plus=float(os.getenv("ADD_LAYER_GAP_PCT_LAYER_11_PLUS", "0.008")),
+            add_gap_mode=os.getenv("ADD_GAP_MODE", "linear"),
+            add_gap_base_pct=float(os.getenv("ADD_GAP_BASE_PCT", "0.003")),
+            add_gap_step_pct=float(os.getenv("ADD_GAP_STEP_PCT", "0.001")),
             add_min_avg_improvement_pct=float(os.getenv("ADD_MIN_AVG_IMPROVEMENT_PCT", "0.0012")),
             max_layers=int(os.getenv("MAX_LAYERS", "3")),
             order_cooldown_seconds=int(os.getenv("ORDER_COOLDOWN_SECONDS", "10")),
@@ -755,19 +760,17 @@ class BollCvdReclaimStrategy:
     def _add_layer_gap_pct_for_target_layer(self, target_layer: int) -> float:
         return add_layer_gates.add_layer_gap_pct_for_target_layer(
             target_layer=target_layer,
-            add_layer_gap_pct=self.config.add_layer_gap_pct,
-            add_layer_gap_pct_layer_7_8=self.config.add_layer_gap_pct_layer_7_8,
-            add_layer_gap_pct_layer_9_10=self.config.add_layer_gap_pct_layer_9_10,
-            add_layer_gap_pct_layer_11_plus=self.config.add_layer_gap_pct_layer_11_plus,
+            add_gap_mode=self.config.add_gap_mode,
+            add_gap_base_pct=self.config.add_gap_base_pct,
+            add_gap_step_pct=self.config.add_gap_step_pct,
         )
 
     def _add_min_interval_bypass_gap_pct_for_target_layer(self, target_layer: int) -> float:
         return add_layer_gates.add_min_interval_bypass_gap_pct_for_target_layer(
             target_layer=target_layer,
-            add_layer_gap_pct=self.config.add_layer_gap_pct,
-            add_layer_gap_pct_layer_7_8=self.config.add_layer_gap_pct_layer_7_8,
-            add_layer_gap_pct_layer_9_10=self.config.add_layer_gap_pct_layer_9_10,
-            add_layer_gap_pct_layer_11_plus=self.config.add_layer_gap_pct_layer_11_plus,
+            add_gap_mode=self.config.add_gap_mode,
+            add_gap_base_pct=self.config.add_gap_base_pct,
+            add_gap_step_pct=self.config.add_gap_step_pct,
         )
 
     def _add_gap_passed(self, side: PositionSide, price: float, target_layer: int) -> tuple[bool, float, float]:
@@ -776,10 +779,9 @@ class BollCvdReclaimStrategy:
             price=price,
             last_entry_price=self.state.last_entry_price,
             target_layer=target_layer,
-            add_layer_gap_pct=self.config.add_layer_gap_pct,
-            add_layer_gap_pct_layer_7_8=self.config.add_layer_gap_pct_layer_7_8,
-            add_layer_gap_pct_layer_9_10=self.config.add_layer_gap_pct_layer_9_10,
-            add_layer_gap_pct_layer_11_plus=self.config.add_layer_gap_pct_layer_11_plus,
+            add_gap_mode=self.config.add_gap_mode,
+            add_gap_base_pct=self.config.add_gap_base_pct,
+            add_gap_step_pct=self.config.add_gap_step_pct,
         )
         return decision.ok, decision.gap_pct, decision.required_price
 
@@ -809,10 +811,9 @@ class BollCvdReclaimStrategy:
             last_order_ts_ms=self.state.last_order_ts_ms,
             first_add_block_seconds=self.config.first_add_block_seconds,
             add_min_interval_seconds=self.config.add_min_interval_seconds,
-            add_layer_gap_pct=self.config.add_layer_gap_pct,
-            add_layer_gap_pct_layer_7_8=self.config.add_layer_gap_pct_layer_7_8,
-            add_layer_gap_pct_layer_9_10=self.config.add_layer_gap_pct_layer_9_10,
-            add_layer_gap_pct_layer_11_plus=self.config.add_layer_gap_pct_layer_11_plus,
+            add_gap_mode=self.config.add_gap_mode,
+            add_gap_base_pct=self.config.add_gap_base_pct,
+            add_gap_step_pct=self.config.add_gap_step_pct,
         )
         return decision.ok, decision.reason
 

@@ -291,16 +291,19 @@ After the first long entry:
 Open another long layer only when:
 
 ```text
-current_price <= last_entry_price * (1 - add_layer_gap_pct)
+current_price <= last_entry_price * (1 - gap_pct)
 AND long setup conditions are valid again
 AND layer_count < max_layers
 AND total_margin_used_pct < max_total_margin_pct
 ```
 
-Default:
+Gap_pct uses linear mode:
 
 ```text
-add_layer_gap_pct = 0.003
+ADD_GAP_MODE=linear
+ADD_GAP_BASE_PCT=0.003   (L2 base)
+ADD_GAP_STEP_PCT=0.001   (per-layer increment)
+L2: 0.3%, L3: 0.4%, L4: 0.5%, ... (linear, no upper bound)
 ```
 
 For short:
@@ -395,7 +398,9 @@ CVD_PRICE_STALL_TOLERANCE_PCT=0.0005
 # Layering
 LAYER_MARGIN_PCT=0.03
 LEVERAGE=50
-ADD_LAYER_GAP_PCT=0.003
+ADD_GAP_MODE=linear
+ADD_GAP_BASE_PCT=0.003
+ADD_GAP_STEP_PCT=0.001
 MAX_LAYERS=3
 MAX_TOTAL_MARGIN_PCT=0.12
 

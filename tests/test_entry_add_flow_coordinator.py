@@ -355,8 +355,7 @@ class EntryAddFlowCoordinatorGapGateTest(unittest.TestCase):
     """Gap gate blocks add when price is too close to last_entry_price."""
 
     def test_gap_not_passed_logs_add_skipped(self) -> None:
-        strat = _strategy(add_layer_gap_pct=0.03,
-                          first_add_block_seconds=0,
+        strat = _strategy(first_add_block_seconds=0,
                           add_min_interval_seconds=0)
         boll = _boll()
         cvd = _cvd()
@@ -378,8 +377,7 @@ class EntryAddFlowCoordinatorSuccessfulLongAddTest(unittest.TestCase):
     """Full LONG add flow when all gates pass."""
 
     def test_successful_long_add_returns_add_long_intent(self) -> None:
-        strat = _strategy(add_layer_gap_pct=0.001,
-                          add_min_avg_improvement_pct=0.0,
+        strat = _strategy(add_min_avg_improvement_pct=0.0,
                           first_add_block_seconds=0,
                           add_min_interval_seconds=0)
         boll = _boll()
@@ -395,8 +393,7 @@ class EntryAddFlowCoordinatorSuccessfulLongAddTest(unittest.TestCase):
         self.assertEqual(strat.state.layers, 2)
 
     def test_successful_long_add_reason_includes_gap_and_improvement_and_text(self) -> None:
-        strat = _strategy(add_layer_gap_pct=0.001,
-                          add_min_avg_improvement_pct=0.0,
+        strat = _strategy(add_min_avg_improvement_pct=0.0,
                           first_add_block_seconds=0,
                           add_min_interval_seconds=0)
         boll = _boll()
@@ -486,8 +483,7 @@ class EntryAddFlowCoordinatorSuccessfulShortAddTest(unittest.TestCase):
     """Full SHORT add flow when all gates pass."""
 
     def test_successful_short_add_returns_add_short_intent(self) -> None:
-        strat = _strategy(add_layer_gap_pct=0.001,
-                          add_min_avg_improvement_pct=0.0,
+        strat = _strategy(add_min_avg_improvement_pct=0.0,
                           first_add_block_seconds=0,
                           add_min_interval_seconds=0)
         boll = _boll()
@@ -501,8 +497,7 @@ class EntryAddFlowCoordinatorSuccessfulShortAddTest(unittest.TestCase):
         self.assertEqual(strat.state.layers, 2)
 
     def test_successful_short_add_reason_includes_short_text(self) -> None:
-        strat = _strategy(add_layer_gap_pct=0.001,
-                          add_min_avg_improvement_pct=0.0,
+        strat = _strategy(add_min_avg_improvement_pct=0.0,
                           first_add_block_seconds=0,
                           add_min_interval_seconds=0)
         boll = _boll()
@@ -601,7 +596,6 @@ class EntryAddFlowCoordinatorBaseStrategyPreservationTest(unittest.TestCase):
     def test_base_strategy_add_long_still_works(self) -> None:
         """Base strategy successful add via coordinator path still works."""
         strat = _strategy(
-            add_layer_gap_pct=0.001,
             add_min_avg_improvement_pct=0.0,
             first_add_block_seconds=0,
             add_min_interval_seconds=0,
