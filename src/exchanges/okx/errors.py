@@ -42,7 +42,14 @@ _NETWORK_KEYWORDS = (
     "connection aborted",
     "temporarily unavailable",
 )
-_MAINTENANCE_KEYWORDS = ("maintenance", "unavailable", "service unavailable")
+_MAINTENANCE_KEYWORDS = (
+    "maintenance",
+    "under maintenance",
+    "service unavailable",
+    "system maintenance",
+    "exchange maintenance",
+)
+_SERVER_MAINTENANCE_KEYWORDS = _MAINTENANCE_KEYWORDS + ("unavailable",)
 _TRIGGER_PRICE_KEYWORDS = (
     "trigger",
     "stop",
@@ -145,7 +152,7 @@ def okx_error_kind_from_code(
     if normalized_code in _ORDER_NOT_FOUND_CODES:
         return ExchangeErrorKind.ORDER_NOT_FOUND
     if normalized_code in _SERVER_ERROR_CODES:
-        if _contains_any(normalized_message, _MAINTENANCE_KEYWORDS):
+        if _contains_any(normalized_message, _SERVER_MAINTENANCE_KEYWORDS):
             return ExchangeErrorKind.EXCHANGE_MAINTENANCE
         return _kind_if_enum_exists("SERVER_ERROR", ExchangeErrorKind.EXCHANGE_MAINTENANCE)
     if normalized_code in _BAD_REQUEST_CODES:
@@ -312,10 +319,10 @@ def _specific_message_kind(message: str) -> ExchangeErrorKind | None:
         return ExchangeErrorKind.RATE_LIMITED
     if _contains_any(message, _TIMEOUT_KEYWORDS):
         return _kind_if_enum_exists("REQUEST_TIMEOUT", ExchangeErrorKind.NETWORK_ERROR)
+    if _contains_any(message, _MAINTENANCE_KEYWORDS):
+        return ExchangeErrorKind.EXCHANGE_MAINTENANCE
     if _contains_any(message, _NETWORK_KEYWORDS):
         return ExchangeErrorKind.NETWORK_ERROR
-    if _contains_any(message, _MAINTENANCE_KEYWORDS) and "service" in message:
-        return ExchangeErrorKind.EXCHANGE_MAINTENANCE
     if _contains_any(message, _ORDER_NOT_FOUND_KEYWORDS):
         return ExchangeErrorKind.ORDER_NOT_FOUND
     if _contains_any(message, _POSITION_NOT_FOUND_KEYWORDS):

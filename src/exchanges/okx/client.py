@@ -294,6 +294,8 @@ class OkxBrokerClient(BrokerClient):
                 res,
                 message="Failed to place market entry",
             )
+        except ExchangeError:
+            raise
         except Exception as exc:
             raise okx_exception_to_exchange_error(
                 exc, message=f"Failed to place market entry: {exc}"
@@ -341,6 +343,8 @@ class OkxBrokerClient(BrokerClient):
                 res,
                 message="Failed to place reduce-only TP",
             )
+        except ExchangeError:
+            raise
         except Exception as exc:
             raise okx_exception_to_exchange_error(
                 exc, message=f"Failed to place reduce-only TP: {exc}"
@@ -387,6 +391,8 @@ class OkxBrokerClient(BrokerClient):
                 res,
                 message=f"Failed to cancel order {order_id}",
             )
+        except ExchangeError:
+            raise
         except Exception as exc:
             raise okx_exception_to_exchange_error(
                 exc, message=f"Failed to cancel order {order_id}: {exc}"

@@ -362,13 +362,14 @@ class TestPlaceOrderMarketEntry:
 
     @pytest.mark.asyncio
     async def test_market_entry_item_level_error_raises_exchange_error(self):
+        response = {
+            "code": "0",
+            "data": [
+                {"ordId": "", "sCode": "51008", "sMsg": "Insufficient balance"}
+            ],
+        }
         trader = FakeTrader(
-            order_response={
-                "code": "0",
-                "data": [
-                    {"ordId": "", "sCode": "51008", "sMsg": "Insufficient balance"}
-                ],
-            }
+            order_response=response
         )
         client = OkxBrokerClient(trader)
         req = _broker_order_request(
@@ -381,6 +382,10 @@ class TestPlaceOrderMarketEntry:
             await client.place_order(req)
         assert exc_info.value.detail.kind == ExchangeErrorKind.INSUFFICIENT_MARGIN
         assert exc_info.value.detail.code == "51008"
+        assert "Failed to place market entry" in exc_info.value.detail.message
+        assert "Insufficient balance" in exc_info.value.detail.message
+        assert "OKX INSUFFICIENT_MARGIN" not in exc_info.value.detail.message
+        assert exc_info.value.detail.raw == response
         assert len(trader.requests) == 1
 
 
@@ -647,23 +652,25 @@ class TestCancelOrder:
 
     @pytest.mark.asyncio
     async def test_cancel_order_item_level_order_not_found_raises_exchange_error(self):
+        response = {
+            "code": "0",
+            "data": [
+                {
+                    "ordId": "12345",
+                    "sCode": "51603",
+                    "sMsg": "Order does not exist",
+                }
+            ],
+        }
         trader = FakeTrader(
-            cancel_response={
-                "code": "0",
-                "data": [
-                    {
-                        "ordId": "12345",
-                        "sCode": "51603",
-                        "sMsg": "Order does not exist",
-                    }
-                ],
-            }
+            cancel_response=response
         )
         client = OkxBrokerClient(trader)
         with pytest.raises(ExchangeError) as exc_info:
             await client.cancel_order("ETH-USDT-SWAP", "12345")
         assert exc_info.value.detail.kind == ExchangeErrorKind.ORDER_NOT_FOUND
         assert exc_info.value.detail.code == "51603"
+        assert exc_info.value.detail.raw == response
         assert len(trader.requests) == 1
 
 

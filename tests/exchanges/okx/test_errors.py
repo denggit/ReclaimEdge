@@ -34,6 +34,42 @@ class TestOkxErrorKindFromCode:
     def test_network_message_maps_network(self):
         assert okx_error_kind_from_code(None, "Connection reset by peer") == ExchangeErrorKind.NETWORK_ERROR
 
+    def test_maintenance_message_maps_exchange_maintenance(self):
+        assert (
+            okx_error_kind_from_code(None, "Exchange under maintenance")
+            == ExchangeErrorKind.EXCHANGE_MAINTENANCE
+        )
+
+    def test_service_unavailable_message_maps_exchange_maintenance(self):
+        assert (
+            okx_error_kind_from_code(None, "Service unavailable")
+            == ExchangeErrorKind.EXCHANGE_MAINTENANCE
+        )
+
+    def test_generic_server_code_maps_server_error(self):
+        assert (
+            okx_error_kind_from_code("50000", "Internal server error")
+            == ExchangeErrorKind.SERVER_ERROR
+        )
+
+    def test_server_code_with_maintenance_message_maps_exchange_maintenance(self):
+        assert (
+            okx_error_kind_from_code("50000", "System maintenance")
+            == ExchangeErrorKind.EXCHANGE_MAINTENANCE
+        )
+
+    def test_server_code_with_unavailable_message_maps_exchange_maintenance(self):
+        assert (
+            okx_error_kind_from_code("50000", "Temporarily unavailable")
+            == ExchangeErrorKind.EXCHANGE_MAINTENANCE
+        )
+
+    def test_temporarily_unavailable_without_code_maps_network(self):
+        assert (
+            okx_error_kind_from_code(None, "Temporarily unavailable")
+            == ExchangeErrorKind.NETWORK_ERROR
+        )
+
     def test_invalid_symbol_message_maps_invalid_symbol(self):
         assert okx_error_kind_from_code(None, "Instrument does not exist") == ExchangeErrorKind.INVALID_SYMBOL
 
