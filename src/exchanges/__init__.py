@@ -15,6 +15,7 @@ from src.exchanges.models import (
     BrokerTimeInForce,
     ExchangeName,
 )
+from src.exchanges.okx.client import OkxBrokerClient
 
 __all__ = [
     "BrokerBalance",
@@ -34,6 +35,7 @@ __all__ = [
     "ExchangeErrorDetail",
     "ExchangeErrorKind",
     "ExchangeName",
+    "OkxBrokerClient",
     "binance_usdm_capabilities",
     "okx_capabilities",
 ]
