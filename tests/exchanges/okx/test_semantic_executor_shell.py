@@ -43,10 +43,21 @@ class FakeBroker:
         self._result_symbol = result_symbol
         self.place_order_requests: list[BrokerOrderRequest] = []
         self.cancel_order_calls: list[tuple[str, str]] = []
+        self.cancel_algo_order_calls: list[tuple[str, str]] = []
+        self.cancel_all_open_orders_calls: list[str] = []
         self.fetch_open_orders_calls: list[str] = []
+        self.fetch_algo_orders_calls: list[str] = []
         self.fetch_position_calls: list[tuple[str, BrokerPositionSide | None]] = []
         self.closed = False
         self.open_orders = [_broker_order()]
+        self.algo_orders = [
+            replace(
+                _broker_order(),
+                order_id="algo-1",
+                order_type=BrokerOrderType.STOP_MARKET,
+                raw={"algoId": "algo-1"},
+            )
+        ]
         self.position = _broker_position(
             exchange=position_exchange or exchange,
             symbol=position_symbol or "ETH-USDT-SWAP",
@@ -91,7 +102,14 @@ class FakeBroker:
         self.cancel_order_calls.append((symbol, order_id))
 
     async def cancel_all_open_orders(self, symbol: str) -> None:
-        raise NotImplementedError
+        self.cancel_all_open_orders_calls.append(symbol)
+
+    async def fetch_algo_orders(self, symbol: str) -> list[BrokerOrder]:
+        self.fetch_algo_orders_calls.append(symbol)
+        return list(self.algo_orders)
+
+    async def cancel_algo_order(self, symbol: str, algo_id: str) -> None:
+        self.cancel_algo_order_calls.append((symbol, algo_id))
 
     async def close(self) -> None:
         self.closed = True
@@ -282,6 +300,101 @@ async def test_cancel_semantic_order_allows_cancel_protective_stop():
     assert broker.cancel_order_calls == [("ETH-USDT-SWAP", "algo-1")]
     assert result.ok is True
     assert result.action == BrokerSemanticAction.CANCEL_PROTECTIVE_STOP
+
+
+@pytest.mark.asyncio
+async def test_execute_cancel_protective_stop_calls_broker_cancel_algo_order():
+    broker = FakeBroker()
+    executor = OkxBrokerSemanticExecutor(broker)
+    request = BrokerSemanticRequest(
+        exchange=ExchangeName.OKX,
+        symbol="ETH-USDT-SWAP",
+        action=BrokerSemanticAction.CANCEL_PROTECTIVE_STOP,
+        role=BrokerSemanticOrderRole.PROTECTIVE_SL,
+        order_id="algo-1",
+    )
+
+    result = await executor.execute(request)
+
+    assert broker.cancel_algo_order_calls == [("ETH-USDT-SWAP", "algo-1")]
+    assert broker.cancel_order_calls == []
+    assert result.ok is True
+    assert result.order_id == "algo-1"
+
+
+@pytest.mark.asyncio
+async def test_execute_cancel_reduce_only_tp_calls_broker_cancel_order():
+    broker = FakeBroker()
+    executor = OkxBrokerSemanticExecutor(broker)
+    request = BrokerSemanticRequest(
+        exchange=ExchangeName.OKX,
+        symbol="ETH-USDT-SWAP",
+        action=BrokerSemanticAction.CANCEL_REDUCE_ONLY_TP,
+        role=BrokerSemanticOrderRole.CORE_TP,
+        order_id="ord-1",
+    )
+
+    result = await executor.execute(request)
+
+    assert broker.cancel_order_calls == [("ETH-USDT-SWAP", "ord-1")]
+    assert broker.cancel_algo_order_calls == []
+    assert result.ok is True
+
+
+@pytest.mark.asyncio
+async def test_execute_fetch_open_orders_returns_ordinary_orders_with_source_raw():
+    broker = FakeBroker()
+    executor = OkxBrokerSemanticExecutor(broker)
+    request = BrokerSemanticRequest(
+        exchange=ExchangeName.OKX,
+        symbol="ETH-USDT-SWAP",
+        action=BrokerSemanticAction.FETCH_OPEN_ORDERS,
+    )
+
+    result = await executor.execute(request)
+
+    assert result.ok is True
+    assert len(result.orders) == 1
+    assert result.orders[0].raw["source"] == "ordinary"
+    assert broker.fetch_open_orders_calls == ["ETH-USDT-SWAP"]
+    assert broker.fetch_algo_orders_calls == []
+
+
+@pytest.mark.asyncio
+async def test_execute_fetch_algo_orders_returns_algo_orders_with_source_raw():
+    broker = FakeBroker()
+    executor = OkxBrokerSemanticExecutor(broker)
+    request = BrokerSemanticRequest(
+        exchange=ExchangeName.OKX,
+        symbol="ETH-USDT-SWAP",
+        action=BrokerSemanticAction.FETCH_ALGO_ORDERS,
+    )
+
+    result = await executor.execute(request)
+
+    assert result.ok is True
+    assert len(result.orders) == 1
+    assert result.orders[0].raw["source"] == "algo"
+    assert broker.fetch_open_orders_calls == []
+    assert broker.fetch_algo_orders_calls == ["ETH-USDT-SWAP"]
+
+
+@pytest.mark.asyncio
+async def test_execute_recover_open_orders_returns_ordinary_and_algo_orders():
+    broker = FakeBroker()
+    executor = OkxBrokerSemanticExecutor(broker)
+    request = BrokerSemanticRequest(
+        exchange=ExchangeName.OKX,
+        symbol="ETH-USDT-SWAP",
+        action=BrokerSemanticAction.RECOVER_OPEN_ORDERS,
+    )
+
+    result = await executor.execute(request)
+
+    assert result.ok is True
+    assert [order.raw["source"] for order in result.orders] == ["ordinary", "algo"]
+    assert broker.fetch_open_orders_calls == ["ETH-USDT-SWAP"]
+    assert broker.fetch_algo_orders_calls == ["ETH-USDT-SWAP"]
 
 
 @pytest.mark.asyncio

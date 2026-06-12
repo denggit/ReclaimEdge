@@ -4,6 +4,8 @@ from decimal import Decimal
 from typing import Any, TYPE_CHECKING
 
 from src.execution import order_specs
+from src.exchanges.models import ExchangeName
+from src.exchanges.semantic_models import BrokerSemanticAction, BrokerSemanticOrderRole, BrokerSemanticRequest
 from src.execution.tp_sl_core_tp_manager import CoreTakeProfitManager
 from src.execution.tp_sl_market_exit_manager import MarketExitManager
 from src.execution.tp_sl_near_tp_manager import NearTpExecutionManager
@@ -234,10 +236,22 @@ class TpSlExecutionManager:
                 logger.info("Protected reduce-only order skipped | ordId=%s", ord_id)
         for ord_id in orders_to_cancel:
             try:
-                await t.request("POST", "/api/v5/trade/cancel-order", order_specs.build_cancel_order_body(
-                    inst_id=t.symbol,
-                    order_id=ord_id,
-                ))
+                semantic_executor = getattr(t, "broker_semantic_executor", None)
+                if semantic_executor is not None:
+                    await semantic_executor.execute(
+                        BrokerSemanticRequest(
+                            exchange=ExchangeName.OKX,
+                            symbol=t.symbol,
+                            action=BrokerSemanticAction.CANCEL_REDUCE_ONLY_TP,
+                            role=BrokerSemanticOrderRole.CORE_TP,
+                            order_id=ord_id,
+                        )
+                    )
+                else:
+                    await t.request("POST", "/api/v5/trade/cancel-order", order_specs.build_cancel_order_body(
+                        inst_id=t.symbol,
+                        order_id=ord_id,
+                    ))
                 logger.info("Canceled existing reduce-only order | ordId=%s", ord_id)
             except Exception:
                 logger.exception("Failed to cancel existing reduce-only order | ordId=%s", ord_id)
@@ -334,10 +348,22 @@ class TpSlExecutionManager:
         if not order_id:
             return True
         try:
-            await t.request("POST", "/api/v5/trade/cancel-algos", order_specs.build_cancel_algo_body(
-                inst_id=t.symbol,
-                algo_id=order_id,
-            ))
+            semantic_executor = getattr(t, "broker_semantic_executor", None)
+            if semantic_executor is not None:
+                await semantic_executor.execute(
+                    BrokerSemanticRequest(
+                        exchange=ExchangeName.OKX,
+                        symbol=t.symbol,
+                        action=BrokerSemanticAction.CANCEL_PROTECTIVE_STOP,
+                        role=BrokerSemanticOrderRole.PROTECTIVE_SL,
+                        order_id=order_id,
+                    )
+                )
+            else:
+                await t.request("POST", "/api/v5/trade/cancel-algos", order_specs.build_cancel_algo_body(
+                    inst_id=t.symbol,
+                    algo_id=order_id,
+                ))
             if t.near_tp_protective_sl_order_id == order_id:
                 t.near_tp_protective_sl_order_id = None
             logger.warning("NEAR_TP_PROTECTIVE_SL_CANCEL_ON_FLAT | algoId=%s", order_id)

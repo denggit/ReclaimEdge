@@ -4,6 +4,8 @@ from decimal import Decimal
 from typing import Any, TYPE_CHECKING
 
 from src.execution import order_specs
+from src.exchanges.models import BrokerOrderSide, BrokerPositionSide, ExchangeName
+from src.exchanges.semantic_models import BrokerSemanticAction, BrokerSemanticOrderRole, BrokerSemanticRequest
 from src.position_management.sidecar.model import sanitize_okx_client_order_id
 from src.utils.log import get_logger
 
@@ -30,17 +32,37 @@ class SidecarTpManager:
         sent_client_order_id = ""
         if client_order_id:
             sent_client_order_id = sanitize_okx_client_order_id(client_order_id)
-        body = order_specs.build_reduce_only_tp_order_body(
-            inst_id=t.symbol,
-            td_mode=t.td_mode,
-            side=side,
-            contracts_text=t.decimal_to_str(Decimal(str(contracts))),
-            price_text=t.price_to_str(float(tp_price)),
-            pos_side_mode=t.pos_side_mode,
-            client_order_id=sent_client_order_id or None,
-        )
-        res = await t.request("POST", "/api/v5/trade/order", body)
-        order_id = t.extract_order_id(res)
+        semantic_executor = getattr(t, "broker_semantic_executor", None)
+        if semantic_executor is not None:
+            result = await semantic_executor.execute(
+                BrokerSemanticRequest(
+                    exchange=ExchangeName.OKX,
+                    symbol=t.symbol,
+                    action=BrokerSemanticAction.SIDECAR_TP,
+                    role=BrokerSemanticOrderRole.SIDECAR_TP,
+                    side=_close_order_side(side),
+                    position_side=_position_side(side),
+                    quantity=Decimal(str(contracts)),
+                    price=Decimal(str(tp_price)),
+                    reduce_only=True,
+                    client_order_id=sent_client_order_id or None,
+                )
+            )
+            order_id = result.order_id or ""
+            if not order_id:
+                raise RuntimeError(f"Missing sidecar TP order_id in broker semantic result: {result}")
+        else:
+            body = order_specs.build_reduce_only_tp_order_body(
+                inst_id=t.symbol,
+                td_mode=t.td_mode,
+                side=side,
+                contracts_text=t.decimal_to_str(Decimal(str(contracts))),
+                price_text=t.price_to_str(float(tp_price)),
+                pos_side_mode=t.pos_side_mode,
+                client_order_id=sent_client_order_id or None,
+            )
+            res = await t.request("POST", "/api/v5/trade/order", body)
+            order_id = t.extract_order_id(res)
         logger.warning(
             "SIDECAR_TP_PLACED | side=%s contracts=%s tp_price=%s sent_clOrdId=%s ordId=%s",
             side,
@@ -56,10 +78,22 @@ class SidecarTpManager:
         if not order_id:
             return True
         try:
-            await t.request("POST", "/api/v5/trade/cancel-order", order_specs.build_cancel_order_body(
-                inst_id=t.symbol,
-                order_id=order_id,
-            ))
+            semantic_executor = getattr(t, "broker_semantic_executor", None)
+            if semantic_executor is not None:
+                await semantic_executor.execute(
+                    BrokerSemanticRequest(
+                        exchange=ExchangeName.OKX,
+                        symbol=t.symbol,
+                        action=BrokerSemanticAction.CANCEL_REDUCE_ONLY_TP,
+                        role=BrokerSemanticOrderRole.SIDECAR_TP,
+                        order_id=order_id,
+                    )
+                )
+            else:
+                await t.request("POST", "/api/v5/trade/cancel-order", order_specs.build_cancel_order_body(
+                    inst_id=t.symbol,
+                    order_id=order_id,
+                ))
             logger.warning("SIDECAR_TP_CANCELLED | ordId=%s", order_id)
             return True
         except Exception as exc:
@@ -104,3 +138,11 @@ def _optional_float(value: Any) -> float | None:
         return float(value)
     except Exception:
         return None
+
+
+def _position_side(side: str) -> BrokerPositionSide:
+    return BrokerPositionSide.LONG if str(side).upper() == "LONG" else BrokerPositionSide.SHORT
+
+
+def _close_order_side(side: str) -> BrokerOrderSide:
+    return BrokerOrderSide.SELL if str(side).upper() == "LONG" else BrokerOrderSide.BUY

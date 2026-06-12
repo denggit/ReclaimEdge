@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 from src.exchanges.base import BrokerClient
 from src.exchanges.errors import ExchangeError, ExchangeErrorDetail, ExchangeErrorKind
 from src.exchanges.models import (
     BrokerOrder,
     BrokerOrderResult,
+    BrokerOrderSide,
     BrokerOrderType,
     BrokerPosition,
     BrokerPositionSide,
@@ -39,8 +42,123 @@ class OkxBrokerSemanticExecutor:
                         "expected_exchange": ExchangeName.OKX.value,
                     },
                 )
-            )
+        )
         self._broker = broker
+
+    @property
+    def exchange(self) -> ExchangeName:
+        return ExchangeName.OKX
+
+    async def execute(self, request: BrokerSemanticRequest) -> BrokerSemanticResult:
+        validate_semantic_request(request)
+        _ensure_executor_exchange(self._broker, request.exchange)
+
+        if request.action in {
+            BrokerSemanticAction.OPEN_POSITION,
+            BrokerSemanticAction.ADD_POSITION,
+            BrokerSemanticAction.SIDECAR_ENTRY,
+            BrokerSemanticAction.MARKET_EXIT,
+            BrokerSemanticAction.MARKET_EXIT_RUNNER,
+            BrokerSemanticAction.CLOSE_POSITION,
+            BrokerSemanticAction.PLACE_REDUCE_ONLY_TP,
+            BrokerSemanticAction.SIDECAR_TP,
+            BrokerSemanticAction.PLACE_PROTECTIVE_STOP,
+        }:
+            return await self.execute_semantic_order(request)
+
+        if request.action in {
+            BrokerSemanticAction.CANCEL_ORDER,
+            BrokerSemanticAction.CANCEL_REDUCE_ONLY_TP,
+            BrokerSemanticAction.SIDECAR_CANCEL,
+        }:
+            order_id = _request_order_id(request)
+            return await self.cancel_semantic_order(request, order_id)
+
+        if request.action == BrokerSemanticAction.CANCEL_PROTECTIVE_STOP:
+            order_id = _request_order_id(request)
+            cancel_algo_order = getattr(self._broker, "cancel_algo_order", None)
+            if callable(cancel_algo_order):
+                await cancel_algo_order(request.symbol, order_id)
+                return BrokerSemanticResult(
+                    exchange=request.exchange,
+                    symbol=request.symbol,
+                    action=request.action,
+                    role=request.role,
+                    ok=True,
+                    order_id=order_id,
+                )
+            return await self.cancel_semantic_order(request, order_id)
+
+        if request.action in {
+            BrokerSemanticAction.CANCEL_ALL_OPEN_ORDERS,
+            BrokerSemanticAction.CANCEL_ALL_ORDINARY_ORDERS,
+        }:
+            await self._broker.cancel_all_open_orders(request.symbol)
+            return BrokerSemanticResult(
+                exchange=request.exchange,
+                symbol=request.symbol,
+                action=request.action,
+                role=request.role,
+                ok=True,
+            )
+
+        if request.action == BrokerSemanticAction.FETCH_OPEN_ORDERS:
+            orders = await self.fetch_semantic_orders(
+                BrokerSemanticOrderQuery(
+                    exchange=request.exchange,
+                    symbol=request.symbol,
+                    include_ordinary=True,
+                    include_algo=False,
+                )
+            )
+            return _semantic_result_from_orders(request, orders)
+
+        if request.action in {
+            BrokerSemanticAction.FETCH_ALGO_ORDERS,
+            BrokerSemanticAction.FETCH_PROTECTIVE_ORDERS,
+        }:
+            orders = await self.fetch_semantic_orders(
+                BrokerSemanticOrderQuery(
+                    exchange=request.exchange,
+                    symbol=request.symbol,
+                    include_ordinary=False,
+                    include_algo=True,
+                )
+            )
+            return _semantic_result_from_orders(request, orders)
+
+        if request.action == BrokerSemanticAction.RECOVER_OPEN_ORDERS:
+            orders = await self.fetch_semantic_orders(
+                BrokerSemanticOrderQuery(
+                    exchange=request.exchange,
+                    symbol=request.symbol,
+                    include_ordinary=True,
+                    include_algo=True,
+                )
+            )
+            return _semantic_result_from_orders(request, orders)
+
+        if request.action in {
+            BrokerSemanticAction.FETCH_POSITION,
+            BrokerSemanticAction.SYNC_POSITION,
+        }:
+            position = await self.fetch_semantic_position(
+                request.symbol,
+                request.position_side,
+            )
+            return BrokerSemanticResult(
+                exchange=request.exchange,
+                symbol=request.symbol,
+                action=request.action,
+                role=request.role,
+                ok=True,
+                raw=position.raw,
+            )
+
+        raise _unsupported(
+            request.exchange,
+            f"Unsupported semantic action {request.action.value!r}",
+        )
 
     async def execute_semantic_order(
         self, request: BrokerSemanticRequest
@@ -53,6 +171,7 @@ class OkxBrokerSemanticExecutor:
             BrokerSemanticAction.ADD_POSITION,
             BrokerSemanticAction.SIDECAR_ENTRY,
             BrokerSemanticAction.MARKET_EXIT,
+            BrokerSemanticAction.MARKET_EXIT_RUNNER,
             BrokerSemanticAction.CLOSE_POSITION,
         }:
             broker_request = semantic_request_to_broker_order_request(
@@ -102,6 +221,204 @@ class OkxBrokerSemanticExecutor:
             order_id=order_id,
         )
 
+    async def open_position(
+        self,
+        *,
+        symbol: str,
+        side: BrokerOrderSide,
+        position_side: BrokerPositionSide,
+        quantity,
+        client_order_id: str | None = None,
+        label: str | None = None,
+    ) -> BrokerSemanticResult:
+        return await self.execute(
+            BrokerSemanticRequest(
+                exchange=self.exchange,
+                symbol=symbol,
+                action=BrokerSemanticAction.OPEN_POSITION,
+                role=BrokerSemanticOrderRole.ENTRY,
+                side=side,
+                position_side=position_side,
+                quantity=quantity,
+                client_order_id=client_order_id,
+                label=label,
+            )
+        )
+
+    async def add_position(
+        self,
+        *,
+        symbol: str,
+        side: BrokerOrderSide,
+        position_side: BrokerPositionSide,
+        quantity,
+        client_order_id: str | None = None,
+        label: str | None = None,
+    ) -> BrokerSemanticResult:
+        return await self.execute(
+            BrokerSemanticRequest(
+                exchange=self.exchange,
+                symbol=symbol,
+                action=BrokerSemanticAction.ADD_POSITION,
+                role=BrokerSemanticOrderRole.ADD,
+                side=side,
+                position_side=position_side,
+                quantity=quantity,
+                client_order_id=client_order_id,
+                label=label,
+            )
+        )
+
+    async def place_reduce_only_tp(
+        self,
+        *,
+        symbol: str,
+        side: BrokerOrderSide,
+        position_side: BrokerPositionSide,
+        quantity,
+        price,
+        role: BrokerSemanticOrderRole = BrokerSemanticOrderRole.CORE_TP,
+        client_order_id: str | None = None,
+        label: str | None = None,
+    ) -> BrokerSemanticResult:
+        return await self.execute(
+            BrokerSemanticRequest(
+                exchange=self.exchange,
+                symbol=symbol,
+                action=BrokerSemanticAction.PLACE_REDUCE_ONLY_TP,
+                role=role,
+                side=side,
+                position_side=position_side,
+                quantity=quantity,
+                price=price,
+                client_order_id=client_order_id,
+                label=label,
+            )
+        )
+
+    async def place_protective_stop(
+        self,
+        *,
+        symbol: str,
+        side: BrokerOrderSide,
+        position_side: BrokerPositionSide,
+        quantity,
+        trigger_price,
+        role: BrokerSemanticOrderRole = BrokerSemanticOrderRole.PROTECTIVE_SL,
+        client_order_id: str | None = None,
+        label: str | None = None,
+    ) -> BrokerSemanticResult:
+        return await self.execute(
+            BrokerSemanticRequest(
+                exchange=self.exchange,
+                symbol=symbol,
+                action=BrokerSemanticAction.PLACE_PROTECTIVE_STOP,
+                role=role,
+                side=side,
+                position_side=position_side,
+                quantity=quantity,
+                trigger_price=trigger_price,
+                reduce_only=True,
+                client_order_id=client_order_id,
+                label=label,
+            )
+        )
+
+    async def cancel_order(
+        self,
+        *,
+        symbol: str,
+        order_id: str,
+    ) -> BrokerSemanticResult:
+        return await self.execute(
+            BrokerSemanticRequest(
+                exchange=self.exchange,
+                symbol=symbol,
+                action=BrokerSemanticAction.CANCEL_ORDER,
+                order_id=order_id,
+            )
+        )
+
+    async def cancel_protective_stop(
+        self,
+        *,
+        symbol: str,
+        order_id: str,
+        role: BrokerSemanticOrderRole = BrokerSemanticOrderRole.PROTECTIVE_SL,
+    ) -> BrokerSemanticResult:
+        return await self.execute(
+            BrokerSemanticRequest(
+                exchange=self.exchange,
+                symbol=symbol,
+                action=BrokerSemanticAction.CANCEL_PROTECTIVE_STOP,
+                role=role,
+                order_id=order_id,
+            )
+        )
+
+    async def cancel_reduce_only_tp(
+        self,
+        *,
+        symbol: str,
+        order_id: str,
+        role: BrokerSemanticOrderRole = BrokerSemanticOrderRole.CORE_TP,
+    ) -> BrokerSemanticResult:
+        return await self.execute(
+            BrokerSemanticRequest(
+                exchange=self.exchange,
+                symbol=symbol,
+                action=BrokerSemanticAction.CANCEL_REDUCE_ONLY_TP,
+                role=role,
+                order_id=order_id,
+            )
+        )
+
+    async def market_exit(
+        self,
+        *,
+        symbol: str,
+        side: BrokerOrderSide,
+        position_side: BrokerPositionSide,
+        quantity,
+        role: BrokerSemanticOrderRole = BrokerSemanticOrderRole.MARKET_EXIT,
+    ) -> BrokerSemanticResult:
+        action = (
+            BrokerSemanticAction.MARKET_EXIT_RUNNER
+            if role == BrokerSemanticOrderRole.RUNNER_TP
+            else BrokerSemanticAction.MARKET_EXIT
+        )
+        return await self.execute(
+            BrokerSemanticRequest(
+                exchange=self.exchange,
+                symbol=symbol,
+                action=action,
+                role=role,
+                side=side,
+                position_side=position_side,
+                quantity=quantity,
+                reduce_only=True,
+                close_position=True,
+            )
+        )
+
+    async def fetch_open_orders(self, *, symbol: str) -> BrokerSemanticResult:
+        return await self.execute(
+            BrokerSemanticRequest(
+                exchange=self.exchange,
+                symbol=symbol,
+                action=BrokerSemanticAction.FETCH_OPEN_ORDERS,
+            )
+        )
+
+    async def fetch_algo_orders(self, *, symbol: str) -> BrokerSemanticResult:
+        return await self.execute(
+            BrokerSemanticRequest(
+                exchange=self.exchange,
+                symbol=symbol,
+                action=BrokerSemanticAction.FETCH_ALGO_ORDERS,
+            )
+        )
+
     async def cancel_semantic_orders_by_role(
         self, query: BrokerSemanticOrderQuery
     ) -> tuple[BrokerSemanticResult, ...]:
@@ -141,11 +458,17 @@ class OkxBrokerSemanticExecutor:
 
         orders: list[BrokerOrder] = []
         if query.include_ordinary:
-            orders.extend(await self._broker.fetch_open_orders(query.symbol))
+            orders.extend(
+                _with_order_source(order, "ordinary")
+                for order in await self._broker.fetch_open_orders(query.symbol)
+            )
 
         fetch_algo_orders = getattr(self._broker, "fetch_algo_orders", None)
         if query.include_algo and fetch_algo_orders is not None:
-            orders.extend(await fetch_algo_orders(query.symbol))
+            orders.extend(
+                _with_order_source(order, "algo")
+                for order in await fetch_algo_orders(query.symbol)
+            )
 
         for order in orders:
             _ensure_broker_order_matches(query, order)
@@ -215,10 +538,29 @@ def _semantic_result_from_order_result(
         role=request.role,
         ok=True,
         order_id=result.order_id,
+        client_order_id=result.client_order_id,
         status=result.status,
         filled_quantity=result.filled_quantity,
         avg_price=result.avg_fill_price,
         raw=result.raw,
+    )
+
+
+def _semantic_result_from_orders(
+    request: BrokerSemanticRequest,
+    orders: tuple[BrokerOrder, ...],
+) -> BrokerSemanticResult:
+    return BrokerSemanticResult(
+        exchange=request.exchange,
+        symbol=request.symbol,
+        action=request.action,
+        role=request.role,
+        ok=True,
+        orders=orders,
+        related_order_ids=tuple(order.order_id for order in orders if order.order_id),
+        raw={
+            "orders": [dict(order.raw) for order in orders],
+        },
     )
 
 
@@ -336,9 +678,16 @@ def _semantic_role_from_order(order: BrokerOrder) -> BrokerSemanticOrderRole:
         return BrokerSemanticOrderRole.UNKNOWN
 
 
+def _with_order_source(order: BrokerOrder, source: str) -> BrokerOrder:
+    raw = dict(order.raw)
+    raw.setdefault("source", source)
+    return replace(order, raw=raw)
+
+
 def _ensure_cancel_action(request: BrokerSemanticRequest) -> None:
     if request.action not in {
         BrokerSemanticAction.CANCEL_ORDER,
+        BrokerSemanticAction.CANCEL_REDUCE_ONLY_TP,
         BrokerSemanticAction.CANCEL_PROTECTIVE_STOP,
         BrokerSemanticAction.SIDECAR_CANCEL,
     }:
@@ -352,6 +701,20 @@ def _ensure_cancel_action(request: BrokerSemanticRequest) -> None:
                 raw={"action": request.action.value},
             )
         )
+
+
+def _request_order_id(request: BrokerSemanticRequest) -> str:
+    order_id = request.order_id or request.metadata.get("order_id")
+    if order_id:
+        return str(order_id)
+    raise ExchangeError(
+        ExchangeErrorDetail(
+            exchange=request.exchange,
+            kind=ExchangeErrorKind.BAD_REQUEST,
+            message=f"Semantic action {request.action.value!r} requires order_id",
+            raw={"action": request.action.value},
+        )
+    )
 
 
 def _unsupported(exchange: ExchangeName, message: str) -> ExchangeError:

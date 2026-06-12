@@ -174,6 +174,10 @@ class Trader:
                 timeout_seconds=self._timeout_seconds,
             )
         )
+        from src.exchanges.okx.client import OkxBrokerClient
+        from src.exchanges.okx.semantic_executor import OkxBrokerSemanticExecutor
+        self._broker_client = OkxBrokerClient(self)
+        self._broker_semantic_executor = OkxBrokerSemanticExecutor(self._broker_client)
         from src.execution.tp_sl_execution_manager import TpSlExecutionManager
         self._tp_sl_manager = TpSlExecutionManager(self)
 
@@ -193,7 +197,21 @@ class Trader:
             limiter = PrivateWriteRateLimiter()
             object.__setattr__(self, '_private_write_limiter', limiter)
             return limiter
+        if name == '_broker_client':
+            from src.exchanges.okx.client import OkxBrokerClient
+            broker_client = OkxBrokerClient(self)
+            object.__setattr__(self, '_broker_client', broker_client)
+            return broker_client
+        if name == '_broker_semantic_executor':
+            from src.exchanges.okx.semantic_executor import OkxBrokerSemanticExecutor
+            executor = OkxBrokerSemanticExecutor(self._broker_client)
+            object.__setattr__(self, '_broker_semantic_executor', executor)
+            return executor
         raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
+
+    @property
+    def broker_semantic_executor(self):
+        return self._broker_semantic_executor
 
     async def start(self) -> None:
         await self._client.start()
@@ -235,16 +253,31 @@ class Trader:
             return await self.replace_take_profit(intent)
 
         contracts = self.eth_qty_to_contracts(Decimal(str(intent.size.eth_qty)))
-        body = order_specs.build_market_entry_order_body(
-            inst_id=self.symbol,
-            td_mode=self.td_mode,
-            side=intent.side,
-            contracts_text=self.decimal_to_str(contracts),
-            pos_side_mode=self.pos_side_mode,
-        )
+        from src.exchanges.models import BrokerOrderSide, BrokerPositionSide
+        from src.exchanges.semantic_models import BrokerSemanticAction, BrokerSemanticOrderRole, BrokerSemanticRequest
 
-        res = await self.request("POST", "/api/v5/trade/order", body)
-        order_id = self.extract_order_id(res)
+        semantic_result = await self.broker_semantic_executor.execute(
+            BrokerSemanticRequest(
+                exchange=self.broker_semantic_executor.exchange,
+                symbol=self.symbol,
+                action=(
+                    BrokerSemanticAction.ADD_POSITION
+                    if intent.intent_type in {"ADD_LONG", "ADD_SHORT"}
+                    else BrokerSemanticAction.OPEN_POSITION
+                ),
+                role=(
+                    BrokerSemanticOrderRole.ADD
+                    if intent.intent_type in {"ADD_LONG", "ADD_SHORT"}
+                    else BrokerSemanticOrderRole.ENTRY
+                ),
+                side=BrokerOrderSide.BUY if intent.side == "LONG" else BrokerOrderSide.SELL,
+                position_side=BrokerPositionSide.LONG if intent.side == "LONG" else BrokerPositionSide.SHORT,
+                quantity=contracts,
+            )
+        )
+        order_id = semantic_result.order_id or ""
+        if not order_id:
+            raise RuntimeError(f"Missing order_id in broker semantic result: {semantic_result}")
 
         # From here on, assume the entry may already be live. Never let a later TP
         # failure look like a pre-entry failure to the caller.
@@ -487,16 +520,25 @@ class Trader:
 
     async def place_sidecar_market_order(self, *, side: PositionSide, eth_qty: float) -> dict[str, Any]:
         contracts = self.eth_qty_to_contracts(Decimal(str(eth_qty)))
-        body = order_specs.build_market_entry_order_body(
-            inst_id=self.symbol,
-            td_mode=self.td_mode,
-            side=side,
-            contracts_text=self.decimal_to_str(contracts),
-            pos_side_mode=self.pos_side_mode,
+        from src.exchanges.models import BrokerOrderSide, BrokerPositionSide
+        from src.exchanges.semantic_models import BrokerSemanticAction, BrokerSemanticOrderRole, BrokerSemanticRequest
+
+        result = await self.broker_semantic_executor.execute(
+            BrokerSemanticRequest(
+                exchange=self.broker_semantic_executor.exchange,
+                symbol=self.symbol,
+                action=BrokerSemanticAction.SIDECAR_ENTRY,
+                role=BrokerSemanticOrderRole.SIDECAR_ENTRY,
+                side=BrokerOrderSide.BUY if side == "LONG" else BrokerOrderSide.SELL,
+                position_side=BrokerPositionSide.LONG if side == "LONG" else BrokerPositionSide.SHORT,
+                quantity=contracts,
+            )
         )
-        res = await self.request("POST", "/api/v5/trade/order", body)
+        order_id = result.order_id or ""
+        if not order_id:
+            raise RuntimeError(f"Missing order_id in broker semantic result: {result}")
         return {
-            "order_id": self.extract_order_id(res),
+            "order_id": order_id,
             "contracts": self.decimal_to_str(contracts),
             "qty": float(contracts * self.contract_multiplier),
         }
@@ -544,13 +586,29 @@ class Trader:
             "avg_fill_price": _optional_float(item.get("avgPx")),
         }
 
-    async def fetch_pending_orders(self) -> list[dict[str, Any]]:
+    async def fetch_pending_orders_raw(self) -> list[dict[str, Any]]:
         res = await self.request("GET", f"/api/v5/trade/orders-pending?instId={self.symbol}")
         return list(res.get("data", []))
 
-    async def fetch_pending_algo_orders(self) -> list[dict[str, Any]]:
+    async def fetch_pending_orders(self) -> list[dict[str, Any]]:
+        result = await self.broker_semantic_executor.execute(
+            _broker_semantic_fetch_request(self.symbol, "ordinary")
+        )
+        # Temporary bridge during broker semantic migration: startup recovery
+        # and identity safety still inspect OKX raw fields via this facade.
+        return [dict(order.raw) for order in result.orders]
+
+    async def fetch_pending_algo_orders_raw(self) -> list[dict[str, Any]]:
         res = await self.request("GET", f"/api/v5/trade/orders-algo-pending?instId={self.symbol}&ordType=conditional")
         return list(res.get("data", []))
+
+    async def fetch_pending_algo_orders(self) -> list[dict[str, Any]]:
+        result = await self.broker_semantic_executor.execute(
+            _broker_semantic_fetch_request(self.symbol, "algo")
+        )
+        # Temporary bridge during broker semantic migration: SL verification
+        # still matches OKX raw algo fields while fetch is routed via broker semantics.
+        return [dict(order.raw) for order in result.orders]
 
     async def cancel_near_tp_protective_stop(self, order_id: str | None) -> bool:
         return await self._tp_sl_manager.cancel_near_tp_protective_stop(order_id)
@@ -693,3 +751,20 @@ def _optional_float(value: Any) -> float | None:
         return float(value)
     except Exception:
         return None
+
+
+def _broker_semantic_fetch_request(symbol: str, source: str):
+    from src.exchanges.models import ExchangeName
+    from src.exchanges.semantic_models import BrokerSemanticAction, BrokerSemanticOrderRole, BrokerSemanticRequest
+
+    action = (
+        BrokerSemanticAction.FETCH_ALGO_ORDERS
+        if source == "algo"
+        else BrokerSemanticAction.FETCH_OPEN_ORDERS
+    )
+    return BrokerSemanticRequest(
+        exchange=ExchangeName.OKX,
+        symbol=symbol,
+        action=action,
+        role=BrokerSemanticOrderRole.RECOVERY,
+    )

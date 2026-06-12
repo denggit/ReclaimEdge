@@ -71,6 +71,8 @@ class _OkxTraderLike(Protocol):
 
     def extract_order_id(self, res: dict[str, Any]) -> str: ...
 
+    def extract_algo_id(self, res: dict[str, Any]) -> str: ...
+
     def decimal_to_str(self, value: Any) -> str: ...
 
     def price_to_str(self, price: float) -> str: ...
@@ -224,7 +226,11 @@ class OkxBrokerClient(BrokerClient):
                 )
             )
         try:
-            raw_orders = await self._trader.fetch_pending_orders()
+            raw_fetch = getattr(self._trader, "fetch_pending_orders_raw", None)
+            if callable(raw_fetch):
+                raw_orders = await raw_fetch()
+            else:
+                raw_orders = await self._trader.fetch_pending_orders()
         except Exception as exc:
             raise okx_exception_to_exchange_error(
                 exc, message=f"Failed to fetch open orders: {exc}"
@@ -253,6 +259,15 @@ class OkxBrokerClient(BrokerClient):
         ):
             return await self._place_market_entry(request)
 
+        # --- MARKET reduce-only close / exit ---
+        if (
+            request.order_type == BrokerOrderType.MARKET
+            and request.reduce_only is True
+            and request.position_side in _TP_ALLOWED_POSITION_SIDES
+            and request.time_in_force in _MARKET_ENTRY_ALLOWED_TIME_IN_FORCE
+        ):
+            return await self._place_reduce_only_market_close(request)
+
         # --- LIMIT reduce-only TP ---
         if (
             request.order_type == BrokerOrderType.LIMIT
@@ -261,6 +276,15 @@ class OkxBrokerClient(BrokerClient):
             and request.position_side in _TP_ALLOWED_POSITION_SIDES
         ):
             return await self._place_limit_reduce_only_tp(request)
+
+        # --- STOP_MARKET protective SL ---
+        if (
+            request.order_type == BrokerOrderType.STOP_MARKET
+            and (request.reduce_only is True or request.close_position is True)
+            and request.trigger_price is not None
+            and request.position_side in _TP_ALLOWED_POSITION_SIDES
+        ):
+            return await self._place_protective_stop_order(request)
 
         # --- Unsupported ---
         raise unsupported_okx_order_request_error(
@@ -305,6 +329,50 @@ class OkxBrokerClient(BrokerClient):
             order_id = self._trader.extract_order_id(res)
         except Exception as exc:
             order_id = None
+            raise okx_exception_to_exchange_error(
+                exc, message=f"Failed to extract order id from response: {res}"
+            ) from exc
+
+        return BrokerOrderResult(
+            exchange=ExchangeName.OKX,
+            symbol=request.symbol,
+            order_id=order_id,
+            client_order_id=request.client_order_id,
+            status=BrokerOrderStatus.NEW,
+            raw=res,
+        )
+
+    async def _place_reduce_only_market_close(
+        self, request: BrokerOrderRequest
+    ) -> BrokerOrderResult:
+        """Place a MARKET reduce-only close order using existing ``order_specs``."""
+        contracts_text = self._trader.decimal_to_str(request.quantity)
+        side_str: order_specs.PositionSide = "LONG" if request.position_side == BrokerPositionSide.LONG else "SHORT"
+
+        body = order_specs.build_reduce_only_market_order_body(
+            inst_id=self._trader.symbol,
+            td_mode=self._trader.td_mode,
+            side=side_str,
+            contracts_text=contracts_text,
+            pos_side_mode=self._trader.pos_side_mode,
+        )
+
+        try:
+            res = await self._trader.request("POST", "/api/v5/trade/order", body)
+            raise_okx_exchange_error_from_response(
+                res,
+                message="Failed to place reduce-only market close",
+            )
+        except ExchangeError:
+            raise
+        except Exception as exc:
+            raise okx_exception_to_exchange_error(
+                exc, message=f"Failed to place reduce-only market close: {exc}"
+            ) from exc
+
+        try:
+            order_id = self._trader.extract_order_id(res)
+        except Exception as exc:
             raise okx_exception_to_exchange_error(
                 exc, message=f"Failed to extract order id from response: {res}"
             ) from exc
@@ -367,6 +435,53 @@ class OkxBrokerClient(BrokerClient):
             raw=res,
         )
 
+    async def _place_protective_stop_order(
+        self, request: BrokerOrderRequest
+    ) -> BrokerOrderResult:
+        """Place a conditional protective SL algo order using existing ``order_specs``."""
+        contracts_text = self._trader.decimal_to_str(request.quantity)
+        # trigger_price is guaranteed non-None by the caller's condition check
+        stop_price_text = self._trader.price_to_str(float(request.trigger_price))  # type: ignore[arg-type]
+        side_str: order_specs.PositionSide = "LONG" if request.position_side == BrokerPositionSide.LONG else "SHORT"
+
+        body = order_specs.build_conditional_protective_sl_algo_body(
+            inst_id=self._trader.symbol,
+            td_mode=self._trader.td_mode,
+            side=side_str,
+            contracts_text=contracts_text,
+            stop_price_text=stop_price_text,
+            pos_side_mode=self._trader.pos_side_mode,
+        )
+
+        try:
+            res = await self._trader.request("POST", "/api/v5/trade/order-algo", body)
+            raise_okx_exchange_error_from_response(
+                res,
+                message="Failed to place protective stop",
+            )
+        except ExchangeError:
+            raise
+        except Exception as exc:
+            raise okx_exception_to_exchange_error(
+                exc, message=f"Failed to place protective stop: {exc}"
+            ) from exc
+
+        try:
+            order_id = _extract_algo_or_order_id(self._trader, res)
+        except Exception as exc:
+            raise okx_exception_to_exchange_error(
+                exc, message=f"Failed to extract algo id from response: {res}"
+            ) from exc
+
+        return BrokerOrderResult(
+            exchange=ExchangeName.OKX,
+            symbol=request.symbol,
+            order_id=order_id,
+            client_order_id=request.client_order_id,
+            status=BrokerOrderStatus.NEW,
+            raw=res,
+        )
+
     # ------------------------------------------------------------------
     # Cancel order
     # ------------------------------------------------------------------
@@ -396,6 +511,36 @@ class OkxBrokerClient(BrokerClient):
         except Exception as exc:
             raise okx_exception_to_exchange_error(
                 exc, message=f"Failed to cancel order {order_id}: {exc}"
+            ) from exc
+
+    async def cancel_algo_order(self, symbol: str, algo_id: str) -> None:
+        if symbol != self._trader.symbol:
+            raise ExchangeError(
+                ExchangeErrorDetail(
+                    exchange=ExchangeName.OKX,
+                    kind=ExchangeErrorKind.INVALID_SYMBOL,
+                    message=f"Cannot cancel algo order for symbol {symbol!r}",
+                    raw={"requested": symbol, "configured": self._trader.symbol},
+                )
+            )
+        try:
+            res = await self._trader.request(
+                "POST",
+                "/api/v5/trade/cancel-algos",
+                order_specs.build_cancel_algo_body(
+                    inst_id=symbol,
+                    algo_id=algo_id,
+                ),
+            )
+            raise_okx_exchange_error_from_response(
+                res,
+                message=f"Failed to cancel algo order {algo_id}",
+            )
+        except ExchangeError:
+            raise
+        except Exception as exc:
+            raise okx_exception_to_exchange_error(
+                exc, message=f"Failed to cancel algo order {algo_id}: {exc}"
             ) from exc
 
     # ------------------------------------------------------------------
@@ -443,7 +588,11 @@ class OkxBrokerClient(BrokerClient):
                 )
             )
         try:
-            raw_orders = await self._trader.fetch_pending_algo_orders()
+            raw_fetch = getattr(self._trader, "fetch_pending_algo_orders_raw", None)
+            if callable(raw_fetch):
+                raw_orders = await raw_fetch()
+            else:
+                raw_orders = await self._trader.fetch_pending_algo_orders()
         except Exception as exc:
             raise okx_exception_to_exchange_error(
                 exc, message=f"Failed to fetch algo orders: {exc}"
@@ -550,16 +699,26 @@ def _validate_okx_order_request(
         )
 
     if request.order_type == BrokerOrderType.MARKET:
-        if request.reduce_only is not False:
-            _raise_unsupported_order_validation_error(
-                request,
-                "MARKET entry orders must not be reduce-only",
-            )
-        if request.close_position is not False:
-            _raise_unsupported_order_validation_error(
-                request,
-                "MARKET entry orders must not close position",
-            )
+        if request.reduce_only is True or request.close_position is True:
+            expected_side_by_position = {
+                BrokerPositionSide.LONG: BrokerOrderSide.SELL,
+                BrokerPositionSide.SHORT: BrokerOrderSide.BUY,
+            }
+            expected_side = expected_side_by_position.get(request.position_side)
+            if expected_side is None:
+                _raise_unsupported_order_validation_error(
+                    request,
+                    "MARKET reduce-only close orders require LONG or SHORT position side",
+                )
+            if request.side != expected_side:
+                _raise_unsupported_order_validation_error(
+                    request,
+                    (
+                        f"MARKET reduce-only close for {request.position_side.value} "
+                        f"requires {expected_side.value} side"
+                    ),
+                )
+            return
 
         expected_side_by_position = {
             BrokerPositionSide.LONG: BrokerOrderSide.BUY,
@@ -606,6 +765,52 @@ def _validate_okx_order_request(
                     f"requires {expected_side.value} side"
                 ),
             )
+        return
+
+    if request.order_type == BrokerOrderType.STOP_MARKET:
+        if request.trigger_price is None:
+            _raise_unsupported_order_validation_error(
+                request,
+                "STOP_MARKET protective SL orders require trigger_price",
+            )
+        if not (request.reduce_only is True or request.close_position is True):
+            _raise_unsupported_order_validation_error(
+                request,
+                "STOP_MARKET protective SL orders must be reduce-only or close-position",
+            )
+
+        expected_side_by_position = {
+            BrokerPositionSide.LONG: BrokerOrderSide.SELL,
+            BrokerPositionSide.SHORT: BrokerOrderSide.BUY,
+        }
+        expected_side = expected_side_by_position.get(request.position_side)
+        if expected_side is None:
+            _raise_unsupported_order_validation_error(
+                request,
+                "STOP_MARKET protective SL orders require LONG or SHORT position side",
+            )
+        if request.side != expected_side:
+            _raise_unsupported_order_validation_error(
+                request,
+                (
+                    f"STOP_MARKET protective SL for {request.position_side.value} "
+                    f"requires {expected_side.value} side"
+                ),
+            )
+        return
+
+
+def _extract_algo_or_order_id(trader: object, res: dict[str, Any]) -> str:
+    extract_algo_id = getattr(trader, "extract_algo_id", None)
+    if callable(extract_algo_id):
+        return str(extract_algo_id(res))
+    data = res.get("data", [])
+    if data:
+        item = data[0]
+        order_id = item.get("algoId") or item.get("ordId")
+        if order_id:
+            return str(order_id)
+    raise RuntimeError(f"Missing algoId/ordId in response: {res}")
 
 
 def _raise_unsupported_order_validation_error(

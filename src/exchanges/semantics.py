@@ -16,12 +16,18 @@ from src.exchanges.models import (
 from src.exchanges.semantic_models import (
     BrokerSemanticAction,
     BrokerSemanticOrderQuery,
+    BrokerSemanticOrderRole,
     BrokerSemanticRequest,
     BrokerSemanticResult,
 )
 
 
 class BrokerSemanticExecutor(Protocol):
+    @property
+    def exchange(self) -> ExchangeName: ...
+
+    async def execute(self, request: BrokerSemanticRequest) -> BrokerSemanticResult: ...
+
     async def execute_semantic_order(
         self, request: BrokerSemanticRequest
     ) -> BrokerSemanticResult: ...
@@ -43,6 +49,91 @@ class BrokerSemanticExecutor(Protocol):
     ) -> BrokerPosition: ...
 
     async def close(self) -> None: ...
+
+    async def open_position(
+        self,
+        *,
+        symbol: str,
+        side,
+        position_side: BrokerPositionSide,
+        quantity: Decimal,
+        client_order_id: str | None = None,
+        label: str | None = None,
+    ) -> BrokerSemanticResult: ...
+
+    async def add_position(
+        self,
+        *,
+        symbol: str,
+        side,
+        position_side: BrokerPositionSide,
+        quantity: Decimal,
+        client_order_id: str | None = None,
+        label: str | None = None,
+    ) -> BrokerSemanticResult: ...
+
+    async def place_reduce_only_tp(
+        self,
+        *,
+        symbol: str,
+        side,
+        position_side: BrokerPositionSide,
+        quantity: Decimal,
+        price: Decimal,
+        role: BrokerSemanticOrderRole = BrokerSemanticOrderRole.CORE_TP,
+        client_order_id: str | None = None,
+        label: str | None = None,
+    ) -> BrokerSemanticResult: ...
+
+    async def place_protective_stop(
+        self,
+        *,
+        symbol: str,
+        side,
+        position_side: BrokerPositionSide,
+        quantity: Decimal,
+        trigger_price: Decimal,
+        role: BrokerSemanticOrderRole = BrokerSemanticOrderRole.PROTECTIVE_SL,
+        client_order_id: str | None = None,
+        label: str | None = None,
+    ) -> BrokerSemanticResult: ...
+
+    async def cancel_order(
+        self,
+        *,
+        symbol: str,
+        order_id: str,
+    ) -> BrokerSemanticResult: ...
+
+    async def cancel_protective_stop(
+        self,
+        *,
+        symbol: str,
+        order_id: str,
+        role: BrokerSemanticOrderRole = BrokerSemanticOrderRole.PROTECTIVE_SL,
+    ) -> BrokerSemanticResult: ...
+
+    async def cancel_reduce_only_tp(
+        self,
+        *,
+        symbol: str,
+        order_id: str,
+        role: BrokerSemanticOrderRole = BrokerSemanticOrderRole.CORE_TP,
+    ) -> BrokerSemanticResult: ...
+
+    async def market_exit(
+        self,
+        *,
+        symbol: str,
+        side,
+        position_side: BrokerPositionSide,
+        quantity: Decimal,
+        role: BrokerSemanticOrderRole = BrokerSemanticOrderRole.MARKET_EXIT,
+    ) -> BrokerSemanticResult: ...
+
+    async def fetch_open_orders(self, *, symbol: str) -> BrokerSemanticResult: ...
+
+    async def fetch_algo_orders(self, *, symbol: str) -> BrokerSemanticResult: ...
 
 
 def validate_semantic_request(request: BrokerSemanticRequest) -> None:
@@ -111,6 +202,7 @@ def semantic_request_to_broker_order_request(
 
     if request.action in {
         BrokerSemanticAction.MARKET_EXIT,
+        BrokerSemanticAction.MARKET_EXIT_RUNNER,
         BrokerSemanticAction.CLOSE_POSITION,
     }:
         if order_type != BrokerOrderType.MARKET:

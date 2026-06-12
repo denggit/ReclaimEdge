@@ -6,6 +6,8 @@ from decimal import Decimal
 from typing import TYPE_CHECKING
 
 from src.execution.trader import LiveTradeResult, PositionSnapshot
+from src.exchanges.models import BrokerOrderSide, BrokerPositionSide, ExchangeName
+from src.exchanges.semantic_models import BrokerSemanticAction, BrokerSemanticOrderRole, BrokerSemanticRequest
 from src.utils.log import get_logger
 
 if TYPE_CHECKING:
@@ -49,9 +51,29 @@ class NearTpExecutionManager:
                 contracts_before=t.decimal_to_str(contracts_before),
             )
 
-        body = t._reduce_only_market_order_body(intent.side, reduce_contracts)
-        res = await t.request("POST", "/api/v5/trade/order", body)
-        order_id = t.extract_order_id(res)
+        semantic_executor = getattr(t, "broker_semantic_executor", None)
+        if semantic_executor is not None:
+            result = await semantic_executor.execute(
+                BrokerSemanticRequest(
+                    exchange=ExchangeName.OKX,
+                    symbol=t.symbol,
+                    action=BrokerSemanticAction.MARKET_EXIT,
+                    role=BrokerSemanticOrderRole.MARKET_EXIT,
+                    side=_close_order_side(intent.side),
+                    position_side=_position_side(intent.side),
+                    quantity=reduce_contracts,
+                    reduce_only=True,
+                    close_position=False,
+                    metadata={"context": "near_tp_reduce"},
+                )
+            )
+            order_id = result.order_id or ""
+            if not order_id:
+                raise RuntimeError(f"Missing near TP reduce order_id in broker semantic result: {result}")
+        else:
+            body = t._reduce_only_market_order_body(intent.side, reduce_contracts)
+            res = await t.request("POST", "/api/v5/trade/order", body)
+            order_id = t.extract_order_id(res)
         logger.warning(
             "NEAR_TP_REDUCE_ORDER_PLACED | side=%s contracts=%s ordId=%s",
             intent.side,
@@ -97,7 +119,6 @@ class NearTpExecutionManager:
                 near_tp_exit_all=True,
                 **base_result_kwargs,
             )
-
         single_intent = replace(intent, partial_tp_price=None, partial_tp_ratio=0.0, tp_plan="SINGLE",
                                 partial_tp_consumed=True)
         tp_order_id: str | None = None
@@ -266,3 +287,11 @@ class NearTpExecutionManager:
             contracts_reduced="",
             contracts_after=t.decimal_to_str(contracts_after),
         )
+
+
+def _position_side(side: str) -> BrokerPositionSide:
+    return BrokerPositionSide.LONG if str(side).upper() == "LONG" else BrokerPositionSide.SHORT
+
+
+def _close_order_side(side: str) -> BrokerOrderSide:
+    return BrokerOrderSide.SELL if str(side).upper() == "LONG" else BrokerOrderSide.BUY

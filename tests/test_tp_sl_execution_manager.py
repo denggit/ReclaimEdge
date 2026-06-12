@@ -6,6 +6,7 @@ from decimal import Decimal
 import src.execution.trader as trader_module
 from src.execution.tp_sl_execution_manager import TpSlExecutionManager
 from src.execution.trader import Trader
+from src.exchanges.semantic_models import BrokerSemanticAction
 from src.risk.simple_position_sizer import PositionSize
 from src.strategies.boll_cvd_reclaim_strategy import TradeIntent
 
@@ -64,6 +65,25 @@ def make_trader(**overrides) -> Trader:
     for k, v in overrides.items():
         setattr(t, k, v)
     return t
+
+
+class FakeBrokerSemanticExecutor:
+    def __init__(self) -> None:
+        self.requests = []
+
+    async def execute(self, request):  # type: ignore[no-untyped-def]
+        self.requests.append(request)
+        from src.exchanges.semantic_models import BrokerSemanticResult
+        from src.exchanges.models import ExchangeName
+
+        return BrokerSemanticResult(
+            exchange=ExchangeName.OKX,
+            symbol=request.symbol,
+            action=request.action,
+            role=request.role,
+            ok=True,
+            order_id=request.order_id,
+        )
 
 
 class TpSlExecutionManagerTest(unittest.IsolatedAsyncioTestCase):
@@ -268,6 +288,33 @@ class TpSlExecutionManagerTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(result)
         self.assertEqual(requests, [])
+
+    async def test_cancel_reduce_only_known_order_uses_broker_semantic_executor(self) -> None:
+        semantic_executor = FakeBrokerSemanticExecutor()
+        trader = make_trader(_broker_semantic_executor=semantic_executor)
+        trader._managed_reduce_only_order_ids = {"known-id"}
+
+        async def fake_fetch_pending():  # type: ignore[no-untyped-def]
+            return [
+                {"instId": trader.symbol, "reduceOnly": "true", "ordId": "known-id"},
+            ]
+
+        async def fake_request(method, path, body):  # type: ignore[no-untyped-def]
+            raise AssertionError("legacy cancel-order request should not be used")
+
+        trader.fetch_pending_orders = fake_fetch_pending
+        trader.request = fake_request  # type: ignore[method-assign]
+
+        manager = TpSlExecutionManager(trader)
+        result = await manager.cancel_existing_reduce_only_orders(phase="update_tp")
+
+        self.assertTrue(result)
+        self.assertEqual(len(semantic_executor.requests), 1)
+        self.assertEqual(
+            semantic_executor.requests[0].action,
+            BrokerSemanticAction.CANCEL_REDUCE_ONLY_TP,
+        )
+        self.assertEqual(semantic_executor.requests[0].order_id, "known-id")
 
     async def test_cancel_reduce_only_normal_cancel_prescans_unknown_before_raise(self) -> None:
         trader = make_trader()

@@ -59,7 +59,9 @@ class FakeTrader:
         pending_orders: list[dict[str, Any]] | None = None,
         pending_algo_orders: list[dict[str, Any]] | None = None,
         order_response: dict[str, Any] | None = None,
+        algo_order_response: dict[str, Any] | None = None,
         cancel_response: dict[str, Any] | None = None,
+        cancel_algo_response: dict[str, Any] | None = None,
     ) -> None:
         self.symbol = symbol
         self.td_mode = td_mode
@@ -72,7 +74,9 @@ class FakeTrader:
         self._pending_orders = pending_orders or []
         self._pending_algo_orders = pending_algo_orders or []
         self._order_response = order_response
+        self._algo_order_response = algo_order_response
         self._cancel_response = cancel_response
+        self._cancel_algo_response = cancel_algo_response
         self.requests: list[dict[str, Any]] = []
         self._next_order_id = 1
         self.closed = False
@@ -102,10 +106,20 @@ class FakeTrader:
             ord_id = str(self._next_order_id)
             self._next_order_id += 1
             return {"code": "0", "data": [{"ordId": ord_id, "clOrdId": payload.get("clOrdId", "") if payload else "", "sCode": "0"}]}
+        if endpoint == "/api/v5/trade/order-algo":
+            if self._algo_order_response is not None:
+                return self._algo_order_response
+            algo_id = f"algo-{self._next_order_id}"
+            self._next_order_id += 1
+            return {"code": "0", "data": [{"algoId": algo_id, "sCode": "0"}]}
         if endpoint == "/api/v5/trade/cancel-order":
             if self._cancel_response is not None:
                 return self._cancel_response
             return {"code": "0", "data": [{"ordId": payload.get("ordId", ""), "sCode": "0"}]}
+        if endpoint == "/api/v5/trade/cancel-algos":
+            if self._cancel_algo_response is not None:
+                return self._cancel_algo_response
+            return {"code": "0", "data": [{"algoId": payload[0].get("algoId", "") if payload else "", "sCode": "0"}]}
         return {"code": "0", "data": []}
 
     @staticmethod
@@ -114,6 +128,13 @@ class FakeTrader:
         if not data or not data[0].get("ordId"):
             raise RuntimeError(f"Missing ordId in response: {res}")
         return str(data[0]["ordId"])
+
+    @staticmethod
+    def extract_algo_id(res: dict[str, Any]) -> str:
+        data = res.get("data", [])
+        if not data or not (data[0].get("algoId") or data[0].get("ordId")):
+            raise RuntimeError(f"Missing algoId in response: {res}")
+        return str(data[0].get("algoId") or data[0].get("ordId"))
 
     @staticmethod
     def decimal_to_str(value: Any) -> str:
@@ -149,6 +170,7 @@ def _broker_order_request(
     close_position: bool = False,
     time_in_force: BrokerTimeInForce | None = None,
     client_order_id: str | None = None,
+    trigger_price: Decimal | None = None,
 ) -> BrokerOrderRequest:
     return BrokerOrderRequest(
         exchange=exchange,
@@ -158,6 +180,7 @@ def _broker_order_request(
         order_type=order_type,
         quantity=quantity,
         price=price,
+        trigger_price=trigger_price,
         reduce_only=reduce_only,
         close_position=close_position,
         time_in_force=time_in_force,
@@ -566,16 +589,26 @@ class TestPlaceOrderLimitReduceOnlyTP:
 
 class TestPlaceOrderUnsupported:
     @pytest.mark.asyncio
-    async def test_stop_market_unsupported(self):
-        client = OkxBrokerClient(FakeTrader())
+    async def test_stop_market_places_protective_sl_algo(self):
+        trader = FakeTrader()
+        client = OkxBrokerClient(trader)
         req = _broker_order_request(
             order_type=BrokerOrderType.STOP_MARKET,
             quantity=Decimal("1"),
+            side=BrokerOrderSide.SELL,
+            position_side=BrokerPositionSide.LONG,
             reduce_only=True,
+            close_position=True,
+            trigger_price=Decimal("3100"),
         )
-        with pytest.raises(ExchangeError) as exc_info:
-            await client.place_order(req)
-        assert exc_info.value.detail.kind == ExchangeErrorKind.UNSUPPORTED_OPERATION
+        result = await client.place_order(req)
+        assert result.order_id == "algo-1"
+        assert len(trader.requests) == 1
+        r = trader.requests[0]
+        assert r["endpoint"] == "/api/v5/trade/order-algo"
+        assert r["payload"]["ordType"] == "conditional"
+        assert r["payload"]["slTriggerPx"] == "3100.00"
+        assert r["payload"]["reduceOnly"] == "true"
 
     @pytest.mark.asyncio
     async def test_take_profit_market_unsupported(self):
@@ -590,28 +623,39 @@ class TestPlaceOrderUnsupported:
         assert exc_info.value.detail.kind == ExchangeErrorKind.UNSUPPORTED_OPERATION
 
     @pytest.mark.asyncio
-    async def test_market_reduce_only_unsupported(self):
-        client = OkxBrokerClient(FakeTrader())
+    async def test_market_reduce_only_close_supported(self):
+        trader = FakeTrader()
+        client = OkxBrokerClient(trader)
         req = _broker_order_request(
             order_type=BrokerOrderType.MARKET,
             quantity=Decimal("1"),
+            side=BrokerOrderSide.SELL,
+            position_side=BrokerPositionSide.LONG,
             reduce_only=True,
         )
-        with pytest.raises(ExchangeError) as exc_info:
-            await client.place_order(req)
-        assert exc_info.value.detail.kind == ExchangeErrorKind.UNSUPPORTED_OPERATION
+        result = await client.place_order(req)
+        assert result.order_id == "1"
+        assert len(trader.requests) == 1
+        r = trader.requests[0]
+        assert r["endpoint"] == "/api/v5/trade/order"
+        assert r["payload"]["ordType"] == "market"
+        assert r["payload"]["side"] == "sell"
+        assert r["payload"]["reduceOnly"] == "true"
 
     @pytest.mark.asyncio
-    async def test_market_close_position_unsupported(self):
-        client = OkxBrokerClient(FakeTrader())
+    async def test_market_close_position_supported(self):
+        trader = FakeTrader()
+        client = OkxBrokerClient(trader)
         req = _broker_order_request(
             order_type=BrokerOrderType.MARKET,
             quantity=Decimal("1"),
+            side=BrokerOrderSide.SELL,
+            position_side=BrokerPositionSide.LONG,
+            reduce_only=True,
             close_position=True,
         )
-        with pytest.raises(ExchangeError) as exc_info:
-            await client.place_order(req)
-        assert exc_info.value.detail.kind == ExchangeErrorKind.UNSUPPORTED_OPERATION
+        result = await client.place_order(req)
+        assert result.order_id == "1"
 
     @pytest.mark.asyncio
     async def test_market_with_net_position_side_unsupported(self):
@@ -794,6 +838,42 @@ class TestFetchAlgoOrders:
         with pytest.raises(ExchangeError) as exc_info:
             await client.fetch_algo_orders("BTC-USDT-SWAP")
         assert exc_info.value.detail.kind == ExchangeErrorKind.INVALID_SYMBOL
+
+
+class TestCancelAlgoOrder:
+    @pytest.mark.asyncio
+    async def test_cancel_algo_order_calls_correct_endpoint(self):
+        trader = FakeTrader()
+        client = OkxBrokerClient(trader)
+        await client.cancel_algo_order("ETH-USDT-SWAP", "algo-123")
+        assert len(trader.requests) == 1
+        r = trader.requests[0]
+        assert r["endpoint"] == "/api/v5/trade/cancel-algos"
+        assert r["payload"] == [{"instId": "ETH-USDT-SWAP", "algoId": "algo-123"}]
+
+    @pytest.mark.asyncio
+    async def test_cancel_algo_order_symbol_mismatch(self):
+        client = OkxBrokerClient(FakeTrader())
+        with pytest.raises(ExchangeError) as exc_info:
+            await client.cancel_algo_order("BTC-USDT-SWAP", "algo-123")
+        assert exc_info.value.detail.kind == ExchangeErrorKind.INVALID_SYMBOL
+
+    @pytest.mark.asyncio
+    async def test_cancel_algo_order_non_zero_scode_raises_exchange_error(self):
+        response = {
+            "code": "0",
+            "data": [
+                {
+                    "algoId": "algo-123",
+                    "sCode": "51603",
+                    "sMsg": "Order does not exist",
+                }
+            ],
+        }
+        client = OkxBrokerClient(FakeTrader(cancel_algo_response=response))
+        with pytest.raises(ExchangeError) as exc_info:
+            await client.cancel_algo_order("ETH-USDT-SWAP", "algo-123")
+        assert exc_info.value.detail.kind == ExchangeErrorKind.ORDER_NOT_FOUND
 
 
 # ---------------------------------------------------------------------------

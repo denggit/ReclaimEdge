@@ -4,7 +4,8 @@ import asyncio
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
-from src.execution import order_specs
+from src.exchanges.models import BrokerOrderSide, BrokerPositionSide, ExchangeName
+from src.exchanges.semantic_models import BrokerSemanticAction, BrokerSemanticOrderRole, BrokerSemanticRequest
 from src.utils.log import get_logger
 
 if TYPE_CHECKING:
@@ -67,9 +68,33 @@ class MarketExitManager:
                     )
                     return False, last_error
 
-                body = t._reduce_only_market_order_body(side, position.contracts)
-                res = await t.request("POST", "/api/v5/trade/order", body)
-                order_id = t.extract_order_id(res)
+                semantic_executor = getattr(t, "broker_semantic_executor", None)
+                if semantic_executor is not None:
+                    result = await semantic_executor.execute(
+                        BrokerSemanticRequest(
+                            exchange=ExchangeName.OKX,
+                            symbol=t.symbol,
+                            action=(
+                                BrokerSemanticAction.MARKET_EXIT_RUNNER
+                                if "runner" in str(context)
+                                else BrokerSemanticAction.MARKET_EXIT
+                            ),
+                            role=BrokerSemanticOrderRole.MARKET_EXIT,
+                            side=_close_order_side(side),
+                            position_side=_position_side(side),
+                            quantity=position.contracts,
+                            reduce_only=True,
+                            close_position=True,
+                            metadata={"context": context},
+                        )
+                    )
+                    order_id = result.order_id or ""
+                    if not order_id:
+                        raise RuntimeError(f"Missing market exit order_id in broker semantic result: {result}")
+                else:
+                    body = t._reduce_only_market_order_body(side, position.contracts)
+                    res = await t.request("POST", "/api/v5/trade/order", body)
+                    order_id = t.extract_order_id(res)
                 refreshed = await t.fetch_position_snapshot()
                 if not refreshed.has_position or refreshed.contracts <= 0:
                     t.position_contracts = Decimal("0")
@@ -159,3 +184,11 @@ class MarketExitManager:
 
     # Backward-compat alias — new code must call _cleanup_after_market_exit
     _cleanup_after_near_tp_market_exit = _cleanup_after_market_exit
+
+
+def _position_side(side: str) -> BrokerPositionSide:
+    return BrokerPositionSide.LONG if str(side).upper() == "LONG" else BrokerPositionSide.SHORT
+
+
+def _close_order_side(side: str) -> BrokerOrderSide:
+    return BrokerOrderSide.SELL if str(side).upper() == "LONG" else BrokerOrderSide.BUY
