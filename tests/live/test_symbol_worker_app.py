@@ -237,6 +237,22 @@ def test_symbol_worker_app_run_has_expected_runtime_order() -> None:
         prev_idx = idx
 
 
+def test_symbol_worker_app_passes_strategy_tick_coalesce_config_to_worker() -> None:
+    source = _app_source()
+
+    assert "strategy_tick_coalesce_enabled=self.app_config.strategy_tick_coalesce_enabled" in source
+    assert (
+        "strategy_tick_coalesce_queue_threshold=self.app_config.strategy_tick_coalesce_queue_threshold"
+        in source
+    )
+    assert "strategy_tick_coalesce_min_decision_interval_seconds=(" in source
+    assert (
+        "self.app_config.strategy_tick_coalesce_min_decision_interval_seconds"
+        in source
+    )
+    assert "strategy_tick_coalesce_max_drain=self.app_config.strategy_tick_coalesce_max_drain" in source
+
+
 # ============================================================================
 # 5. test_symbol_worker_app_does_not_load_dotenv_or_live_trading_gate
 # ============================================================================

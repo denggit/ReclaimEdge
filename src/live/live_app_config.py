@@ -74,12 +74,22 @@ class LiveAppConfig:
     daily_report: DailyReportConfig
     weekly_summary: WeeklySummaryConfig
     heartbeat: LiveHeartbeatConfig
+    strategy_tick_coalesce_enabled: bool = True
+    strategy_tick_coalesce_queue_threshold: int = 50
+    strategy_tick_coalesce_min_decision_interval_seconds: float = 0.1
+    strategy_tick_coalesce_max_drain: int = 5000
     # ── D06b: graceful shutdown ────────────────────────────────────────
     symbol_worker_shutdown_drain_timeout_seconds: float = 10.0
     symbol_worker_shutdown_save_state_enabled: bool = True
     symbol_worker_shutdown_heartbeat_enabled: bool = True
 
     def __post_init__(self) -> None:
+        if self.strategy_tick_coalesce_queue_threshold < 1:
+            raise ValueError("strategy_tick_coalesce_queue_threshold must be >= 1")
+        if self.strategy_tick_coalesce_min_decision_interval_seconds <= 0:
+            raise ValueError("strategy_tick_coalesce_min_decision_interval_seconds must be > 0")
+        if self.strategy_tick_coalesce_max_drain < 1:
+            raise ValueError("strategy_tick_coalesce_max_drain must be >= 1")
         if self.symbol_worker_shutdown_drain_timeout_seconds <= 0:
             raise ValueError(
                 "symbol_worker_shutdown_drain_timeout_seconds must be > 0"
@@ -127,6 +137,18 @@ class LiveAppConfig:
                 enabled=_env_bool("SYMBOL_WORKER_HEARTBEAT_ENABLED", True),
                 interval_seconds=_env_float("SYMBOL_WORKER_HEARTBEAT_INTERVAL_SECONDS", 10.0),
                 stale_after_seconds=_env_float("SYMBOL_WORKER_HEARTBEAT_STALE_AFTER_SECONDS", 30.0),
+            ),
+            strategy_tick_coalesce_enabled=_env_bool(
+                "STRATEGY_TICK_COALESCE_ENABLED", True
+            ),
+            strategy_tick_coalesce_queue_threshold=_env_int(
+                "STRATEGY_TICK_COALESCE_QUEUE_THRESHOLD", 50
+            ),
+            strategy_tick_coalesce_min_decision_interval_seconds=_env_float(
+                "STRATEGY_TICK_COALESCE_MIN_DECISION_INTERVAL_SECONDS", 0.1
+            ),
+            strategy_tick_coalesce_max_drain=_env_int(
+                "STRATEGY_TICK_COALESCE_MAX_DRAIN", 5000
             ),
             symbol_worker_shutdown_drain_timeout_seconds=_env_float(
                 "SYMBOL_WORKER_SHUTDOWN_DRAIN_TIMEOUT_SECONDS", 10.0

@@ -68,6 +68,14 @@ def tick(ts_ms: int) -> MarketTickEvent:
     return MarketTickEvent(TradeTick("ETH-USDT-SWAP", 100.0, 1.0, "buy", ts_ms), boll())
 
 
+def tick_with(ts_ms: int, price: float) -> MarketTickEvent:
+    return MarketTickEvent(TradeTick("ETH-USDT-SWAP", price, 1.0, "buy", ts_ms), boll())
+
+
+def tick_without_boll(ts_ms: int, price: float = 100.0) -> MarketTickEvent:
+    return MarketTickEvent(TradeTick("ETH-USDT-SWAP", price, 1.0, "buy", ts_ms), None)
+
+
 def cvd_snapshot(ts_ms: int) -> CvdSnapshot:
     return CvdSnapshot(
         ts_ms=ts_ms,
@@ -139,10 +147,14 @@ class FakeStrategy:
         self.state = StrategyPositionState()
         self.intents = intents or []
         self.processed_ts: list[int] = []
+        self.processed_prices: list[float] = []
+        self.processed_boll: list[BollSnapshot] = []
         self.processed = processed
 
     def on_tick(self, price: float, ts_ms: int, boll: BollSnapshot, cvd: CvdSnapshot) -> list[TradeIntent]:
         self.processed_ts.append(ts_ms)
+        self.processed_prices.append(price)
+        self.processed_boll.append(boll)
         if self.processed is not None:
             self.processed.set()
         return [self.intents.pop(0)] if self.intents else []
@@ -355,6 +367,40 @@ class RaceFullQueue(asyncio.Queue[TradeCommand]):
 
 
 class LiveRuntimeWorkerTest(unittest.IsolatedAsyncioTestCase):
+    def _start_strategy_worker(
+            self,
+            *,
+            strategy_tick_queue: asyncio.Queue[MarketTickEvent],
+            strategy: FakeStrategy,
+            cvd: FakeCvd,
+            account_snapshot: AccountSnapshot | None = None,
+            execution_state: ExecutionState | None = None,
+            execution_queue: asyncio.Queue[TradeCommand] | None = None,
+            **coalesce_kwargs,
+    ) -> asyncio.Task:
+        return asyncio.create_task(
+            strategy_tick_worker(
+                strategy_tick_queue=strategy_tick_queue,
+                execution_queue=execution_queue or asyncio.Queue(maxsize=1000),
+                state_lock=asyncio.Lock(),
+                account_snapshot=account_snapshot or AccountSnapshot(
+                    flat_position(),
+                    100.0,
+                    100.0,
+                    asyncio.get_running_loop().time(),
+                    0,
+                    1,
+                ),
+                execution_state=execution_state or ExecutionState(None, None),
+                cvd=cvd,  # type: ignore[arg-type]
+                strategy=strategy,  # type: ignore[arg-type]
+                heartbeat_seconds=1_000_000_000_000,
+                account_stale_warn_seconds=1_000_000_000_000,
+                strategy_lag_warn_seconds=1_000_000_000_000,
+                **coalesce_kwargs,
+            )
+        )
+
     def test_queue_log_level_thresholds(self) -> None:
         self.assertIsNone(queue_log_level(0))
         self.assertIsNone(queue_log_level(499))
@@ -565,6 +611,241 @@ class LiveRuntimeWorkerTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(account_snapshot.latest_market_price, 106.4)
         self.assertEqual(account_snapshot.latest_market_price_ts_ms, 12_345)
+
+    async def test_strategy_tick_worker_processes_ticks_individually_below_coalesce_threshold(self) -> None:
+        strategy = FakeStrategy()
+        cvd = FakeCvd()
+        queue: asyncio.Queue[MarketTickEvent] = asyncio.Queue()
+        for ts_ms in (1_000, 1_001, 1_002):
+            await queue.put(tick(ts_ms))
+
+        task = self._start_strategy_worker(
+            strategy_tick_queue=queue,
+            strategy=strategy,
+            cvd=cvd,
+            strategy_tick_coalesce_queue_threshold=50,
+        )
+        try:
+            with self.assertNoLogs("src.live.workers.strategy_tick_worker", level="WARNING"):
+                await asyncio.wait_for(queue.join(), timeout=0.2)
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+        self.assertEqual(cvd.calls, [1_000, 1_001, 1_002])
+        self.assertEqual(strategy.processed_ts, [1_000, 1_001, 1_002])
+
+    async def test_strategy_tick_worker_coalesces_backlog_without_dropping_cvd_ticks(self) -> None:
+        strategy = FakeStrategy()
+        cvd = FakeCvd()
+        queue: asyncio.Queue[MarketTickEvent] = asyncio.Queue()
+        account_snapshot = AccountSnapshot(
+            flat_position(),
+            100.0,
+            100.0,
+            asyncio.get_running_loop().time(),
+            0,
+            1,
+        )
+        events = [tick_with(1_000, 100.0)]
+        events.extend(tick_with(1_000 + idx, 100.0 + idx) for idx in range(1, 61))
+        for event in events:
+            await queue.put(event)
+
+        task = self._start_strategy_worker(
+            strategy_tick_queue=queue,
+            strategy=strategy,
+            cvd=cvd,
+            account_snapshot=account_snapshot,
+            strategy_tick_coalesce_queue_threshold=50,
+            strategy_tick_coalesce_min_decision_interval_seconds=0.1,
+        )
+        try:
+            with self.assertLogs("src.live.workers.strategy_tick_worker", level="WARNING") as logs:
+                await asyncio.wait_for(queue.join(), timeout=0.2)
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+        self.assertEqual(cvd.calls, [event.tick.ts_ms for event in events])
+        self.assertEqual(strategy.processed_ts, [1_060])
+        self.assertEqual(strategy.processed_prices, [160.0])
+        self.assertIs(strategy.processed_boll[0], events[-1].boll)
+        self.assertEqual(account_snapshot.latest_market_price, 160.0)
+        self.assertEqual(account_snapshot.latest_market_price_ts_ms, 1_060)
+        self.assertTrue(any("STRATEGY_TICK_COALESCED" in line for line in logs.output))
+
+    async def test_strategy_tick_worker_skips_coalesced_decision_within_min_interval(self) -> None:
+        strategy = FakeStrategy()
+        cvd = FakeCvd()
+        queue: asyncio.Queue[MarketTickEvent] = asyncio.Queue()
+        account_snapshot = AccountSnapshot(
+            flat_position(),
+            100.0,
+            100.0,
+            asyncio.get_running_loop().time(),
+            0,
+            1,
+        )
+        first_batch = [tick_with(2_000 + idx, 200.0 + idx) for idx in range(0, 4)]
+        second_batch = [tick_with(3_000 + idx, 300.0 + idx) for idx in range(0, 4)]
+        for event in first_batch:
+            await queue.put(event)
+
+        task = self._start_strategy_worker(
+            strategy_tick_queue=queue,
+            strategy=strategy,
+            cvd=cvd,
+            account_snapshot=account_snapshot,
+            strategy_tick_coalesce_queue_threshold=2,
+            strategy_tick_coalesce_min_decision_interval_seconds=0.1,
+        )
+        try:
+            with patch(
+                    "src.live.workers.strategy_tick_worker._monotonic",
+                    side_effect=[100.0, 100.0, 100.05],
+            ):
+                await asyncio.wait_for(queue.join(), timeout=0.2)
+                for event in second_batch:
+                    await queue.put(event)
+                await asyncio.wait_for(queue.join(), timeout=0.2)
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+        self.assertEqual(cvd.calls, [event.tick.ts_ms for event in [*first_batch, *second_batch]])
+        self.assertEqual(strategy.processed_ts, [2_003])
+        self.assertEqual(account_snapshot.latest_market_price, 303.0)
+        self.assertEqual(account_snapshot.latest_market_price_ts_ms, 3_003)
+
+    async def test_strategy_tick_worker_allows_coalesced_decision_after_min_interval(self) -> None:
+        strategy = FakeStrategy()
+        cvd = FakeCvd()
+        queue: asyncio.Queue[MarketTickEvent] = asyncio.Queue()
+        first_batch = [tick_with(4_000 + idx, 400.0 + idx) for idx in range(0, 4)]
+        second_batch = [tick_with(5_000 + idx, 500.0 + idx) for idx in range(0, 4)]
+        for event in first_batch:
+            await queue.put(event)
+
+        task = self._start_strategy_worker(
+            strategy_tick_queue=queue,
+            strategy=strategy,
+            cvd=cvd,
+            strategy_tick_coalesce_queue_threshold=2,
+            strategy_tick_coalesce_min_decision_interval_seconds=0.1,
+        )
+        try:
+            with patch(
+                    "src.live.workers.strategy_tick_worker._monotonic",
+                    side_effect=[100.0, 100.0, 100.2, 100.2],
+            ):
+                await asyncio.wait_for(queue.join(), timeout=0.2)
+                for event in second_batch:
+                    await queue.put(event)
+                await asyncio.wait_for(queue.join(), timeout=0.2)
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+        self.assertEqual(cvd.calls, [event.tick.ts_ms for event in [*first_batch, *second_batch]])
+        self.assertEqual(strategy.processed_ts, [4_003, 5_003])
+        self.assertEqual(strategy.processed_prices, [403.0, 503.0])
+
+    async def test_strategy_tick_worker_coalesced_boll_none_events_do_not_crash(self) -> None:
+        strategy = FakeStrategy()
+        cvd = FakeCvd()
+        queue: asyncio.Queue[MarketTickEvent] = asyncio.Queue()
+        events = [
+            tick_without_boll(6_000, 600.0),
+            tick_without_boll(6_001, 601.0),
+            tick_with(6_002, 602.0),
+        ]
+        for event in events:
+            await queue.put(event)
+
+        task = self._start_strategy_worker(
+            strategy_tick_queue=queue,
+            strategy=strategy,
+            cvd=cvd,
+            strategy_tick_coalesce_queue_threshold=2,
+        )
+        try:
+            await asyncio.wait_for(queue.join(), timeout=0.2)
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+        self.assertEqual(cvd.calls, [6_000, 6_001, 6_002])
+        self.assertEqual(strategy.processed_ts, [6_002])
+        self.assertEqual(strategy.processed_prices, [602.0])
+
+        strategy = FakeStrategy()
+        cvd = FakeCvd()
+        queue = asyncio.Queue()
+        events = [
+            tick_without_boll(7_000, 700.0),
+            tick_without_boll(7_001, 701.0),
+            tick_without_boll(7_002, 702.0),
+        ]
+        for event in events:
+            await queue.put(event)
+
+        task = self._start_strategy_worker(
+            strategy_tick_queue=queue,
+            strategy=strategy,
+            cvd=cvd,
+            strategy_tick_coalesce_queue_threshold=2,
+        )
+        try:
+            await asyncio.wait_for(queue.join(), timeout=0.2)
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+        self.assertEqual(cvd.calls, [7_000, 7_001, 7_002])
+        self.assertEqual(strategy.processed_ts, [])
+
+    async def test_strategy_tick_worker_coalesced_backlog_skips_on_tick_while_execution_pending(self) -> None:
+        strategy = FakeStrategy()
+        cvd = FakeCvd()
+        queue: asyncio.Queue[MarketTickEvent] = asyncio.Queue()
+        account_snapshot = AccountSnapshot(
+            flat_position(),
+            100.0,
+            100.0,
+            asyncio.get_running_loop().time(),
+            0,
+            1,
+        )
+        events = [tick_with(8_000 + idx, 800.0 + idx) for idx in range(0, 4)]
+        for event in events:
+            await queue.put(event)
+
+        task = self._start_strategy_worker(
+            strategy_tick_queue=queue,
+            strategy=strategy,
+            cvd=cvd,
+            account_snapshot=account_snapshot,
+            execution_state=ExecutionState(None, None, pending_order_count=1),
+            strategy_tick_coalesce_queue_threshold=2,
+        )
+        try:
+            await asyncio.wait_for(queue.join(), timeout=0.2)
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+        self.assertEqual(cvd.calls, [event.tick.ts_ms for event in events])
+        self.assertEqual(strategy.processed_ts, [])
+        self.assertEqual(account_snapshot.latest_market_price, 803.0)
+        self.assertEqual(account_snapshot.latest_market_price_ts_ms, 8_003)
 
     async def test_three_stage_tp1_sync_places_long_post_tp1_sl_with_extension(self) -> None:
         class Tp1Trader(FakeTrader):

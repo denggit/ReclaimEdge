@@ -812,6 +812,12 @@ class SymbolWorkerApp:
                     heartbeat_seconds=market_tick_heartbeat_seconds,
                     account_stale_warn_seconds=account_snapshot_stale_warn_seconds,
                     strategy_lag_warn_seconds=strategy_lag_warn_seconds,
+                    strategy_tick_coalesce_enabled=self.app_config.strategy_tick_coalesce_enabled,
+                    strategy_tick_coalesce_queue_threshold=self.app_config.strategy_tick_coalesce_queue_threshold,
+                    strategy_tick_coalesce_min_decision_interval_seconds=(
+                        self.app_config.strategy_tick_coalesce_min_decision_interval_seconds
+                    ),
+                    strategy_tick_coalesce_max_drain=self.app_config.strategy_tick_coalesce_max_drain,
                 )
             )
             execution_task = asyncio.ensure_future(

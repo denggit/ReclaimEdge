@@ -29,6 +29,10 @@ _C01_ENV_KEYS = [
     "SYMBOL_WORKER_HEARTBEAT_ENABLED",
     "SYMBOL_WORKER_HEARTBEAT_INTERVAL_SECONDS",
     "SYMBOL_WORKER_HEARTBEAT_STALE_AFTER_SECONDS",
+    "STRATEGY_TICK_COALESCE_ENABLED",
+    "STRATEGY_TICK_COALESCE_QUEUE_THRESHOLD",
+    "STRATEGY_TICK_COALESCE_MIN_DECISION_INTERVAL_SECONDS",
+    "STRATEGY_TICK_COALESCE_MAX_DRAIN",
 ]
 
 
@@ -74,6 +78,10 @@ def test_from_env_defaults() -> None:
     assert cfg.heartbeat.enabled is True
     assert cfg.heartbeat.interval_seconds == 10.0
     assert cfg.heartbeat.stale_after_seconds == 30.0
+    assert cfg.strategy_tick_coalesce_enabled is True
+    assert cfg.strategy_tick_coalesce_queue_threshold == 50
+    assert cfg.strategy_tick_coalesce_min_decision_interval_seconds == 0.1
+    assert cfg.strategy_tick_coalesce_max_drain == 5000
 
 
 # ---------------------------------------------------------------------------
@@ -100,6 +108,10 @@ def test_from_env_overrides() -> None:
     os.environ["SYMBOL_WORKER_HEARTBEAT_ENABLED"] = "false"
     os.environ["SYMBOL_WORKER_HEARTBEAT_INTERVAL_SECONDS"] = "2.5"
     os.environ["SYMBOL_WORKER_HEARTBEAT_STALE_AFTER_SECONDS"] = "9.5"
+    os.environ["STRATEGY_TICK_COALESCE_ENABLED"] = "false"
+    os.environ["STRATEGY_TICK_COALESCE_QUEUE_THRESHOLD"] = "75"
+    os.environ["STRATEGY_TICK_COALESCE_MIN_DECISION_INTERVAL_SECONDS"] = "0.25"
+    os.environ["STRATEGY_TICK_COALESCE_MAX_DRAIN"] = "1234"
 
     try:
         cfg = LiveAppConfig.from_env()
@@ -129,6 +141,10 @@ def test_from_env_overrides() -> None:
         assert cfg.heartbeat.enabled is False
         assert cfg.heartbeat.interval_seconds == 2.5
         assert cfg.heartbeat.stale_after_seconds == 9.5
+        assert cfg.strategy_tick_coalesce_enabled is False
+        assert cfg.strategy_tick_coalesce_queue_threshold == 75
+        assert cfg.strategy_tick_coalesce_min_decision_interval_seconds == 0.25
+        assert cfg.strategy_tick_coalesce_max_drain == 1234
     finally:
         _clear_c01_env()
 
@@ -267,3 +283,36 @@ def test_heartbeat_config_is_frozen() -> None:
 
     with pytest.raises(Exception):
         cfg.stale_after_seconds = 99.0  # type: ignore[misc]
+
+
+def test_invalid_strategy_tick_coalesce_queue_threshold_raises() -> None:
+    _clear_c01_env()
+    os.environ["STRATEGY_TICK_COALESCE_QUEUE_THRESHOLD"] = "0"
+    try:
+        with pytest.raises(ValueError, match="strategy_tick_coalesce_queue_threshold must be >= 1"):
+            LiveAppConfig.from_env()
+    finally:
+        _clear_c01_env()
+
+
+def test_invalid_strategy_tick_coalesce_min_interval_raises() -> None:
+    _clear_c01_env()
+    os.environ["STRATEGY_TICK_COALESCE_MIN_DECISION_INTERVAL_SECONDS"] = "0"
+    try:
+        with pytest.raises(
+            ValueError,
+            match="strategy_tick_coalesce_min_decision_interval_seconds must be > 0",
+        ):
+            LiveAppConfig.from_env()
+    finally:
+        _clear_c01_env()
+
+
+def test_invalid_strategy_tick_coalesce_max_drain_raises() -> None:
+    _clear_c01_env()
+    os.environ["STRATEGY_TICK_COALESCE_MAX_DRAIN"] = "0"
+    try:
+        with pytest.raises(ValueError, match="strategy_tick_coalesce_max_drain must be >= 1"):
+            LiveAppConfig.from_env()
+    finally:
+        _clear_c01_env()
