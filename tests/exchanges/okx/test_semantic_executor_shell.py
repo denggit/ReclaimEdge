@@ -27,7 +27,16 @@ from src.exchanges.semantic_models import (
 
 
 class FakeBroker:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        exchange: ExchangeName = ExchangeName.OKX,
+        result_exchange: ExchangeName | None = None,
+        result_symbol: str | None = None,
+    ) -> None:
+        self._exchange = exchange
+        self._result_exchange = result_exchange
+        self._result_symbol = result_symbol
         self.place_order_requests: list[BrokerOrderRequest] = []
         self.cancel_order_calls: list[tuple[str, str]] = []
         self.fetch_open_orders_calls: list[str] = []
@@ -38,7 +47,7 @@ class FakeBroker:
 
     @property
     def exchange(self) -> ExchangeName:
-        return ExchangeName.OKX
+        return self._exchange
 
     @property
     def capabilities(self):
@@ -63,8 +72,8 @@ class FakeBroker:
     async def place_order(self, request: BrokerOrderRequest) -> BrokerOrderResult:
         self.place_order_requests.append(request)
         return BrokerOrderResult(
-            exchange=ExchangeName.OKX,
-            symbol=request.symbol,
+            exchange=self._result_exchange or request.exchange,
+            symbol=self._result_symbol or request.symbol,
             order_id="order-1",
             client_order_id=request.client_order_id,
             status=BrokerOrderStatus.NEW,
@@ -81,6 +90,15 @@ class FakeBroker:
         self.closed = True
 
 
+def test_constructor_rejects_non_okx_broker():
+    broker = FakeBroker(exchange=ExchangeName.BINANCE)
+
+    with pytest.raises(ExchangeError) as exc_info:
+        OkxBrokerSemanticExecutor(broker)
+
+    assert exc_info.value.detail.kind == ExchangeErrorKind.UNSUPPORTED_OPERATION
+
+
 @pytest.mark.asyncio
 async def test_execute_open_position_calls_broker_place_market_order():
     broker = FakeBroker()
@@ -94,6 +112,22 @@ async def test_execute_open_position_calls_broker_place_market_order():
     assert broker.place_order_requests[0].reduce_only is False
     assert result.ok is True
     assert result.action == BrokerSemanticAction.OPEN_POSITION
+
+
+@pytest.mark.asyncio
+async def test_execute_rejects_request_exchange_mismatch():
+    broker = FakeBroker()
+    executor = OkxBrokerSemanticExecutor(broker)
+    request = _semantic_request(
+        exchange=ExchangeName.BINANCE,
+        action=BrokerSemanticAction.OPEN_POSITION,
+    )
+
+    with pytest.raises(ExchangeError) as exc_info:
+        await executor.execute_semantic_order(request)
+
+    assert exc_info.value.detail.kind == ExchangeErrorKind.UNSUPPORTED_OPERATION
+    assert broker.place_order_requests == []
 
 
 @pytest.mark.asyncio
@@ -128,6 +162,48 @@ async def test_cancel_semantic_order_calls_broker_cancel_order():
 
 
 @pytest.mark.asyncio
+async def test_cancel_semantic_order_rejects_exchange_mismatch():
+    broker = FakeBroker()
+    executor = OkxBrokerSemanticExecutor(broker)
+    request = _semantic_request(
+        exchange=ExchangeName.BINANCE,
+        action=BrokerSemanticAction.CANCEL_ORDER,
+    )
+
+    with pytest.raises(ExchangeError) as exc_info:
+        await executor.cancel_semantic_order(request, "order-1")
+
+    assert exc_info.value.detail.kind == ExchangeErrorKind.UNSUPPORTED_OPERATION
+    assert broker.cancel_order_calls == []
+
+
+@pytest.mark.asyncio
+async def test_cancel_semantic_order_rejects_non_cancel_action():
+    broker = FakeBroker()
+    executor = OkxBrokerSemanticExecutor(broker)
+    request = _semantic_request(action=BrokerSemanticAction.OPEN_POSITION)
+
+    with pytest.raises(ExchangeError) as exc_info:
+        await executor.cancel_semantic_order(request, "order-1")
+
+    assert exc_info.value.detail.kind == ExchangeErrorKind.UNSUPPORTED_OPERATION
+    assert broker.cancel_order_calls == []
+
+
+@pytest.mark.asyncio
+async def test_cancel_semantic_order_allows_sidecar_cancel():
+    broker = FakeBroker()
+    executor = OkxBrokerSemanticExecutor(broker)
+    request = _semantic_request(action=BrokerSemanticAction.SIDECAR_CANCEL)
+
+    result = await executor.cancel_semantic_order(request, "order-1")
+
+    assert broker.cancel_order_calls == [("ETH-USDT-SWAP", "order-1")]
+    assert result.ok is True
+    assert result.action == BrokerSemanticAction.SIDECAR_CANCEL
+
+
+@pytest.mark.asyncio
 async def test_fetch_semantic_orders_calls_fetch_open_orders():
     broker = FakeBroker()
     executor = OkxBrokerSemanticExecutor(broker)
@@ -141,6 +217,23 @@ async def test_fetch_semantic_orders_calls_fetch_open_orders():
 
     assert orders == tuple(broker.open_orders)
     assert broker.fetch_open_orders_calls == ["ETH-USDT-SWAP"]
+
+
+@pytest.mark.asyncio
+async def test_fetch_semantic_orders_rejects_query_exchange_mismatch():
+    broker = FakeBroker()
+    executor = OkxBrokerSemanticExecutor(broker)
+    query = BrokerSemanticOrderQuery(
+        exchange=ExchangeName.BINANCE,
+        symbol="ETH-USDT-SWAP",
+        include_algo=False,
+    )
+
+    with pytest.raises(ExchangeError) as exc_info:
+        await executor.fetch_semantic_orders(query)
+
+    assert exc_info.value.detail.kind == ExchangeErrorKind.UNSUPPORTED_OPERATION
+    assert broker.fetch_open_orders_calls == []
 
 
 @pytest.mark.asyncio
@@ -170,6 +263,32 @@ async def test_unsupported_semantic_action_raises_exchange_error():
 
 
 @pytest.mark.asyncio
+async def test_execute_rejects_broker_result_exchange_mismatch():
+    broker = FakeBroker(result_exchange=ExchangeName.BINANCE)
+    executor = OkxBrokerSemanticExecutor(broker)
+    request = _semantic_request(action=BrokerSemanticAction.OPEN_POSITION)
+
+    with pytest.raises(ExchangeError) as exc_info:
+        await executor.execute_semantic_order(request)
+
+    assert exc_info.value.detail.kind == ExchangeErrorKind.UNSUPPORTED_OPERATION
+    assert len(broker.place_order_requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_execute_rejects_broker_result_symbol_mismatch():
+    broker = FakeBroker(result_symbol="BTC-USDT-SWAP")
+    executor = OkxBrokerSemanticExecutor(broker)
+    request = _semantic_request(action=BrokerSemanticAction.OPEN_POSITION)
+
+    with pytest.raises(ExchangeError) as exc_info:
+        await executor.execute_semantic_order(request)
+
+    assert exc_info.value.detail.kind == ExchangeErrorKind.INVALID_SYMBOL
+    assert len(broker.place_order_requests) == 1
+
+
+@pytest.mark.asyncio
 async def test_executor_does_not_require_trader():
     broker = FakeBroker()
     executor = OkxBrokerSemanticExecutor(broker)
@@ -189,6 +308,7 @@ def test_okx_semantic_executor_shell_has_no_live_or_raw_endpoint_logic():
 
 def _semantic_request(
     *,
+    exchange: ExchangeName = ExchangeName.OKX,
     action: BrokerSemanticAction,
     side: BrokerOrderSide = BrokerOrderSide.BUY,
     position_side: BrokerPositionSide = BrokerPositionSide.LONG,
@@ -196,7 +316,7 @@ def _semantic_request(
     price: Decimal | None = None,
 ) -> BrokerSemanticRequest:
     return BrokerSemanticRequest(
-        exchange=ExchangeName.OKX,
+        exchange=exchange,
         symbol="ETH-USDT-SWAP",
         action=action,
         side=side,
