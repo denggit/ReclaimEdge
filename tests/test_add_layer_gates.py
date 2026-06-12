@@ -319,20 +319,6 @@ class AddLayerGateTest(unittest.TestCase):
         self.assertEqual(result.intent_type, "ADD_LONG")
         self.assertEqual(result.layer_index, 3)
 
-    def test_legacy_interval_bypass_config_does_not_control_dynamic_bypass(self) -> None:
-        strat = strategy(add_min_interval_bypass_gap_pct=0.003)
-        strat.state = long_state(layers=10, last_order_ts_ms=NOW_MS - 5 * 60 * 1000)
-        # L11 linear gap = 0.012, bypass = 0.024. price=99.20 → gap=0.008 < 0.024 → blocked
-        blocked = strat._maybe_open_or_add_long(99.20, NOW_MS, boll(), cvd())
-        self.assertIsNone(blocked)
-
-        strat.state = long_state(layers=10, last_order_ts_ms=NOW_MS - 5 * 60 * 1000)
-        # price=97.59 → gap=0.0241 >= 0.024 → allowed
-        allowed = strat._maybe_open_or_add_long(97.59, NOW_MS, boll(), cvd())
-        self.assertIsNotNone(allowed)
-        self.assertEqual(allowed.intent_type, "ADD_LONG")
-        self.assertEqual(allowed.layer_index, 11)
-
     def test_long_add_blocked_when_avg_improvement_below_0_12_pct(self) -> None:
         strat = strategy()
         strat.state = long_state(

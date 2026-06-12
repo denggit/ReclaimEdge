@@ -57,7 +57,6 @@ class BollCvdReclaimStrategyConfig:
     order_cooldown_seconds: int = 10
     first_add_block_seconds: int = 1800
     add_min_interval_seconds: int = 600
-    add_min_interval_bypass_gap_pct: float = 0.005
     add_freeze_chain_enabled: bool = True
     add_min_interval_bypass_multiplier: float = 2.0
     tp_update_interval_seconds: int = 900
@@ -188,7 +187,6 @@ class BollCvdReclaimStrategyConfig:
             order_cooldown_seconds=int(os.getenv("ORDER_COOLDOWN_SECONDS", "10")),
             first_add_block_seconds=int(os.getenv("FIRST_ADD_BLOCK_SECONDS", "1800")),
             add_min_interval_seconds=int(os.getenv("ADD_MIN_INTERVAL_SECONDS", "600")),
-            add_min_interval_bypass_gap_pct=float(os.getenv("ADD_MIN_INTERVAL_BYPASS_GAP_PCT", "0.005")),
             add_freeze_chain_enabled=_env_bool("ADD_FREEZE_CHAIN_ENABLED", True),
             add_min_interval_bypass_multiplier=float(os.getenv("ADD_MIN_INTERVAL_BYPASS_MULTIPLIER", "2")),
             tp_update_interval_seconds=int(os.getenv("TP_UPDATE_INTERVAL_SECONDS", "900")),

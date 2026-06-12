@@ -309,7 +309,7 @@ L2: 0.3%, L3: 0.4%, L4: 0.5%, ... (linear, no upper bound)
 For short:
 
 ```text
-current_price >= last_entry_price * (1 + add_layer_gap_pct)
+current_price >= last_entry_price * (1 + gap_pct)
 AND short setup conditions are valid again
 ```
 
