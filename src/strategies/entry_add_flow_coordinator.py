@@ -16,6 +16,7 @@ from src.strategies.middle_bucket_split_apply import (
     apply_middle_runner_bucket_split,
     apply_three_stage_middle_bucket_split,
 )
+from src.strategies.tp_lifecycle import recover_pre_tp1_degrade_stage_after_add
 from src.utils.log import get_logger
 
 if TYPE_CHECKING:
@@ -291,6 +292,11 @@ class EntryAddFlowCoordinator:
             strategy.state.last_add_skip_log_ts_ms = 0
         strategy.state.side = side
         strategy._update_position_cost(price, size.eth_qty)
+        if next_layer > 1:
+            recover_pre_tp1_degrade_stage_after_add(
+                state=strategy.state,
+                position_age_seconds=strategy._three_stage_pre_tp1_age_seconds(ts_ms),
+            )
         strategy.state.partial_tp_consumed = False
         strategy._reset_near_tp_state()
         strategy._reset_middle_runner_state()

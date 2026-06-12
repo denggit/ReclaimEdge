@@ -1,5 +1,6 @@
-/.env
+/.env.multicoin
 /logs/
 /mnt/
 /.claude/
 /.pytest_cache/
+/.env

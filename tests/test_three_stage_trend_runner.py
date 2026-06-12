@@ -1628,6 +1628,49 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
 
         self.assertIsNone(strat._three_stage_pre_tp1_degrade_target(100_000 + 21_601_000))
 
+    def test_post_tp1_middle_profit_fallback_does_not_refresh_pre_tp1_degrade_stage(self) -> None:
+        strat = strategy(breakeven_fee_buffer_pct=0.0, tp_min_net_profit_pct=0.002)
+        strat.state = StrategyPositionState(
+            side="LONG",
+            layers=1,
+            avg_entry_price=100.0,
+            net_remaining_breakeven_price=100.0,
+            tp_plan="THREE_STAGE_RUNNER",
+            three_stage_tp1_consumed=True,
+            partial_tp_consumed=True,
+            three_stage_pre_tp1_degrade_stage=None,
+        )
+
+        strat._fallback_to_single_outer_due_middle_profit_insufficient(
+            side="LONG",
+            boll=boll(middle=100.1, upper=110.0, lower=90.0),
+            ts_ms=21_601_000,
+            reason="startup_force_tp_reconcile",
+        )
+
+        self.assertIsNone(strat.state.three_stage_pre_tp1_degrade_stage)
+
+    def test_runner_active_middle_profit_fallback_does_not_refresh_pre_tp1_degrade_stage(self) -> None:
+        strat = strategy(breakeven_fee_buffer_pct=0.0, tp_min_net_profit_pct=0.002)
+        strat.state = StrategyPositionState(
+            side="LONG",
+            layers=1,
+            avg_entry_price=100.0,
+            net_remaining_breakeven_price=100.0,
+            tp_plan="THREE_STAGE_RUNNER",
+            trend_runner_active=True,
+            three_stage_pre_tp1_degrade_stage=None,
+        )
+
+        strat._fallback_to_single_outer_due_middle_profit_insufficient(
+            side="LONG",
+            boll=boll(middle=100.1, upper=110.0, lower=90.0),
+            ts_ms=21_601_000,
+            reason="startup_force_tp_reconcile",
+        )
+
+        self.assertIsNone(strat.state.three_stage_pre_tp1_degrade_stage)
+
     def test_single_degrade_uses_outer_when_middle_profit_insufficient(self) -> None:
         long_strat = strategy(breakeven_fee_buffer_pct=0.0, tp_min_net_profit_pct=0.002)
         long_strat.state = StrategyPositionState(side="LONG", avg_entry_price=100.0,

@@ -408,6 +408,77 @@ class EntryAddFlowCoordinatorSuccessfulLongAddTest(unittest.TestCase):
         self.assertIn("补仓后均价改善", intent.reason)
         self.assertIn("新出轨深度达标后低点附近再次跌不动", intent.reason)
 
+    def _strategy_with_degraded_three_stage(self, first_ts: int) -> BollCvdReclaimStrategy:
+        strat = _strategy(
+            three_stage_runner_enabled=True,
+            split_tp_enabled=False,
+            breakeven_fee_buffer_pct=0.0,
+            tp_min_net_profit_pct=0.001,
+        )
+        strat.state = StrategyPositionState(
+            side="LONG",
+            layers=1,
+            last_entry_price=100.0,
+            first_entry_ts_ms=first_ts,
+            last_order_ts_ms=first_ts,
+            total_entry_qty=1.0,
+            total_entry_notional=100.0,
+            position_cost_entry_notional=100.0,
+            position_cost_remaining_qty=1.0,
+            avg_entry_price=100.0,
+            net_remaining_breakeven_price=100.0,
+            tp_price=110.0,
+            tp_mode="UPPER",
+            tp_plan="SINGLE",
+            three_stage_pre_tp1_degrade_stage="SINGLE",
+        )
+        return strat
+
+    def test_add_replan_before_3h_recovers_three_stage_from_sticky_single(self) -> None:
+        first_ts = 100_000
+        strat = self._strategy_with_degraded_three_stage(first_ts)
+        boll = _boll(middle=101.0, upper=112.0, lower=90.0)
+        cvd = _cvd()
+
+        intent = _coordinator(strat).open_position(
+            "LONG", "ADD_LONG", 90.0, first_ts + 2 * 60 * 60 * 1000, boll, cvd, "base"
+        )
+
+        self.assertIsNotNone(intent)
+        self.assertIsNone(strat.state.three_stage_pre_tp1_degrade_stage)
+        self.assertEqual(strat.state.tp_plan, "THREE_STAGE_RUNNER")
+        self.assertEqual(intent.tp_plan, "THREE_STAGE_RUNNER")
+
+    def test_add_replan_3h_to_6h_caps_recovery_at_middle_runner(self) -> None:
+        first_ts = 100_000
+        strat = self._strategy_with_degraded_three_stage(first_ts)
+        boll = _boll(middle=101.0, upper=112.0, lower=90.0)
+        cvd = _cvd()
+
+        intent = _coordinator(strat).open_position(
+            "LONG", "ADD_LONG", 90.0, first_ts + 4 * 60 * 60 * 1000, boll, cvd, "base"
+        )
+
+        self.assertIsNotNone(intent)
+        self.assertEqual(strat.state.three_stage_pre_tp1_degrade_stage, "MIDDLE_RUNNER")
+        self.assertEqual(strat.state.tp_plan, "MIDDLE_RUNNER")
+        self.assertNotEqual(intent.tp_plan, "THREE_STAGE_RUNNER")
+
+    def test_add_replan_after_6h_remains_single(self) -> None:
+        first_ts = 100_000
+        strat = self._strategy_with_degraded_three_stage(first_ts)
+        strat.state.three_stage_pre_tp1_degrade_stage = None
+        boll = _boll(middle=101.0, upper=112.0, lower=90.0)
+        cvd = _cvd()
+
+        intent = _coordinator(strat).open_position(
+            "LONG", "ADD_LONG", 90.0, first_ts + 7 * 60 * 60 * 1000, boll, cvd, "base"
+        )
+
+        self.assertIsNotNone(intent)
+        self.assertEqual(strat.state.three_stage_pre_tp1_degrade_stage, "SINGLE")
+        self.assertEqual(strat.state.tp_plan, "SINGLE")
+
 
 # ── successful SHORT add ────────────────────────────────────────────────
 

@@ -14,6 +14,7 @@ from src.strategies import near_tp_reduce as near_tp_helpers
 from src.strategies import three_stage_runner as three_stage_helpers
 from src.strategies import tp_plan_selector
 from src.strategies import trend_runner as trend_runner_helpers
+from src.strategies.tp_lifecycle import is_pre_tp1_lifecycle
 from src.utils.log import get_logger
 
 logger = get_logger(__name__)
@@ -927,15 +928,7 @@ class BollCvdReclaimStrategy:
     def _three_stage_pre_tp1_degrade_target(self, ts_ms: int) -> str | None:
         if not self.config.three_stage_pre_tp1_degrade_enabled:
             return None
-        if self.state.three_stage_tp1_consumed:
-            return None
-        if self.state.three_stage_tp2_consumed:
-            return None
-        if self.state.trend_runner_active:
-            return None
-        if self.state.middle_runner_active:
-            return None
-        if self.state.partial_tp_consumed:
+        if not is_pre_tp1_lifecycle(self.state):
             return None
 
         age = self._three_stage_pre_tp1_age_seconds(ts_ms)
@@ -961,6 +954,7 @@ class BollCvdReclaimStrategy:
         old_tp2 = self.state.three_stage_tp2_price
         old_tp_plan = self.state.tp_plan
         age_seconds = self._three_stage_pre_tp1_age_seconds(ts_ms)
+        can_refresh_degrade_stage = is_pre_tp1_lifecycle(self.state)
         final_tp, final_src = self._select_valid_tp_outer_with_profit_fallback(self.state.side, boll)
         first_tp, _first_src = self._select_valid_tp_middle_with_profit_fallback(self.state.side, boll)
 
@@ -997,8 +991,15 @@ class BollCvdReclaimStrategy:
         self.state.tp_mode = "UPPER" if self.state.side == "LONG" else "LOWER"
         self.state.partial_tp_price = first_tp
         self.state.partial_tp_ratio = self.state.middle_runner_first_close_ratio
-        self.state.three_stage_pre_tp1_degrade_stage = "MIDDLE_RUNNER"
-        self.state.three_stage_pre_tp1_degraded_ts_ms = ts_ms
+        if can_refresh_degrade_stage:
+            self.state.three_stage_pre_tp1_degrade_stage = "MIDDLE_RUNNER"
+            self.state.three_stage_pre_tp1_degraded_ts_ms = ts_ms
+        else:
+            logger.info(
+                "PRE_TP1_DEGRADE_REFRESH_SKIPPED_POST_TP1 | target=MIDDLE_RUNNER side=%s age_seconds=%.1f",
+                self.state.side,
+                age_seconds,
+            )
         logger.warning(
             "THREE_STAGE_PRE_TP1_DEGRADED | from=%s to=MIDDLE_RUNNER side=%s age_seconds=%.1f old_tp1=%s old_tp2=%s new_first_tp=%.4f new_final_tp=%.4f first_entry_ts_ms=%s",
             old_tp_plan,
@@ -1017,6 +1018,7 @@ class BollCvdReclaimStrategy:
         old_plan = self.state.tp_plan
         tp_price, tp_mode = self._select_tp_price(self.state.side, boll)
         age_seconds = self._three_stage_pre_tp1_age_seconds(ts_ms)
+        can_refresh_degrade_stage = is_pre_tp1_lifecycle(self.state)
         self._reset_three_stage_runner_state()
         self._reset_middle_runner_state()
         self.state.tp_plan = "SINGLE"
@@ -1024,8 +1026,15 @@ class BollCvdReclaimStrategy:
         self.state.tp_mode = tp_mode
         self.state.partial_tp_price = None
         self.state.partial_tp_ratio = 0.0
-        self.state.three_stage_pre_tp1_degrade_stage = "SINGLE"
-        self.state.three_stage_pre_tp1_degraded_ts_ms = ts_ms
+        if can_refresh_degrade_stage:
+            self.state.three_stage_pre_tp1_degrade_stage = "SINGLE"
+            self.state.three_stage_pre_tp1_degraded_ts_ms = ts_ms
+        else:
+            logger.info(
+                "PRE_TP1_DEGRADE_REFRESH_SKIPPED_POST_TP1 | target=SINGLE side=%s age_seconds=%.1f",
+                self.state.side,
+                age_seconds,
+            )
         logger.warning(
             "THREE_STAGE_PRE_TP1_DEGRADED | from=%s to=SINGLE side=%s age_seconds=%.1f tp_price=%.4f tp_mode=%s middle=%.4f upper=%.4f lower=%.4f first_entry_ts_ms=%s",
             old_plan,
@@ -2157,6 +2166,7 @@ class BollCvdReclaimStrategy:
         del reason
         outer, _outer_src = self._select_valid_tp_outer_with_profit_fallback(side, boll)
         tp_mode: TpMode = "UPPER" if side == "LONG" else "LOWER"
+        can_refresh_degrade_stage = is_pre_tp1_lifecycle(self.state)
         self._reset_three_stage_runner_state()
         self._reset_middle_runner_state()
         self.state.tp_plan = "SINGLE"
@@ -2164,8 +2174,14 @@ class BollCvdReclaimStrategy:
         self.state.tp_mode = tp_mode
         self.state.partial_tp_price = None
         self.state.partial_tp_ratio = 0.0
-        self.state.three_stage_pre_tp1_degrade_stage = "SINGLE"
-        self.state.three_stage_pre_tp1_degraded_ts_ms = ts_ms
+        if can_refresh_degrade_stage:
+            self.state.three_stage_pre_tp1_degrade_stage = "SINGLE"
+            self.state.three_stage_pre_tp1_degraded_ts_ms = ts_ms
+        else:
+            logger.info(
+                "PRE_TP1_DEGRADE_REFRESH_SKIPPED_POST_TP1 | target=SINGLE side=%s reason=middle_profit_insufficient",
+                side,
+            )
         return outer, tp_mode
 
     def _select_tp_outer(self, side: PositionSide, boll: BollSnapshot) -> tuple[float, str]:
