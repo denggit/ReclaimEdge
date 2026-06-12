@@ -23,7 +23,26 @@ from src.exchanges.semantic_models import (
 
 
 # ---------------------------------------------------------------------------
-# Side mapping
+# Internal — side normalization (strict)
+# ---------------------------------------------------------------------------
+
+
+def _normalize_position_side(position_side: str) -> str:
+    """Normalize *position_side* to ``"LONG"`` or ``"SHORT"``.
+
+    Raises ``ValueError`` for unrecognised values so that silent
+    mis-mapping cannot slip into a live trade.
+    """
+    side = str(position_side).upper().strip()
+    if side not in {"LONG", "SHORT"}:
+        raise ValueError(
+            f"Unsupported position side for broker semantic bridge: {position_side!r}"
+        )
+    return side
+
+
+# ---------------------------------------------------------------------------
+# Public side mapping
 # ---------------------------------------------------------------------------
 
 
@@ -35,7 +54,10 @@ def close_order_side(position_side: str) -> BrokerOrderSide:
     >>> close_order_side("SHORT")
     <BrokerOrderSide.BUY: 'BUY'>
     """
-    return BrokerOrderSide.SELL if str(position_side).upper() == "LONG" else BrokerOrderSide.BUY
+    side = _normalize_position_side(position_side)
+    if side == "LONG":
+        return BrokerOrderSide.SELL
+    return BrokerOrderSide.BUY
 
 
 def entry_order_side(position_side: str) -> BrokerOrderSide:
@@ -46,7 +68,10 @@ def entry_order_side(position_side: str) -> BrokerOrderSide:
     >>> entry_order_side("SHORT")
     <BrokerOrderSide.SELL: 'SELL'>
     """
-    return BrokerOrderSide.BUY if str(position_side).upper() == "LONG" else BrokerOrderSide.SELL
+    side = _normalize_position_side(position_side)
+    if side == "LONG":
+        return BrokerOrderSide.BUY
+    return BrokerOrderSide.SELL
 
 
 def broker_position_side(position_side: str) -> BrokerPositionSide:
@@ -57,7 +82,38 @@ def broker_position_side(position_side: str) -> BrokerPositionSide:
     >>> broker_position_side("SHORT")
     <BrokerPositionSide.SHORT: 'SHORT'>
     """
-    return BrokerPositionSide.LONG if str(position_side).upper() == "LONG" else BrokerPositionSide.SHORT
+    side = _normalize_position_side(position_side)
+    if side == "LONG":
+        return BrokerPositionSide.LONG
+    return BrokerPositionSide.SHORT
+
+
+# ---------------------------------------------------------------------------
+# TP role classifier
+# ---------------------------------------------------------------------------
+
+
+def semantic_tp_role(label: str | None) -> BrokerSemanticOrderRole:
+    """Classify a TP order *label* into the closest semantic role.
+
+    >>> semantic_tp_role("tp1")
+    <BrokerSemanticOrderRole.TP1: 'TP1'>
+    >>> semantic_tp_role("runner")
+    <BrokerSemanticOrderRole.RUNNER_TP: 'RUNNER_TP'>
+    >>> semantic_tp_role("unknown")
+    <BrokerSemanticOrderRole.CORE_TP: 'CORE_TP'>
+    """
+    normalized = str(label or "").lower()
+    if normalized in {
+        "tp1", "tp1_middle", "tp1_middle_fast", "tp1_middle_slow",
+        "middle", "middle_fast", "middle_slow",
+    }:
+        return BrokerSemanticOrderRole.TP1
+    if normalized in {"tp2", "tp2_outer"}:
+        return BrokerSemanticOrderRole.TP2
+    if normalized == "runner":
+        return BrokerSemanticOrderRole.RUNNER_TP
+    return BrokerSemanticOrderRole.CORE_TP
 
 
 # ---------------------------------------------------------------------------
@@ -68,11 +124,17 @@ def broker_position_side(position_side: str) -> BrokerPositionSide:
 def get_broker_semantic_executor(trader: object) -> object | None:
     """Return the semantic executor attached to *trader*, or ``None``.
 
-    Does **not** create a new executor — only reads the attribute.
+    Checks both the ``broker_semantic_executor`` property (which may
+    lazily initialise the executor) and the ``_broker_semantic_executor``
+    private attribute.
+
     Callers should fall back to the legacy OKX body/request path when
     ``None`` is returned.
     """
-    return getattr(trader, "broker_semantic_executor", None)
+    executor = getattr(trader, "broker_semantic_executor", None)
+    if executor is not None:
+        return executor
+    return getattr(trader, "_broker_semantic_executor", None)
 
 
 # ---------------------------------------------------------------------------
@@ -144,10 +206,14 @@ def build_market_exit_request(
     context: str = "generic",
     exchange: ExchangeName = ExchangeName.OKX,
 ) -> BrokerSemanticRequest:
-    """Build a ``MARKET_EXIT`` or ``MARKET_EXIT_RUNNER`` semantic request."""
+    """Build a ``MARKET_EXIT`` or ``MARKET_EXIT_RUNNER`` semantic request.
+
+    The action is ``MARKET_EXIT_RUNNER`` when *context* contains
+    ``"runner"`` (case-insensitive), otherwise ``MARKET_EXIT``.
+    """
     action = (
         BrokerSemanticAction.MARKET_EXIT_RUNNER
-        if "runner" in str(context)
+        if "runner" in str(context).lower()
         else BrokerSemanticAction.MARKET_EXIT
     )
     return BrokerSemanticRequest(

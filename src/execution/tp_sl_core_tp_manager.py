@@ -6,6 +6,12 @@ from typing import TYPE_CHECKING, Any
 
 from src.execution import middle_bucket_split_size as _split_size
 from src.execution import order_specs
+from src.execution.broker_semantic_helpers import (
+    broker_position_side,
+    close_order_side,
+    get_broker_semantic_executor,
+    semantic_tp_role,
+)
 from src.execution.trader import LiveTradeResult
 from src.exchanges.models import BrokerOrderSide, BrokerPositionSide, ExchangeName
 from src.exchanges.semantic_models import BrokerSemanticAction, BrokerSemanticOrderRole, BrokerSemanticRequest
@@ -1007,16 +1013,16 @@ class CoreTakeProfitManager:
         t = self.trader
         placed_order_ids: list[str] = []
         for label, contracts, price in specs:
-            semantic_executor = getattr(t, "broker_semantic_executor", None)
+            semantic_executor = get_broker_semantic_executor(t)
             if semantic_executor is not None:
                 result = await semantic_executor.execute(
                     BrokerSemanticRequest(
                         exchange=ExchangeName.OKX,
                         symbol=t.symbol,
                         action=BrokerSemanticAction.PLACE_REDUCE_ONLY_TP,
-                        role=_semantic_tp_role(label),
-                        side=_close_order_side(intent.side),
-                        position_side=_position_side(intent.side),
+                        role=semantic_tp_role(label),
+                        side=close_order_side(intent.side),
+                        position_side=broker_position_side(intent.side),
                         quantity=contracts,
                         price=Decimal(t.price_to_str(price)),
                         reduce_only=True,
@@ -1068,22 +1074,3 @@ class CoreTakeProfitManager:
         if len(specs) == 1:
             return t.price_to_str(specs[0][2])
         return ",".join(f"{label}:{t.price_to_str(price)}" for label, _contracts, price in specs)
-
-
-def _position_side(side: str) -> BrokerPositionSide:
-    return BrokerPositionSide.LONG if str(side).upper() == "LONG" else BrokerPositionSide.SHORT
-
-
-def _close_order_side(side: str) -> BrokerOrderSide:
-    return BrokerOrderSide.SELL if str(side).upper() == "LONG" else BrokerOrderSide.BUY
-
-
-def _semantic_tp_role(label: str) -> BrokerSemanticOrderRole:
-    normalized = str(label or "").lower()
-    if normalized in {"tp1", "tp1_middle", "tp1_middle_fast", "tp1_middle_slow", "middle", "middle_fast", "middle_slow"}:
-        return BrokerSemanticOrderRole.TP1
-    if normalized in {"tp2", "tp2_outer"}:
-        return BrokerSemanticOrderRole.TP2
-    if normalized == "runner":
-        return BrokerSemanticOrderRole.RUNNER_TP
-    return BrokerSemanticOrderRole.CORE_TP

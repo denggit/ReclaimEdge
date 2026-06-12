@@ -5,6 +5,11 @@ from dataclasses import replace
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
+from src.execution.broker_semantic_helpers import (
+    broker_position_side,
+    close_order_side,
+    get_broker_semantic_executor,
+)
 from src.execution.trader import LiveTradeResult, PositionSnapshot
 from src.exchanges.models import BrokerOrderSide, BrokerPositionSide, ExchangeName
 from src.exchanges.semantic_models import BrokerSemanticAction, BrokerSemanticOrderRole, BrokerSemanticRequest
@@ -51,7 +56,7 @@ class NearTpExecutionManager:
                 contracts_before=t.decimal_to_str(contracts_before),
             )
 
-        semantic_executor = getattr(t, "broker_semantic_executor", None)
+        semantic_executor = get_broker_semantic_executor(t)
         if semantic_executor is not None:
             result = await semantic_executor.execute(
                 BrokerSemanticRequest(
@@ -59,8 +64,8 @@ class NearTpExecutionManager:
                     symbol=t.symbol,
                     action=BrokerSemanticAction.MARKET_EXIT,
                     role=BrokerSemanticOrderRole.MARKET_EXIT,
-                    side=_close_order_side(intent.side),
-                    position_side=_position_side(intent.side),
+                    side=close_order_side(intent.side),
+                    position_side=broker_position_side(intent.side),
                     quantity=reduce_contracts,
                     reduce_only=True,
                     close_position=False,
@@ -287,11 +292,3 @@ class NearTpExecutionManager:
             contracts_reduced="",
             contracts_after=t.decimal_to_str(contracts_after),
         )
-
-
-def _position_side(side: str) -> BrokerPositionSide:
-    return BrokerPositionSide.LONG if str(side).upper() == "LONG" else BrokerPositionSide.SHORT
-
-
-def _close_order_side(side: str) -> BrokerOrderSide:
-    return BrokerOrderSide.SELL if str(side).upper() == "LONG" else BrokerOrderSide.BUY

@@ -4,6 +4,11 @@ from decimal import Decimal
 from typing import Any, TYPE_CHECKING
 
 from src.execution import order_specs
+from src.execution.broker_semantic_helpers import (
+    broker_position_side,
+    close_order_side,
+    get_broker_semantic_executor,
+)
 from src.exchanges.models import BrokerOrderSide, BrokerPositionSide, ExchangeName
 from src.exchanges.semantic_models import BrokerSemanticAction, BrokerSemanticOrderRole, BrokerSemanticRequest
 from src.position_management.sidecar.model import sanitize_okx_client_order_id
@@ -32,7 +37,7 @@ class SidecarTpManager:
         sent_client_order_id = ""
         if client_order_id:
             sent_client_order_id = sanitize_okx_client_order_id(client_order_id)
-        semantic_executor = getattr(t, "broker_semantic_executor", None)
+        semantic_executor = get_broker_semantic_executor(t)
         if semantic_executor is not None:
             result = await semantic_executor.execute(
                 BrokerSemanticRequest(
@@ -40,8 +45,8 @@ class SidecarTpManager:
                     symbol=t.symbol,
                     action=BrokerSemanticAction.SIDECAR_TP,
                     role=BrokerSemanticOrderRole.SIDECAR_TP,
-                    side=_close_order_side(side),
-                    position_side=_position_side(side),
+                    side=close_order_side(side),
+                    position_side=broker_position_side(side),
                     quantity=Decimal(str(contracts)),
                     price=Decimal(str(tp_price)),
                     reduce_only=True,
@@ -78,7 +83,7 @@ class SidecarTpManager:
         if not order_id:
             return True
         try:
-            semantic_executor = getattr(t, "broker_semantic_executor", None)
+            semantic_executor = get_broker_semantic_executor(t)
             if semantic_executor is not None:
                 await semantic_executor.execute(
                     BrokerSemanticRequest(
@@ -138,11 +143,3 @@ def _optional_float(value: Any) -> float | None:
         return float(value)
     except Exception:
         return None
-
-
-def _position_side(side: str) -> BrokerPositionSide:
-    return BrokerPositionSide.LONG if str(side).upper() == "LONG" else BrokerPositionSide.SHORT
-
-
-def _close_order_side(side: str) -> BrokerOrderSide:
-    return BrokerOrderSide.SELL if str(side).upper() == "LONG" else BrokerOrderSide.BUY

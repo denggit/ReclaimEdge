@@ -5,6 +5,11 @@ import os
 from decimal import Decimal
 from typing import Any, TYPE_CHECKING
 
+from src.execution.broker_semantic_helpers import (
+    broker_position_side,
+    close_order_side,
+    get_broker_semantic_executor,
+)
 from src.exchanges.models import BrokerOrderSide, BrokerPositionSide, ExchangeName
 from src.exchanges.semantic_models import BrokerSemanticAction, BrokerSemanticOrderRole, BrokerSemanticRequest
 from src.utils.log import get_logger
@@ -99,7 +104,7 @@ class ProtectiveStopManager:
         metadata: dict[str, Any],
     ) -> str:
         t = self.trader
-        semantic_executor = getattr(t, "broker_semantic_executor", None)
+        semantic_executor = get_broker_semantic_executor(t)
         if semantic_executor is not None:
             result = await semantic_executor.execute(
                 BrokerSemanticRequest(
@@ -107,8 +112,8 @@ class ProtectiveStopManager:
                     symbol=t.symbol,
                     action=BrokerSemanticAction.PLACE_PROTECTIVE_STOP,
                     role=role,
-                    side=_close_order_side(side),
-                    position_side=_position_side(side),
+                    side=close_order_side(side),
+                    position_side=broker_position_side(side),
                     quantity=contracts,
                     trigger_price=Decimal(t.price_to_str(stop_price)),
                     reduce_only=True,
@@ -269,11 +274,3 @@ class ProtectiveStopManager:
             return False
         price_tolerance = max(Decimal("0.01"), expected_stop.copy_abs() * Decimal("0.0001"))
         return abs(item_stop - expected_stop) <= price_tolerance
-
-
-def _position_side(side: str) -> BrokerPositionSide:
-    return BrokerPositionSide.LONG if str(side).upper() == "LONG" else BrokerPositionSide.SHORT
-
-
-def _close_order_side(side: str) -> BrokerOrderSide:
-    return BrokerOrderSide.SELL if str(side).upper() == "LONG" else BrokerOrderSide.BUY

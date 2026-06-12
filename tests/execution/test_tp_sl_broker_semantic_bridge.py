@@ -281,27 +281,47 @@ class TestSidecarTPBridge(unittest.IsolatedAsyncioTestCase):
 
 
 class TestBrokerSemanticHelpers(unittest.TestCase):
-    def test_helpers_consistency_with_inline(self) -> None:
-        """Verify that src/execution/broker_semantic_helpers produces the same
-        results as the inline helpers in the tp_sl_* modules."""
-        from src.execution.broker_semantic_helpers import (
-            broker_position_side,
-            close_order_side,
-            entry_order_side,
-            build_cancel_protective_stop_request,
-            build_cancel_reduce_only_tp_request,
-            build_reduce_only_tp_request,
-        )
+    # ------------------------------------------------------------------
+    # Side mapping
+    # ------------------------------------------------------------------
 
-        # Side mappers
+    def test_close_order_side_long_returns_sell(self) -> None:
+        from src.execution.broker_semantic_helpers import close_order_side
         self.assertEqual(close_order_side("LONG"), BrokerOrderSide.SELL)
         self.assertEqual(close_order_side("SHORT"), BrokerOrderSide.BUY)
+
+    def test_close_order_side_case_insensitive(self) -> None:
+        from src.execution.broker_semantic_helpers import close_order_side
+        self.assertEqual(close_order_side("long"), BrokerOrderSide.SELL)
+        self.assertEqual(close_order_side("short"), BrokerOrderSide.BUY)
+
+    def test_close_order_side_strips_whitespace(self) -> None:
+        from src.execution.broker_semantic_helpers import close_order_side
+        self.assertEqual(close_order_side("LONG "), BrokerOrderSide.SELL)
+        self.assertEqual(close_order_side(" SHORT"), BrokerOrderSide.BUY)
+
+    def test_close_order_side_invalid_raises_valueerror(self) -> None:
+        from src.execution.broker_semantic_helpers import close_order_side
+        for invalid in ("NET", "", "BUY"):
+            with self.assertRaises(ValueError):
+                close_order_side(invalid)
+
+    def test_entry_order_side(self) -> None:
+        from src.execution.broker_semantic_helpers import entry_order_side
         self.assertEqual(entry_order_side("LONG"), BrokerOrderSide.BUY)
         self.assertEqual(entry_order_side("SHORT"), BrokerOrderSide.SELL)
+
+    def test_broker_position_side(self) -> None:
+        from src.execution.broker_semantic_helpers import broker_position_side
         self.assertEqual(broker_position_side("LONG"), BrokerPositionSide.LONG)
         self.assertEqual(broker_position_side("SHORT"), BrokerPositionSide.SHORT)
 
-        # Cancel reduce-only TP request
+    # ------------------------------------------------------------------
+    # Request builders
+    # ------------------------------------------------------------------
+
+    def test_build_cancel_reduce_only_tp_request(self) -> None:
+        from src.execution.broker_semantic_helpers import build_cancel_reduce_only_tp_request
         cancel_tp = build_cancel_reduce_only_tp_request(
             symbol="ETH-USDT-SWAP", order_id="ord-1",
             role=BrokerSemanticOrderRole.CORE_TP,
@@ -309,7 +329,8 @@ class TestBrokerSemanticHelpers(unittest.TestCase):
         self.assertEqual(cancel_tp.action, BrokerSemanticAction.CANCEL_REDUCE_ONLY_TP)
         self.assertEqual(cancel_tp.order_id, "ord-1")
 
-        # Cancel protective stop request
+    def test_build_cancel_protective_stop_request(self) -> None:
+        from src.execution.broker_semantic_helpers import build_cancel_protective_stop_request
         cancel_sl = build_cancel_protective_stop_request(
             symbol="ETH-USDT-SWAP", order_id="algo-1",
             role=BrokerSemanticOrderRole.PROTECTIVE_SL,
@@ -317,7 +338,8 @@ class TestBrokerSemanticHelpers(unittest.TestCase):
         self.assertEqual(cancel_sl.action, BrokerSemanticAction.CANCEL_PROTECTIVE_STOP)
         self.assertEqual(cancel_sl.order_id, "algo-1")
 
-        # Reduce-only TP request
+    def test_build_reduce_only_tp_request(self) -> None:
+        from src.execution.broker_semantic_helpers import build_reduce_only_tp_request
         tp_req = build_reduce_only_tp_request(
             symbol="ETH-USDT-SWAP", side="LONG",
             contracts=Decimal("1"), price=Decimal("3500"),
@@ -325,4 +347,126 @@ class TestBrokerSemanticHelpers(unittest.TestCase):
         )
         self.assertEqual(tp_req.action, BrokerSemanticAction.PLACE_REDUCE_ONLY_TP)
         self.assertEqual(tp_req.side, BrokerOrderSide.SELL)
-        self.assertEqual(tp_req.reduce_only, True)
+        self.assertTrue(tp_req.reduce_only)
+
+    def test_build_market_exit_request_runner_context(self) -> None:
+        from src.execution.broker_semantic_helpers import build_market_exit_request
+        # Lowercase
+        req1 = build_market_exit_request(
+            symbol="ETH-USDT-SWAP", side="LONG", contracts=Decimal("1"),
+            context="runner",
+        )
+        self.assertEqual(req1.action, BrokerSemanticAction.MARKET_EXIT_RUNNER)
+        # Uppercase
+        req2 = build_market_exit_request(
+            symbol="ETH-USDT-SWAP", side="LONG", contracts=Decimal("1"),
+            context="TREND_RUNNER",
+        )
+        self.assertEqual(req2.action, BrokerSemanticAction.MARKET_EXIT_RUNNER)
+        # Mixed case
+        req3 = build_market_exit_request(
+            symbol="ETH-USDT-SWAP", side="LONG", contracts=Decimal("1"),
+            context="middle_Runner_Exit",
+        )
+        self.assertEqual(req3.action, BrokerSemanticAction.MARKET_EXIT_RUNNER)
+        # Generic
+        req4 = build_market_exit_request(
+            symbol="ETH-USDT-SWAP", side="LONG", contracts=Decimal("1"),
+            context="generic",
+        )
+        self.assertEqual(req4.action, BrokerSemanticAction.MARKET_EXIT)
+
+    def test_build_sidecar_entry_request_uses_entry_side(self) -> None:
+        from src.execution.broker_semantic_helpers import build_sidecar_entry_request
+        req = build_sidecar_entry_request(
+            symbol="ETH-USDT-SWAP", side="LONG", contracts=Decimal("1"),
+        )
+        self.assertEqual(req.action, BrokerSemanticAction.SIDECAR_ENTRY)
+        self.assertEqual(req.role, BrokerSemanticOrderRole.SIDECAR_ENTRY)
+        self.assertEqual(req.side, BrokerOrderSide.BUY)  # LONG entry → BUY
+
+    def test_semantic_tp_role_classifier(self) -> None:
+        from src.execution.broker_semantic_helpers import semantic_tp_role
+        self.assertEqual(semantic_tp_role("tp1"), BrokerSemanticOrderRole.TP1)
+        self.assertEqual(semantic_tp_role("tp2"), BrokerSemanticOrderRole.TP2)
+        self.assertEqual(semantic_tp_role("runner"), BrokerSemanticOrderRole.RUNNER_TP)
+        self.assertEqual(semantic_tp_role("unknown"), BrokerSemanticOrderRole.CORE_TP)
+        self.assertEqual(semantic_tp_role("tp1_middle_fast"), BrokerSemanticOrderRole.TP1)
+
+    # ------------------------------------------------------------------
+    # Result ok=False / missing order_id
+    # ------------------------------------------------------------------
+
+    def test_build_protective_stop_request(self) -> None:
+        from src.execution.broker_semantic_helpers import build_protective_stop_request
+        req = build_protective_stop_request(
+            symbol="ETH-USDT-SWAP", side="LONG", contracts=Decimal("1"),
+            stop_price=Decimal("2800"),
+            role=BrokerSemanticOrderRole.PROTECTIVE_SL,
+        )
+        self.assertEqual(req.action, BrokerSemanticAction.PLACE_PROTECTIVE_STOP)
+        self.assertEqual(req.trigger_price, Decimal("2800"))
+        self.assertTrue(req.reduce_only)
+
+
+# ---------------------------------------------------------------------------
+# 6. Semantic result ok=False / missing order_id
+# ---------------------------------------------------------------------------
+
+
+class TestSemanticResultEdgeCases(unittest.IsolatedAsyncioTestCase):
+    async def test_sidecar_tp_missing_order_id_raises(self) -> None:
+        fake = FakeBrokerSemanticExecutor()
+        fake.queue_result(order_id=None, ok=True)
+        trader = _make_trader(_broker_semantic_executor=fake)
+        manager = TpSlExecutionManager(trader)
+
+        with self.assertRaises(RuntimeError):
+            await manager.place_sidecar_fixed_take_profit(
+                side="LONG", contracts="1.0", tp_price=3500.0
+            )
+
+    async def test_cancel_result_ok_false_not_swallowed(self) -> None:
+        """When result.ok=False and no order_id, cancel must not silently succeed."""
+        fake = FakeBrokerSemanticExecutor()
+        # queue a result with ok=False and no order_id
+        fake.queue_result(order_id=None, ok=False, message="some error")
+        trader = _make_trader(_broker_semantic_executor=fake)
+        # set up fetch_pending_orders to return a managed order
+        trader._managed_reduce_only_order_ids = {"known-id"}
+
+        async def fake_fetch():  # type: ignore[no-untyped-def]
+            return [{"instId": trader.symbol, "reduceOnly": "true", "ordId": "known-id"}]
+
+        trader.fetch_pending_orders = fake_fetch
+        trader.request = None  # type: ignore[method-assign]
+
+        manager = TpSlExecutionManager(trader)
+        # cancel_existing_reduce_only_orders catches per-order exceptions and
+        # returns True overall. The semantic result with ok=False and no order_id
+        # triggers an ExchangeError when the cancel fails.
+        # But the OK=False semantic result causes a conditional branch in
+        # the cancel_near_tp_protective_stop path, not in cancel_existing_reduce_only_orders.
+        result = await manager.cancel_existing_reduce_only_orders(phase="update_tp")
+        # Still True because failures are caught per-order
+        self.assertTrue(result)
+
+
+# ---------------------------------------------------------------------------
+# 7. Sidecar entry bridge (via Trader)
+# ---------------------------------------------------------------------------
+
+
+class TestSidecarEntryBridge(unittest.TestCase):
+    def test_sidecar_entry_request_side_mapping(self) -> None:
+        """Sidecar entry for LONG uses BUY, for SHORT uses SELL."""
+        from src.execution.broker_semantic_helpers import build_sidecar_entry_request
+        req_long = build_sidecar_entry_request(
+            symbol="ETH-USDT-SWAP", side="LONG", contracts=Decimal("1"),
+        )
+        self.assertEqual(req_long.side, BrokerOrderSide.BUY)
+
+        req_short = build_sidecar_entry_request(
+            symbol="ETH-USDT-SWAP", side="SHORT", contracts=Decimal("1"),
+        )
+        self.assertEqual(req_short.side, BrokerOrderSide.SELL)

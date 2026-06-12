@@ -4,6 +4,11 @@ import asyncio
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
+from src.execution.broker_semantic_helpers import (
+    broker_position_side,
+    close_order_side,
+    get_broker_semantic_executor,
+)
 from src.exchanges.models import BrokerOrderSide, BrokerPositionSide, ExchangeName
 from src.exchanges.semantic_models import BrokerSemanticAction, BrokerSemanticOrderRole, BrokerSemanticRequest
 from src.utils.log import get_logger
@@ -68,7 +73,7 @@ class MarketExitManager:
                     )
                     return False, last_error
 
-                semantic_executor = getattr(t, "broker_semantic_executor", None)
+                semantic_executor = get_broker_semantic_executor(t)
                 if semantic_executor is not None:
                     result = await semantic_executor.execute(
                         BrokerSemanticRequest(
@@ -76,12 +81,12 @@ class MarketExitManager:
                             symbol=t.symbol,
                             action=(
                                 BrokerSemanticAction.MARKET_EXIT_RUNNER
-                                if "runner" in str(context)
+                                if "runner" in str(context).lower()
                                 else BrokerSemanticAction.MARKET_EXIT
                             ),
                             role=BrokerSemanticOrderRole.MARKET_EXIT,
-                            side=_close_order_side(side),
-                            position_side=_position_side(side),
+                            side=close_order_side(side),
+                            position_side=broker_position_side(side),
                             quantity=position.contracts,
                             reduce_only=True,
                             close_position=True,
@@ -184,11 +189,3 @@ class MarketExitManager:
 
     # Backward-compat alias — new code must call _cleanup_after_market_exit
     _cleanup_after_near_tp_market_exit = _cleanup_after_market_exit
-
-
-def _position_side(side: str) -> BrokerPositionSide:
-    return BrokerPositionSide.LONG if str(side).upper() == "LONG" else BrokerPositionSide.SHORT
-
-
-def _close_order_side(side: str) -> BrokerOrderSide:
-    return BrokerOrderSide.SELL if str(side).upper() == "LONG" else BrokerOrderSide.BUY

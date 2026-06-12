@@ -4,6 +4,7 @@ from decimal import Decimal
 from typing import Any, TYPE_CHECKING
 
 from src.execution import order_specs
+from src.execution.broker_semantic_helpers import get_broker_semantic_executor
 from src.exchanges.models import ExchangeName
 from src.exchanges.semantic_models import BrokerSemanticAction, BrokerSemanticOrderRole, BrokerSemanticRequest
 from src.execution.tp_sl_core_tp_manager import CoreTakeProfitManager
@@ -236,7 +237,7 @@ class TpSlExecutionManager:
                 logger.info("Protected reduce-only order skipped | ordId=%s", ord_id)
         for ord_id in orders_to_cancel:
             try:
-                semantic_executor = getattr(t, "broker_semantic_executor", None)
+                semantic_executor = get_broker_semantic_executor(t)
                 if semantic_executor is not None:
                     await semantic_executor.execute(
                         BrokerSemanticRequest(
@@ -348,7 +349,7 @@ class TpSlExecutionManager:
         if not order_id:
             return True
         try:
-            semantic_executor = getattr(t, "broker_semantic_executor", None)
+            semantic_executor = get_broker_semantic_executor(t)
             if semantic_executor is not None:
                 await semantic_executor.execute(
                     BrokerSemanticRequest(
