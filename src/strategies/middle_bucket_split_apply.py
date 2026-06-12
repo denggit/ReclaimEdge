@@ -71,10 +71,15 @@ def _write_preserved_partial_split_state(
     setattr(state, "middle_bucket_split_fast_consumed", old_fast_consumed)
     setattr(state, "middle_bucket_split_slow_consumed", old_slow_consumed)
 
-    if decision is not None and decision.fast_price is not None:
-        setattr(state, "middle_bucket_split_fast_price", decision.fast_price)
-    if decision is not None and decision.slow_price is not None:
-        setattr(state, "middle_bucket_split_slow_price", decision.slow_price)
+    if decision is not None:
+        if decision.action == "SPLIT":
+            if decision.fast_price is not None:
+                setattr(state, "middle_bucket_split_fast_price", decision.fast_price)
+            if decision.slow_price is not None:
+                setattr(state, "middle_bucket_split_slow_price", decision.slow_price)
+        elif decision.action == "UNSPLIT_SLOW_MIDDLE":
+            if not old_slow_consumed and decision.slow_price is not None:
+                setattr(state, "middle_bucket_split_slow_price", decision.slow_price)
 
     current_middle_ratio = float(getattr(state, "middle_bucket_split_middle_bucket_ratio", 0.0) or 0.0)
     current_fast_ratio = float(getattr(state, "middle_bucket_split_fast_ratio_of_bucket", 0.0) or 0.0)

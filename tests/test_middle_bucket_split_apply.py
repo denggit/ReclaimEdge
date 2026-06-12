@@ -158,6 +158,7 @@ def test_fast_consumed_unsplit_slow_middle_preserves_partial_split() -> None:
     assert strategy.state.middle_bucket_split_active is True
     assert strategy.state.middle_bucket_split_fast_consumed is True
     assert strategy.state.middle_bucket_split_slow_consumed is False
+    assert strategy.state.middle_bucket_split_slow_price == 103.0
 
     decision = build_take_profit_order_specs(
         position_contracts=Decimal("100"),
@@ -181,6 +182,8 @@ def test_fast_consumed_unsplit_slow_middle_preserves_partial_split() -> None:
     labels = [spec.label for spec in decision.specs]
     assert labels == ["tp1_middle_slow", "tp2_outer"]
     assert "tp1_middle_fast" not in labels
+    slow_spec = next(spec for spec in decision.specs if spec.label == "tp1_middle_slow")
+    assert slow_spec.price == 103.0
 
 
 def test_slow_consumed_unsplit_slow_middle_preserves_partial_split() -> None:
@@ -199,6 +202,31 @@ def test_slow_consumed_unsplit_slow_middle_preserves_partial_split() -> None:
     assert strategy.state.middle_bucket_split_active is True
     assert strategy.state.middle_bucket_split_fast_consumed is False
     assert strategy.state.middle_bucket_split_slow_consumed is True
+    assert strategy.state.middle_bucket_split_fast_price == 106.0
+
+    decision = build_take_profit_order_specs(
+        position_contracts=Decimal("100"),
+        min_contracts=Decimal("1"),
+        contract_precision=Decimal("1"),
+        tp_plan="THREE_STAGE_RUNNER",
+        final_tp_price=110.0,
+        partial_tp_price=result.partial_tp_price,
+        partial_tp_ratio=Decimal(str(result.partial_tp_ratio)),
+        partial_tp_consumed=False,
+        middle_runner_active=False,
+        three_stage_tp1_price=strategy.state.three_stage_tp1_price,
+        three_stage_tp2_price=110.0,
+        three_stage_tp1_ratio=Decimal("0.70"),
+        three_stage_tp2_ratio=Decimal("0.20"),
+        three_stage_tp1_consumed=False,
+        three_stage_tp2_consumed=False,
+        three_stage_runner_ratio=Decimal("0.10"),
+        middle_bucket_split=_split_input_from_state(strategy),
+    )
+    labels = [spec.label for spec in decision.specs]
+    assert labels == ["tp1_middle_fast", "tp2_outer"]
+    fast_spec = next(spec for spec in decision.specs if spec.label == "tp1_middle_fast")
+    assert fast_spec.price == 106.0
 
 
 def test_unconsumed_unsplit_slow_middle_keeps_original_unsplit_behavior() -> None:
