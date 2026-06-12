@@ -364,3 +364,68 @@ async def test_three_stage_success_places_new_before_canceling_old() -> None:
     ]
     assert state.three_stage_post_tp1_protective_sl_order_id == "new-sl"
     assert state.three_stage_post_tp1_protective_sl_price == 104.0
+
+
+@pytest.mark.asyncio
+async def test_middle_bucket_fast_invalid_market_exit_keeps_existing_stronger_sl_without_dme() -> None:
+    """invalid MARKET_EXIT + old stronger fast SL -> KEEP_EXISTING, no DME."""
+    state = strategy_state()
+    strategy = fake_strategy(state)
+    trader = FakeTrader()
+    journal = FakeJournal()
+    execution_state = live_runtime_types.ExecutionState("pos-1", 1000.0)
+
+    # current_price=100.5 < avg_entry=100 makes LONG fast SL invalid
+    # avg_entry=100, fee_buffer_pct=0.01 -> candidate fast SL ≈ 101
+    # LONG: old 102 >= candidate 101 -> stronger protection
+    await run_phase(
+        strategy=strategy,
+        trader=trader,
+        journal=journal,
+        execution_state=execution_state,
+        middle_bucket_split_fast_protection_payload=fast_payload(
+            current_price=100.5,
+            old_sl_order_id="old-fast-sl",
+            old_sl_price=102.0,
+            old_protected=True,
+        ),
+    )
+
+    assert execution_state.trading_halted is False
+    assert execution_state.halt_reason is None
+    assert state.middle_bucket_split_fast_sl_order_id == "old-fast-sl"
+    assert state.middle_bucket_split_fast_sl_price == 102.0
+    assert state.middle_bucket_split_fast_sl_protected is True
+    assert state.delayed_market_exit_armed is False
+    event_names = [event for event, _payload, _position_id in journal.events]
+    assert "MIDDLE_BUCKET_FAST_PROTECTIVE_SL_INVALID_KEEP_EXISTING" in event_names
+    assert "MIDDLE_BUCKET_FAST_PROTECTIVE_SL_INVALID_MARKET_EXIT" not in event_names
+
+
+@pytest.mark.asyncio
+async def test_middle_bucket_fast_invalid_market_exit_no_old_arms_dme() -> None:
+    """invalid MARKET_EXIT + no old SL -> DME (original behavior)."""
+    state = strategy_state()
+    strategy = fake_strategy(state)
+    trader = FakeTrader()
+    journal = FakeJournal()
+    execution_state = live_runtime_types.ExecutionState("pos-1", 1000.0)
+
+    await run_phase(
+        strategy=strategy,
+        trader=trader,
+        journal=journal,
+        execution_state=execution_state,
+        middle_bucket_split_fast_protection_payload=fast_payload(
+            current_price=100.5,
+            old_sl_order_id=None,
+            old_sl_price=None,
+            old_protected=False,
+        ),
+    )
+
+    assert execution_state.trading_halted is True
+    assert execution_state.halt_reason == "middle_bucket_fast_sl_invalid_delayed_market_exit_armed"
+    assert state.delayed_market_exit_armed is True
+    event_names = [event for event, _payload, _position_id in journal.events]
+    assert "MIDDLE_BUCKET_FAST_PROTECTIVE_SL_INVALID_MARKET_EXIT" in event_names

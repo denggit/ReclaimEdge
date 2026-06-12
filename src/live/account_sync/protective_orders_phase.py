@@ -828,64 +828,108 @@ async def run_account_sync_protective_orders_phase(
                     )
 
         elif decision.action == "MARKET_EXIT" and side is not None:
-            # ── Delayed market exit (NO immediate exit) ──────────────────
-            halt_reason = "middle_bucket_fast_sl_invalid_delayed_market_exit_armed"
+            # ── Check if existing old fast SL should be kept ──────────────
+            old_sl_order_id = middle_bucket_split_fast_protection_payload.get("old_sl_order_id")
+            old_sl_price = middle_bucket_split_fast_protection_payload.get("old_sl_price")
+            old_protected = bool(middle_bucket_split_fast_protection_payload.get("old_protected", False))
             position_id = middle_bucket_split_fast_protection_payload.get("position_id")
 
-            async with state_lock:
-                arm_payload = dme.arm_delayed_market_exit(
-                    strategy_state=strategy.state,
-                    execution_state=execution_state,
-                    position_id=position_id,
-                    side=side,
-                    reason=halt_reason,
-                    context="middle_bucket_fast_sl_invalid_market_exit",
-                    source_event="MIDDLE_BUCKET_FAST_PROTECTIVE_SL_INVALID_MARKET_EXIT",
-                    now_ms=int(time.time() * 1000),
-                    error=decision.reason,
-                )
-                strategy.state.middle_bucket_split_fast_sl_invalid_action_taken = "DELAYED_MARKET_EXIT"
-            if hasattr(journal, "append"):
-                journal.append(
-                    "MIDDLE_BUCKET_FAST_PROTECTIVE_SL_INVALID_MARKET_EXIT",
-                    {
-                        "position_id": position_id,
-                        "side": side,
-                        "fast_sl_price": decision.sl_price,
-                        "current_price": current_price,
-                        "avg_entry_price": avg_entry,
-                        "reason": decision.reason,
-                        "trading_halted": True,
-                        "halt_reason": halt_reason,
-                        "market_exit_attempted": False,
-                        "delayed_market_exit_armed": True,
-                        "manual_intervention_required": True,
-                        **arm_payload,
-                    },
-                    position_id=position_id,
-                )
-            logger.error(
-                "MIDDLE_BUCKET_FAST_PROTECTIVE_SL_INVALID_MARKET_EXIT | position_id=%s side=%s sl_price=%.4f current_price=%.4f delayed_market_exit_armed=true halt_reason=%s",
-                position_id,
-                side,
-                decision.sl_price,
-                current_price,
-                halt_reason,
-            )
-            await _send_protective_orders_halt_alert(
-                email_sender=email_sender,
-                halt_alert_deduper=halt_alert_deduper,
-                symbol=trader.symbol,
-                position_id=position_id,
-                halt_reason=halt_reason,
+            if _should_keep_existing_protective_sl(
                 side=side,
-                manual_intervention_required=True,
-                message=(
-                    f"Middle bucket fast SL invalid → delayed market exit armed (30 min countdown). "
-                    f"NO immediate market exit."
-                ),
-                extra={"sl_price": str(decision.sl_price), "current_price": str(current_price), "delayed_market_exit_armed": True},
-            )
+                old_sl_order_id=old_sl_order_id,
+                old_sl_price=old_sl_price,
+                old_protected=old_protected,
+                candidate_sl_price=decision.sl_price,
+            ):
+                async with state_lock:
+                    strategy.state.middle_bucket_split_fast_sl_order_id = old_sl_order_id
+                    strategy.state.middle_bucket_split_fast_sl_price = _optional_float(old_sl_price)
+                    strategy.state.middle_bucket_split_fast_sl_protected = True
+                    save_state_payload = (execution_state.current_position_id, copy.deepcopy(strategy.state),
+                                          execution_state.cash_before_position)
+                if hasattr(journal, "append"):
+                    journal.append(
+                        "MIDDLE_BUCKET_FAST_PROTECTIVE_SL_INVALID_KEEP_EXISTING",
+                        {
+                            "position_id": position_id,
+                            "side": side,
+                            "candidate_sl_price": decision.sl_price,
+                            "old_sl_order_id": old_sl_order_id,
+                            "old_sl_price": old_sl_price,
+                            "current_price": current_price,
+                            "avg_entry_price": avg_entry,
+                            "reason": decision.reason,
+                            "delayed_market_exit_armed": False,
+                        },
+                        position_id=position_id,
+                    )
+                logger.warning(
+                    "MIDDLE_BUCKET_FAST_PROTECTIVE_SL_INVALID_KEEP_EXISTING | position_id=%s side=%s candidate_sl_price=%s old_sl_price=%s old_sl_order_id=%s reason=%s delayed_market_exit_armed=false",
+                    position_id,
+                    side,
+                    decision.sl_price,
+                    old_sl_price,
+                    old_sl_order_id,
+                    decision.reason,
+                )
+            else:
+                # ── Delayed market exit (NO immediate exit) ──────────────────
+                halt_reason = "middle_bucket_fast_sl_invalid_delayed_market_exit_armed"
+
+                async with state_lock:
+                    arm_payload = dme.arm_delayed_market_exit(
+                        strategy_state=strategy.state,
+                        execution_state=execution_state,
+                        position_id=position_id,
+                        side=side,
+                        reason=halt_reason,
+                        context="middle_bucket_fast_sl_invalid_market_exit",
+                        source_event="MIDDLE_BUCKET_FAST_PROTECTIVE_SL_INVALID_MARKET_EXIT",
+                        now_ms=int(time.time() * 1000),
+                        error=decision.reason,
+                    )
+                    strategy.state.middle_bucket_split_fast_sl_invalid_action_taken = "DELAYED_MARKET_EXIT"
+                if hasattr(journal, "append"):
+                    journal.append(
+                        "MIDDLE_BUCKET_FAST_PROTECTIVE_SL_INVALID_MARKET_EXIT",
+                        {
+                            "position_id": position_id,
+                            "side": side,
+                            "fast_sl_price": decision.sl_price,
+                            "current_price": current_price,
+                            "avg_entry_price": avg_entry,
+                            "reason": decision.reason,
+                            "trading_halted": True,
+                            "halt_reason": halt_reason,
+                            "market_exit_attempted": False,
+                            "delayed_market_exit_armed": True,
+                            "manual_intervention_required": True,
+                            **arm_payload,
+                        },
+                        position_id=position_id,
+                    )
+                logger.error(
+                    "MIDDLE_BUCKET_FAST_PROTECTIVE_SL_INVALID_MARKET_EXIT | position_id=%s side=%s sl_price=%.4f current_price=%.4f delayed_market_exit_armed=true halt_reason=%s",
+                    position_id,
+                    side,
+                    decision.sl_price,
+                    current_price,
+                    halt_reason,
+                )
+                await _send_protective_orders_halt_alert(
+                    email_sender=email_sender,
+                    halt_alert_deduper=halt_alert_deduper,
+                    symbol=trader.symbol,
+                    position_id=position_id,
+                    halt_reason=halt_reason,
+                    side=side,
+                    manual_intervention_required=True,
+                    message=(
+                        f"Middle bucket fast SL invalid → delayed market exit armed (30 min countdown). "
+                        f"NO immediate market exit."
+                    ),
+                    extra={"sl_price": str(decision.sl_price), "current_price": str(current_price), "delayed_market_exit_armed": True},
+                )
 
         elif decision.action == "HALT_ONLY":
             async with state_lock:
