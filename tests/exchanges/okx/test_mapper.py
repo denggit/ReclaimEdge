@@ -350,11 +350,8 @@ class TestBrokerOrderFromPendingOrder:
         order = broker_order_from_okx_pending_order(item, symbol="ETH-USDT-SWAP")
         assert order.status == BrokerOrderStatus.REJECTED
 
-    def test_conditional_stop_market(self):
-        """Ordinary pending orders with 'conditional' ordType fall back to LIMIT.
-
-        Only algo orders map 'conditional' → STOP_MARKET.
-        """
+    def test_conditional_ordinary_ord_type_is_unknown_status(self):
+        """Ordinary pending orders with non-market/limit ordType are not normal orders."""
         item = {
             "ordId": "cond-1",
             "side": "sell",
@@ -366,10 +363,13 @@ class TestBrokerOrderFromPendingOrder:
             "accFillSz": "0",
         }
         order = broker_order_from_okx_pending_order(item, symbol="ETH-USDT-SWAP")
-        # Conditional is NOT recognized for ordinary orders → conservative LIMIT
+        # BrokerOrderType has no UNKNOWN member, so status carries the quarantine.
         assert order.order_type == BrokerOrderType.LIMIT
+        assert order.status == BrokerOrderStatus.UNKNOWN
+        assert order.raw == item
 
     def test_missing_ord_id_does_not_crash(self):
+        """Missing ordId placeholders keep UNKNOWN status and must not be normal orders."""
         item = {
             "side": "buy",
             "ordType": "limit",
@@ -381,6 +381,7 @@ class TestBrokerOrderFromPendingOrder:
         order = broker_order_from_okx_pending_order(item, symbol="ETH-USDT-SWAP")
         assert order.order_id == ""
         assert order.status == BrokerOrderStatus.UNKNOWN
+        assert order.raw == item
 
     def test_none_values_in_numeric_fields(self):
         item = {
@@ -412,7 +413,22 @@ class TestBrokerOrderFromPendingOrder:
         order = broker_order_from_okx_pending_order(item, symbol="ETH-USDT-SWAP")
         assert order.status == BrokerOrderStatus.UNKNOWN
 
-    def test_unknown_ord_type_falls_back_to_limit(self):
+    def test_unknown_side_is_unknown_status_not_normal_buy(self):
+        item = {
+            "ordId": "side-1",
+            "side": "weird",
+            "posSide": "long",
+            "ordType": "limit",
+            "state": "live",
+            "px": "100.00",
+            "sz": "1.0",
+            "accFillSz": "0",
+        }
+        order = broker_order_from_okx_pending_order(item, symbol="ETH-USDT-SWAP")
+        assert order.status == BrokerOrderStatus.UNKNOWN
+        assert order.raw == item
+
+    def test_unknown_ordinary_ord_type_is_unknown_status_not_normal_limit(self):
         item = {
             "ordId": "type-1",
             "side": "buy",
@@ -425,6 +441,8 @@ class TestBrokerOrderFromPendingOrder:
         }
         order = broker_order_from_okx_pending_order(item, symbol="ETH-USDT-SWAP")
         assert order.order_type == BrokerOrderType.LIMIT
+        assert order.status == BrokerOrderStatus.UNKNOWN
+        assert order.raw == item
 
     def test_raw_is_preserved(self):
         item = {

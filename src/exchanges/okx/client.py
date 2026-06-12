@@ -30,6 +30,10 @@ from src.exchanges.okx.mapper import (
     unsupported_okx_order_request_error,
 )
 from src.execution import order_specs
+from src.utils.log import get_logger
+
+
+logger = get_logger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -234,6 +238,7 @@ class OkxBrokerClient(BrokerClient):
 
     async def place_order(self, request: BrokerOrderRequest) -> BrokerOrderResult:
         request = _normalize_broker_order_request(request)
+        _validate_okx_order_request(request, configured_symbol=self._trader.symbol)
 
         # --- MARKET entry (non-reduce-only) ---
         if (
@@ -386,9 +391,15 @@ class OkxBrokerClient(BrokerClient):
             if order.order_id:
                 try:
                     await self.cancel_order(symbol, order.order_id)
-                except ExchangeError:
+                except ExchangeError as exc:
                     # Continue cancelling remaining orders even if one fails
-                    pass
+                    logger.warning(
+                        "Failed to cancel open OKX order symbol=%s order_id=%s kind=%s message=%s",
+                        symbol,
+                        order.order_id,
+                        exc.detail.kind.value,
+                        exc.detail.message,
+                    )
 
     # ------------------------------------------------------------------
     # Algo orders (adapter-specific, not part of BrokerClient interface)
@@ -466,9 +477,134 @@ class OkxBrokerClient(BrokerClient):
 def _normalize_broker_order_request(request: BrokerOrderRequest) -> BrokerOrderRequest:
     """Normalize a ``BrokerOrderRequest`` for internal use.
 
-    Ensures *symbol* is set (defaults to the exchange's primary symbol if empty).
-    This conservatively guards against callers passing empty symbol strings.
+    Validation is responsible for symbol checks; frozen request objects are not
+    mutated here.
     """
-    if not request.symbol:
-        object.__setattr__(request, "symbol", request.symbol or "")
     return request
+
+
+def _validate_okx_order_request(
+    request: BrokerOrderRequest,
+    *,
+    configured_symbol: str,
+) -> None:
+    """Validate broker-level order semantics supported by the OKX adapter."""
+    if request.exchange != ExchangeName.OKX:
+        raise ExchangeError(
+            ExchangeErrorDetail(
+                exchange=ExchangeName.OKX,
+                kind=ExchangeErrorKind.UNSUPPORTED_OPERATION,
+                message=(
+                    f"OKX adapter cannot place orders for exchange "
+                    f"{request.exchange.value!r}"
+                ),
+                raw={
+                    "requested_exchange": request.exchange.value,
+                    "configured_exchange": ExchangeName.OKX.value,
+                },
+            )
+        )
+
+    if not request.symbol:
+        raise ExchangeError(
+            ExchangeErrorDetail(
+                exchange=ExchangeName.OKX,
+                kind=ExchangeErrorKind.INVALID_SYMBOL,
+                message="Order symbol is required",
+                raw={"requested": request.symbol, "configured": configured_symbol},
+            )
+        )
+
+    if request.symbol != configured_symbol:
+        raise ExchangeError(
+            ExchangeErrorDetail(
+                exchange=ExchangeName.OKX,
+                kind=ExchangeErrorKind.INVALID_SYMBOL,
+                message=(
+                    f"Order symbol {request.symbol!r} does not match configured "
+                    f"symbol {configured_symbol!r}"
+                ),
+                raw={"requested": request.symbol, "configured": configured_symbol},
+            )
+        )
+
+    if request.order_type == BrokerOrderType.MARKET:
+        if request.reduce_only is not False:
+            _raise_unsupported_order_validation_error(
+                request,
+                "MARKET entry orders must not be reduce-only",
+            )
+        if request.close_position is not False:
+            _raise_unsupported_order_validation_error(
+                request,
+                "MARKET entry orders must not close position",
+            )
+
+        expected_side_by_position = {
+            BrokerPositionSide.LONG: BrokerOrderSide.BUY,
+            BrokerPositionSide.SHORT: BrokerOrderSide.SELL,
+        }
+        expected_side = expected_side_by_position.get(request.position_side)
+        if expected_side is None:
+            _raise_unsupported_order_validation_error(
+                request,
+                "MARKET entry orders require LONG or SHORT position side",
+            )
+        if request.side != expected_side:
+            _raise_unsupported_order_validation_error(
+                request,
+                (
+                    f"MARKET {request.position_side.value} entry requires "
+                    f"{expected_side.value} side"
+                ),
+            )
+        return
+
+    if request.order_type == BrokerOrderType.LIMIT and request.reduce_only is True:
+        if request.price is None:
+            _raise_unsupported_order_validation_error(
+                request,
+                "LIMIT reduce-only TP orders require price",
+            )
+
+        expected_side_by_position = {
+            BrokerPositionSide.LONG: BrokerOrderSide.SELL,
+            BrokerPositionSide.SHORT: BrokerOrderSide.BUY,
+        }
+        expected_side = expected_side_by_position.get(request.position_side)
+        if expected_side is None:
+            _raise_unsupported_order_validation_error(
+                request,
+                "LIMIT reduce-only TP orders require LONG or SHORT position side",
+            )
+        if request.side != expected_side:
+            _raise_unsupported_order_validation_error(
+                request,
+                (
+                    f"LIMIT reduce-only TP for {request.position_side.value} "
+                    f"requires {expected_side.value} side"
+                ),
+            )
+
+
+def _raise_unsupported_order_validation_error(
+    request: BrokerOrderRequest,
+    reason: str,
+) -> None:
+    raise ExchangeError(
+        ExchangeErrorDetail(
+            exchange=ExchangeName.OKX,
+            kind=ExchangeErrorKind.UNSUPPORTED_OPERATION,
+            message=reason,
+            raw={
+                "symbol": request.symbol,
+                "order_type": request.order_type.value,
+                "side": request.side.value,
+                "position_side": request.position_side.value,
+                "reduce_only": request.reduce_only,
+                "close_position": request.close_position,
+                "price": str(request.price) if request.price is not None else None,
+                "reason": reason,
+            },
+        )
+    )

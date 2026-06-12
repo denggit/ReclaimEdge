@@ -130,6 +130,7 @@ class FakeTrader:
 
 def _broker_order_request(
     *,
+    exchange: ExchangeName = ExchangeName.OKX,
     symbol: str = "ETH-USDT-SWAP",
     side: BrokerOrderSide = BrokerOrderSide.BUY,
     position_side: BrokerPositionSide = BrokerPositionSide.LONG,
@@ -142,7 +143,7 @@ def _broker_order_request(
     client_order_id: str | None = None,
 ) -> BrokerOrderRequest:
     return BrokerOrderRequest(
-        exchange=ExchangeName.OKX,
+        exchange=exchange,
         symbol=symbol,
         side=side,
         position_side=position_side,
@@ -154,6 +155,13 @@ def _broker_order_request(
         time_in_force=time_in_force,
         client_order_id=client_order_id,
     )
+
+
+def _assert_place_order_error(
+    exc_info: pytest.ExceptionInfo[ExchangeError],
+    kind: ExchangeErrorKind,
+) -> None:
+    assert exc_info.value.detail.kind == kind
 
 
 # ---------------------------------------------------------------------------
@@ -343,6 +351,91 @@ class TestPlaceOrderMarketEntry:
         )
         result = await client.place_order(req)
         assert result.order_id == "1"
+
+
+# ---------------------------------------------------------------------------
+# place_order — validation
+# ---------------------------------------------------------------------------
+
+
+class TestPlaceOrderValidation:
+    @pytest.mark.asyncio
+    async def test_place_order_symbol_mismatch_raises_invalid_symbol(self):
+        trader = FakeTrader(symbol="ETH-USDT-SWAP")
+        client = OkxBrokerClient(trader)
+        req = _broker_order_request(symbol="BTC-USDT-SWAP")
+        with pytest.raises(ExchangeError) as exc_info:
+            await client.place_order(req)
+        _assert_place_order_error(exc_info, ExchangeErrorKind.INVALID_SYMBOL)
+        assert trader.requests == []
+
+    @pytest.mark.asyncio
+    async def test_place_order_exchange_mismatch_raises_unsupported(self):
+        trader = FakeTrader()
+        client = OkxBrokerClient(trader)
+        req = _broker_order_request(exchange=ExchangeName.BINANCE)
+        with pytest.raises(ExchangeError) as exc_info:
+            await client.place_order(req)
+        _assert_place_order_error(exc_info, ExchangeErrorKind.UNSUPPORTED_OPERATION)
+        assert trader.requests == []
+
+    @pytest.mark.asyncio
+    async def test_market_entry_long_requires_buy_side(self):
+        trader = FakeTrader()
+        client = OkxBrokerClient(trader)
+        req = _broker_order_request(
+            side=BrokerOrderSide.SELL,
+            position_side=BrokerPositionSide.LONG,
+        )
+        with pytest.raises(ExchangeError) as exc_info:
+            await client.place_order(req)
+        _assert_place_order_error(exc_info, ExchangeErrorKind.UNSUPPORTED_OPERATION)
+        assert trader.requests == []
+
+    @pytest.mark.asyncio
+    async def test_market_entry_short_requires_sell_side(self):
+        trader = FakeTrader()
+        client = OkxBrokerClient(trader)
+        req = _broker_order_request(
+            side=BrokerOrderSide.BUY,
+            position_side=BrokerPositionSide.SHORT,
+        )
+        with pytest.raises(ExchangeError) as exc_info:
+            await client.place_order(req)
+        _assert_place_order_error(exc_info, ExchangeErrorKind.UNSUPPORTED_OPERATION)
+        assert trader.requests == []
+
+    @pytest.mark.asyncio
+    async def test_reduce_only_tp_long_requires_sell_side(self):
+        trader = FakeTrader()
+        client = OkxBrokerClient(trader)
+        req = _broker_order_request(
+            side=BrokerOrderSide.BUY,
+            position_side=BrokerPositionSide.LONG,
+            order_type=BrokerOrderType.LIMIT,
+            price=Decimal("3500.00"),
+            reduce_only=True,
+        )
+        with pytest.raises(ExchangeError) as exc_info:
+            await client.place_order(req)
+        _assert_place_order_error(exc_info, ExchangeErrorKind.UNSUPPORTED_OPERATION)
+        assert trader.requests == []
+
+    @pytest.mark.asyncio
+    async def test_reduce_only_tp_short_requires_buy_side(self):
+        trader = FakeTrader()
+        client = OkxBrokerClient(trader)
+        req = _broker_order_request(
+            side=BrokerOrderSide.SELL,
+            position_side=BrokerPositionSide.SHORT,
+            order_type=BrokerOrderType.LIMIT,
+            price=Decimal("3000.00"),
+            reduce_only=True,
+        )
+        with pytest.raises(ExchangeError) as exc_info:
+            await client.place_order(req)
+        _assert_place_order_error(exc_info, ExchangeErrorKind.UNSUPPORTED_OPERATION)
+        assert trader.requests == []
 
 
 # ---------------------------------------------------------------------------

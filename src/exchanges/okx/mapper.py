@@ -173,6 +173,10 @@ def _okx_side_to_broker_side(side: str) -> BrokerOrderSide:
     return BrokerOrderSide.BUY
 
 
+def _is_okx_side_recognized(raw_side: Any) -> bool:
+    return str(raw_side or "").strip().lower() in {"buy", "sell"}
+
+
 def broker_order_side_from_okx_side(raw_side: Any) -> BrokerOrderSide:
     """Map an OKX raw side string to ``BrokerOrderSide``.
 
@@ -181,7 +185,9 @@ def broker_order_side_from_okx_side(raw_side: Any) -> BrokerOrderSide:
     >>> broker_order_side_from_okx_side("sell")
     <BrokerOrderSide.SELL: 'SELL'>
 
-    Falls back to ``BUY`` for unrecognised values — never raises.
+    This legacy helper returns ``BUY`` for unrecognised values because
+    ``BrokerOrderSide`` has no unknown member. Pending-order mapping marks such
+    orders with ``UNKNOWN`` status so they are not treated as normal BUY orders.
     """
     return _okx_side_to_broker_side(str(raw_side) if raw_side is not None else "")
 
@@ -259,8 +265,11 @@ def _okx_ord_type_to_broker(ord_type: str, *, is_algo: bool = False) -> BrokerOr
         return BrokerOrderType.MARKET
     if t == "limit":
         return BrokerOrderType.LIMIT
-    # Conservative fallback
     return BrokerOrderType.LIMIT
+
+
+def _is_okx_ordinary_ord_type_recognized(raw_ord_type: Any) -> bool:
+    return str(raw_ord_type or "").strip().lower() in {"market", "limit"}
 
 
 def broker_order_type_from_okx_ord_type(
@@ -277,9 +286,9 @@ def broker_order_type_from_okx_ord_type(
     >>> broker_order_type_from_okx_ord_type("oco", is_algo=True)
     <BrokerOrderType.STOP_MARKET: 'STOP_MARKET'>
 
-    For ordinary orders, falls back to ``LIMIT``.
-    For algo orders, falls back to ``STOP_MARKET``.
-    Never raises.
+    For ordinary orders, the legacy helper returns ``LIMIT`` for unrecognised
+    values because ``BrokerOrderType`` has no unknown member. Pending-order
+    mapping marks such ordinary orders with ``UNKNOWN`` status.
     """
     return _okx_ord_type_to_broker(
         str(raw_ord_type) if raw_ord_type is not None else "", is_algo=is_algo
@@ -414,10 +423,17 @@ def broker_order_from_okx_pending_order(item: Mapping[str, Any], *, symbol: str)
             raw=dict(item),
         )
 
-    side = _okx_side_to_broker_side(str(item.get("side", "")))
+    raw_side = item.get("side", "")
+    raw_ord_type = item.get("ordType", "")
+    side_recognized = _is_okx_side_recognized(raw_side)
+    ordinary_ord_type_recognized = _is_okx_ordinary_ord_type_recognized(raw_ord_type)
+
+    side = _okx_side_to_broker_side(str(raw_side))
     pos_side = _okx_pos_side_to_broker(str(item.get("posSide", "")))
-    order_type = _okx_ord_type_to_broker(str(item.get("ordType", "")), is_algo=False)
+    order_type = _okx_ord_type_to_broker(str(raw_ord_type), is_algo=False)
     status = _okx_state_to_broker_status(str(item.get("state", "")))
+    if not side_recognized or not ordinary_ord_type_recognized:
+        status = BrokerOrderStatus.UNKNOWN
     price = _decimal_or_none(item.get("px"))
     quantity = _decimal_or_zero(item.get("sz"))
     filled_qty = _decimal_or_zero(item.get("accFillSz"))
