@@ -223,6 +223,50 @@ class TestStartupForceReconcile:
         assert "startup_force_tp_reconcile" in result.reason
         assert s.state.startup_force_tp_reconcile is False
 
+    def test_startup_force_reconcile_normal_branch_restores_three_stage_split(self):
+        s = _strategy(
+            three_stage_runner_enabled=True,
+            middle_bucket_split_enabled=True,
+            middle_bucket_split_fast_ratio=0.70,
+            tp_min_net_profit_pct=0.0,
+        )
+        _setup_position_state(
+            s,
+            side="LONG",
+            layers=1,
+            avg_entry_price=100.0,
+            breakeven_price=100.0,
+            net_remaining_breakeven_price=100.0,
+            last_tp_update_candle_ts_ms=0,
+            tp_plan="SINGLE",
+        )
+        s.state.startup_force_tp_reconcile = True
+        s.state.three_stage_runner_enabled_for_position = False
+        s.state.middle_bucket_split_active = False
+
+        boll = _boll_with_tp(
+            middle=102.0,
+            upper=110.0,
+            lower=90.0,
+            tp_middle=103.0,
+            tp_upper=108.0,
+            tp_lower=92.0,
+            candle_ts_ms=2000,
+        )
+        cvd = _cvd()
+
+        result = s._maybe_update_tp(101.0, 2000, boll, cvd)
+
+        assert result is not None
+        assert result.intent_type == "UPDATE_TP"
+        assert s.state.tp_plan == "THREE_STAGE_RUNNER"
+        assert s.state.middle_bucket_split_active is True
+        assert s.state.middle_bucket_split_fast_price is not None
+        assert s.state.middle_bucket_split_slow_price is not None
+        assert result.tp_plan == "THREE_STAGE_RUNNER"
+        assert result.middle_bucket_split_active is True
+        assert s.state.startup_force_tp_reconcile is False
+
 
 # ── 5. Three-Stage waiting TP2 uses outer profit fallback ──────────────
 

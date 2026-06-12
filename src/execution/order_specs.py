@@ -33,6 +33,8 @@ class MiddleBucketSplitOrderInput:
     slow_ratio_of_bucket: Decimal
     fast_total_ratio: Decimal
     slow_total_ratio: Decimal
+    fast_consumed: bool = False
+    slow_consumed: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -296,6 +298,104 @@ def build_take_profit_order_specs(
             and middle_bucket_split.slow_price is not None
         )
         if _split_active_3s:
+            fast_consumed = bool(middle_bucket_split.fast_consumed)
+            slow_consumed = bool(middle_bucket_split.slow_consumed)
+            if fast_consumed or slow_consumed:
+                remaining_bucket_ratio = Decimal("0")
+                if not fast_consumed:
+                    remaining_bucket_ratio += middle_bucket_split.fast_total_ratio
+                if not slow_consumed:
+                    remaining_bucket_ratio += middle_bucket_split.slow_total_ratio
+                remaining_total_ratio = (
+                    remaining_bucket_ratio
+                    + three_stage_tp2_ratio
+                    + three_stage_runner_ratio
+                )
+                if three_stage_tp2_ratio <= 0 or remaining_total_ratio <= 0:
+                    return TakeProfitSpecsDecision(
+                        specs=(TakeProfitOrderSpec(label="final", contracts=position_contracts, price=final_tp_price),),
+                        fallback_reason="THREE_STAGE_TP_SPLIT_PARTIAL_INVALID_RATIOS",
+                        fallback_context={
+                            "total_contracts": position_contracts,
+                            "remaining_bucket_ratio": remaining_bucket_ratio,
+                            "tp2_ratio": three_stage_tp2_ratio,
+                            "runner_ratio": three_stage_runner_ratio,
+                        },
+                    )
+                partial_specs: list[TakeProfitOrderSpec] = []
+                if not fast_consumed:
+                    _split_fast_contracts_3s = _rnd(
+                        position_contracts * middle_bucket_split.fast_total_ratio / remaining_total_ratio
+                    )
+                    partial_specs.append(TakeProfitOrderSpec(
+                        label="tp1_middle_fast",
+                        contracts=_split_fast_contracts_3s,
+                        price=float(middle_bucket_split.fast_price),
+                    ))
+                if not slow_consumed:
+                    _split_slow_contracts_3s = _rnd(
+                        position_contracts * middle_bucket_split.slow_total_ratio / remaining_total_ratio
+                    )
+                    partial_specs.append(TakeProfitOrderSpec(
+                        label="tp1_middle_slow",
+                        contracts=_split_slow_contracts_3s,
+                        price=float(middle_bucket_split.slow_price),
+                    ))
+                tp2_contracts = _rnd(position_contracts * three_stage_tp2_ratio / remaining_total_ratio)
+                allocated_contracts = sum((spec.contracts for spec in partial_specs), Decimal("0")) + tp2_contracts
+                runner_contracts = position_contracts - allocated_contracts
+                too_small = [
+                    spec for spec in partial_specs
+                    if spec.contracts < min_contracts
+                ]
+                if too_small or tp2_contracts < min_contracts:
+                    return TakeProfitSpecsDecision(
+                        specs=(TakeProfitOrderSpec(label="final", contracts=position_contracts, price=final_tp_price),),
+                        fallback_reason="THREE_STAGE_TP_SPLIT_PARTIAL_SIZE_TOO_SMALL",
+                        fallback_context={
+                            "total_contracts": position_contracts,
+                            "fast_contracts": _split_fast_contracts_3s,
+                            "slow_contracts": _split_slow_contracts_3s,
+                            "tp2_contracts": tp2_contracts,
+                            "runner_contracts": runner_contracts,
+                            "min_contracts": min_contracts,
+                        },
+                    )
+                if runner_contracts < min_contracts:
+                    if fast_consumed and slow_consumed:
+                        return TakeProfitSpecsDecision(
+                            specs=(TakeProfitOrderSpec(
+                                label="tp2_outer",
+                                contracts=position_contracts,
+                                price=float(three_stage_tp2_price),
+                            ),),
+                            fallback_reason="THREE_STAGE_TP2_AFTER_TP1_RUNNER_TOO_SMALL",
+                            fallback_context={
+                                "total_contracts": position_contracts,
+                                "tp2_contracts": tp2_contracts,
+                                "runner_contracts": runner_contracts,
+                                "min_contracts": min_contracts,
+                            },
+                        )
+                    return TakeProfitSpecsDecision(
+                        specs=(TakeProfitOrderSpec(label="final", contracts=position_contracts, price=final_tp_price),),
+                        fallback_reason="THREE_STAGE_TP_SPLIT_FALLBACK_SINGLE_SIZE_TOO_SMALL",
+                        fallback_context={
+                            "total_contracts": position_contracts,
+                            "fast_contracts": _split_fast_contracts_3s,
+                            "slow_contracts": _split_slow_contracts_3s,
+                            "tp2_contracts": tp2_contracts,
+                            "runner_contracts": runner_contracts,
+                            "min_contracts": min_contracts,
+                        },
+                    )
+                partial_specs.append(TakeProfitOrderSpec(
+                    label="tp2_outer",
+                    contracts=tp2_contracts,
+                    price=float(three_stage_tp2_price),
+                ))
+                return TakeProfitSpecsDecision(specs=tuple(partial_specs))
+
             fast_ratio = float(middle_bucket_split.fast_ratio_of_bucket)  # type: ignore[union-attr]
             _split_fast_contracts_3s = _rnd(tp1_total_contracts * Decimal(str(fast_ratio)))
             _split_slow_contracts_3s = tp1_total_contracts - _split_fast_contracts_3s
@@ -387,7 +487,66 @@ def build_take_profit_order_specs(
             and middle_bucket_split.fast_price is not None
             and middle_bucket_split.slow_price is not None
         ):
+            fast_consumed = bool(middle_bucket_split.fast_consumed)
+            slow_consumed = bool(middle_bucket_split.slow_consumed)
             fast_ratio = float(middle_bucket_split.fast_ratio_of_bucket)
+            if fast_consumed or slow_consumed:
+                remaining_middle_ratio = Decimal("0")
+                if not fast_consumed:
+                    remaining_middle_ratio += middle_bucket_split.fast_total_ratio
+                if not slow_consumed:
+                    remaining_middle_ratio += middle_bucket_split.slow_total_ratio
+                runner_ratio = Decimal("1") - middle_bucket_split.middle_bucket_ratio
+                remaining_total_ratio = remaining_middle_ratio + runner_ratio
+                if runner_ratio <= 0 or remaining_total_ratio <= 0:
+                    return TakeProfitSpecsDecision(
+                        specs=(TakeProfitOrderSpec(label="final", contracts=position_contracts, price=final_tp_price),),
+                    )
+                split_specs: list[TakeProfitOrderSpec] = []
+                fast_contracts: Decimal | None = None
+                slow_contracts: Decimal | None = None
+                if not fast_consumed:
+                    fast_contracts = _rnd(
+                        position_contracts * middle_bucket_split.fast_total_ratio / remaining_total_ratio
+                    )
+                    split_specs.append(TakeProfitOrderSpec(
+                        label="middle_fast",
+                        contracts=fast_contracts,
+                        price=float(middle_bucket_split.fast_price),
+                    ))
+                if not slow_consumed:
+                    slow_contracts = _rnd(
+                        position_contracts * middle_bucket_split.slow_total_ratio / remaining_total_ratio
+                    )
+                    split_specs.append(TakeProfitOrderSpec(
+                        label="middle_slow",
+                        contracts=slow_contracts,
+                        price=float(middle_bucket_split.slow_price),
+                    ))
+                runner_contracts = position_contracts - sum(
+                    (spec.contracts for spec in split_specs),
+                    Decimal("0"),
+                )
+                if any(spec.contracts < min_contracts for spec in split_specs) or runner_contracts < min_contracts:
+                    return TakeProfitSpecsDecision(
+                        specs=(TakeProfitOrderSpec(label="final", contracts=position_contracts, price=final_tp_price),),
+                        fallback_reason="MIDDLE_RUNNER_SPLIT_FALLBACK_RUNNER_TOO_SMALL",
+                        fallback_context={
+                            "total_contracts": position_contracts,
+                            "middle_total_contracts": partial_contracts,
+                            "fast_contracts": fast_contracts,
+                            "slow_contracts": slow_contracts,
+                            "runner_contracts": runner_contracts,
+                            "min_contracts": min_contracts,
+                        },
+                    )
+                split_specs.append(TakeProfitOrderSpec(
+                    label="runner",
+                    contracts=runner_contracts,
+                    price=final_tp_price,
+                ))
+                return TakeProfitSpecsDecision(specs=tuple(split_specs))
+
             middle_total_contracts = partial_contracts
             fast_contracts = _rnd(middle_total_contracts * Decimal(str(fast_ratio)))
             slow_contracts = middle_total_contracts - fast_contracts

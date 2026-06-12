@@ -42,6 +42,20 @@ class MiddleBucketSplitApplyResult:
     reason: str | None
 
 
+def _preserve_middle_bucket_split_progress(state: object) -> tuple[bool, bool]:
+    """Return existing split progress without mutating strategy state."""
+    old_fast_consumed = bool(getattr(state, "middle_bucket_split_fast_consumed", False))
+    old_slow_consumed = bool(getattr(state, "middle_bucket_split_slow_consumed", False))
+    if old_fast_consumed or old_slow_consumed:
+        logger.warning(
+            "MIDDLE_BUCKET_SPLIT_PROGRESS_PRESERVED | "
+            "fast_consumed=%s slow_consumed=%s",
+            old_fast_consumed,
+            old_slow_consumed,
+        )
+    return old_fast_consumed, old_slow_consumed
+
+
 # ------------------------------------------------------------------
 # Three-Stage Middle Bucket Split
 # ------------------------------------------------------------------
@@ -99,9 +113,10 @@ def apply_three_stage_middle_bucket_split(
     )
 
     if decision.action == "SPLIT":
+        old_fast_consumed, old_slow_consumed = _preserve_middle_bucket_split_progress(s.state)
         s.state.middle_bucket_split_active = True
-        s.state.middle_bucket_split_fast_consumed = False
-        s.state.middle_bucket_split_slow_consumed = False
+        s.state.middle_bucket_split_fast_consumed = old_fast_consumed
+        s.state.middle_bucket_split_slow_consumed = old_slow_consumed
         s.state.middle_bucket_split_fast_price = decision.fast_price
         s.state.middle_bucket_split_slow_price = decision.slow_price
         s.state.middle_bucket_split_effective_price = decision.effective_price
@@ -240,9 +255,10 @@ def apply_middle_runner_bucket_split(
     )
 
     if decision.action == "SPLIT":
+        old_fast_consumed, old_slow_consumed = _preserve_middle_bucket_split_progress(s.state)
         s.state.middle_bucket_split_active = True
-        s.state.middle_bucket_split_fast_consumed = False
-        s.state.middle_bucket_split_slow_consumed = False
+        s.state.middle_bucket_split_fast_consumed = old_fast_consumed
+        s.state.middle_bucket_split_slow_consumed = old_slow_consumed
         s.state.middle_bucket_split_fast_price = decision.fast_price
         s.state.middle_bucket_split_slow_price = decision.slow_price
         s.state.middle_bucket_split_effective_price = decision.effective_price

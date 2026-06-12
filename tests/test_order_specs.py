@@ -4,6 +4,7 @@ import unittest
 from decimal import Decimal
 
 from src.execution.order_specs import (
+    MiddleBucketSplitOrderInput,
     TakeProfitSpecsDecision,
     build_cancel_algo_body,
     build_cancel_order_body,
@@ -331,6 +332,26 @@ class BuildTakeProfitOrderSpecsTest(unittest.TestCase):
     def _specs(self, decision: TakeProfitSpecsDecision) -> list[tuple[str, Decimal, float]]:
         return [(s.label, s.contracts, s.price) for s in decision.specs]
 
+    def _middle_bucket_split(
+        self,
+        *,
+        fast_consumed: bool = False,
+        slow_consumed: bool = False,
+    ) -> MiddleBucketSplitOrderInput:
+        return MiddleBucketSplitOrderInput(
+            active=True,
+            fast_price=106.0,
+            slow_price=104.0,
+            effective_price=105.4,
+            middle_bucket_ratio=Decimal("0.70"),
+            fast_ratio_of_bucket=Decimal("0.70"),
+            slow_ratio_of_bucket=Decimal("0.30"),
+            fast_total_ratio=Decimal("0.49"),
+            slow_total_ratio=Decimal("0.21"),
+            fast_consumed=fast_consumed,
+            slow_consumed=slow_consumed,
+        )
+
     # ── SINGLE ──
     def test_single_returns_final_full(self) -> None:
         d = self._call(tp_plan="SINGLE", final_tp_price=100.0)
@@ -513,6 +534,76 @@ class BuildTakeProfitOrderSpecsTest(unittest.TestCase):
             three_stage_tp2_ratio=Decimal("0"),
         )
         self.assertEqual(self._specs(d), [("final", Decimal("10"), 110.0)])
+
+    def test_three_stage_middle_bucket_full_split_labels(self) -> None:
+        d = self._call(
+            position_contracts=Decimal("100"),
+            contract_precision=Decimal("1"),
+            tp_plan="THREE_STAGE_RUNNER",
+            final_tp_price=110.0,
+            three_stage_tp1_price=105.4,
+            three_stage_tp2_price=110.0,
+            three_stage_tp1_ratio=Decimal("0.70"),
+            three_stage_tp2_ratio=Decimal("0.20"),
+            three_stage_runner_ratio=Decimal("0.10"),
+            middle_bucket_split=self._middle_bucket_split(),
+        )
+        self.assertEqual(
+            [label for label, _contracts, _price in self._specs(d)],
+            ["tp1_middle_fast", "tp1_middle_slow", "tp2_outer"],
+        )
+
+    def test_three_stage_middle_bucket_fast_consumed_keeps_slow_and_tp2(self) -> None:
+        d = self._call(
+            position_contracts=Decimal("100"),
+            tp_plan="THREE_STAGE_RUNNER",
+            final_tp_price=110.0,
+            three_stage_tp1_price=105.4,
+            three_stage_tp2_price=110.0,
+            three_stage_tp1_ratio=Decimal("0.70"),
+            three_stage_tp2_ratio=Decimal("0.20"),
+            three_stage_runner_ratio=Decimal("0.10"),
+            middle_bucket_split=self._middle_bucket_split(fast_consumed=True),
+        )
+        labels = [label for label, _contracts, _price in self._specs(d)]
+        self.assertEqual(labels, ["tp1_middle_slow", "tp2_outer"])
+        self.assertNotIn("tp1_middle_fast", labels)
+
+    def test_three_stage_middle_bucket_slow_consumed_keeps_fast_and_tp2(self) -> None:
+        d = self._call(
+            position_contracts=Decimal("100"),
+            tp_plan="THREE_STAGE_RUNNER",
+            final_tp_price=110.0,
+            three_stage_tp1_price=105.4,
+            three_stage_tp2_price=110.0,
+            three_stage_tp1_ratio=Decimal("0.70"),
+            three_stage_tp2_ratio=Decimal("0.20"),
+            three_stage_runner_ratio=Decimal("0.10"),
+            middle_bucket_split=self._middle_bucket_split(slow_consumed=True),
+        )
+        labels = [label for label, _contracts, _price in self._specs(d)]
+        self.assertEqual(labels, ["tp1_middle_fast", "tp2_outer"])
+        self.assertNotIn("tp1_middle_slow", labels)
+
+    def test_three_stage_middle_bucket_both_consumed_keeps_tp2_only(self) -> None:
+        d = self._call(
+            position_contracts=Decimal("100"),
+            tp_plan="THREE_STAGE_RUNNER",
+            final_tp_price=110.0,
+            three_stage_tp1_price=105.4,
+            three_stage_tp2_price=110.0,
+            three_stage_tp1_ratio=Decimal("0.70"),
+            three_stage_tp2_ratio=Decimal("0.20"),
+            three_stage_runner_ratio=Decimal("0.10"),
+            middle_bucket_split=self._middle_bucket_split(
+                fast_consumed=True,
+                slow_consumed=True,
+            ),
+        )
+        labels = [label for label, _contracts, _price in self._specs(d)]
+        self.assertEqual(labels, ["tp2_outer"])
+        self.assertNotIn("tp1_middle_fast", labels)
+        self.assertNotIn("tp1_middle_slow", labels)
 
     # ── THREE_STAGE_RUNNER: after TP1 ──
     def test_three_stage_after_tp1_valid(self) -> None:

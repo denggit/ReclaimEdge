@@ -52,6 +52,25 @@ def _classify_middle_bucket_split_actual_order_mode(
     if _three_stage_split_labels.issubset(labels) or _middle_runner_split_labels.issubset(labels):
         return True, None, "SPLIT_FAST_SLOW"
 
+    # ── Legal partial/post-TP1 structures ─────────────────────────────
+    if labels == {"tp2_outer"}:
+        return True, None, "POST_TP1_TP2_ONLY"
+
+    if "tp2_outer" in labels:
+        if "tp1_middle_slow" in labels and "tp1_middle_fast" not in labels:
+            return True, None, "PARTIAL_SPLIT_SLOW_PENDING"
+        if "tp1_middle_fast" in labels and "tp1_middle_slow" not in labels:
+            return True, None, "PARTIAL_SPLIT_FAST_PENDING"
+
+    if labels == {"runner"}:
+        return True, None, "POST_MIDDLE_BUCKET_RUNNER_ONLY"
+
+    if "runner" in labels:
+        if "middle_slow" in labels and "middle_fast" not in labels:
+            return True, None, "PARTIAL_SPLIT_SLOW_PENDING"
+        if "middle_fast" in labels and "middle_slow" not in labels:
+            return True, None, "PARTIAL_SPLIT_FAST_PENDING"
+
     # ── FINAL_FULL_SIZE: only a single "final" label ───────────────────
     if labels == {"final"}:
         reason = split_disabled_reason or "split_fallback_final_order_structure"
@@ -452,8 +471,10 @@ class CoreTakeProfitManager:
             # ── Pre-check split sub-leg sizes BEFORE constructing input ──
             tp_plan = str(getattr(intent, "tp_plan", "SINGLE"))
             fast_ratio = Decimal(str(getattr(intent, "middle_bucket_split_fast_ratio_of_bucket", 0.0)))
+            fast_consumed = bool(getattr(intent, "middle_bucket_split_fast_consumed", False))
+            slow_consumed = bool(getattr(intent, "middle_bucket_split_slow_consumed", False))
 
-            if tp_plan == "THREE_STAGE_RUNNER":
+            if tp_plan == "THREE_STAGE_RUNNER" and not (fast_consumed or slow_consumed):
                 size_check = _split_size.check_three_stage_middle_bucket_split_size(
                     position_contracts=t.position_contracts,
                     min_contracts=t.min_contracts,
@@ -461,7 +482,7 @@ class CoreTakeProfitManager:
                     three_stage_tp1_ratio=Decimal(str(getattr(intent, "three_stage_tp1_ratio", 0.0))),
                     fast_ratio_of_bucket=fast_ratio,
                 )
-            elif tp_plan == "MIDDLE_RUNNER":
+            elif tp_plan == "MIDDLE_RUNNER" and not (fast_consumed or slow_consumed):
                 size_check = _split_size.check_middle_runner_bucket_split_size(
                     position_contracts=t.position_contracts,
                     min_contracts=t.min_contracts,
@@ -496,6 +517,8 @@ class CoreTakeProfitManager:
                     slow_ratio_of_bucket=Decimal(str(getattr(intent, "middle_bucket_split_slow_ratio_of_bucket", 0.0))),
                     fast_total_ratio=Decimal(str(getattr(intent, "middle_bucket_split_fast_total_ratio", 0.0))),
                     slow_total_ratio=Decimal(str(getattr(intent, "middle_bucket_split_slow_total_ratio", 0.0))),
+                    fast_consumed=fast_consumed,
+                    slow_consumed=slow_consumed,
                 )
 
         decision = order_specs.build_take_profit_order_specs(

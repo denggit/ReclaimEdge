@@ -489,6 +489,36 @@ class TestClassifierDirect:
         assert reason == "split_fallback_unsplit_middle_bucket"
         assert mode == "UNSPLIT_MIDDLE_BUCKET"
 
+    def test_three_stage_post_tp1_tp2_only_labels(self):
+        """tp2_outer only → POST_TP1_TP2_ONLY."""
+        executed, reason, mode = self._classify(
+            split_was_active=True,
+            labels=["tp2_outer"],
+        )
+        assert executed is True
+        assert reason is None
+        assert mode == "POST_TP1_TP2_ONLY"
+
+    def test_three_stage_partial_slow_pending_labels(self):
+        """tp1_middle_slow + tp2_outer → PARTIAL_SPLIT_SLOW_PENDING."""
+        executed, reason, mode = self._classify(
+            split_was_active=True,
+            labels=["tp1_middle_slow", "tp2_outer"],
+        )
+        assert executed is True
+        assert reason is None
+        assert mode == "PARTIAL_SPLIT_SLOW_PENDING"
+
+    def test_three_stage_partial_fast_pending_labels(self):
+        """tp1_middle_fast + tp2_outer → PARTIAL_SPLIT_FAST_PENDING."""
+        executed, reason, mode = self._classify(
+            split_was_active=True,
+            labels=["tp1_middle_fast", "tp2_outer"],
+        )
+        assert executed is True
+        assert reason is None
+        assert mode == "PARTIAL_SPLIT_FAST_PENDING"
+
     def test_unknown_labels_fails_safe(self):
         """Unknown labels → FINAL_FULL_SIZE (never returns executed=True)."""
         executed, reason, mode = self._classify(
@@ -520,14 +550,15 @@ class TestClassifierDirect:
         assert reason == "split_fallback_final_order_structure"
         assert mode == "FINAL_FULL_SIZE"
 
-    def test_only_fast_without_slow_is_not_split(self):
-        """tp1_middle_fast without tp1_middle_slow is NOT classified as SPLIT."""
+    def test_only_fast_without_slow_is_partial_fast_pending(self):
+        """tp1_middle_fast without tp1_middle_slow is a legal partial structure."""
         executed, reason, mode = self._classify(
             split_was_active=True,
             labels=["tp1_middle_fast", "tp2_outer"],
         )
-        assert executed is False
-        assert mode != "SPLIT_FAST_SLOW"
+        assert executed is True
+        assert reason is None
+        assert mode == "PARTIAL_SPLIT_FAST_PENDING"
 
 
 # ── Integration: Three-Stage TP2/runner too small → FINAL_FULL_SIZE ────

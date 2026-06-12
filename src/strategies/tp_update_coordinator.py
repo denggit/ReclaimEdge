@@ -170,7 +170,7 @@ class TpUpdateCoordinator:
         elif not middle_profit_fallback_locked and not degrade_applied:
             tp_price, tp_mode, partial_tp_price, partial_tp_ratio, tp_plan, \
                 reason_override = self._apply_normal_plan_selection_branch(
-                    tp_price, tp_mode, boll, ts_ms, reason_override,
+                    tp_price, tp_mode, boll, ts_ms, reason_override, force_reconcile,
                 )
 
         # ── Finalize state & emit intent (or skip) ────────────────────
@@ -685,6 +685,7 @@ class TpUpdateCoordinator:
         boll: BollSnapshot,
         ts_ms: int,
         reason_override: str | None,
+        force_reconcile: bool = False,
     ) -> tuple[float, TpMode, float | None, float, str, str | None]:
         """Normal _select_tp_plan branch with middle/three-stage runner setup."""
         s = self.strategy
@@ -702,7 +703,8 @@ class TpUpdateCoordinator:
         if tp_plan == "MIDDLE_RUNNER":
             s._set_middle_runner_planned(partial_tp_price, tp_price)
         elif tp_plan == "THREE_STAGE_RUNNER":
-            if not s._update_three_stage_dynamic_targets_without_reset(s.state.side, boll):
+            updated = s._update_three_stage_dynamic_targets_without_reset(s.state.side, boll)
+            if not updated:
                 tp_price, tp_mode = s._fallback_to_single_outer_due_middle_profit_insufficient(
                     side=s.state.side,
                     boll=boll,
@@ -711,6 +713,32 @@ class TpUpdateCoordinator:
                 )
                 partial_tp_price, partial_tp_ratio, tp_plan = None, 0.0, "SINGLE"
                 reason_override = "three_stage_middle_profit_insufficient_single_outer"
+            elif (
+                s.config.middle_bucket_split_enabled
+                and is_pre_tp1_lifecycle(s.state)
+                and not s.state.trend_runner_active
+            ):
+                split_result = self._apply_middle_bucket_split_for_three_stage(boll)
+                if split_result.action == "SPLIT":
+                    partial_tp_price = split_result.partial_tp_price
+                    partial_tp_ratio = split_result.partial_tp_ratio
+                    tp_plan = split_result.tp_plan or "THREE_STAGE_RUNNER"
+                    s.state.three_stage_tp2_price = tp_price
+                    if force_reconcile:
+                        logger.warning(
+                            "STARTUP_FORCE_TP_RECONCILE_MIDDLE_BUCKET_SPLIT_RESTORED | "
+                            "side=%s candle_ts=%s fast_consumed=%s slow_consumed=%s",
+                            s.state.side,
+                            boll.candle_ts_ms,
+                            getattr(s.state, "middle_bucket_split_fast_consumed", False),
+                            getattr(s.state, "middle_bucket_split_slow_consumed", False),
+                        )
+                elif split_result.action == "UNSPLIT_SLOW_MIDDLE":
+                    partial_tp_price = split_result.partial_tp_price
+                    partial_tp_ratio = split_result.partial_tp_ratio
+                    tp_plan = "THREE_STAGE_RUNNER"
+                    s.state.three_stage_tp1_price = partial_tp_price
+                    s.state.three_stage_tp2_price = tp_price
         elif s.state.middle_runner_pending and not s.state.middle_runner_active:
             s._reset_middle_runner_state()
         elif (
