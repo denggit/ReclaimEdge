@@ -4,7 +4,21 @@
 @Author     : Zijun Deng
 @Date       : 2026/06/12
 @File       : __init__.py
-@Description: OKX exchange adapter – skeleton placeholder.
+@Description: OKX exchange adapter package.
 
-Real adapter implementation is deferred to a later task.
+Real broker execution is deferred to a later task.
 """
+
+from src.exchanges.okx.mapper import (
+    broker_balance_from_okx_balance_detail,
+    broker_order_from_okx_pending_algo_order,
+    broker_order_from_okx_pending_order,
+    broker_position_from_okx_position,
+)
+
+__all__ = [
+    "broker_balance_from_okx_balance_detail",
+    "broker_order_from_okx_pending_algo_order",
+    "broker_order_from_okx_pending_order",
+    "broker_position_from_okx_position",
+]
