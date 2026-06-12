@@ -79,7 +79,7 @@ burst_window_seconds = "3"
 burst_baseline_seconds = "60"
 burst_min_move_ratio = "2.5"
 burst_min_volume_ratio = "2.0"
-burst_min_abs_range_pct = "0.0015"
+burst_min_abs_range_pct = "0.0012"
 
 [tp]
 # Listed fields wired to BollCvdReclaimStrategyConfig.
