@@ -2163,10 +2163,28 @@ class BollCvdReclaimStrategy:
             ts_ms: int,
             reason: str,
     ) -> tuple[float, TpMode]:
-        del reason
+        can_apply_pre_tp1_fallback = is_pre_tp1_lifecycle(self.state)
+        if not can_apply_pre_tp1_fallback:
+            current_tp_price = self.state.tp_price or self._select_valid_tp_outer_with_profit_fallback(side, boll)[0]
+            current_tp_mode = self.state.tp_mode or ("UPPER" if side == "LONG" else "LOWER")
+            logger.info(
+                "PRE_TP1_FALLBACK_SKIPPED_POST_TP1 | side=%s reason=%s tp_plan=%s tp_price=%s tp_mode=%s "
+                "tp1_consumed=%s tp2_consumed=%s trend_runner_active=%s middle_runner_active=%s partial_tp_consumed=%s",
+                side,
+                reason,
+                self.state.tp_plan,
+                current_tp_price,
+                current_tp_mode,
+                self.state.three_stage_tp1_consumed,
+                self.state.three_stage_tp2_consumed,
+                self.state.trend_runner_active,
+                self.state.middle_runner_active,
+                self.state.partial_tp_consumed,
+            )
+            return current_tp_price, current_tp_mode
+
         outer, _outer_src = self._select_valid_tp_outer_with_profit_fallback(side, boll)
         tp_mode: TpMode = "UPPER" if side == "LONG" else "LOWER"
-        can_refresh_degrade_stage = is_pre_tp1_lifecycle(self.state)
         self._reset_three_stage_runner_state()
         self._reset_middle_runner_state()
         self.state.tp_plan = "SINGLE"
@@ -2174,14 +2192,8 @@ class BollCvdReclaimStrategy:
         self.state.tp_mode = tp_mode
         self.state.partial_tp_price = None
         self.state.partial_tp_ratio = 0.0
-        if can_refresh_degrade_stage:
-            self.state.three_stage_pre_tp1_degrade_stage = "SINGLE"
-            self.state.three_stage_pre_tp1_degraded_ts_ms = ts_ms
-        else:
-            logger.info(
-                "PRE_TP1_DEGRADE_REFRESH_SKIPPED_POST_TP1 | target=SINGLE side=%s reason=middle_profit_insufficient",
-                side,
-            )
+        self.state.three_stage_pre_tp1_degrade_stage = "SINGLE"
+        self.state.three_stage_pre_tp1_degraded_ts_ms = ts_ms
         return outer, tp_mode
 
     def _select_tp_outer(self, side: PositionSide, boll: BollSnapshot) -> tuple[float, str]:

@@ -1636,6 +1636,8 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
             avg_entry_price=100.0,
             net_remaining_breakeven_price=100.0,
             tp_plan="THREE_STAGE_RUNNER",
+            tp_price=110.0,
+            three_stage_tp2_price=110.0,
             three_stage_tp1_consumed=True,
             partial_tp_consumed=True,
             three_stage_pre_tp1_degrade_stage=None,
@@ -1648,6 +1650,9 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
             reason="startup_force_tp_reconcile",
         )
 
+        self.assertEqual(strat.state.tp_plan, "THREE_STAGE_RUNNER")
+        self.assertTrue(strat.state.three_stage_tp1_consumed)
+        self.assertTrue(strat.state.partial_tp_consumed)
         self.assertIsNone(strat.state.three_stage_pre_tp1_degrade_stage)
 
     def test_runner_active_middle_profit_fallback_does_not_refresh_pre_tp1_degrade_stage(self) -> None:
@@ -1659,6 +1664,8 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
             net_remaining_breakeven_price=100.0,
             tp_plan="THREE_STAGE_RUNNER",
             trend_runner_active=True,
+            trend_runner_tp_price=120.0,
+            trend_runner_sl_price=105.0,
             three_stage_pre_tp1_degrade_stage=None,
         )
 
@@ -1669,6 +1676,10 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
             reason="startup_force_tp_reconcile",
         )
 
+        self.assertTrue(strat.state.trend_runner_active)
+        self.assertEqual(strat.state.trend_runner_tp_price, 120.0)
+        self.assertEqual(strat.state.trend_runner_sl_price, 105.0)
+        self.assertNotEqual(strat.state.tp_plan, "SINGLE")
         self.assertIsNone(strat.state.three_stage_pre_tp1_degrade_stage)
 
     def test_single_degrade_uses_outer_when_middle_profit_insufficient(self) -> None:

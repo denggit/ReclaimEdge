@@ -20,6 +20,7 @@ from src.strategies.middle_bucket_split_apply import (
     apply_middle_runner_bucket_split,
     apply_three_stage_middle_bucket_split,
 )
+from src.strategies.tp_lifecycle import is_pre_tp1_lifecycle
 from src.utils.log import get_logger
 
 if TYPE_CHECKING:
@@ -292,12 +293,12 @@ class TpUpdateCoordinator:
         partial_tp_price: float | None = None
         partial_tp_ratio: float = 0.0
         tp_plan: str = s.state.tp_plan
+        pre_tp1_lifecycle = is_pre_tp1_lifecycle(s.state)
 
-        # Three-Stage: only reset when TP1 has NOT been consumed and trend runner is NOT active
+        # Pre-TP1 complex plans may fall back to SINGLE when middle profit is insufficient.
         if (
             s.state.three_stage_runner_enabled_for_position
-            and not s.state.three_stage_tp1_consumed
-            and not s.state.trend_runner_active
+            and pre_tp1_lifecycle
         ):
             old_tp1 = s.state.three_stage_tp1_price
             old_tp2 = s.state.three_stage_tp2_price
@@ -331,7 +332,7 @@ class TpUpdateCoordinator:
             middle_profit_fallback_locked = True
 
         # Middle Runner pending (first close NOT done): reset
-        elif s.state.middle_runner_pending and not s.state.middle_runner_active:
+        elif pre_tp1_lifecycle and s.state.middle_runner_pending and not s.state.middle_runner_active:
             outer, outer_src = s._select_valid_tp_outer_with_profit_fallback(s.state.side, boll)
             logger.warning(
                 "MIDDLE_RUNNER_MIDDLE_PROFIT_INSUFFICIENT_SINGLE_OUTER | "
@@ -359,7 +360,7 @@ class TpUpdateCoordinator:
             middle_profit_fallback_locked = True
 
         # SPLIT partial NOT consumed: fall back to SINGLE outer
-        elif s.state.tp_plan == "SPLIT_PARTIAL_FINAL" and not s.state.partial_tp_consumed:
+        elif pre_tp1_lifecycle and s.state.tp_plan == "SPLIT_PARTIAL_FINAL" and not s.state.partial_tp_consumed:
             outer, _outer_src = s._select_valid_tp_outer_with_profit_fallback(s.state.side, boll)
             outer_mode: TpMode = "UPPER" if s.state.side == "LONG" else "LOWER"
             logger.warning(
@@ -383,11 +384,8 @@ class TpUpdateCoordinator:
 
         # Any other unfulfilled complex plan: fall back to SINGLE outer
         elif (
-            s.state.tp_plan != "SINGLE"
-            and not s.state.trend_runner_active
-            and not s.state.middle_runner_active
-            and not s.state.three_stage_tp1_consumed
-            and not s.state.three_stage_tp2_consumed
+            pre_tp1_lifecycle
+            and s.state.tp_plan != "SINGLE"
         ):
             outer, _outer_src = s._select_valid_tp_outer_with_profit_fallback(s.state.side, boll)
             outer_mode_t: TpMode = "UPPER" if s.state.side == "LONG" else "LOWER"
