@@ -334,6 +334,60 @@ def _to_float(value) -> float:
 
 
 # ---------------------------------------------------------------------------
+# Candle buffer helper (dedup by ts_ms)
+# ---------------------------------------------------------------------------
+
+
+def _upsert_candle_entry(
+    candle_buffer: list[dict],
+    candle_entry: dict,
+    candle_limit: int,
+) -> None:
+    """Upsert a candle entry into the buffer, deduplicating by ``ts_ms``.
+
+    * If an entry with the same ``ts_ms`` already exists, **replace** it
+      in-place (the buffer length does not change).
+    * Otherwise, **append** the new entry.
+    * After every upsert the buffer is sorted ascending by ``ts_ms``.
+    * If the buffer exceeds ``candle_limit`` unique entries, the oldest
+      entries are removed.
+
+    This guarantees that repeated partial-kline updates for the same
+    15m candle never inflate the buffer, so BOLL readiness depends only
+    on the count of **unique** klines.
+    """
+    ts = candle_entry["ts_ms"]
+
+    # --- Look for an existing entry with the same ts_ms ---
+    for i, existing in enumerate(candle_buffer):
+        if existing["ts_ms"] == ts:
+            candle_buffer[i] = candle_entry
+            logger.debug(
+                "BINANCE_SIGNAL_ONLY_CANDLE_UPDATE | ts_ms=%s close=%.4f buffer_size=%s",
+                ts,
+                candle_entry["close"],
+                len(candle_buffer),
+            )
+            break
+    else:
+        # No existing entry — append
+        candle_buffer.append(candle_entry)
+        logger.debug(
+            "BINANCE_SIGNAL_ONLY_CANDLE_APPEND | ts_ms=%s close=%.4f buffer_size=%s",
+            ts,
+            candle_entry["close"],
+            len(candle_buffer),
+        )
+
+    # --- Keep buffer sorted by ts_ms ascending ---
+    candle_buffer.sort(key=lambda c: c["ts_ms"])
+
+    # --- Truncate oldest entries if over limit ---
+    while len(candle_buffer) > candle_limit:
+        candle_buffer.pop(0)
+
+
+# ---------------------------------------------------------------------------
 # Runtime
 # ---------------------------------------------------------------------------
 
@@ -510,11 +564,11 @@ async def _handle_candle(
         "volume": _to_float(event.volume),
         "closed": event.is_closed,
     }
-    candle_buffer.append(candle_entry)
-
-    # Keep only the most recent candles up to candle_limit
-    while len(candle_buffer) > config.candle_limit:
-        candle_buffer.pop(0)
+    _upsert_candle_entry(
+        candle_buffer=candle_buffer,
+        candle_entry=candle_entry,
+        candle_limit=config.candle_limit,
+    )
 
     if isinstance(signal_input, BinanceSignalCandleInput):
         level = (

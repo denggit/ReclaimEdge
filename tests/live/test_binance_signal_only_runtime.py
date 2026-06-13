@@ -35,7 +35,9 @@ from src.live.binance_signal_only_runtime import (
     BinanceSignalOnlyConfig,
     _build_boll_snapshot,
     _calculate_boll,
+    _handle_candle,
     _try_recompute_boll,
+    _upsert_candle_entry,
     load_binance_signal_only_config,
 )
 from src.monitors.boll_band_breakout_monitor import BollSnapshot
@@ -387,6 +389,175 @@ class TestCandleBufferAndBoll:
             candle_buffer=candle_buffer, config=config
         )
         assert isinstance(result, BollSnapshot)
+
+
+# ======================================================================
+# Candle buffer upsert (dedup by ts_ms)
+# ======================================================================
+
+
+class TestCandleBufferUpsert:
+    """Tests for ``_upsert_candle_entry`` dedup and ordering."""
+
+    @staticmethod
+    def _entry(ts_ms: int, close: float) -> dict:
+        return {
+            "ts_ms": ts_ms,
+            "open": close - 10.0,
+            "high": close + 5.0,
+            "low": close - 5.0,
+            "close": close,
+            "volume": 100.0,
+            "closed": False,
+        }
+
+    # --- 1. Same ts_ms update does NOT append ---
+    def test_same_ts_ms_replaces_not_appends(self) -> None:
+        buffer: list[dict] = []
+        _upsert_candle_entry(buffer, self._entry(1000, 3000.0), candle_limit=100)
+        _upsert_candle_entry(buffer, self._entry(1000, 3010.0), candle_limit=100)
+        assert len(buffer) == 1
+        assert buffer[0]["close"] == 3010.0
+        assert buffer[0]["ts_ms"] == 1000
+
+    # --- 2. New ts_ms appends ---
+    def test_new_ts_ms_appends(self) -> None:
+        buffer: list[dict] = []
+        _upsert_candle_entry(buffer, self._entry(1000, 3000.0), candle_limit=100)
+        _upsert_candle_entry(buffer, self._entry(2000, 3010.0), candle_limit=100)
+        assert len(buffer) == 2
+        assert [c["ts_ms"] for c in buffer] == [1000, 2000]
+
+    # --- 3. Out-of-order input stays sorted ---
+    def test_out_of_order_input_sorted(self) -> None:
+        buffer: list[dict] = []
+        _upsert_candle_entry(buffer, self._entry(3000, 3030.0), candle_limit=100)
+        _upsert_candle_entry(buffer, self._entry(1000, 3010.0), candle_limit=100)
+        _upsert_candle_entry(buffer, self._entry(2000, 3020.0), candle_limit=100)
+        assert [c["ts_ms"] for c in buffer] == [1000, 2000, 3000]
+
+    # --- 4. candle_limit truncates by unique count ---
+    def test_candle_limit_truncates_oldest(self) -> None:
+        buffer: list[dict] = []
+        limit = 3
+        for i in range(5):
+            _upsert_candle_entry(
+                buffer, self._entry(1000 + i * 60000, 3000.0 + i), candle_limit=limit
+            )
+        assert len(buffer) == 3
+        # Only the newest 3 remain
+        assert buffer[0]["ts_ms"] == 1000 + 2 * 60000  # 3rd
+        assert buffer[1]["ts_ms"] == 1000 + 3 * 60000  # 4th
+        assert buffer[2]["ts_ms"] == 1000 + 4 * 60000  # 5th
+
+    # --- 5. Repeated partial kline cannot make BOLL ready ---
+    def test_repeated_partial_kline_no_boll(self) -> None:
+        config = BinanceSignalOnlyConfig(
+            canonical_symbol="ETH-USDT-PERP",
+            raw_symbol="ETHUSDT",
+            kline_interval="15m",
+            duration_seconds=3600.0,
+            max_events=100000,
+            heartbeat_seconds=30.0,
+            candle_limit=100,
+            boll_window=5,
+            boll_std_multiplier=2.0,
+            band_distance_threshold_pct=0.005,
+            tp_boll_enabled=False,
+            tp_boll_window=0,
+        )
+        buffer: list[dict] = []
+        # Upsert the same ts_ms 10 times with different closes
+        for i in range(10):
+            _upsert_candle_entry(
+                buffer, self._entry(1000, 3000.0 + i), candle_limit=100
+            )
+        assert len(buffer) == 1  # Only one unique kline
+        result = _try_recompute_boll(candle_buffer=buffer, config=config)
+        assert result is None
+
+    # --- 6. 5 unique klines → BOLL ready ---
+    def test_five_unique_klines_boll_ready(self) -> None:
+        config = BinanceSignalOnlyConfig(
+            canonical_symbol="ETH-USDT-PERP",
+            raw_symbol="ETHUSDT",
+            kline_interval="15m",
+            duration_seconds=3600.0,
+            max_events=100000,
+            heartbeat_seconds=30.0,
+            candle_limit=100,
+            boll_window=5,
+            boll_std_multiplier=2.0,
+            band_distance_threshold_pct=0.005,
+            tp_boll_enabled=False,
+            tp_boll_window=0,
+        )
+        buffer: list[dict] = []
+        for i in range(5):
+            _upsert_candle_entry(
+                buffer,
+                self._entry(1000 + i * 60000, 3000.0 + i * 10),
+                candle_limit=100,
+            )
+        assert len(buffer) == 5
+        result = _try_recompute_boll(candle_buffer=buffer, config=config)
+        assert isinstance(result, BollSnapshot)
+
+    # --- 7. _handle_candle uses upsert behavior ---
+    @pytest.mark.asyncio
+    async def test_handle_candle_uses_upsert(self) -> None:
+        """Two candle events with same open_time_ms → buffer length stays 1."""
+        from src.live.binance_market_data_bridge import BinanceMarketDataSignalBridge
+
+        config = BinanceSignalOnlyConfig(
+            canonical_symbol="ETH-USDT-PERP",
+            raw_symbol="ETHUSDT",
+            kline_interval="15m",
+            duration_seconds=3600.0,
+            max_events=100000,
+            heartbeat_seconds=30.0,
+            candle_limit=100,
+            boll_window=20,
+            boll_std_multiplier=2.0,
+            band_distance_threshold_pct=0.005,
+            tp_boll_enabled=False,
+            tp_boll_window=0,
+        )
+        bridge = BinanceMarketDataSignalBridge()
+        buffer: list[dict] = []
+
+        event1 = _make_candle_event(
+            open_time_ms=1700000000000,
+            close_price="3000.00",
+            is_closed=False,
+        )
+        event2 = _make_candle_event(
+            open_time_ms=1700000000000,  # same open_time
+            close_price="3010.00",       # updated close
+            is_closed=False,
+        )
+
+        signal1 = bridge.handle_event(event1)
+        signal2 = bridge.handle_event(event2)
+
+        await _handle_candle(
+            event=event1,
+            signal_input=signal1,
+            bridge=bridge,
+            candle_buffer=buffer,
+            config=config,
+        )
+        await _handle_candle(
+            event=event2,
+            signal_input=signal2,
+            bridge=bridge,
+            candle_buffer=buffer,
+            config=config,
+        )
+
+        assert len(buffer) == 1
+        assert buffer[0]["close"] == 3010.0
+        assert buffer[0]["ts_ms"] == 1700000000000
 
 
 # ======================================================================
