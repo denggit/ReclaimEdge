@@ -111,9 +111,13 @@ DEFAULT_MAX_NOTIONAL: Decimal = Decimal("6")
 DEFAULT_TP_PCT: Decimal = Decimal("0.006")
 DEFAULT_SL_PCT: Decimal = Decimal("0.006")
 
+ENV_MARGIN_BUFFER_MULTIPLIER: str = "BINANCE_LIVE_SMOKE_TEST_MARGIN_BUFFER_MULTIPLIER"
+DEFAULT_MARGIN_BUFFER_MULTIPLIER: Decimal = Decimal("3")
+
 EXCHANGE_INFO_PATH: str = "/fapi/v1/exchangeInfo"
 TICKER_PRICE_PATH: str = "/fapi/v1/ticker/price"
 BALANCE_PATH: str = "/fapi/v2/balance"
+CHANGE_LEVERAGE_PATH: str = "/fapi/v1/leverage"
 # ---------------------------------------------------------------------------
 # Preflight state (populated before any order is placed)
 # ---------------------------------------------------------------------------
@@ -142,6 +146,10 @@ class Preflight:
     filters: ExchangeInfoFilters
     calculated_quantity: Decimal
     calculated_notional: Decimal
+    leverage: int
+    margin_buffer_multiplier: Decimal
+    estimated_initial_margin: Decimal
+    required_margin_with_buffer: Decimal
 
 
 # ---------------------------------------------------------------------------
@@ -233,6 +241,32 @@ def load_binance_credentials() -> tuple[str, str]:
     api_secret = _load_api_credential("EXCHANGE_API_SECRET")
     print("[preflight] API credentials present")
     return api_key, api_secret
+
+
+def _read_positive_decimal_env(name: str, default: Decimal) -> Decimal:
+    """Read a positive Decimal from environment, falling back to *default*.
+
+    Raises ``SystemExit`` when the value is present but invalid (non-numeric,
+    zero, or negative).
+    """
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = Decimal(raw)
+    except (InvalidOperation, ValueError):
+        print(
+            f"ERROR: {name} must be a valid decimal, got {raw!r}",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    if value <= 0:
+        print(
+            f"ERROR: {name} must be positive, got {value}",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    return value
 
 
 async def require_one_way_position_mode(api_key: str, api_secret: str) -> None:
@@ -332,6 +366,49 @@ async def require_isolated_margin(
         )
         raise SystemExit(1)
     print("[preflight] margin mode = isolated OK")
+
+
+async def set_initial_leverage(
+    api_key: str,
+    api_secret: str,
+    leverage: int,
+) -> None:
+    """Set ETHUSDT initial leverage on Binance USD-M Futures.
+
+    Calls POST /fapi/v1/leverage with ``symbol=ETHUSDT`` and the requested
+    *leverage*.  Raises ``SystemExit`` on HTTP errors or if the response
+    leverage does not match the request.
+    """
+    signed = build_signed_request(
+        method="POST",
+        path=CHANGE_LEVERAGE_PATH,
+        params={"symbol": BINANCE_SYMBOL, "leverage": leverage},
+        api_key=api_key,
+        api_secret=api_secret,
+        base_url=BINANCE_USDM_BASE_URL,
+    )
+    transport = AiohttpBinanceTransport()
+    response: BinanceTransportResponse = await transport.send(signed)
+
+    if response.status_code >= 400:
+        payload = response.payload if isinstance(response.payload, dict) else {}
+        print(
+            f"ERROR: set leverage failed (HTTP {response.status_code}): {payload}",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
+    if isinstance(response.payload, dict):
+        resp_leverage = response.payload.get("leverage")
+        if resp_leverage is not None and int(resp_leverage) != leverage:
+            print(
+                f"ERROR: leverage mismatch — requested {leverage}x, "
+                f"got {resp_leverage}x",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+
+    print(f"[preflight] leverage = {leverage}x OK")
 
 
 async def fetch_exchange_info_filters() -> ExchangeInfoFilters:
@@ -539,6 +616,31 @@ def calculate_safe_quantity(
         f"(notional ≈ {actual_notional} USDT)"
     )
     return quantity, actual_notional
+
+
+def calculate_required_margin_with_buffer(
+    *,
+    notional: Decimal,
+    leverage: int,
+    buffer_multiplier: Decimal,
+) -> tuple[Decimal, Decimal]:
+    """Return ``(estimated_initial_margin, required_margin_with_buffer)``.
+
+    ``estimated_initial_margin = notional / leverage``
+    ``required_margin_with_buffer = estimated_initial_margin * buffer_multiplier``
+
+    Raises ``ValueError`` on invalid inputs.
+    """
+    if leverage <= 0:
+        raise ValueError("leverage must be positive")
+    if buffer_multiplier <= 0:
+        raise ValueError("buffer_multiplier must be positive")
+    if notional <= 0:
+        raise ValueError("notional must be positive")
+
+    estimated = notional / Decimal(leverage)
+    required = estimated * buffer_multiplier
+    return estimated, required
 
 
 _cid_counter: int = 0
@@ -929,12 +1031,23 @@ async def main() -> int:
     rt = load_unified_runtime_config()
     binance_symbol = validate_unified_config_for_binance(rt)
 
+    # --- configuration (no network) ---
+    max_notional = _read_positive_decimal_env(ENV_MAX_NOTIONAL, DEFAULT_MAX_NOTIONAL)
+    tp_pct = _read_positive_decimal_env(ENV_TP_PCT, DEFAULT_TP_PCT)
+    sl_pct = _read_positive_decimal_env(ENV_SL_PCT, DEFAULT_SL_PCT)
+    margin_buffer_multiplier = _read_positive_decimal_env(
+        ENV_MARGIN_BUFFER_MULTIPLIER, DEFAULT_MARGIN_BUFFER_MULTIPLIER,
+    )
+
     # --- preflight (network) ---
     print("[preflight] checking position mode...")
     await require_one_way_position_mode(api_key, api_secret)
 
     print("[preflight] checking margin mode...")
     await require_isolated_margin(api_key, api_secret)
+
+    print(f"[preflight] setting initial leverage to {rt.leverage}x...")
+    await set_initial_leverage(api_key, api_secret, rt.leverage)
 
     print("[preflight] fetching exchangeInfo...")
     filters = await fetch_exchange_info_filters()
@@ -945,23 +1058,6 @@ async def main() -> int:
     print("[preflight] fetching account balance...")
     available_balance = await fetch_account_balance(api_key, api_secret)
 
-    # --- configuration ---
-    max_notional_str = os.environ.get(ENV_MAX_NOTIONAL, str(DEFAULT_MAX_NOTIONAL))
-    tp_pct_str = os.environ.get(ENV_TP_PCT, str(DEFAULT_TP_PCT))
-    sl_pct_str = os.environ.get(ENV_SL_PCT, str(DEFAULT_SL_PCT))
-
-    try:
-        max_notional = Decimal(max_notional_str)
-        tp_pct = Decimal(tp_pct_str)
-        sl_pct = Decimal(sl_pct_str)
-    except (InvalidOperation, ValueError) as exc:
-        print(f"ERROR: cannot parse env config: {exc}", file=sys.stderr)
-        return 1
-
-    if max_notional <= 0:
-        print(f"ERROR: MAX_NOTIONAL must be positive, got {max_notional}", file=sys.stderr)
-        return 1
-
     # --- quantity calculation ---
     calculated_qty, calculated_notional = calculate_safe_quantity(
         mark_price=mark_price,
@@ -969,14 +1065,30 @@ async def main() -> int:
         filters=filters,
     )
 
-    # --- balance check ---
-    if available_balance < calculated_notional:
+    # --- leverage-aware margin check ---
+    estimated_margin, required_margin = calculate_required_margin_with_buffer(
+        notional=calculated_notional,
+        leverage=rt.leverage,
+        buffer_multiplier=margin_buffer_multiplier,
+    )
+
+    if available_balance < required_margin:
         print(
-            f"ERROR: insufficient USDT balance — "
-            f"need ≈ {calculated_notional}, have {available_balance}",
+            f"ERROR: insufficient USDT margin balance — "
+            f"need ≈ {required_margin} "
+            f"(notional={calculated_notional}, leverage={rt.leverage}x, "
+            f"buffer={margin_buffer_multiplier}x), "
+            f"have {available_balance}",
             file=sys.stderr,
         )
         return 1
+
+    print(
+        f"[preflight] margin check OK — "
+        f"notional≈{calculated_notional}, leverage={rt.leverage}x, "
+        f"estimated_margin≈{estimated_margin}, buffer={margin_buffer_multiplier}x, "
+        f"required≈{required_margin}, available={available_balance}"
+    )
 
     preflight = Preflight(
         api_key=api_key,
@@ -989,6 +1101,10 @@ async def main() -> int:
         filters=filters,
         calculated_quantity=calculated_qty,
         calculated_notional=calculated_notional,
+        leverage=rt.leverage,
+        margin_buffer_multiplier=margin_buffer_multiplier,
+        estimated_initial_margin=estimated_margin,
+        required_margin_with_buffer=required_margin,
     )
 
     print(
@@ -1000,6 +1116,9 @@ async def main() -> int:
         f"\n  Quantity:     {calculated_qty} ETH"
         f"\n  Notional:     ≈ {calculated_notional} USDT"
         f"\n  Mark Price:   {mark_price}"
+        f"\n  Leverage:     {rt.leverage}x"
+        f"\n  Est. Margin:  ≈ {estimated_margin} USDT"
+        f"\n  Req. Margin:  ≈ {required_margin} USDT (buffer={margin_buffer_multiplier}x)"
         f"\n  TP PCT:       {tp_pct}"
         f"\n  SL PCT:       {sl_pct}"
         "\n================================================================\n"

@@ -167,3 +167,71 @@ def test_smoke_test_has_reduce_only() -> None:
     """Smoke test TP/SL/close must use reduce_only=True."""
     text = _read_smoke_test_text()
     assert "reduce_only=True" in text
+
+
+# ---------------------------------------------------------------------------
+# Leverage-aware margin check boundaries (20B-FIX-2)
+# ---------------------------------------------------------------------------
+
+
+def test_smoke_test_contains_leverage_endpoint() -> None:
+    """Script must reference /fapi/v1/leverage."""
+    text = _read_smoke_test_text()
+    assert "/fapi/v1/leverage" in text
+
+
+def test_smoke_test_no_longer_uses_notional_balance_check() -> None:
+    """The old balance check (available >= notional) must be gone."""
+    text = _read_smoke_test_text()
+    assert "available_balance < calculated_notional" not in text
+
+
+def test_smoke_test_no_longer_uses_old_insufficient_balance_message() -> None:
+    """The old 'need ≈ {calculated_notional}' error message must be gone."""
+    text = _read_smoke_test_text()
+    assert "need ≈ {calculated_notional}" not in text
+
+
+def test_smoke_test_contains_required_margin_with_buffer() -> None:
+    """New margin check must reference required_margin_with_buffer."""
+    text = _read_smoke_test_text()
+    assert "required_margin_with_buffer" in text
+
+
+def test_smoke_test_contains_margin_buffer_multiplier() -> None:
+    """Script must reference margin_buffer_multiplier."""
+    text = _read_smoke_test_text()
+    assert "margin_buffer_multiplier" in text
+
+
+def test_smoke_test_contains_set_initial_leverage() -> None:
+    """Script must contain set_initial_leverage function."""
+    text = _read_smoke_test_text()
+    assert "set_initial_leverage" in text
+
+
+def test_smoke_test_contains_calculate_required_margin_with_buffer() -> None:
+    """Script must contain the margin calculation function."""
+    text = _read_smoke_test_text()
+    assert "calculate_required_margin_with_buffer" in text
+
+
+def test_smoke_test_still_has_ethusdt_only() -> None:
+    """Still only ETHUSDT — no BTC."""
+    text = _read_smoke_test_text()
+    assert "BTCUSDT" not in text
+    assert "BTC-USDT" not in text
+
+
+def test_smoke_test_still_one_way_mode() -> None:
+    """Still One-way / net mode, not hedge."""
+    text = _read_smoke_test_text()
+    assert "require_one_way_position_mode" in text
+    assert "Hedge Mode" in text or "one-way/net" in text or "One-way" in text
+
+
+def test_smoke_test_still_isolated() -> None:
+    """Still isolated margin mode."""
+    text = _read_smoke_test_text()
+    assert "require_isolated_margin" in text
+    assert "isolated" in text

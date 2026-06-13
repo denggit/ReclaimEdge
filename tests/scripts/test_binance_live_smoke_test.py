@@ -24,14 +24,19 @@ from scripts.binance_live_smoke_test import (
     CLIENT_ORDER_ID_PREFIX,
     CONFIRM_ENV,
     CONFIRM_VALUE,
+    CHANGE_LEVERAGE_PATH,
     DEFAULT_MAX_NOTIONAL,
+    DEFAULT_MARGIN_BUFFER_MULTIPLIER,
     DEFAULT_SL_PCT,
     DEFAULT_TP_PCT,
+    ENV_MARGIN_BUFFER_MULTIPLIER,
     ExchangeInfoFilters,
     Preflight,
     _generate_client_order_id,
     _make_order_request,
+    _read_positive_decimal_env,
     _round_up_to_step,
+    calculate_required_margin_with_buffer,
     calculate_safe_quantity,
     cancel_order_by_id,
     cancel_smoke_orders,
@@ -41,9 +46,11 @@ from scripts.binance_live_smoke_test import (
     fetch_long_position,
     fetch_open_orders,
     load_binance_credentials,
+    main,
     open_long,
     place_sl,
     place_tp,
+    set_initial_leverage,
     validate_unified_config_for_binance,
     require_one_way_position_mode,
     require_isolated_margin,
@@ -862,9 +869,17 @@ class TestPreflightDataclass:
             ),
             calculated_quantity=Decimal("0.002"),
             calculated_notional=Decimal("6"),
+            leverage=10,
+            margin_buffer_multiplier=Decimal("3"),
+            estimated_initial_margin=Decimal("0.6"),
+            required_margin_with_buffer=Decimal("1.8"),
         )
         assert p.calculated_quantity == Decimal("0.002")
         assert p.calculated_notional == Decimal("6")
+        assert p.leverage == 10
+        assert p.margin_buffer_multiplier == Decimal("3")
+        assert p.estimated_initial_margin == Decimal("0.6")
+        assert p.required_margin_with_buffer == Decimal("1.8")
 
 
 # ---------------------------------------------------------------------------
@@ -1008,3 +1023,257 @@ class TestConstants:
 
     def test_client_order_id_prefix(self) -> None:
         assert CLIENT_ORDER_ID_PREFIX == "RE_SMOKE_"
+
+    def test_change_leverage_path(self) -> None:
+        assert CHANGE_LEVERAGE_PATH == "/fapi/v1/leverage"
+
+    def test_default_margin_buffer_multiplier_is_3(self) -> None:
+        assert DEFAULT_MARGIN_BUFFER_MULTIPLIER == Decimal("3")
+
+    def test_env_margin_buffer_multiplier_key(self) -> None:
+        assert ENV_MARGIN_BUFFER_MULTIPLIER == "BINANCE_LIVE_SMOKE_TEST_MARGIN_BUFFER_MULTIPLIER"
+
+
+# ---------------------------------------------------------------------------
+# Tests: calculate_required_margin_with_buffer
+# ---------------------------------------------------------------------------
+
+
+class TestCalculateRequiredMarginWithBuffer:
+    def test_standard_case(self) -> None:
+        estimated, required = calculate_required_margin_with_buffer(
+            notional=Decimal("20.14788"),
+            leverage=10,
+            buffer_multiplier=Decimal("3"),
+        )
+        assert estimated == pytest.approx(Decimal("2.014788"))
+        assert required == pytest.approx(Decimal("6.044364"))
+
+    def test_available_10_passes_margin_check(self) -> None:
+        """With notional≈20.15, leverage=10, buffer=3 → required≈6.04.
+        10 USDT available comfortably passes."""
+        _, required = calculate_required_margin_with_buffer(
+            notional=Decimal("20.14788"),
+            leverage=10,
+            buffer_multiplier=Decimal("3"),
+        )
+        assert Decimal("10") >= required
+
+    def test_available_5_fails_margin_check(self) -> None:
+        """With notional≈20.15, leverage=10, buffer=3 → required≈6.04.
+        5 USDT available is not enough."""
+        _, required = calculate_required_margin_with_buffer(
+            notional=Decimal("20.14788"),
+            leverage=10,
+            buffer_multiplier=Decimal("3"),
+        )
+        assert Decimal("5") < required
+
+    def test_leverage_1_means_full_notional_margin(self) -> None:
+        """With leverage=1, estimated_margin equals notional."""
+        estimated, required = calculate_required_margin_with_buffer(
+            notional=Decimal("20"),
+            leverage=1,
+            buffer_multiplier=Decimal("1"),
+        )
+        assert estimated == Decimal("20")
+        assert required == Decimal("20")
+
+    def test_leverage_20_reduces_margin(self) -> None:
+        estimated, required = calculate_required_margin_with_buffer(
+            notional=Decimal("20"),
+            leverage=20,
+            buffer_multiplier=Decimal("2"),
+        )
+        assert estimated == Decimal("1")
+        assert required == Decimal("2")
+
+    def test_raises_on_zero_leverage(self) -> None:
+        with pytest.raises(ValueError, match="leverage must be positive"):
+            calculate_required_margin_with_buffer(
+                notional=Decimal("20"),
+                leverage=0,
+                buffer_multiplier=Decimal("3"),
+            )
+
+    def test_raises_on_negative_leverage(self) -> None:
+        with pytest.raises(ValueError, match="leverage must be positive"):
+            calculate_required_margin_with_buffer(
+                notional=Decimal("20"),
+                leverage=-1,
+                buffer_multiplier=Decimal("3"),
+            )
+
+    def test_raises_on_zero_buffer(self) -> None:
+        with pytest.raises(ValueError, match="buffer_multiplier must be positive"):
+            calculate_required_margin_with_buffer(
+                notional=Decimal("20"),
+                leverage=10,
+                buffer_multiplier=Decimal("0"),
+            )
+
+    def test_raises_on_negative_buffer(self) -> None:
+        with pytest.raises(ValueError, match="buffer_multiplier must be positive"):
+            calculate_required_margin_with_buffer(
+                notional=Decimal("20"),
+                leverage=10,
+                buffer_multiplier=Decimal("-1"),
+            )
+
+    def test_raises_on_zero_notional(self) -> None:
+        with pytest.raises(ValueError, match="notional must be positive"):
+            calculate_required_margin_with_buffer(
+                notional=Decimal("0"),
+                leverage=10,
+                buffer_multiplier=Decimal("3"),
+            )
+
+    def test_raises_on_negative_notional(self) -> None:
+        with pytest.raises(ValueError, match="notional must be positive"):
+            calculate_required_margin_with_buffer(
+                notional=Decimal("-1"),
+                leverage=10,
+                buffer_multiplier=Decimal("3"),
+            )
+
+
+# ---------------------------------------------------------------------------
+# Tests: set_initial_leverage
+# ---------------------------------------------------------------------------
+
+
+class TestSetInitialLeverage:
+    @pytest.mark.asyncio
+    async def test_success_with_matching_leverage(self) -> None:
+        from src.exchanges.binance.aiohttp_transport import AiohttpBinanceTransport
+
+        class FakeTransport:
+            async def send(self, request):
+                return BinanceTransportResponse(
+                    status_code=200,
+                    payload={"symbol": "ETHUSDT", "leverage": 10},
+                    headers={},
+                )
+
+        with mock.patch.object(AiohttpBinanceTransport, "send", FakeTransport.send):
+            await set_initial_leverage("test-key", "test-secret", 10)
+            # does not raise
+
+    @pytest.mark.asyncio
+    async def test_fails_on_leverage_mismatch(self) -> None:
+        from src.exchanges.binance.aiohttp_transport import AiohttpBinanceTransport
+
+        class FakeTransport:
+            async def send(self, request):
+                return BinanceTransportResponse(
+                    status_code=200,
+                    payload={"symbol": "ETHUSDT", "leverage": 5},
+                    headers={},
+                )
+
+        with mock.patch.object(AiohttpBinanceTransport, "send", FakeTransport.send):
+            with pytest.raises(SystemExit):
+                await set_initial_leverage("test-key", "test-secret", 10)
+
+    @pytest.mark.asyncio
+    async def test_fails_on_http_400(self) -> None:
+        from src.exchanges.binance.aiohttp_transport import AiohttpBinanceTransport
+
+        class FakeTransport:
+            async def send(self, request):
+                return BinanceTransportResponse(
+                    status_code=400,
+                    payload={"code": -4029, "msg": "Invalid symbol"},
+                    headers={},
+                )
+
+        with mock.patch.object(AiohttpBinanceTransport, "send", FakeTransport.send):
+            with pytest.raises(SystemExit):
+                await set_initial_leverage("test-key", "test-secret", 10)
+
+    @pytest.mark.asyncio
+    async def test_accepts_payload_without_leverage_field(self) -> None:
+        """When response payload has no 'leverage' key (e.g. just ack), pass."""
+        from src.exchanges.binance.aiohttp_transport import AiohttpBinanceTransport
+
+        class FakeTransport:
+            async def send(self, request):
+                return BinanceTransportResponse(
+                    status_code=200,
+                    payload={"symbol": "ETHUSDT", "msg": "success"},
+                    headers={},
+                )
+
+        with mock.patch.object(AiohttpBinanceTransport, "send", FakeTransport.send):
+            await set_initial_leverage("test-key", "test-secret", 10)
+            # does not raise
+
+
+# ---------------------------------------------------------------------------
+# Tests: _read_positive_decimal_env
+# ---------------------------------------------------------------------------
+
+
+class TestReadPositiveDecimalEnv:
+    def test_uses_default_when_env_not_set(self, monkeypatch) -> None:
+        monkeypatch.delenv("TEST_ENV_VAR", raising=False)
+        result = _read_positive_decimal_env("TEST_ENV_VAR", Decimal("42"))
+        assert result == Decimal("42")
+
+    def test_uses_default_when_env_empty(self, monkeypatch) -> None:
+        monkeypatch.setenv("TEST_ENV_VAR", "   ")
+        result = _read_positive_decimal_env("TEST_ENV_VAR", Decimal("42"))
+        assert result == Decimal("42")
+
+    def test_parses_valid_decimal(self, monkeypatch) -> None:
+        monkeypatch.setenv("TEST_ENV_VAR", "3.14")
+        result = _read_positive_decimal_env("TEST_ENV_VAR", Decimal("1"))
+        assert result == Decimal("3.14")
+
+    def test_parses_integer_as_decimal(self, monkeypatch) -> None:
+        monkeypatch.setenv("TEST_ENV_VAR", "5")
+        result = _read_positive_decimal_env("TEST_ENV_VAR", Decimal("1"))
+        assert result == Decimal("5")
+
+    def test_rejects_zero(self, monkeypatch) -> None:
+        monkeypatch.setenv("TEST_ENV_VAR", "0")
+        with pytest.raises(SystemExit):
+            _read_positive_decimal_env("TEST_ENV_VAR", Decimal("3"))
+
+    def test_rejects_negative(self, monkeypatch) -> None:
+        monkeypatch.setenv("TEST_ENV_VAR", "-5")
+        with pytest.raises(SystemExit):
+            _read_positive_decimal_env("TEST_ENV_VAR", Decimal("3"))
+
+    def test_rejects_non_numeric(self, monkeypatch) -> None:
+        monkeypatch.setenv("TEST_ENV_VAR", "abc")
+        with pytest.raises(SystemExit):
+            _read_positive_decimal_env("TEST_ENV_VAR", Decimal("3"))
+
+    def test_margin_buffer_env_default(self, monkeypatch) -> None:
+        monkeypatch.delenv(ENV_MARGIN_BUFFER_MULTIPLIER, raising=False)
+        result = _read_positive_decimal_env(
+            ENV_MARGIN_BUFFER_MULTIPLIER, DEFAULT_MARGIN_BUFFER_MULTIPLIER,
+        )
+        assert result == Decimal("3")
+
+    def test_margin_buffer_env_custom(self, monkeypatch) -> None:
+        monkeypatch.setenv(ENV_MARGIN_BUFFER_MULTIPLIER, "5")
+        result = _read_positive_decimal_env(
+            ENV_MARGIN_BUFFER_MULTIPLIER, DEFAULT_MARGIN_BUFFER_MULTIPLIER,
+        )
+        assert result == Decimal("5")
+
+    def test_margin_buffer_env_zero_rejected(self, monkeypatch) -> None:
+        monkeypatch.setenv(ENV_MARGIN_BUFFER_MULTIPLIER, "0")
+        with pytest.raises(SystemExit):
+            _read_positive_decimal_env(
+                ENV_MARGIN_BUFFER_MULTIPLIER, DEFAULT_MARGIN_BUFFER_MULTIPLIER,
+            )
+
+    def test_margin_buffer_env_negative_rejected(self, monkeypatch) -> None:
+        monkeypatch.setenv(ENV_MARGIN_BUFFER_MULTIPLIER, "-1")
+        with pytest.raises(SystemExit):
+            _read_positive_decimal_env(
+                ENV_MARGIN_BUFFER_MULTIPLIER, DEFAULT_MARGIN_BUFFER_MULTIPLIER,
+            )
