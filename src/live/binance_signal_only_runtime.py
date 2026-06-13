@@ -520,6 +520,14 @@ async def _seed_historical_klines(
         config=config,
     )
 
+    if current_boll is not None:
+        _log_boll_ready(
+            boll=current_boll,
+            buffer_size=len(candle_buffer),
+            reason="seed",
+            level=logging.WARNING,
+        )
+
     latest_open_time_ms = (
         candle_buffer[-1]["ts_ms"] if candle_buffer else 0
     )
@@ -632,6 +640,8 @@ async def run_binance_signal_only(
             signal_input = bridge.handle_event(event)
 
             if isinstance(event, MarketCandleEvent):
+                was_ready = current_boll is not None
+
                 await _handle_candle(
                     event=event,
                     signal_input=signal_input,
@@ -639,11 +649,30 @@ async def run_binance_signal_only(
                     candle_buffer=candle_buffer,
                     config=config,
                 )
+
                 # Recompute BOLL after every candle event
-                current_boll = _try_recompute_boll(
+                next_boll = _try_recompute_boll(
                     candle_buffer=candle_buffer,
                     config=config,
                 )
+
+                # Throttled BOLL_READY logging:
+                #   - partial kline updates → silent (no log)
+                #   - not_ready → ready transition → log once
+                #   - closed 15m candle arrives → log once
+                should_log, reason = _should_log_boll_ready(
+                    was_ready=was_ready,
+                    is_closed_candle=event.is_closed,
+                    next_boll=next_boll,
+                )
+                if should_log and reason is not None and next_boll is not None:
+                    _log_boll_ready(
+                        boll=next_boll,
+                        buffer_size=len(candle_buffer),
+                        reason=reason,
+                    )
+
+                current_boll = next_boll
 
             elif isinstance(event, MarketTradeEvent):
                 await _handle_trade(
@@ -822,6 +851,59 @@ async def _handle_trade(
 
 
 # ---------------------------------------------------------------------------
+# BOLL log throttling helpers
+# ---------------------------------------------------------------------------
+
+
+def _should_log_boll_ready(
+    *,
+    was_ready: bool,
+    is_closed_candle: bool,
+    next_boll: BollSnapshot | None,
+) -> tuple[bool, str | None]:
+    """Decide whether to emit a BOLL_READY log line.
+
+    Returns ``(should_log, reason)`` where *reason* is one of:
+
+    * ``"became_ready"`` — BOLL just transitioned from not-ready to ready.
+    * ``"closed_candle"`` — a closed 15m candle arrived and BOLL is ready.
+    * ``None`` — no log should be emitted.
+    """
+    if next_boll is None:
+        return False, None
+    if not was_ready:
+        return True, "became_ready"
+    if is_closed_candle:
+        return True, "closed_candle"
+    return False, None
+
+
+def _log_boll_ready(
+    *,
+    boll: BollSnapshot,
+    buffer_size: int,
+    reason: str,
+    level: int = logging.INFO,
+) -> None:
+    """Emit a single throttled BOLL_READY log line."""
+    logger.log(
+        level,
+        "BINANCE_SIGNAL_ONLY_BOLL_READY | reason=%s close=%.4f middle=%.4f "
+        "upper=%.4f lower=%.4f upper_dist=%.4f%% lower_dist=%.4f%% "
+        "switch=%s buffer_size=%s",
+        reason,
+        boll.close,
+        boll.middle,
+        boll.upper,
+        boll.lower,
+        boll.upper_distance_pct * 100,
+        boll.lower_distance_pct * 100,
+        boll.alert_switch_on,
+        buffer_size,
+    )
+
+
+# ---------------------------------------------------------------------------
 # BOLL recompute
 # ---------------------------------------------------------------------------
 
@@ -833,21 +915,19 @@ def _try_recompute_boll(
 ) -> BollSnapshot | None:
     """Try to recompute the BOLL snapshot from the candle buffer.
 
+    This is a **pure computation** function — it never logs anything.
+    Logging decisions belong to the caller.
+
     Returns None if there are not enough candles.
     """
     if len(candle_buffer) < config.boll_window:
-        logger.debug(
-            "BINANCE_SIGNAL_ONLY_CANDLE | buffer_size=%s < boll_window=%s",
-            len(candle_buffer),
-            config.boll_window,
-        )
         return None
 
     closes = [c["close"] for c in candle_buffer]
     latest = candle_buffer[-1]
 
     try:
-        boll = _build_boll_snapshot(
+        return _build_boll_snapshot(
             raw_symbol=config.raw_symbol,
             closes=closes,
             latest_candle=latest,
@@ -855,22 +935,6 @@ def _try_recompute_boll(
         )
     except ValueError:
         return None
-
-    logger.info(
-        "BINANCE_SIGNAL_ONLY_BOLL_READY | close=%.4f middle=%.4f "
-        "upper=%.4f lower=%.4f upper_dist=%.4f%% lower_dist=%.4f%% "
-        "switch=%s buffer_size=%s",
-        boll.close,
-        boll.middle,
-        boll.upper,
-        boll.lower,
-        boll.upper_distance_pct * 100,
-        boll.lower_distance_pct * 100,
-        boll.alert_switch_on,
-        len(candle_buffer),
-    )
-
-    return boll
 
 
 # ---------------------------------------------------------------------------

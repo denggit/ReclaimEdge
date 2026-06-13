@@ -38,6 +38,8 @@ from src.live.binance_signal_only_runtime import (
     _calculate_boll,
     _compute_seed_limit,
     _handle_candle,
+    _log_boll_ready,
+    _should_log_boll_ready,
     _try_recompute_boll,
     _upsert_candle_entry,
     load_binance_signal_only_config,
@@ -1333,3 +1335,335 @@ class TestSeedRuntimeBehavior:
         assert result is not None
         times = [c["ts_ms"] for c in candle_buffer]
         assert times == sorted(times)
+
+
+# ======================================================================
+# BOLL log throttling tests
+# ======================================================================
+
+
+class TestTryRecomputeBollNoLogging:
+    """``_try_recompute_boll`` is a pure computation — it must NOT emit logs."""
+
+    def _make_config(self) -> BinanceSignalOnlyConfig:
+        return BinanceSignalOnlyConfig(
+            canonical_symbol="ETH-USDT-PERP",
+            raw_symbol="ETHUSDT",
+            kline_interval="15m",
+            duration_seconds=3600.0,
+            max_events=100000,
+            heartbeat_seconds=30.0,
+            candle_limit=100,
+            boll_window=5,
+            boll_std_multiplier=2.0,
+            band_distance_threshold_pct=0.005,
+            tp_boll_enabled=False,
+            tp_boll_window=0,
+            seed_historical_klines=True,
+            seed_kline_limit=100,
+            seed_kline_timeout_seconds=10.0,
+        )
+
+    def test_recompute_does_not_log_boll_ready(self, caplog) -> None:
+        """Calling _try_recompute_boll multiple times must not emit BOLL_READY."""
+        import logging
+
+        config = self._make_config()
+        candle_buffer: list[dict] = [
+            {"ts_ms": i * 60000, "close": float(3000 + i)} for i in range(10)
+        ]
+        with caplog.at_level(logging.DEBUG):
+            for _ in range(5):
+                _try_recompute_boll(candle_buffer=candle_buffer, config=config)
+        assert "BINANCE_SIGNAL_ONLY_BOLL_READY" not in caplog.text
+
+    def test_recompute_does_not_log_when_buffer_too_small(self, caplog) -> None:
+        """Insufficient buffer → no log either."""
+        import logging
+
+        config = self._make_config()
+        candle_buffer: list[dict] = [
+            {"ts_ms": i * 60000, "close": float(3000 + i)} for i in range(3)
+        ]
+        with caplog.at_level(logging.DEBUG):
+            _try_recompute_boll(candle_buffer=candle_buffer, config=config)
+        assert "BINANCE_SIGNAL_ONLY_BOLL_READY" not in caplog.text
+
+
+class TestShouldLogBollReady:
+    """Tests for ``_should_log_boll_ready`` pure decision function."""
+
+    @staticmethod
+    def _dummy_boll() -> BollSnapshot:
+        return BollSnapshot(
+            inst_id="ETHUSDT",
+            candle_ts_ms=1700000000000,
+            close=3010.0,
+            middle=3000.0,
+            upper=3050.0,
+            lower=2950.0,
+            upper_distance_pct=0.016,
+            lower_distance_pct=0.016,
+            alert_switch_on=True,
+            live_mode=True,
+        )
+
+    def test_next_boll_none_returns_false(self) -> None:
+        should, reason = _should_log_boll_ready(
+            was_ready=False, is_closed_candle=False, next_boll=None
+        )
+        assert should is False
+        assert reason is None
+
+    def test_not_ready_to_ready_returns_became_ready(self) -> None:
+        should, reason = _should_log_boll_ready(
+            was_ready=False, is_closed_candle=False, next_boll=self._dummy_boll()
+        )
+        assert should is True
+        assert reason == "became_ready"
+
+    def test_ready_partial_update_returns_false(self) -> None:
+        """Already ready + partial candle → no log."""
+        should, reason = _should_log_boll_ready(
+            was_ready=True, is_closed_candle=False, next_boll=self._dummy_boll()
+        )
+        assert should is False
+        assert reason is None
+
+    def test_ready_closed_candle_returns_closed_candle(self) -> None:
+        should, reason = _should_log_boll_ready(
+            was_ready=True, is_closed_candle=True, next_boll=self._dummy_boll()
+        )
+        assert should is True
+        assert reason == "closed_candle"
+
+    def test_not_ready_still_none_returns_false(self) -> None:
+        """BOLL was not ready and still isn't → no log."""
+        should, reason = _should_log_boll_ready(
+            was_ready=False, is_closed_candle=True, next_boll=None
+        )
+        assert should is False
+        assert reason is None
+
+    def test_not_ready_closed_candle_returns_became_ready(self) -> None:
+        """First candle that makes BOLL ready is a closed candle → became_ready, not closed_candle."""
+        should, reason = _should_log_boll_ready(
+            was_ready=False, is_closed_candle=True, next_boll=self._dummy_boll()
+        )
+        assert should is True
+        assert reason == "became_ready"
+
+
+class TestLogBollReadyFormat:
+    """Tests for ``_log_boll_ready`` log format."""
+
+    @staticmethod
+    def _dummy_boll() -> BollSnapshot:
+        return BollSnapshot(
+            inst_id="ETHUSDT",
+            candle_ts_ms=1700000000000,
+            close=3010.0,
+            middle=3000.0,
+            upper=3050.0,
+            lower=2950.0,
+            upper_distance_pct=0.016,
+            lower_distance_pct=0.016,
+            alert_switch_on=True,
+            live_mode=True,
+        )
+
+    def test_log_contains_reason_and_boll_fields(self, caplog) -> None:
+        import logging
+
+        boll = self._dummy_boll()
+        with caplog.at_level(logging.INFO):
+            _log_boll_ready(boll=boll, buffer_size=20, reason="seed")
+        assert "BINANCE_SIGNAL_ONLY_BOLL_READY" in caplog.text
+        assert "reason=seed" in caplog.text
+        assert "close=3010.0000" in caplog.text
+        assert "middle=3000.0000" in caplog.text
+        assert "buffer_size=20" in caplog.text
+
+    def test_log_reason_became_ready(self, caplog) -> None:
+        import logging
+
+        boll = self._dummy_boll()
+        with caplog.at_level(logging.WARNING):
+            _log_boll_ready(
+                boll=boll, buffer_size=5, reason="became_ready", level=logging.WARNING
+            )
+        assert "reason=became_ready" in caplog.text
+
+    def test_log_reason_closed_candle(self, caplog) -> None:
+        import logging
+
+        boll = self._dummy_boll()
+        with caplog.at_level(logging.INFO):
+            _log_boll_ready(boll=boll, buffer_size=30, reason="closed_candle")
+        assert "reason=closed_candle" in caplog.text
+
+
+class TestSeedBollReadyLogOnce:
+    """Seed must log BOLL_READY exactly once with reason=seed."""
+
+    def _make_config(self, **overrides) -> BinanceSignalOnlyConfig:
+        defaults = {
+            "canonical_symbol": "ETH-USDT-PERP",
+            "raw_symbol": "ETHUSDT",
+            "kline_interval": "15m",
+            "duration_seconds": 3600.0,
+            "max_events": 100000,
+            "heartbeat_seconds": 30.0,
+            "candle_limit": 100,
+            "boll_window": 5,
+            "boll_std_multiplier": 2.0,
+            "band_distance_threshold_pct": 0.005,
+            "tp_boll_enabled": False,
+            "tp_boll_window": 0,
+            "seed_historical_klines": True,
+            "seed_kline_limit": 50,
+            "seed_kline_timeout_seconds": 10.0,
+        }
+        defaults.update(overrides)
+        return BinanceSignalOnlyConfig(**defaults)
+
+    @staticmethod
+    def _make_kline(open_time_ms: int, close: float) -> BinancePublicKline:
+        return BinancePublicKline(
+            open_time_ms=open_time_ms,
+            close_time_ms=open_time_ms + 15 * 60 * 1000 - 1,
+            open_price=Decimal(str(close - 10)),
+            high_price=Decimal(str(close + 5)),
+            low_price=Decimal(str(close - 5)),
+            close_price=Decimal(str(close)),
+            volume=Decimal("100.0"),
+        )
+
+    @pytest.mark.asyncio
+    async def test_seed_logs_boll_ready_once_with_reason_seed(self, caplog) -> None:
+        """Seed with enough klines → exactly 1 BOLL_READY with reason=seed."""
+        import logging
+
+        from src.live.binance_signal_only_runtime import _seed_historical_klines
+
+        config = self._make_config(boll_window=5)
+        candle_buffer: list[dict] = []
+
+        klines = [
+            self._make_kline(1000 + i * 900_000, 3000.0 + i * 10)
+            for i in range(20)
+        ]
+
+        async def fake_fetcher(*, symbol, interval, limit):
+            return klines
+
+        with caplog.at_level(logging.WARNING):
+            result = await _seed_historical_klines(
+                candle_buffer=candle_buffer,
+                config=config,
+                fetcher=fake_fetcher,
+            )
+
+        assert result is not None
+
+        # Count BOLL_READY occurrences
+        boll_ready_lines = [
+            line for line in caplog.text.splitlines()
+            if "BINANCE_SIGNAL_ONLY_BOLL_READY" in line
+        ]
+        assert len(boll_ready_lines) == 1
+        assert "reason=seed" in boll_ready_lines[0]
+
+        # KLINE_SEED_DONE must still exist
+        assert "BINANCE_SIGNAL_ONLY_KLINE_SEED_DONE" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_seed_insufficient_no_boll_ready_log(self, caplog) -> None:
+        """Seed with too few klines → no BOLL_READY log at all."""
+        import logging
+
+        from src.live.binance_signal_only_runtime import _seed_historical_klines
+
+        config = self._make_config(boll_window=20)
+        candle_buffer: list[dict] = []
+
+        klines = [
+            self._make_kline(1000 + i * 900_000, 3000.0 + i * 10)
+            for i in range(3)
+        ]
+
+        async def fake_fetcher(*, symbol, interval, limit):
+            return klines
+
+        with caplog.at_level(logging.WARNING):
+            result = await _seed_historical_klines(
+                candle_buffer=candle_buffer,
+                config=config,
+                fetcher=fake_fetcher,
+            )
+
+        assert result is None
+        assert "BINANCE_SIGNAL_ONLY_BOLL_READY" not in caplog.text
+        # KLINE_SEED_DONE should still appear
+        assert "BINANCE_SIGNAL_ONLY_KLINE_SEED_DONE" in caplog.text
+
+
+class TestHeartbeatFormatUnchanged:
+    """Heartbeat format must still include BOLL fields when ready."""
+
+    def test_heartbeat_with_boll_contains_boll_fields(self, caplog) -> None:
+        """Heartbeat log line must contain price, boll_middle, etc."""
+        import logging
+
+        from src.live.binance_signal_only_runtime import _log_heartbeat
+        from src.live.binance_market_data_bridge import BinanceMarketDataSignalBridge
+
+        bridge = BinanceMarketDataSignalBridge()
+        boll = BollSnapshot(
+            inst_id="ETHUSDT",
+            candle_ts_ms=1700000000000,
+            close=3010.0,
+            middle=3000.0,
+            upper=3050.0,
+            lower=2950.0,
+            upper_distance_pct=0.016,
+            lower_distance_pct=0.016,
+            alert_switch_on=True,
+            live_mode=True,
+        )
+
+        with caplog.at_level(logging.WARNING):
+            _log_heartbeat(
+                bridge=bridge,
+                current_boll=boll,
+                total_events=100,
+                elapsed=30.0,
+            )
+
+        assert "BINANCE_SIGNAL_ONLY_HEARTBEAT" in caplog.text
+        assert "price=" in caplog.text
+        assert "boll_middle=" in caplog.text
+        assert "boll_upper=" in caplog.text
+        assert "boll_lower=" in caplog.text
+        assert "bridge_errors=" in caplog.text
+
+    def test_heartbeat_without_boll_shows_not_ready(self, caplog) -> None:
+        """Heartbeat without BOLL must show boll=not_ready."""
+        import logging
+
+        from src.live.binance_signal_only_runtime import _log_heartbeat
+        from src.live.binance_market_data_bridge import BinanceMarketDataSignalBridge
+
+        bridge = BinanceMarketDataSignalBridge()
+
+        with caplog.at_level(logging.WARNING):
+            _log_heartbeat(
+                bridge=bridge,
+                current_boll=None,
+                total_events=10,
+                elapsed=10.0,
+            )
+
+        assert "BINANCE_SIGNAL_ONLY_HEARTBEAT" in caplog.text
+        assert "boll=not_ready" in caplog.text
+        assert "bridge_errors=" in caplog.text
