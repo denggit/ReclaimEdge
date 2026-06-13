@@ -355,3 +355,59 @@ def test_semantic_sidecar_tp_placement_switch_boundary() -> None:
                     f"{token} must only appear in sidecar TP semantic placement files; "
                     f"found in {file_name}"
                 )
+
+
+# ---------------------------------------------------------------------------
+# Additional guard – semantic sidecar TP cancel switch boundary
+# ---------------------------------------------------------------------------
+
+FILES_FORBIDDEN_SEMANTIC_SIDECAR_TP_CANCEL: list[str] = [
+    "scripts/run_boll_cvd_live.py",
+    "src/execution/trader.py",
+    "src/execution/tp_sl_core_tp_manager.py",
+    "src/execution/tp_sl_execution_manager.py",
+    "src/execution/tp_sl_protective_stop_manager.py",
+    "src/execution/tp_sl_market_exit_manager.py",
+    "src/execution/tp_sl_near_tp_manager.py",
+    "src/live/workers/execution_command_processor.py",
+    "src/live/account_sync/protective_orders_phase.py",
+    "src/live/startup_recovery/order_recovery.py",
+    "src/strategies/boll_cvd_reclaim_strategy.py",
+    "src/strategies/boll_cvd_shock_reclaim_strategy.py",
+]
+
+SEMANTIC_SIDECAR_TP_CANCEL_TOKENS: list[str] = [
+    "BROKER_SEMANTIC_SIDECAR_TP_CANCEL_ENABLED",
+    "_cancel_sidecar_take_profit_semantic",
+]
+
+ALLOWED_SEMANTIC_SIDECAR_TP_CANCEL_FILES: set[str] = {
+    "src/execution/tp_sl_sidecar_manager.py",
+    "tests/test_tp_sl_sidecar_manager_semantic_tp_cancel.py",
+    "tests/exchanges/test_no_live_wiring.py",
+}
+
+
+def test_semantic_sidecar_tp_cancel_switch_boundary() -> None:
+    """The sidecar TP cancel semantic switch must only live in the sidecar
+    manager and its tests."""
+    for file_name in FILES_FORBIDDEN_SEMANTIC_SIDECAR_TP_CANCEL:
+        path = Path(file_name)
+        if not path.exists():
+            continue
+        text = path.read_text(encoding="utf-8")
+        for token in SEMANTIC_SIDECAR_TP_CANCEL_TOKENS:
+            assert token not in text, f"{token} unexpectedly found in {file_name}"
+
+    root = Path(".")
+    for path in root.rglob("*.py"):
+        if any(part in {".git", ".venv", "__pycache__"} for part in path.parts):
+            continue
+        file_name = path.as_posix()
+        text = path.read_text(encoding="utf-8")
+        for token in SEMANTIC_SIDECAR_TP_CANCEL_TOKENS:
+            if token in text:
+                assert file_name in ALLOWED_SEMANTIC_SIDECAR_TP_CANCEL_FILES, (
+                    f"{token} must only appear in sidecar TP semantic cancel files; "
+                    f"found in {file_name}"
+                )
