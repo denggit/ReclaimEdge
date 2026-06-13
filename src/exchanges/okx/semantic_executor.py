@@ -102,7 +102,10 @@ class OkxBrokerSemanticExecutor(BrokerSemanticExecutor):
             )
 
         if request.action == BrokerSemanticAction.CANCEL_ALL_OPEN_ORDERS:
-            return await self._cancel_all_open_orders(request)
+            raise _exchange_error(
+                ExchangeErrorKind.UNSUPPORTED_OPERATION,
+                "CANCEL_ALL_OPEN_ORDERS is disabled for OKX until reduce-only identity safety is enforced",
+            )
 
         if request.action == BrokerSemanticAction.FETCH_POSITION:
             position = await self._broker_client.fetch_position(request.symbol)
@@ -266,36 +269,6 @@ class OkxBrokerSemanticExecutor(BrokerSemanticExecutor):
             request=request,
             order_result=order_result,
         )
-
-    async def _cancel_all_open_orders(
-        self,
-        request: BrokerSemanticRequest,
-    ) -> BrokerSemanticResult:
-        orders = tuple(await self._broker_client.fetch_open_orders(request.symbol))
-        cancel_results: list[BrokerCancelResult] = []
-        for order in orders:
-            if not order.order_id:
-                raise _exchange_error(
-                    ExchangeErrorKind.EXCHANGE_REJECTED,
-                    "CANCEL_ALL_OPEN_ORDERS requires every order to have order_id",
-                )
-            cancel_results.append(
-                await self._broker_client.cancel_order(
-                    request.symbol,
-                    order.order_id,
-                )
-            )
-        return BrokerSemanticResult(
-            exchange=request.exchange,
-            symbol=request.symbol,
-            action=request.action,
-            role=request.role,
-            ok=all(result.ok for result in cancel_results),
-            orders=orders,
-            message="cancelled_all_open_orders",
-            raw={"cancel_results": tuple(result.raw for result in cancel_results)},
-        )
-
 
 def _require_side(request: BrokerSemanticRequest) -> BrokerPositionSide:
     if request.side is None:

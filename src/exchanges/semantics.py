@@ -117,6 +117,7 @@ class BrokerSemanticExecutor(ABC):
         client_order_id: str | None = None,
         label: str | None = None,
     ) -> BrokerSemanticResult:
+        effective_price = order_price if order_price is not None else trigger_price
         return await self.execute(
             BrokerSemanticRequest(
                 exchange=self.exchange,
@@ -126,8 +127,8 @@ class BrokerSemanticExecutor(ABC):
                 side=side,
                 quantity=quantity,
                 quantity_unit=quantity_unit,
-                trigger_price=trigger_price,
-                price=order_price,
+                price=effective_price,
+                trigger_price=None,
                 reduce_only=True,
                 client_order_id=client_order_id,
                 label=label,
@@ -294,6 +295,7 @@ class BrokerSemanticExecutor(ABC):
         client_order_id: str | None = None,
         label: str | None = None,
     ) -> BrokerSemanticResult:
+        effective_price = order_price if order_price is not None else trigger_price
         return await self.execute(
             BrokerSemanticRequest(
                 exchange=self.exchange,
@@ -303,8 +305,8 @@ class BrokerSemanticExecutor(ABC):
                 side=side,
                 quantity=quantity,
                 quantity_unit=quantity_unit,
-                trigger_price=trigger_price,
-                price=order_price,
+                price=effective_price,
+                trigger_price=None,
                 reduce_only=True,
                 client_order_id=client_order_id,
                 label=label,

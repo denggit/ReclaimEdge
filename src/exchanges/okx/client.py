@@ -164,15 +164,11 @@ class OkxBrokerClient(BrokerClient):
         )
 
     async def fetch_open_orders(self, symbol: str) -> Sequence[BrokerOrder]:
-        fetch_pending_orders = getattr(self._trader, "fetch_pending_orders", None)
-        if callable(fetch_pending_orders):
-            raw_orders = await fetch_pending_orders()
-        else:
-            raw = await self._trader.request(
-                "GET",
-                f"/api/v5/trade/orders-pending?instId={symbol}",
-            )
-            raw_orders = _response_data(raw)
+        raw = await self._trader.request(
+            "GET",
+            f"/api/v5/trade/orders-pending?instId={symbol}",
+        )
+        raw_orders = _response_data(raw)
 
         return tuple(
             broker_order_from_okx_pending_order(item)
@@ -181,19 +177,11 @@ class OkxBrokerClient(BrokerClient):
         )
 
     async def fetch_algo_orders(self, symbol: str) -> Sequence[BrokerOrder]:
-        fetch_pending_algo_orders = getattr(
-            self._trader,
-            "fetch_pending_algo_orders",
-            None,
+        raw = await self._trader.request(
+            "GET",
+            f"/api/v5/trade/orders-algo-pending?instId={symbol}&ordType=conditional",
         )
-        if callable(fetch_pending_algo_orders):
-            raw_orders = await fetch_pending_algo_orders()
-        else:
-            raw = await self._trader.request(
-                "GET",
-                f"/api/v5/trade/orders-algo-pending?instId={symbol}&ordType=conditional",
-            )
-            raw_orders = _response_data(raw)
+        raw_orders = _response_data(raw)
 
         return tuple(
             broker_order_from_okx_pending_algo_order(item)

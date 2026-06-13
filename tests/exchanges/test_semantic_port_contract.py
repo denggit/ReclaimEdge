@@ -91,7 +91,8 @@ class TestConvenienceMethodsDelegateToExecute:
         assert req.action == BrokerSemanticAction.PLACE_REDUCE_ONLY_TP
         assert req.role == BrokerSemanticOrderRole.CORE_TP
         assert req.reduce_only is True
-        assert req.trigger_price == Decimal("52000")
+        assert req.price == Decimal("52000")
+        assert req.trigger_price is None
 
     @pytest.mark.asyncio
     async def test_place_reduce_only_tp_action_explicit_role_tp1(
@@ -110,7 +111,25 @@ class TestConvenienceMethodsDelegateToExecute:
         assert req.action == BrokerSemanticAction.PLACE_REDUCE_ONLY_TP
         assert req.role == BrokerSemanticOrderRole.TP1
         assert req.reduce_only is True
-        assert req.trigger_price == Decimal("52000")
+        assert req.price == Decimal("52000")
+        assert req.trigger_price is None
+
+    @pytest.mark.asyncio
+    async def test_place_reduce_only_tp_order_price_takes_precedence(
+        self, executor: RecordingSemanticExecutor,
+    ) -> None:
+        await executor.place_reduce_only_tp(
+            symbol="ETH-USDT-SWAP",
+            side=BrokerPositionSide.LONG,
+            quantity=Decimal("10"),
+            trigger_price=Decimal("3500"),
+            order_price=Decimal("3501"),
+        )
+
+        req = executor.requests[-1]
+        assert req.action == BrokerSemanticAction.PLACE_REDUCE_ONLY_TP
+        assert req.price == Decimal("3501")
+        assert req.trigger_price is None
 
     @pytest.mark.asyncio
     async def test_place_protective_stop_action(self, executor: RecordingSemanticExecutor) -> None:
@@ -257,6 +276,25 @@ class TestConvenienceMethodsDelegateToExecute:
         assert req.action == BrokerSemanticAction.SIDECAR_TP
         assert req.role == BrokerSemanticOrderRole.SIDECAR_TP
         assert req.reduce_only is True
+        assert req.price == Decimal("52000")
+        assert req.trigger_price is None
+
+    @pytest.mark.asyncio
+    async def test_sidecar_tp_order_price_takes_precedence(
+        self, executor: RecordingSemanticExecutor,
+    ) -> None:
+        await executor.sidecar_tp(
+            symbol="ETH-USDT-SWAP",
+            side=BrokerPositionSide.LONG,
+            quantity=Decimal("10"),
+            trigger_price=Decimal("3500"),
+            order_price=Decimal("3501"),
+        )
+
+        req = executor.requests[-1]
+        assert req.action == BrokerSemanticAction.SIDECAR_TP
+        assert req.price == Decimal("3501")
+        assert req.trigger_price is None
 
     @pytest.mark.asyncio
     async def test_fetch_position_action(self, executor: RecordingSemanticExecutor) -> None:

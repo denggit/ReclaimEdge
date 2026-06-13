@@ -60,13 +60,17 @@ class FakeTrader:
             return {"data": [{"ordId": payload["ordId"], "sCode": "0"}]}
         if endpoint == "/api/v5/trade/cancel-algos":
             return {"data": [{"algoId": payload[0]["algoId"], "sCode": "0"}]}
+        if endpoint.startswith("/api/v5/trade/orders-pending?"):
+            return {"data": list(self.pending_orders)}
+        if endpoint.startswith("/api/v5/trade/orders-algo-pending?"):
+            return {"data": list(self.pending_algo_orders)}
         raise AssertionError(f"unexpected request {method} {endpoint} {payload}")
 
     async def fetch_pending_orders(self) -> list[dict[str, Any]]:
-        return list(self.pending_orders)
+        raise AssertionError("must not call trader.fetch_pending_orders")
 
     async def fetch_pending_algo_orders(self) -> list[dict[str, Any]]:
-        return list(self.pending_algo_orders)
+        raise AssertionError("must not call trader.fetch_pending_algo_orders")
 
     async def fetch_position_snapshot(self) -> LegacyPositionSnapshot | None:
         return self.position_snapshot
@@ -283,6 +287,11 @@ async def test_fetch_open_orders_filters_symbol_and_maps_raw(
 
     assert isinstance(orders, tuple)
     assert len(orders) == 1
+    assert fake_trader.requests[-1] == (
+        "GET",
+        "/api/v5/trade/orders-pending?instId=ETH-USDT-SWAP",
+        None,
+    )
     assert orders[0].order_id == "123"
     assert orders[0].raw["ordId"] == "123"
 
@@ -318,9 +327,96 @@ async def test_fetch_algo_orders_filters_symbol_and_maps_raw(
     orders = await client.fetch_algo_orders("ETH-USDT-SWAP")
 
     assert len(orders) == 1
+    assert fake_trader.requests[-1] == (
+        "GET",
+        "/api/v5/trade/orders-algo-pending?instId=ETH-USDT-SWAP&ordType=conditional",
+        None,
+    )
     assert orders[0].order_id == "algo-123"
     assert orders[0].metadata["source"] == "algo"
     assert orders[0].raw == raw
+
+
+@pytest.mark.asyncio
+async def test_fetch_open_orders_does_not_call_trader_fetch_pending_orders(
+    fake_trader: FakeTrader,
+    client: OkxBrokerClient,
+) -> None:
+    fake_trader.pending_orders = [
+        {
+            "instId": "ETH-USDT-SWAP",
+            "ordId": "ordinary-1",
+            "side": "sell",
+            "posSide": "long",
+            "ordType": "limit",
+            "state": "live",
+            "px": "3500",
+            "sz": "10",
+            "reduceOnly": "true",
+        },
+    ]
+
+    orders = await client.fetch_open_orders("ETH-USDT-SWAP")
+
+    assert len(orders) == 1
+    assert orders[0].order_id == "ordinary-1"
+    assert fake_trader.requests[-1][1] == (
+        "/api/v5/trade/orders-pending?instId=ETH-USDT-SWAP"
+    )
+
+
+@pytest.mark.asyncio
+async def test_fetch_algo_orders_does_not_call_trader_fetch_pending_algo_orders(
+    fake_trader: FakeTrader,
+    client: OkxBrokerClient,
+) -> None:
+    fake_trader.pending_algo_orders = [
+        {
+            "instId": "ETH-USDT-SWAP",
+            "algoId": "algo-1",
+            "side": "sell",
+            "posSide": "long",
+            "ordType": "conditional",
+            "state": "live",
+            "sz": "10",
+            "slTriggerPx": "3400",
+            "slOrdPx": "-1",
+            "reduceOnly": "true",
+        },
+    ]
+
+    orders = await client.fetch_algo_orders("ETH-USDT-SWAP")
+
+    assert len(orders) == 1
+    assert orders[0].order_id == "algo-1"
+    assert fake_trader.requests[-1][1] == (
+        "/api/v5/trade/orders-algo-pending?instId=ETH-USDT-SWAP&ordType=conditional"
+    )
+
+
+@pytest.mark.asyncio
+async def test_future_semantic_read_routing_will_not_recurse_through_trader_legacy_methods(
+    fake_trader: FakeTrader,
+    client: OkxBrokerClient,
+) -> None:
+    fake_trader.pending_orders = [
+        {
+            "instId": "ETH-USDT-SWAP",
+            "ordId": "ordinary-1",
+            "side": "sell",
+            "posSide": "long",
+            "ordType": "limit",
+            "state": "live",
+            "px": "3500",
+            "sz": "10",
+            "reduceOnly": "true",
+        },
+    ]
+
+    orders = await client.fetch_open_orders("ETH-USDT-SWAP")
+
+    assert len(orders) == 1
+    assert fake_trader.requests[-1][1].startswith("/api/v5/trade/orders-pending?")
 
 
 @pytest.mark.asyncio

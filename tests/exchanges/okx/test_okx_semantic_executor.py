@@ -445,22 +445,23 @@ async def test_fetch_position_returns_position(
 
 
 @pytest.mark.asyncio
-async def test_cancel_all_open_orders_fetches_and_cancels_each_order(
+async def test_cancel_all_open_orders_is_unsupported_until_identity_safety_exists(
     executor: OkxBrokerSemanticExecutor,
     fake: FakeBrokerClient,
 ) -> None:
     fake.open_orders.extend([_order("ord-1"), _order("ord-2")])
 
-    result = await executor.execute(
-        _request(
-            BrokerSemanticAction.CANCEL_ALL_OPEN_ORDERS,
-            BrokerSemanticOrderRole.RECOVERY,
+    with pytest.raises(ExchangeError) as exc_info:
+        await executor.execute(
+            _request(
+                BrokerSemanticAction.CANCEL_ALL_OPEN_ORDERS,
+                BrokerSemanticOrderRole.RECOVERY,
+            )
         )
-    )
 
-    assert result.ok is True
-    assert fake.cancel_order_calls == [(SYMBOL, "ord-1"), (SYMBOL, "ord-2")]
-    assert result.orders == tuple(fake.open_orders)
+    assert exc_info.value.kind == ExchangeErrorKind.UNSUPPORTED_OPERATION
+    assert "reduce-only identity safety" in exc_info.value.message
+    assert fake.cancel_order_calls == []
 
 
 @pytest.mark.parametrize(
