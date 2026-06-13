@@ -192,11 +192,24 @@ def test_select_recoverable_reduce_only_orders_ignores_missing_fields() -> None:
         protected_order_ids=set(),
     )
 
-    # Only the last item has both instId and reduceOnly=true, but it has no
-    # ordId so _order_id returns "" which is not in the empty protected set.
-    assert len(selected) == 1
-    assert _order_symbol(selected[0]) == "ETH-USDT-SWAP"
-    assert _order_reduce_only(selected[0]) is True
+    # All items lack a usable order id — none should be selected.
+    assert selected == []
+
+
+def test_select_recoverable_reduce_only_orders_requires_order_id() -> None:
+    pending = [
+        {"instId": "ETH-USDT-SWAP", "reduceOnly": "true"},
+        {"symbol": "ETH-USDT-SWAP", "reduce_only": True},
+        {"instId": "ETH-USDT-SWAP", "reduceOnly": "true", "ordId": "tp-1"},
+    ]
+
+    selected = _select_recoverable_reduce_only_orders(
+        pending,
+        symbol="ETH-USDT-SWAP",
+        protected_order_ids=set(),
+    )
+
+    assert [_order_id(item) for item in selected] == ["tp-1"]
 
 
 # ---------------------------------------------------------------------------

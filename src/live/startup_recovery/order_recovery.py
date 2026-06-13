@@ -71,14 +71,23 @@ def _select_recoverable_reduce_only_orders(
 
     Returns the original order objects unchanged – callers can extract
     order ids via ``_order_id()`` when needed.
+
+    Orders without a usable order id are silently skipped — startup
+    recovery can only act on identifiable orders.
     """
-    return [
-        order
-        for order in pending_orders
-        if _order_symbol(order) == symbol
-        and _order_reduce_only(order)
-        and _order_id(order) not in protected_order_ids
-    ]
+    selected: list[Any] = []
+    for order in pending_orders:
+        order_id = _order_id(order)
+        if not order_id:
+            continue
+        if _order_symbol(order) != symbol:
+            continue
+        if not _order_reduce_only(order):
+            continue
+        if order_id in protected_order_ids:
+            continue
+        selected.append(order)
+    return selected
 
 
 async def apply_sidecar_startup_recovery(
