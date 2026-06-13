@@ -18,6 +18,49 @@ class SidecarTpManager:
     def __init__(self, trader: Trader) -> None:
         self.trader = trader
 
+    def _broker_semantic_sidecar_tp_placement_enabled(self) -> bool:
+        import os
+
+        value = os.getenv("BROKER_SEMANTIC_SIDECAR_TP_PLACEMENT_ENABLED", "false").strip().lower()
+        return value in {"1", "true", "yes", "y", "on"}
+
+    @staticmethod
+    def _broker_position_side(side: str):
+        from src.exchanges.models import BrokerPositionSide
+
+        if side == "LONG":
+            return BrokerPositionSide.LONG
+        if side == "SHORT":
+            return BrokerPositionSide.SHORT
+        raise RuntimeError(f"unsupported_position_side_for_semantic_sidecar_tp: {side}")
+
+    async def _place_sidecar_take_profit_semantic(
+        self,
+        *,
+        side: str,
+        contracts: Decimal,
+        tp_price: float,
+        client_order_id: str | None,
+    ) -> str:
+        t = self.trader
+        from src.exchanges.models import BrokerQuantityUnit
+
+        result = await t.broker_semantic_executor.sidecar_tp(
+            symbol=t.symbol,
+            side=self._broker_position_side(side),
+            quantity=contracts,
+            trigger_price=Decimal(str(tp_price)),
+            quantity_unit=BrokerQuantityUnit.CONTRACTS,
+            client_order_id=client_order_id,
+            label="sidecar_tp",
+        )
+        if not result.ok or not result.order_id:
+            raise RuntimeError(
+                f"semantic_sidecar_tp_order_failed side={side} contracts={t.decimal_to_str(contracts)} "
+                f"tp_price={t.price_to_str(float(tp_price))} message={result.message}"
+            )
+        return str(result.order_id)
+
     async def place_sidecar_fixed_take_profit(
             self,
             *,
@@ -30,21 +73,30 @@ class SidecarTpManager:
         sent_client_order_id = ""
         if client_order_id:
             sent_client_order_id = sanitize_okx_client_order_id(client_order_id)
-        body = order_specs.build_reduce_only_tp_order_body(
-            inst_id=t.symbol,
-            td_mode=t.td_mode,
-            side=side,
-            contracts_text=t.decimal_to_str(Decimal(str(contracts))),
-            price_text=t.price_to_str(float(tp_price)),
-            pos_side_mode=t.pos_side_mode,
-            client_order_id=sent_client_order_id or None,
-        )
-        res = await t.request("POST", "/api/v5/trade/order", body)
-        order_id = t.extract_order_id(res)
+        contracts_decimal = Decimal(str(contracts))
+        if self._broker_semantic_sidecar_tp_placement_enabled():
+            order_id = await self._place_sidecar_take_profit_semantic(
+                side=side,
+                contracts=contracts_decimal,
+                tp_price=tp_price,
+                client_order_id=sent_client_order_id or None,
+            )
+        else:
+            body = order_specs.build_reduce_only_tp_order_body(
+                inst_id=t.symbol,
+                td_mode=t.td_mode,
+                side=side,
+                contracts_text=t.decimal_to_str(contracts_decimal),
+                price_text=t.price_to_str(float(tp_price)),
+                pos_side_mode=t.pos_side_mode,
+                client_order_id=sent_client_order_id or None,
+            )
+            res = await t.request("POST", "/api/v5/trade/order", body)
+            order_id = t.extract_order_id(res)
         logger.warning(
             "SIDECAR_TP_PLACED | side=%s contracts=%s tp_price=%s sent_clOrdId=%s ordId=%s",
             side,
-            t.decimal_to_str(Decimal(str(contracts))),
+            t.decimal_to_str(contracts_decimal),
             t.price_to_str(float(tp_price)),
             sent_client_order_id or "-",
             order_id,

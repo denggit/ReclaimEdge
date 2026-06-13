@@ -7,13 +7,15 @@
 @Description: Boundary guard – prove the exchange abstraction is NOT wired
               into live trading paths beyond Trader lazy sidecar access and
               the optional core TP semantic placement switch, targeted
-              TP/SL semantic cancel switches, and the optional market-exit
-              semantic placement switch.
+              TP/SL semantic cancel switches, the optional market-exit
+              semantic placement switch, and the optional sidecar TP semantic
+              placement switch.
 
 Trader may lazily expose the OKX broker semantic executor.  Core TP may own
 the optional semantic TP placement switch; the TP/SL execution manager may own
 targeted semantic cancel switches; the market-exit manager may own the optional
-semantic market-exit placement switch.  Adapters must not be routed through
+semantic market-exit placement switch; the sidecar manager may own the optional
+semantic sidecar TP placement switch.  Adapters must not be routed through
 other TP/SL managers, live workers, strategies, or the live entry script.
 """
 
@@ -29,7 +31,6 @@ from pathlib import Path
 LIVE_FILES_THAT_MUST_NOT_REFERENCE_EXCHANGE_ADAPTERS: list[str] = [
     "scripts/run_boll_cvd_live.py",
     "src/execution/tp_sl_near_tp_manager.py",
-    "src/execution/tp_sl_sidecar_manager.py",
     "src/live/workers/strategy_tick_worker.py",
     "src/live/workers/execution_worker.py",
     "src/live/workers/execution_command_processor.py",
@@ -296,5 +297,61 @@ def test_semantic_market_exit_placement_switch_boundary() -> None:
             if token in text:
                 assert file_name in ALLOWED_SEMANTIC_MARKET_EXIT_PLACEMENT_FILES, (
                     f"{token} must only appear in market-exit semantic placement files; "
+                    f"found in {file_name}"
+                )
+
+
+# ---------------------------------------------------------------------------
+# Additional guard – semantic sidecar TP placement switch boundary
+# ---------------------------------------------------------------------------
+
+FILES_FORBIDDEN_SEMANTIC_SIDECAR_TP_PLACEMENT: list[str] = [
+    "scripts/run_boll_cvd_live.py",
+    "src/execution/trader.py",
+    "src/execution/tp_sl_core_tp_manager.py",
+    "src/execution/tp_sl_execution_manager.py",
+    "src/execution/tp_sl_protective_stop_manager.py",
+    "src/execution/tp_sl_market_exit_manager.py",
+    "src/execution/tp_sl_near_tp_manager.py",
+    "src/live/workers/execution_command_processor.py",
+    "src/live/account_sync/protective_orders_phase.py",
+    "src/live/startup_recovery/order_recovery.py",
+    "src/strategies/boll_cvd_reclaim_strategy.py",
+    "src/strategies/boll_cvd_shock_reclaim_strategy.py",
+]
+
+SEMANTIC_SIDECAR_TP_PLACEMENT_TOKENS: list[str] = [
+    "BROKER_SEMANTIC_SIDECAR_TP_PLACEMENT_ENABLED",
+    "_place_sidecar_take_profit_semantic",
+]
+
+ALLOWED_SEMANTIC_SIDECAR_TP_PLACEMENT_FILES: set[str] = {
+    "src/execution/tp_sl_sidecar_manager.py",
+    "tests/test_tp_sl_sidecar_manager_semantic_tp_placement.py",
+    "tests/exchanges/test_no_live_wiring.py",
+}
+
+
+def test_semantic_sidecar_tp_placement_switch_boundary() -> None:
+    """The sidecar TP semantic switch must only live in the sidecar manager
+    and its tests."""
+    for file_name in FILES_FORBIDDEN_SEMANTIC_SIDECAR_TP_PLACEMENT:
+        path = Path(file_name)
+        if not path.exists():
+            continue
+        text = path.read_text(encoding="utf-8")
+        for token in SEMANTIC_SIDECAR_TP_PLACEMENT_TOKENS:
+            assert token not in text, f"{token} unexpectedly found in {file_name}"
+
+    root = Path(".")
+    for path in root.rglob("*.py"):
+        if any(part in {".git", ".venv", "__pycache__"} for part in path.parts):
+            continue
+        file_name = path.as_posix()
+        text = path.read_text(encoding="utf-8")
+        for token in SEMANTIC_SIDECAR_TP_PLACEMENT_TOKENS:
+            if token in text:
+                assert file_name in ALLOWED_SEMANTIC_SIDECAR_TP_PLACEMENT_FILES, (
+                    f"{token} must only appear in sidecar TP semantic placement files; "
                     f"found in {file_name}"
                 )
