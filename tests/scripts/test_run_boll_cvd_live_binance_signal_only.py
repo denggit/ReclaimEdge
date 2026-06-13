@@ -71,7 +71,7 @@ class TestBinanceSignalOnlyBranch:
         with mock.patch.dict(os.environ, env, clear=True), \
              mock.patch("scripts.run_boll_cvd_live.load_dotenv", return_value=False):
             from scripts.run_boll_cvd_live import main
-            with pytest.raises(RuntimeError, match="Binance main live trading is not wired"):
+            with pytest.raises(RuntimeError, match="Binance live trading runtime is not wired"):
                 asyncio.run(main())
 
     def test_binance_signal_only_missing_raises(self) -> None:
@@ -82,7 +82,7 @@ class TestBinanceSignalOnlyBranch:
         with mock.patch.dict(os.environ, env, clear=True), \
              mock.patch("scripts.run_boll_cvd_live.load_dotenv", return_value=False):
             from scripts.run_boll_cvd_live import main
-            with pytest.raises(RuntimeError, match="Binance main live trading is not wired"):
+            with pytest.raises(RuntimeError, match="Binance live trading runtime is not wired"):
                 asyncio.run(main())
 
     def test_binance_signal_only_no_trader_instantiation(self) -> None:
@@ -222,3 +222,30 @@ class TestBinanceSignalOnlyIsolation:
                     asyncio.run(main())
                     # BollBandBreakoutMonitor should NOT be instantiated
                     mock_monitor.assert_not_called()
+
+
+# ======================================================================
+# Unsupported exchange
+# ======================================================================
+
+
+class TestUnsupportedExchange:
+    """Unsupported EXCHANGE values raise ValueError."""
+
+    def test_bybit_raises_valueerror(self) -> None:
+        """EXCHANGE=bybit raises ValueError from selector."""
+        env = {"EXCHANGE": "bybit"}
+        with mock.patch.dict(os.environ, env, clear=True), \
+             mock.patch("scripts.run_boll_cvd_live.load_dotenv", return_value=False):
+            from scripts.run_boll_cvd_live import main
+            with pytest.raises(ValueError, match="Unsupported exchange"):
+                asyncio.run(main())
+
+    def test_unknown_exchange_raises_valueerror(self) -> None:
+        """EXCHANGE=ftx raises ValueError from selector."""
+        env = {"EXCHANGE": "ftx"}
+        with mock.patch.dict(os.environ, env, clear=True), \
+             mock.patch("scripts.run_boll_cvd_live.load_dotenv", return_value=False):
+            from scripts.run_boll_cvd_live import main
+            with pytest.raises(ValueError, match="Unsupported exchange"):
+                asyncio.run(main())
