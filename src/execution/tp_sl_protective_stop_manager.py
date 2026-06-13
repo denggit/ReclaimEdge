@@ -107,6 +107,10 @@ class ProtectiveStopManager:
                 if attempt < retry_count and retry_interval_seconds > 0:
                     await asyncio.sleep(retry_interval_seconds)
 
+        # NOTE:
+        # This is an OKX-specific safety fallback, not a generic broker semantic action.
+        # Keep it on the legacy OKX body path until a cross-exchange conditional-close
+        # semantic is explicitly designed and covered by parity tests.
         for attempt in range(1, retry_count + 1):
             try:
                 body = t._near_tp_fallback_conditional_close_body(side, contracts, stop_price)

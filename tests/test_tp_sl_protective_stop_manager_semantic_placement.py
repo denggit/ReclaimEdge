@@ -412,3 +412,31 @@ def test_broker_position_side_short() -> None:
 def test_broker_position_side_unknown_raises() -> None:
     with pytest.raises(RuntimeError, match="unsupported_position_side_for_semantic_protective_sl"):
         ProtectiveStopManager._broker_position_side("UNKNOWN")
+
+
+def test_fallback_conditional_close_remains_legacy_boundary() -> None:
+    from pathlib import Path
+
+    text = Path("src/execution/tp_sl_protective_stop_manager.py").read_text(encoding="utf-8")
+
+    assert "_near_tp_fallback_conditional_close_body" in text
+    assert "cross-exchange conditional-close" in text
+
+
+def test_no_fallback_conditional_close_semantic_action_exists() -> None:
+    from pathlib import Path
+
+    for file_name in [
+        "src/exchanges/semantic_models.py",
+        "src/exchanges/semantics.py",
+        "src/exchanges/okx/semantic_executor.py",
+    ]:
+        text = Path(file_name).read_text(encoding="utf-8")
+        forbidden = [
+            "FALLBACK_CONDITIONAL_CLOSE",
+            "CONDITIONAL_CLOSE",
+            "PLACE_FALLBACK",
+            "FALLBACK_CLOSE",
+        ]
+        for token in forbidden:
+            assert token not in text, f"{token} should not be introduced before 08C design approval"
