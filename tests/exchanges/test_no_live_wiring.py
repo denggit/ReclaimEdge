@@ -5,10 +5,11 @@
 @Date       : 2026/06/12
 @File       : test_no_live_wiring.py
 @Description: Boundary guard – prove the exchange abstraction is NOT wired
-              into live trading paths yet.
+              into live trading paths beyond Trader lazy sidecar access.
 
-This test is intentionally strict.  It will be relaxed or removed in a
-later task once adapters are intentionally connected to Trader / workers.
+Trader may lazily expose the OKX broker semantic executor, but adapters must
+not be routed through TP/SL managers, live workers, strategies, or the live
+entry script.
 """
 
 from __future__ import annotations
@@ -17,12 +18,11 @@ from pathlib import Path
 
 
 # ---------------------------------------------------------------------------
-# Files that must NOT import anything from src.exchanges
+# Files that must NOT reference the broker semantic sidecar / OKX adapter
 # ---------------------------------------------------------------------------
 
-LIVE_FILES_THAT_MUST_NOT_IMPORT_EXCHANGES: list[str] = [
+LIVE_FILES_THAT_MUST_NOT_REFERENCE_EXCHANGE_ADAPTERS: list[str] = [
     "scripts/run_boll_cvd_live.py",
-    "src/execution/trader.py",
     "src/execution/tp_sl_execution_manager.py",
     "src/execution/tp_sl_core_tp_manager.py",
     "src/execution/tp_sl_protective_stop_manager.py",
@@ -32,31 +32,30 @@ LIVE_FILES_THAT_MUST_NOT_IMPORT_EXCHANGES: list[str] = [
     "src/live/workers/strategy_tick_worker.py",
     "src/live/workers/execution_worker.py",
     "src/live/workers/execution_command_processor.py",
+    "src/live/workers/account_position_sync_worker.py",
+    "src/strategies/boll_cvd_reclaim_strategy.py",
+    "src/strategies/boll_cvd_shock_reclaim_strategy.py",
 ]
 
 # Symbols that must not appear in any live-file source text.
 FORBIDDEN_SYMBOLS: list[str] = [
-    "src.exchanges",
-    "src.exchanges.okx.client",
-    "src.exchanges.okx.semantic_executor",
-    "BrokerSemanticExecutor",
+    "broker_semantic_executor",
+    "src.exchanges.okx",
     "OkxBrokerClient",
     "OkxBrokerSemanticExecutor",
 ]
 
 
-def test_exchange_abstraction_not_wired_into_live_path_yet() -> None:
-    """Prove that none of the live execution files import or reference the
-    new exchange abstraction (src.exchanges, BrokerSemanticExecutor, or
-    OkxBrokerClient)."""
-    for file_name in LIVE_FILES_THAT_MUST_NOT_IMPORT_EXCHANGES:
+def test_exchange_adapter_not_wired_into_live_path_yet() -> None:
+    """Prove non-Trader live paths do not reference the broker semantic sidecar."""
+    for file_name in LIVE_FILES_THAT_MUST_NOT_REFERENCE_EXCHANGE_ADAPTERS:
         path = Path(file_name)
         if not path.exists():
             continue
         text = path.read_text()
         for symbol in FORBIDDEN_SYMBOLS:
             assert symbol not in text, (
-                f"{file_name} MUST NOT reference '{symbol}' in this skeleton step. "
+                f"{file_name} MUST NOT reference '{symbol}' before routing is intentionally switched. "
                 f"Found in {file_name}"
             )
 

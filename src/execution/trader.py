@@ -106,6 +106,8 @@ class Trader:
                 timeout_seconds=self._timeout_seconds,
             )
         )
+        self._broker_client = None
+        self._broker_semantic_executor = None
         from src.execution.tp_sl_execution_manager import TpSlExecutionManager
         self._tp_sl_manager = TpSlExecutionManager(self)
 
@@ -126,6 +128,21 @@ class Trader:
             object.__setattr__(self, '_private_write_limiter', limiter)
             return limiter
         raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
+
+    @property
+    def broker_exchange_name(self) -> str:
+        return "okx"
+
+    @property
+    def broker_semantic_executor(self) -> Any:
+        if self._broker_semantic_executor is None:
+            from src.exchanges.okx.client import OkxBrokerClient
+            from src.exchanges.okx.semantic_executor import OkxBrokerSemanticExecutor
+
+            broker_client = OkxBrokerClient(self)
+            self._broker_client = broker_client
+            self._broker_semantic_executor = OkxBrokerSemanticExecutor(broker_client)
+        return self._broker_semantic_executor
 
     async def start(self) -> None:
         await self._client.start()
