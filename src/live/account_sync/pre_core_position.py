@@ -4,6 +4,7 @@ import asyncio
 import os
 import time
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Any
 
 from src.execution.trader import PositionSnapshot, Trader
@@ -27,6 +28,79 @@ from src.strategies.boll_cvd_shock_reclaim_strategy import BollCvdShockReclaimSt
 from src.utils.log import get_logger
 
 logger = get_logger(__name__)
+
+
+def _broker_semantic_account_sync_position_enabled() -> bool:
+    value = os.getenv("BROKER_SEMANTIC_ACCOUNT_SYNC_POSITION_ENABLED", "false").strip().lower()
+    return value in {"1", "true", "yes", "y", "on"}
+
+
+def _position_snapshot_from_broker_position(broker_position: Any, trader: Trader) -> PositionSnapshot:
+    from src.exchanges.models import BrokerPositionSide
+
+    if broker_position is None:
+        return PositionSnapshot(
+            side=None,
+            contracts=Decimal("0"),
+            avg_entry_price=0.0,
+            eth_qty=0.0,
+            raw_pos=Decimal("0"),
+        )
+
+    quantity = Decimal(str(getattr(broker_position, "quantity", "0") or "0"))
+    if quantity <= 0:
+        return PositionSnapshot(
+            side=None,
+            contracts=Decimal("0"),
+            avg_entry_price=0.0,
+            eth_qty=0.0,
+            raw_pos=Decimal("0"),
+        )
+
+    position_side = getattr(broker_position, "position_side", None)
+    if position_side == BrokerPositionSide.LONG:
+        side = "LONG"
+        raw_pos = quantity
+    elif position_side == BrokerPositionSide.SHORT:
+        side = "SHORT"
+        raw_pos = -quantity
+    else:
+        side = None
+        raw_pos = Decimal("0")
+
+    if side is None:
+        return PositionSnapshot(
+            side=None,
+            contracts=Decimal("0"),
+            avg_entry_price=0.0,
+            eth_qty=0.0,
+            raw_pos=Decimal("0"),
+        )
+
+    avg_entry_price = float(getattr(broker_position, "average_entry_price", 0) or 0)
+    eth_qty = float(quantity * trader.contract_multiplier)
+
+    return PositionSnapshot(
+        side=side,
+        contracts=quantity,
+        avg_entry_price=avg_entry_price,
+        eth_qty=eth_qty,
+        raw_pos=raw_pos,
+    )
+
+
+async def _fetch_account_sync_position_snapshot(trader: Trader) -> PositionSnapshot:
+    if _broker_semantic_account_sync_position_enabled():
+        try:
+            broker_position = await trader.fetch_broker_position()
+            return _position_snapshot_from_broker_position(broker_position, trader)
+        except Exception as exc:
+            logger.warning(
+                "BROKER_SEMANTIC_READ_FALLBACK | kind=account_sync_position symbol=%s error=%s",
+                trader.symbol,
+                exc,
+            )
+    return await trader.fetch_position_snapshot()
 
 
 @dataclass(frozen=True)
@@ -87,7 +161,7 @@ async def run_account_sync_pre_core_position_phase(
         cash = await live_flat_balance.fetch_usdt_cash_balance(trader)
         last_account_sync = now
 
-    position = await trader.fetch_position_snapshot()
+    position = await _fetch_account_sync_position_snapshot(trader)
     core_position = position
     current_position_key: Any = core_position_view_helpers.position_log_key(core_position)
     pending_flat_payload: dict[str, Any] | None = None
