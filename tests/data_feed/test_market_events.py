@@ -347,9 +347,13 @@ class TestExports:
 
         expected = {
             "MarketCandleEvent",
+            "MarketDataEvent",
+            "MarketDataFeed",
             "MarketEventType",
             "MarketTradeEvent",
             "MarketTradeSide",
+            "build_market_data_feed",
+            "normalize_exchange_name",
             "require_non_negative_decimal",
             "require_positive_decimal",
         }
