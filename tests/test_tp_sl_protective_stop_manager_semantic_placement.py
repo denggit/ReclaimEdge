@@ -394,8 +394,10 @@ class TestEnvVarVariants:
 # ===================================================================
 
 
-def test_broker_semantic_protective_sl_placement_enabled_default() -> None:
-    """Default returns False."""
+def test_broker_semantic_protective_sl_placement_enabled_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default returns False when the env var is absent."""
+    monkeypatch.delenv("BROKER_SEMANTIC_PROTECTIVE_SL_PLACEMENT_ENABLED", raising=False)
+
     assert ProtectiveStopManager._broker_semantic_protective_sl_placement_enabled() is False
 
 
