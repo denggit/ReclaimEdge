@@ -43,6 +43,7 @@ from src.exchanges.binance.signing import (
     current_timestamp_ms,
     sign_query_string,
 )
+from src.exchanges.binance.transport import BinanceHttpTransport, BinanceTransportResponse
 
 __all__ = [
     "BINANCE_ETH_CONTRACT_SIZE_BASE",
@@ -53,7 +54,9 @@ __all__ = [
     "BINANCE_USDM_OPEN_ORDERS_PATH",
     "BINANCE_USDM_POSITION_RISK_PATH",
     "BinanceBrokerClient",
+    "BinanceHttpTransport",
     "BinanceSignedRequest",
+    "BinanceTransportResponse",
     "assert_binance_ethusdt_symbol",
     "binance_api_key_headers",
     "broker_order_request_to_binance_params",
