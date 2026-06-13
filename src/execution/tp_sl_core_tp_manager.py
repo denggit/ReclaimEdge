@@ -106,6 +106,33 @@ class CoreTakeProfitManager:
         self.trader = trader
         self.protective_stops = protective_stops
 
+    def _broker_semantic_tp_placement_enabled(self) -> bool:
+        value = os.getenv("BROKER_SEMANTIC_TP_PLACEMENT_ENABLED", "false").strip().lower()
+        return value in {"1", "true", "yes", "y", "on"}
+
+    @staticmethod
+    def _broker_position_side(side: str):
+        from src.exchanges.models import BrokerPositionSide
+
+        if side == "LONG":
+            return BrokerPositionSide.LONG
+        if side == "SHORT":
+            return BrokerPositionSide.SHORT
+        raise RuntimeError(f"unsupported_position_side_for_semantic_tp: {side}")
+
+    @staticmethod
+    def _broker_tp_role_for_label(label: str):
+        from src.exchanges.semantic_models import BrokerSemanticOrderRole
+
+        normalized = str(label).lower()
+        if "tp1" in normalized:
+            return BrokerSemanticOrderRole.TP1
+        if "tp2" in normalized:
+            return BrokerSemanticOrderRole.TP2
+        if "runner" in normalized:
+            return BrokerSemanticOrderRole.RUNNER_TP
+        return BrokerSemanticOrderRole.CORE_TP
+
     async def replace_take_profit(self, intent: TradeIntent) -> LiveTradeResult:
         t = self.trader
         managed_core_contracts = t._managed_core_contracts_from_intent(intent)
@@ -639,10 +666,20 @@ class CoreTakeProfitManager:
                                                     specs: list[tuple[str, Decimal, float]]) -> list[str]:
         t = self.trader
         placed_order_ids: list[str] = []
+        use_semantic = self._broker_semantic_tp_placement_enabled()
+
         for label, contracts, price in specs:
-            body = t._reduce_only_tp_order_body(intent.side, contracts, price)
-            res = await t.request("POST", "/api/v5/trade/order", body)
-            order_id = t.extract_order_id(res)
+            if use_semantic:
+                order_id = await self._place_reduce_only_take_profit_order_semantic(
+                    side=intent.side,
+                    label=label,
+                    contracts=contracts,
+                    price=price,
+                )
+            else:
+                body = t._reduce_only_tp_order_body(intent.side, contracts, price)
+                res = await t.request("POST", "/api/v5/trade/order", body)
+                order_id = t.extract_order_id(res)
             placed_order_ids.append(order_id)
             logger.info(
                 "TP_ORDER_PLACED | label=%s side=%s tp_contracts=%s core_contracts=%s price=%s ordId=%s",
@@ -654,6 +691,34 @@ class CoreTakeProfitManager:
                 order_id,
             )
         return placed_order_ids
+
+    async def _place_reduce_only_take_profit_order_semantic(
+        self,
+        *,
+        side: str,
+        label: str,
+        contracts: Decimal,
+        price: float,
+    ) -> str:
+        t = self.trader
+        from src.exchanges.models import BrokerQuantityUnit
+
+        executor = getattr(t, "broker_" "semantic_executor")
+        result = await executor.place_reduce_only_tp(
+            symbol=t.symbol,
+            side=self._broker_position_side(side),
+            quantity=contracts,
+            trigger_price=Decimal(str(price)),
+            quantity_unit=BrokerQuantityUnit.CONTRACTS,
+            role=self._broker_tp_role_for_label(label),
+        )
+        if not result.ok or not result.order_id:
+            raise RuntimeError(
+                f"semantic_tp_order_failed label={label} side={side} "
+                f"contracts={t.decimal_to_str(contracts)} price={t.price_to_str(price)} "
+                f"message={result.message}"
+            )
+        return str(result.order_id)
 
     def _tp_price_summary(self, specs: list[tuple[str, Decimal, float]]) -> str:
         t = self.trader

@@ -5,11 +5,12 @@
 @Date       : 2026/06/12
 @File       : test_no_live_wiring.py
 @Description: Boundary guard – prove the exchange abstraction is NOT wired
-              into live trading paths beyond Trader lazy sidecar access.
+              into live trading paths beyond Trader lazy sidecar access and
+              the optional core TP semantic placement switch.
 
-Trader may lazily expose the OKX broker semantic executor, but adapters must
-not be routed through TP/SL managers, live workers, strategies, or the live
-entry script.
+Trader may lazily expose the OKX broker semantic executor.  Core TP may own
+the optional semantic TP placement switch; adapters must not be routed through
+other TP/SL managers, live workers, strategies, or the live entry script.
 """
 
 from __future__ import annotations
@@ -24,7 +25,6 @@ from pathlib import Path
 LIVE_FILES_THAT_MUST_NOT_REFERENCE_EXCHANGE_ADAPTERS: list[str] = [
     "scripts/run_boll_cvd_live.py",
     "src/execution/tp_sl_execution_manager.py",
-    "src/execution/tp_sl_core_tp_manager.py",
     "src/execution/tp_sl_protective_stop_manager.py",
     "src/execution/tp_sl_market_exit_manager.py",
     "src/execution/tp_sl_near_tp_manager.py",
@@ -64,6 +64,31 @@ def test_exchange_adapter_not_wired_into_live_path_yet() -> None:
                 f"{file_name} MUST NOT reference '{symbol}' before routing is intentionally switched. "
                 f"Found in {file_name}"
             )
+
+
+def test_semantic_tp_placement_switch_only_lives_in_core_tp_manager() -> None:
+    guarded_files = [
+        "scripts/run_boll_cvd_live.py",
+        "src/execution/trader.py",
+        "src/execution/tp_sl_execution_manager.py",
+        "src/execution/tp_sl_protective_stop_manager.py",
+        "src/execution/tp_sl_market_exit_manager.py",
+        "src/execution/tp_sl_near_tp_manager.py",
+        "src/execution/tp_sl_sidecar_manager.py",
+        "src/live/workers/execution_command_processor.py",
+    ]
+    forbidden_tokens = [
+        "BROKER_SEMANTIC_TP_PLACEMENT_ENABLED",
+        "_place_reduce_only_take_profit_order_semantic",
+    ]
+
+    for file_name in guarded_files:
+        path = Path(file_name)
+        if not path.exists():
+            continue
+        text = path.read_text(encoding="utf-8")
+        for token in forbidden_tokens:
+            assert token not in text, f"{token} unexpectedly found in {file_name}"
 
 
 # ---------------------------------------------------------------------------
