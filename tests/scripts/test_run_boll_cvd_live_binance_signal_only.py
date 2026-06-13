@@ -52,7 +52,8 @@ class TestBinanceSignalOnlyBranch:
             called_with["called"] = True
             called_with["env"] = env_arg
 
-        with mock.patch.dict(os.environ, env, clear=True):
+        with mock.patch.dict(os.environ, env, clear=True), \
+             mock.patch("scripts.run_boll_cvd_live.load_dotenv", return_value=False):
             # Patch the import target BEFORE importing main
             with mock.patch(
                 "src.live.binance_signal_only_runtime.run_binance_signal_only",
@@ -67,7 +68,8 @@ class TestBinanceSignalOnlyBranch:
         """EXCHANGE=binance + BINANCE_SIGNAL_ONLY=false raises RuntimeError."""
         env = {**_base_binance_env(), "BINANCE_SIGNAL_ONLY": "false"}
 
-        with mock.patch.dict(os.environ, env, clear=True):
+        with mock.patch.dict(os.environ, env, clear=True), \
+             mock.patch("scripts.run_boll_cvd_live.load_dotenv", return_value=False):
             from scripts.run_boll_cvd_live import main
             with pytest.raises(RuntimeError, match="Binance main live trading is not wired"):
                 asyncio.run(main())
@@ -77,7 +79,8 @@ class TestBinanceSignalOnlyBranch:
         env = _base_binance_env()
         del env["BINANCE_SIGNAL_ONLY"]
 
-        with mock.patch.dict(os.environ, env, clear=True):
+        with mock.patch.dict(os.environ, env, clear=True), \
+             mock.patch("scripts.run_boll_cvd_live.load_dotenv", return_value=False):
             from scripts.run_boll_cvd_live import main
             with pytest.raises(RuntimeError, match="Binance main live trading is not wired"):
                 asyncio.run(main())
@@ -89,7 +92,8 @@ class TestBinanceSignalOnlyBranch:
         async def fake_run_binance_signal_only(env_arg=None):
             return
 
-        with mock.patch.dict(os.environ, env, clear=True):
+        with mock.patch.dict(os.environ, env, clear=True), \
+             mock.patch("scripts.run_boll_cvd_live.load_dotenv", return_value=False):
             with mock.patch(
                 "src.live.binance_signal_only_runtime.run_binance_signal_only",
                 fake_run_binance_signal_only,
@@ -110,7 +114,8 @@ class TestBinanceSignalOnlyBranch:
         async def fake_run_binance_signal_only(env_arg=None):
             return
 
-        with mock.patch.dict(os.environ, env, clear=True):
+        with mock.patch.dict(os.environ, env, clear=True), \
+             mock.patch("scripts.run_boll_cvd_live.load_dotenv", return_value=False):
             with mock.patch(
                 "src.live.binance_signal_only_runtime.run_binance_signal_only",
                 fake_run_binance_signal_only,
@@ -138,7 +143,8 @@ class TestOkxDefaultPathUnchanged:
             "EXCHANGE": "okx",
             "LIVE_TRADING": "false",
         }
-        with mock.patch.dict(os.environ, env, clear=True):
+        with mock.patch.dict(os.environ, env, clear=True), \
+             mock.patch("scripts.run_boll_cvd_live.load_dotenv", return_value=False):
             from scripts.run_boll_cvd_live import main
             with pytest.raises(RuntimeError, match="LIVE_TRADING is not true"):
                 asyncio.run(main())
@@ -150,7 +156,8 @@ class TestOkxDefaultPathUnchanged:
             "LIVE_TRADING": "false",
             "BINANCE_SIGNAL_ONLY": "true",  # irrelevant for OKX
         }
-        with mock.patch.dict(os.environ, env, clear=True):
+        with mock.patch.dict(os.environ, env, clear=True), \
+             mock.patch("scripts.run_boll_cvd_live.load_dotenv", return_value=False):
             from scripts.run_boll_cvd_live import main
             with pytest.raises(RuntimeError, match="LIVE_TRADING is not true"):
                 asyncio.run(main())
@@ -160,7 +167,8 @@ class TestOkxDefaultPathUnchanged:
         env = {
             "LIVE_TRADING": "false",
         }
-        with mock.patch.dict(os.environ, env, clear=True):
+        with mock.patch.dict(os.environ, env, clear=True), \
+             mock.patch("scripts.run_boll_cvd_live.load_dotenv", return_value=False):
             from scripts.run_boll_cvd_live import main
             with pytest.raises(RuntimeError, match="LIVE_TRADING is not true"):
                 asyncio.run(main())
@@ -181,7 +189,8 @@ class TestBinanceSignalOnlyIsolation:
         async def fake_run_binance_signal_only(env_arg=None):
             return
 
-        with mock.patch.dict(os.environ, env, clear=True):
+        with mock.patch.dict(os.environ, env, clear=True), \
+             mock.patch("scripts.run_boll_cvd_live.load_dotenv", return_value=False):
             with mock.patch(
                 "src.live.binance_signal_only_runtime.run_binance_signal_only",
                 fake_run_binance_signal_only,
@@ -200,7 +209,8 @@ class TestBinanceSignalOnlyIsolation:
         async def fake_run_binance_signal_only(env_arg=None):
             return
 
-        with mock.patch.dict(os.environ, env, clear=True):
+        with mock.patch.dict(os.environ, env, clear=True), \
+             mock.patch("scripts.run_boll_cvd_live.load_dotenv", return_value=False):
             with mock.patch(
                 "src.live.binance_signal_only_runtime.run_binance_signal_only",
                 fake_run_binance_signal_only,
