@@ -69,6 +69,7 @@ def test_binance_adapter_shell_not_wired_into_runtime() -> None:
         "tests/exchanges/binance/test_binance_broker_client_transport.py",
         "tests/exchanges/binance/test_binance_broker_client_position_fetch.py",
         "tests/exchanges/binance/test_binance_no_live_wiring.py",
+        "tests/exchanges/binance/test_binance_semantic_signed_request_parity.py",
         "tests/exchanges/binance/test_binance_transport_boundaries.py",
         # Pre-existing mention in docstring; not part of this change.
         "src/exchanges/factory.py",

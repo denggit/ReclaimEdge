@@ -43,6 +43,7 @@ def test_binance_semantic_executor_not_wired_into_runtime() -> None:
         "src/exchanges/binance/semantic_executor.py",
         "tests/exchanges/binance/test_binance_semantic_executor.py",
         "tests/exchanges/binance/test_binance_semantic_executor_boundaries.py",
+        "tests/exchanges/binance/test_binance_semantic_signed_request_parity.py",
     }
 
     for path in Path(".").rglob("*.py"):
