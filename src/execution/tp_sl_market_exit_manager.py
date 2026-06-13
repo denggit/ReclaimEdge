@@ -34,6 +34,11 @@ class MarketExitManager:
             return BrokerPositionSide.SHORT
         raise RuntimeError(f"unsupported_position_side_for_semantic_market_exit: {side}")
 
+    @staticmethod
+    def _is_runner_market_exit_context(context: str) -> bool:
+        normalized = str(context or "").strip().lower()
+        return "runner" in normalized
+
     async def _place_market_exit_order_semantic(
         self,
         *,
@@ -45,13 +50,17 @@ class MarketExitManager:
         from src.exchanges.models import BrokerQuantityUnit
 
         executor = t.broker_semantic_executor
-        result = await executor.market_exit(
-            symbol=t.symbol,
-            side=self._broker_position_side(side),
-            quantity=contracts,
-            quantity_unit=BrokerQuantityUnit.CONTRACTS,
-            label=context,
-        )
+        common_kwargs = {
+            "symbol": t.symbol,
+            "side": self._broker_position_side(side),
+            "quantity": contracts,
+            "quantity_unit": BrokerQuantityUnit.CONTRACTS,
+            "label": context,
+        }
+        if self._is_runner_market_exit_context(context):
+            result = await executor.market_exit_runner(**common_kwargs)
+        else:
+            result = await executor.market_exit(**common_kwargs)
         if not result.ok or not result.order_id:
             raise RuntimeError(
                 f"semantic_market_exit_order_failed context={context} side={side} "

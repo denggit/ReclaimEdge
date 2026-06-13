@@ -39,6 +39,7 @@ class FakeSemanticExecutor:
     ):
         self.calls.append(
             {
+                "method": "market_exit",
                 "symbol": symbol,
                 "side": side,
                 "quantity": quantity,
@@ -50,6 +51,35 @@ class FakeSemanticExecutor:
             exchange=ExchangeName.OKX,
             symbol=symbol,
             action=BrokerSemanticAction.MARKET_EXIT,
+            role=BrokerSemanticOrderRole.MARKET_EXIT,
+            ok=self.ok,
+            order_id=self.order_id if self.ok else None,
+            message=self.message,
+        )
+
+    async def market_exit_runner(
+        self,
+        *,
+        symbol,
+        side,
+        quantity,
+        quantity_unit,
+        label=None,
+    ):
+        self.calls.append(
+            {
+                "method": "market_exit_runner",
+                "symbol": symbol,
+                "side": side,
+                "quantity": quantity,
+                "quantity_unit": quantity_unit,
+                "label": label,
+            }
+        )
+        return BrokerSemanticResult(
+            exchange=ExchangeName.OKX,
+            symbol=symbol,
+            action=BrokerSemanticAction.MARKET_EXIT_RUNNER,
             role=BrokerSemanticOrderRole.MARKET_EXIT,
             ok=self.ok,
             order_id=self.order_id if self.ok else None,
@@ -147,12 +177,41 @@ async def test_market_exit_uses_semantic_executor_when_enabled(monkeypatch) -> N
     assert trader.requests == []
     assert len(trader.semantic.calls) == 1
     call = trader.semantic.calls[0]
+    assert call["method"] == "market_exit"
     assert call["symbol"] == "ETH-USDT-SWAP"
     assert call["side"] == BrokerPositionSide.LONG
     assert call["quantity"] == Decimal("10")
     assert call["quantity_unit"] == BrokerQuantityUnit.CONTRACTS
     assert call["label"] == context
     assert trader.cleanup_called == 1
+
+
+@pytest.mark.asyncio
+async def test_market_exit_runner_context_uses_runner_semantic_action(monkeypatch) -> None:
+    monkeypatch.setenv("BROKER_SEMANTIC_MARKET_EXIT_ENABLED", "true")
+    trader = FakeTrader()
+    trader.snapshots = [
+        FakePositionSnapshot(has_position=True, side="LONG", contracts=Decimal("10")),
+        FakePositionSnapshot(has_position=False, side=None, contracts=Decimal("0")),
+    ]
+    manager = MarketExitManager(trader)
+
+    ok, message = await manager.market_exit_remaining_position_with_retries(
+        "LONG",
+        1,
+        context="near_tp_market_exit_runner",
+    )
+
+    assert ok is True
+    assert "semantic-exit-1" in message
+    assert trader.requests == []
+    assert len(trader.semantic.calls) == 1
+    call = trader.semantic.calls[0]
+    assert call["method"] == "market_exit_runner"
+    assert call["label"] == "near_tp_market_exit_runner"
+    assert call["side"] == BrokerPositionSide.LONG
+    assert call["quantity"] == Decimal("10")
+    assert call["quantity_unit"] == BrokerQuantityUnit.CONTRACTS
 
 
 @pytest.mark.asyncio
@@ -249,3 +308,10 @@ def test_semantic_market_exit_uses_explicit_broker_semantic_executor_access() ->
     assert '"broker_semantic" "_executor"' not in text
     assert "getattr(t, \"broker_semantic\"" not in text
     assert "t.broker_semantic_executor" in text
+
+
+def test_is_runner_market_exit_context() -> None:
+    assert MarketExitManager._is_runner_market_exit_context("near_tp_market_exit_runner") is True
+    assert MarketExitManager._is_runner_market_exit_context("trend_runner_exit") is True
+    assert MarketExitManager._is_runner_market_exit_context("generic") is False
+    assert MarketExitManager._is_runner_market_exit_context("") is False
