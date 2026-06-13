@@ -287,6 +287,9 @@ class TestConfigFrozen:
             band_distance_threshold_pct=0.005,
             tp_boll_enabled=True,
             tp_boll_window=15,
+            seed_historical_klines=True,
+            seed_kline_limit=100,
+            seed_kline_timeout_seconds=10.0,
         )
         with pytest.raises(Exception):
             config.duration_seconds = 10.0  # type: ignore[misc]
@@ -309,3 +312,140 @@ class TestNoMonitorInstantiation:
     def test_no_okx_public_client(self) -> None:
         text = _read_runtime_text()
         assert "OkxPublicMarketClient" not in text
+
+
+# ======================================================================
+# Seed-related boundaries — runtime still clean
+# ======================================================================
+
+
+class TestSeedBoundaries:
+    """Seed additions must not introduce forbidden patterns."""
+
+    def test_runtime_still_no_signing_after_seed(self) -> None:
+        text = _read_runtime_text()
+        assert "signing" not in text.lower().split("import")[-1] if "signing" in text.lower() else True
+        assert "src.exchanges.binance.signing" not in text
+
+    def test_runtime_still_no_execution(self) -> None:
+        text = _read_runtime_text()
+        assert "src.execution" not in text
+
+    def test_runtime_still_no_broker(self) -> None:
+        text = _read_runtime_text()
+        _BROKER = "Binance" + "BrokerClient"
+        assert _BROKER not in text
+
+    def test_seed_log_keys_are_public(self) -> None:
+        """Seed log messages must NOT contain any secret env var names."""
+        text = _read_runtime_text()
+        # The seed-related log messages should only reference public values.
+        # Check for actual secret env var keys (not docstring mentions).
+        assert "EXCHANGE_API_KEY" not in text
+        assert "EXCHANGE_API_SECRET" not in text
+        # "api_secret" can appear in comments; the env-key checks above are sufficient
+
+    def test_seed_uses_public_endpoint_only(self) -> None:
+        """Seed must use public REST, not signed."""
+        text = _read_runtime_text()
+        # Check that fetch_public_klines is called with public args,
+        # not with any signature or API key
+        assert "signature" not in text.lower()
+
+
+# ======================================================================
+# public_klines.py boundary tests
+# ======================================================================
+
+_PUBLIC_KLINES_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "src"
+    / "data_feed"
+    / "binance"
+    / "public_klines.py"
+)
+
+
+def _read_public_klines_text() -> str:
+    return _PUBLIC_KLINES_PATH.read_text(encoding="utf-8")
+
+
+class TestPublicKlinesBoundaries:
+    """The public klines module must be clean — no secrets, no orders."""
+
+    def test_public_klines_file_exists_and_compiles(self) -> None:
+        assert _PUBLIC_KLINES_PATH.exists(), f"File not found: {_PUBLIC_KLINES_PATH}"
+        text = _read_public_klines_text()
+        compile(text, str(_PUBLIC_KLINES_PATH), "exec")
+
+    def test_no_api_key_in_public_klines(self) -> None:
+        text = _read_public_klines_text()
+        assert "EXCHANGE_API_KEY" not in text
+        assert "EXCHANGE_API_SECRET" not in text
+        assert "EXCHANGE_API_PASSPHRASE" not in text
+        assert "BINANCE_API_KEY" not in text
+        assert "BINANCE_SECRET_KEY" not in text
+        assert "api_key" not in text.lower()
+        assert "api_secret" not in text.lower()
+
+    def test_no_signing_in_public_klines(self) -> None:
+        text = _read_public_klines_text()
+        assert "signature" not in text.lower()
+        assert "signing" not in text.lower()
+        assert "build_signed_request" not in text
+        assert "HMAC" not in text
+        assert "hmac" not in text
+
+    def test_no_broker_in_public_klines(self) -> None:
+        text = _read_public_klines_text()
+        # Check for actual import paths, not comment mentions
+        assert "src.exchanges" not in text
+        assert "BrokerClient" not in text
+        assert "from src.execution" not in text
+
+    def test_no_execution_in_public_klines(self) -> None:
+        text = _read_public_klines_text()
+        assert "src.execution" not in text
+        assert "import execution" not in text
+
+    def test_no_strategy_in_public_klines(self) -> None:
+        text = _read_public_klines_text()
+        assert "src.strategies" not in text
+        assert "import strategy" not in text
+
+    def test_no_order_placement_in_public_klines(self) -> None:
+        text = _read_public_klines_text()
+        assert "place_order" not in text
+        assert "cancel_order" not in text
+        assert "positionSide" not in text
+
+    def test_no_btc_in_public_klines(self) -> None:
+        text = _read_public_klines_text()
+        assert "BTC" not in text
+
+    def test_no_spot_in_public_klines(self) -> None:
+        text = _read_public_klines_text()
+        assert "SPOT" not in text
+
+    def test_only_ethusdt_supported(self) -> None:
+        text = _read_public_klines_text()
+        assert 'SUPPORTED_SYMBOL: str = "ETHUSDT"' in text
+
+    def test_only_15m_supported(self) -> None:
+        text = _read_public_klines_text()
+        assert 'SUPPORTED_INTERVAL: str = "15m"' in text
+
+    def test_uses_public_base_url(self) -> None:
+        text = _read_public_klines_text()
+        assert "fapi.binance.com" in text
+        # Must not use testnet base URL (check actual URL constants, not comments)
+        assert "testnet.binance" not in text.lower()
+
+    def test_no_signed_request_imports(self) -> None:
+        text = _read_public_klines_text()
+        assert "src.exchanges.binance.signing" not in text
+        assert "src.exchanges.binance.client" not in text
+
+    def test_no_okx_import_in_public_klines(self) -> None:
+        text = _read_public_klines_text()
+        assert "src.exchanges.okx" not in text

@@ -19,6 +19,7 @@ from unittest import mock
 
 import pytest
 
+from src.data_feed.binance.public_klines import BinancePublicKline
 from src.data_feed.market_events import (
     MarketCandleEvent,
     MarketTradeEvent,
@@ -35,6 +36,7 @@ from src.live.binance_signal_only_runtime import (
     BinanceSignalOnlyConfig,
     _build_boll_snapshot,
     _calculate_boll,
+    _compute_seed_limit,
     _handle_candle,
     _try_recompute_boll,
     _upsert_candle_entry,
@@ -236,6 +238,9 @@ class TestConfigLoading:
             band_distance_threshold_pct=0.005,
             tp_boll_enabled=True,
             tp_boll_window=15,
+            seed_historical_klines=True,
+            seed_kline_limit=100,
+            seed_kline_timeout_seconds=10.0,
         )
         with pytest.raises(Exception):
             config.boll_window = 30  # type: ignore[misc]
@@ -280,6 +285,9 @@ class TestBollCalculation:
             band_distance_threshold_pct=0.005,
             tp_boll_enabled=True,
             tp_boll_window=15,
+            seed_historical_klines=True,
+            seed_kline_limit=100,
+            seed_kline_timeout_seconds=10.0,
         )
         closes = [float(3000 + i) for i in range(20)]
         latest = {"ts_ms": 1700000000000, "close": closes[-1]}
@@ -316,6 +324,9 @@ class TestBollCalculation:
             band_distance_threshold_pct=0.005,
             tp_boll_enabled=False,
             tp_boll_window=0,
+            seed_historical_klines=True,
+            seed_kline_limit=100,
+            seed_kline_timeout_seconds=10.0,
         )
         closes = [float(3000 + i) for i in range(20)]
         latest = {"ts_ms": 1700000000000, "close": closes[-1]}
@@ -352,6 +363,9 @@ class TestCandleBufferAndBoll:
             band_distance_threshold_pct=0.005,
             tp_boll_enabled=False,
             tp_boll_window=0,
+            seed_historical_klines=True,
+            seed_kline_limit=100,
+            seed_kline_timeout_seconds=10.0,
         )
 
     def test_buffer_too_small_returns_none(self) -> None:
@@ -465,6 +479,9 @@ class TestCandleBufferUpsert:
             band_distance_threshold_pct=0.005,
             tp_boll_enabled=False,
             tp_boll_window=0,
+            seed_historical_klines=True,
+            seed_kline_limit=100,
+            seed_kline_timeout_seconds=10.0,
         )
         buffer: list[dict] = []
         # Upsert the same ts_ms 10 times with different closes
@@ -491,6 +508,9 @@ class TestCandleBufferUpsert:
             band_distance_threshold_pct=0.005,
             tp_boll_enabled=False,
             tp_boll_window=0,
+            seed_historical_klines=True,
+            seed_kline_limit=100,
+            seed_kline_timeout_seconds=10.0,
         )
         buffer: list[dict] = []
         for i in range(5):
@@ -522,6 +542,9 @@ class TestCandleBufferUpsert:
             band_distance_threshold_pct=0.005,
             tp_boll_enabled=False,
             tp_boll_window=0,
+            seed_historical_klines=True,
+            seed_kline_limit=100,
+            seed_kline_timeout_seconds=10.0,
         )
         bridge = BinanceMarketDataSignalBridge()
         buffer: list[dict] = []
@@ -824,3 +847,489 @@ class TestSecretExclusion:
             config = load_binance_signal_only_config()
         # Config itself has no secret fields
         assert not hasattr(config, "api_key")
+
+
+# ======================================================================
+# Seed config tests
+# ======================================================================
+
+
+class TestSeedConfig:
+    """Tests for seed_historical_klines config fields."""
+
+    def test_default_seed_enabled(self) -> None:
+        env = _base_binance_env()
+        with mock.patch.dict(os.environ, env, clear=True):
+            config = load_binance_signal_only_config()
+        assert config.seed_historical_klines is True
+
+    def test_seed_disabled_via_env(self) -> None:
+        env = {**_base_binance_env(), "BINANCE_SIGNAL_ONLY_SEED_KLINES": "false"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            config = load_binance_signal_only_config()
+        assert config.seed_historical_klines is False
+
+    def test_seed_disabled_via_zero(self) -> None:
+        env = {**_base_binance_env(), "BINANCE_SIGNAL_ONLY_SEED_KLINES": "0"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            config = load_binance_signal_only_config()
+        assert config.seed_historical_klines is False
+
+    def test_seed_default_limit_is_reasonable(self) -> None:
+        """Default seed limit >= boll_window, tp_boll_window, candle_limit."""
+        env = _base_binance_env()
+        with mock.patch.dict(os.environ, env, clear=True):
+            config = load_binance_signal_only_config()
+        # Default: max(100, 20, 15, 100) = 100
+        assert config.seed_kline_limit >= 100
+        assert config.seed_kline_limit >= config.boll_window
+        assert config.seed_kline_limit >= config.tp_boll_window
+        assert config.seed_kline_limit >= config.candle_limit
+
+    def test_custom_seed_limit(self) -> None:
+        env = {
+            **_base_binance_env(),
+            "BINANCE_SIGNAL_ONLY_SEED_LIMIT": "50",
+        }
+        with mock.patch.dict(os.environ, env, clear=True):
+            config = load_binance_signal_only_config()
+        assert config.seed_kline_limit == 50
+
+    def test_seed_limit_zero_raises(self) -> None:
+        env = {
+            **_base_binance_env(),
+            "BINANCE_SIGNAL_ONLY_SEED_LIMIT": "0",
+        }
+        with mock.patch.dict(os.environ, env, clear=True):
+            with pytest.raises(ValueError, match="positive"):
+                load_binance_signal_only_config()
+
+    def test_seed_limit_negative_raises(self) -> None:
+        env = {
+            **_base_binance_env(),
+            "BINANCE_SIGNAL_ONLY_SEED_LIMIT": "-10",
+        }
+        with mock.patch.dict(os.environ, env, clear=True):
+            with pytest.raises(ValueError, match="positive"):
+                load_binance_signal_only_config()
+
+    def test_seed_limit_exceeds_1500_raises(self) -> None:
+        env = {
+            **_base_binance_env(),
+            "BINANCE_SIGNAL_ONLY_SEED_LIMIT": "2000",
+        }
+        with mock.patch.dict(os.environ, env, clear=True):
+            with pytest.raises(ValueError, match="must not exceed"):
+                load_binance_signal_only_config()
+
+    def test_seed_limit_at_1500_allowed(self) -> None:
+        env = {
+            **_base_binance_env(),
+            "BINANCE_SIGNAL_ONLY_SEED_LIMIT": "1500",
+        }
+        with mock.patch.dict(os.environ, env, clear=True):
+            config = load_binance_signal_only_config()
+        assert config.seed_kline_limit == 1500
+
+    def test_seed_timeout_default(self) -> None:
+        env = _base_binance_env()
+        with mock.patch.dict(os.environ, env, clear=True):
+            config = load_binance_signal_only_config()
+        assert config.seed_kline_timeout_seconds == 10.0
+
+    def test_seed_timeout_custom(self) -> None:
+        env = {
+            **_base_binance_env(),
+            "BINANCE_SIGNAL_ONLY_SEED_TIMEOUT_SECONDS": "5.5",
+        }
+        with mock.patch.dict(os.environ, env, clear=True):
+            config = load_binance_signal_only_config()
+        assert config.seed_kline_timeout_seconds == 5.5
+
+    def test_seed_timeout_invalid_raises(self) -> None:
+        env = {
+            **_base_binance_env(),
+            "BINANCE_SIGNAL_ONLY_SEED_TIMEOUT_SECONDS": "not_a_number",
+        }
+        with mock.patch.dict(os.environ, env, clear=True):
+            with pytest.raises(ValueError):
+                load_binance_signal_only_config()
+
+    def test_seed_limit_not_integer_raises(self) -> None:
+        env = {
+            **_base_binance_env(),
+            "BINANCE_SIGNAL_ONLY_SEED_LIMIT": "abc",
+        }
+        with mock.patch.dict(os.environ, env, clear=True):
+            with pytest.raises(ValueError, match="must be an integer"):
+                load_binance_signal_only_config()
+
+    def test_seed_default_limit_with_large_boll_window(self) -> None:
+        """When boll_window is large, seed_limit should increase accordingly."""
+        env = {
+            **_base_binance_env(),
+            "BOLL_WINDOW": "200",
+        }
+        with mock.patch.dict(os.environ, env, clear=True):
+            config = load_binance_signal_only_config()
+        assert config.seed_kline_limit >= 200
+
+    def test_config_has_seed_fields(self) -> None:
+        """Config is frozen and has seed-related fields."""
+        config = BinanceSignalOnlyConfig(
+            canonical_symbol="ETH-USDT-PERP",
+            raw_symbol="ETHUSDT",
+            kline_interval="15m",
+            duration_seconds=3600.0,
+            max_events=100000,
+            heartbeat_seconds=30.0,
+            candle_limit=100,
+            boll_window=20,
+            boll_std_multiplier=2.0,
+            band_distance_threshold_pct=0.005,
+            tp_boll_enabled=True,
+            tp_boll_window=15,
+            seed_historical_klines=True,
+            seed_kline_limit=100,
+            seed_kline_timeout_seconds=10.0,
+        )
+        assert config.seed_historical_klines is True
+        assert config.seed_kline_limit == 100
+        assert config.seed_kline_timeout_seconds == 10.0
+
+
+# ======================================================================
+# Compute seed limit unit tests
+# ======================================================================
+
+
+class TestComputeSeedLimit:
+    """Unit tests for ``_compute_seed_limit``."""
+
+    def test_default_when_no_env(self) -> None:
+        result = _compute_seed_limit(
+            {}, boll_window=20, tp_boll_window=15, candle_limit=100
+        )
+        assert result == 100
+
+    def test_default_uses_max(self) -> None:
+        """When candle_limit is small, uses max with boll/tp/100."""
+        result = _compute_seed_limit(
+            {}, boll_window=20, tp_boll_window=15, candle_limit=50
+        )
+        assert result == 100  # max(50, 20, 15, 100)
+
+    def test_default_uses_candle_limit_when_largest(self) -> None:
+        result = _compute_seed_limit(
+            {}, boll_window=20, tp_boll_window=15, candle_limit=500
+        )
+        assert result == 500  # max(500, 20, 15, 100)
+
+    def test_default_uses_boll_window_when_largest(self) -> None:
+        result = _compute_seed_limit(
+            {}, boll_window=300, tp_boll_window=15, candle_limit=100
+        )
+        assert result == 300  # max(100, 300, 15, 100)
+
+
+# ======================================================================
+# Seed runtime behavior tests
+# ======================================================================
+
+
+class TestSeedRuntimeBehavior:
+    """Tests for ``_seed_historical_klines`` runtime behavior."""
+
+    def _make_config(self, **overrides) -> BinanceSignalOnlyConfig:
+        defaults = {
+            "canonical_symbol": "ETH-USDT-PERP",
+            "raw_symbol": "ETHUSDT",
+            "kline_interval": "15m",
+            "duration_seconds": 3600.0,
+            "max_events": 100000,
+            "heartbeat_seconds": 30.0,
+            "candle_limit": 100,
+            "boll_window": 5,
+            "boll_std_multiplier": 2.0,
+            "band_distance_threshold_pct": 0.005,
+            "tp_boll_enabled": False,
+            "tp_boll_window": 0,
+            "seed_historical_klines": True,
+            "seed_kline_limit": 50,
+            "seed_kline_timeout_seconds": 10.0,
+        }
+        defaults.update(overrides)
+        return BinanceSignalOnlyConfig(**defaults)
+
+    @staticmethod
+    def _make_kline(open_time_ms: int, close: float) -> BinancePublicKline:
+        return BinancePublicKline(
+            open_time_ms=open_time_ms,
+            close_time_ms=open_time_ms + 15 * 60 * 1000 - 1,
+            open_price=Decimal(str(close - 10)),
+            high_price=Decimal(str(close + 5)),
+            low_price=Decimal(str(close - 5)),
+            close_price=Decimal(str(close)),
+            volume=Decimal("100.0"),
+        )
+
+    @pytest.mark.asyncio
+    async def test_seed_success_fills_buffer(self) -> None:
+        """Seed with enough klines fills the buffer and returns BOLL."""
+        from src.live.binance_signal_only_runtime import _seed_historical_klines
+
+        config = self._make_config(boll_window=5, candle_limit=100)
+        candle_buffer: list[dict] = []
+
+        # Create a fetcher that returns 20 klines
+        klines = [
+            self._make_kline(1000 + i * 900_000, 3000.0 + i * 10)
+            for i in range(20)
+        ]
+
+        async def fake_fetcher(*, symbol, interval, limit):
+            return klines
+
+        result = await _seed_historical_klines(
+            candle_buffer=candle_buffer,
+            config=config,
+            fetcher=fake_fetcher,
+        )
+
+        assert len(candle_buffer) == 20
+        assert result is not None  # BOLL ready
+        assert isinstance(result, BollSnapshot)
+
+    @pytest.mark.asyncio
+    async def test_seed_insufficient_klines_no_boll(self) -> None:
+        """Seed with fewer klines than boll_window → BOLL stays None."""
+        from src.live.binance_signal_only_runtime import _seed_historical_klines
+
+        config = self._make_config(boll_window=20, candle_limit=100)
+        candle_buffer: list[dict] = []
+
+        klines = [
+            self._make_kline(1000 + i * 900_000, 3000.0 + i * 10)
+            for i in range(3)  # only 3, need 20
+        ]
+
+        async def fake_fetcher(*, symbol, interval, limit):
+            return klines
+
+        result = await _seed_historical_klines(
+            candle_buffer=candle_buffer,
+            config=config,
+            fetcher=fake_fetcher,
+        )
+
+        assert len(candle_buffer) == 3
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_seed_deduplicates_by_ts_ms(self) -> None:
+        """Duplicate open_time_ms are upserted, not appended."""
+        from src.live.binance_signal_only_runtime import _seed_historical_klines
+
+        config = self._make_config(boll_window=5, candle_limit=100)
+        candle_buffer: list[dict] = []
+
+        # Two klines with same open_time_ms
+        k1a = BinancePublicKline(
+            open_time_ms=1000, close_time_ms=900_000,
+            open_price=Decimal("100"), high_price=Decimal("110"),
+            low_price=Decimal("90"), close_price=Decimal("105"),
+            volume=Decimal("50"),
+        )
+        k1b = BinancePublicKline(
+            open_time_ms=1000, close_time_ms=900_000,
+            open_price=Decimal("100"), high_price=Decimal("110"),
+            low_price=Decimal("90"), close_price=Decimal("108"),  # updated
+            volume=Decimal("60"),
+        )
+        # Plus enough unique klines to reach boll_window
+        unique = [
+            self._make_kline(2000 + i * 900_000, 3000.0 + i * 10)
+            for i in range(10)
+        ]
+
+        async def fake_fetcher(*, symbol, interval, limit):
+            return [k1a, k1b] + unique
+
+        result = await _seed_historical_klines(
+            candle_buffer=candle_buffer,
+            config=config,
+            fetcher=fake_fetcher,
+        )
+
+        # Dedup: k1a and k1b have same ts_ms → only one entry for ts_ms=1000
+        # check the close is from k1b (last)
+        ts_1000_entries = [c for c in candle_buffer if c["ts_ms"] == 1000]
+        assert len(ts_1000_entries) == 1
+        assert ts_1000_entries[0]["close"] == 108.0
+
+    @pytest.mark.asyncio
+    async def test_seed_respects_candle_limit(self) -> None:
+        """If seed_limit > candle_limit, buffer truncated to candle_limit."""
+        from src.live.binance_signal_only_runtime import _seed_historical_klines
+
+        config = self._make_config(boll_window=5, candle_limit=10)
+        candle_buffer: list[dict] = []
+
+        klines = [
+            self._make_kline(1000 + i * 900_000, 3000.0 + i * 10)
+            for i in range(30)  # more than candle_limit
+        ]
+
+        async def fake_fetcher(*, symbol, interval, limit):
+            return klines
+
+        result = await _seed_historical_klines(
+            candle_buffer=candle_buffer,
+            config=config,
+            fetcher=fake_fetcher,
+        )
+
+        assert len(candle_buffer) == 10  # truncated to candle_limit
+        assert result is not None  # still enough for boll_window=5
+
+    @pytest.mark.asyncio
+    async def test_seed_failure_returns_none(self) -> None:
+        """Seed that raises does not crash — returns None."""
+        from src.live.binance_signal_only_runtime import _seed_historical_klines
+
+        config = self._make_config()
+        candle_buffer: list[dict] = []
+
+        async def failing_fetcher(*, symbol, interval, limit):
+            raise RuntimeError("network error")
+
+        result = await _seed_historical_klines(
+            candle_buffer=candle_buffer,
+            config=config,
+            fetcher=failing_fetcher,
+        )
+
+        assert result is None
+        assert len(candle_buffer) == 0  # nothing seeded
+
+    @pytest.mark.asyncio
+    async def test_seed_timeout_returns_none(self) -> None:
+        """Timeout during seed returns None, does not crash."""
+        from src.live.binance_signal_only_runtime import _seed_historical_klines
+
+        config = self._make_config(seed_kline_timeout_seconds=0.001)
+        candle_buffer: list[dict] = []
+
+        async def slow_fetcher(*, symbol, interval, limit):
+            await asyncio.sleep(10)  # way longer than timeout
+            return []
+
+        result = await _seed_historical_klines(
+            candle_buffer=candle_buffer,
+            config=config,
+            fetcher=slow_fetcher,
+        )
+
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_seed_empty_result_returns_none(self) -> None:
+        """Fetcher returns empty list → no seed, BOLL stays None."""
+        from src.live.binance_signal_only_runtime import _seed_historical_klines
+
+        config = self._make_config()
+        candle_buffer: list[dict] = []
+
+        async def empty_fetcher(*, symbol, interval, limit):
+            return []
+
+        result = await _seed_historical_klines(
+            candle_buffer=candle_buffer,
+            config=config,
+            fetcher=empty_fetcher,
+        )
+
+        assert result is None
+        assert len(candle_buffer) == 0
+
+    @pytest.mark.asyncio
+    async def test_seed_does_not_call_strategy(self) -> None:
+        """Seed should only fill buffer, never call strategy.on_tick."""
+        from src.live.binance_signal_only_runtime import _seed_historical_klines
+
+        config = self._make_config(boll_window=5)
+        candle_buffer: list[dict] = []
+
+        klines = [
+            self._make_kline(1000 + i * 900_000, 3000.0 + i * 10)
+            for i in range(10)
+        ]
+
+        async def fake_fetcher(*, symbol, interval, limit):
+            return klines
+
+        # Seed doesn't even have a strategy reference — it only fills the buffer
+        result = await _seed_historical_klines(
+            candle_buffer=candle_buffer,
+            config=config,
+            fetcher=fake_fetcher,
+        )
+
+        assert result is not None
+        # Strategy is never touched by _seed_historical_klines
+
+    @pytest.mark.asyncio
+    async def test_seed_closes_are_marked_as_closed(self) -> None:
+        """All seeded candles must have closed=True."""
+        from src.live.binance_signal_only_runtime import _seed_historical_klines
+
+        config = self._make_config(boll_window=5)
+        candle_buffer: list[dict] = []
+
+        klines = [
+            self._make_kline(1000 + i * 900_000, 3000.0 + i * 10)
+            for i in range(5)
+        ]
+
+        async def fake_fetcher(*, symbol, interval, limit):
+            return klines
+
+        result = await _seed_historical_klines(
+            candle_buffer=candle_buffer,
+            config=config,
+            fetcher=fake_fetcher,
+        )
+
+        assert result is not None
+        for entry in candle_buffer:
+            assert entry["closed"] is True
+
+    @pytest.mark.asyncio
+    async def test_seed_sorted_ascending(self) -> None:
+        """Seeded candle buffer must be sorted by ts_ms ascending."""
+        from src.live.binance_signal_only_runtime import _seed_historical_klines
+
+        config = self._make_config(boll_window=5)
+        candle_buffer: list[dict] = []
+
+        # Provide klines in random order by open_time_ms
+        klines = [
+            self._make_kline(5000, 3050.0),
+            self._make_kline(1000, 3010.0),
+            self._make_kline(3000, 3030.0),
+            self._make_kline(4000, 3040.0),
+            self._make_kline(2000, 3020.0),
+        ]
+
+        async def fake_fetcher(*, symbol, interval, limit):
+            return klines
+
+        result = await _seed_historical_klines(
+            candle_buffer=candle_buffer,
+            config=config,
+            fetcher=fake_fetcher,
+        )
+
+        assert result is not None
+        times = [c["ts_ms"] for c in candle_buffer]
+        assert times == sorted(times)

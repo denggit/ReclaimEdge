@@ -3,5 +3,5 @@
 /mnt/
 /.claude/
 /.pytest_cache/
-/.env
+/.env.okx
 /.env.binance

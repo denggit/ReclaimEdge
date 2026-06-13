@@ -29,11 +29,15 @@ import os
 import time
 from dataclasses import dataclass
 from statistics import mean, pstdev
-from typing import Mapping
+from typing import Awaitable, Callable, Mapping
 
 from src.data_feed.binance.aiohttp_ws_connector import (
     AiohttpBinanceWsConnection,
     connect_binance_market_ws,
+)
+from src.data_feed.binance.public_klines import (
+    BinancePublicKline,
+    fetch_public_klines,
 )
 from src.data_feed.binance.websocket_feed import BinanceWebSocketMarketDataFeed
 from src.data_feed.market_events import MarketCandleEvent, MarketTradeEvent
@@ -97,6 +101,9 @@ class BinanceSignalOnlyConfig:
     band_distance_threshold_pct: float
     tp_boll_enabled: bool
     tp_boll_window: int
+    seed_historical_klines: bool
+    seed_kline_limit: int
+    seed_kline_timeout_seconds: float
 
 
 # ---------------------------------------------------------------------------
@@ -147,6 +154,43 @@ def _read_non_negative_float(env: Mapping[str, str], key: str, default: float) -
         raise ValueError(f"{key} must be a float, got {raw!r}")
     if value < 0:
         raise ValueError(f"{key} must be non-negative, got {value}")
+    return value
+
+
+_MAX_SEED_KLINES_LIMIT = 1500
+
+
+def _compute_seed_limit(
+    env: Mapping[str, str],
+    *,
+    boll_window: int,
+    tp_boll_window: int,
+    candle_limit: int,
+) -> int:
+    """Compute the seed kline limit from env or sensible defaults.
+
+    The default is ``max(candle_limit, boll_window, tp_boll_window, 100)``
+    so that the seed always fetches enough candles for BOLL readiness.
+    """
+    default = max(candle_limit, boll_window, tp_boll_window, 100)
+    raw = env.get("BINANCE_SIGNAL_ONLY_SEED_LIMIT", "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        raise ValueError(
+            f"BINANCE_SIGNAL_ONLY_SEED_LIMIT must be an integer, got {raw!r}"
+        )
+    if value <= 0:
+        raise ValueError(
+            f"BINANCE_SIGNAL_ONLY_SEED_LIMIT must be positive, got {value}"
+        )
+    if value > _MAX_SEED_KLINES_LIMIT:
+        raise ValueError(
+            f"BINANCE_SIGNAL_ONLY_SEED_LIMIT must not exceed "
+            f"{_MAX_SEED_KLINES_LIMIT}, got {value}"
+        )
     return value
 
 
@@ -248,6 +292,19 @@ def load_binance_signal_only_config(
         ),
         tp_boll_enabled=_read_bool(values, "TP_BOLL_ENABLED", True),
         tp_boll_window=_read_positive_int(values, "TP_BOLL_WINDOW", 15),
+        # --- Seed params ---
+        seed_historical_klines=_read_bool(
+            values, "BINANCE_SIGNAL_ONLY_SEED_KLINES", True
+        ),
+        seed_kline_limit=_compute_seed_limit(
+            values,
+            boll_window=_read_positive_int(values, "BOLL_WINDOW", 20),
+            tp_boll_window=_read_positive_int(values, "TP_BOLL_WINDOW", 15),
+            candle_limit=_read_positive_int(values, "CANDLE_LIMIT", 100),
+        ),
+        seed_kline_timeout_seconds=_read_positive_float(
+            values, "BINANCE_SIGNAL_ONLY_SEED_TIMEOUT_SECONDS", 10.0
+        ),
     )
 
 
@@ -392,6 +449,94 @@ def _upsert_candle_entry(
 # ---------------------------------------------------------------------------
 
 
+async def _seed_historical_klines(
+    *,
+    candle_buffer: list[dict],
+    config: BinanceSignalOnlyConfig,
+    fetcher: Callable[..., Awaitable[list[BinancePublicKline]]] = fetch_public_klines,
+) -> BollSnapshot | None:
+    """Seed the candle buffer with historical closed klines from Binance public REST.
+
+    Returns a :class:`BollSnapshot` if the seed produced enough candles for
+    BOLL readiness, or ``None`` otherwise.
+
+    Does **not** raise on failure — logs a warning and returns ``None``.
+    """
+    logger.warning(
+        "BINANCE_SIGNAL_ONLY_KLINE_SEED_START | symbol=ETHUSDT interval=15m limit=%s",
+        config.seed_kline_limit,
+    )
+
+    try:
+        fetched = await asyncio.wait_for(
+            fetcher(
+                symbol="ETHUSDT",
+                interval="15m",
+                limit=config.seed_kline_limit,
+            ),
+            timeout=config.seed_kline_timeout_seconds,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "BINANCE_SIGNAL_ONLY_KLINE_SEED_FAILED | "
+            "error=timeout after %.1fs action=continue_without_seed",
+            config.seed_kline_timeout_seconds,
+        )
+        return None
+    except Exception as exc:
+        logger.warning(
+            "BINANCE_SIGNAL_ONLY_KLINE_SEED_FAILED | error=%s action=continue_without_seed",
+            exc,
+        )
+        return None
+
+    if not fetched:
+        logger.warning(
+            "BINANCE_SIGNAL_ONLY_KLINE_SEED_FAILED | "
+            "error=no_klines_returned action=continue_without_seed"
+        )
+        return None
+
+    # Upsert each fetched kline into the candle buffer
+    for kline in fetched:
+        candle_entry = {
+            "ts_ms": kline.open_time_ms,
+            "open": float(kline.open_price),
+            "high": float(kline.high_price),
+            "low": float(kline.low_price),
+            "close": float(kline.close_price),
+            "volume": float(kline.volume),
+            "closed": True,  # all fetched klines are already closed
+        }
+        _upsert_candle_entry(
+            candle_buffer=candle_buffer,
+            candle_entry=candle_entry,
+            candle_limit=config.candle_limit,
+        )
+
+    # Try recomputing BOLL immediately after seeding
+    current_boll = _try_recompute_boll(
+        candle_buffer=candle_buffer,
+        config=config,
+    )
+
+    latest_open_time_ms = (
+        candle_buffer[-1]["ts_ms"] if candle_buffer else 0
+    )
+
+    logger.warning(
+        "BINANCE_SIGNAL_ONLY_KLINE_SEED_DONE | fetched=%s seeded=%s "
+        "buffer_size=%s boll_ready=%s latest_open_time_ms=%s",
+        len(fetched),
+        len(candle_buffer),
+        len(candle_buffer),
+        current_boll is not None,
+        latest_open_time_ms,
+    )
+
+    return current_boll
+
+
 async def run_binance_signal_only(
     env: Mapping[str, str] | None = None,
 ) -> None:
@@ -461,6 +606,17 @@ async def run_binance_signal_only(
     total_events: int = 0
     last_heartbeat_monotonic: float = 0.0
     start_monotonic: float = asyncio.get_event_loop().time()
+
+    # --- Seed historical klines (optional) ---
+    if config.seed_historical_klines:
+        current_boll = await _seed_historical_klines(
+            candle_buffer=candle_buffer,
+            config=config,
+        )
+    else:
+        logger.warning(
+            "BINANCE_SIGNAL_ONLY_KLINE_SEED_SKIPPED | reason=disabled"
+        )
 
     connection: AiohttpBinanceWsConnection | None = None
 
