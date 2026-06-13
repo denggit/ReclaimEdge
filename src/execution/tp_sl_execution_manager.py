@@ -273,10 +273,67 @@ class TpSlExecutionManager:
     # cancel protective stops
     # ------------------------------------------------------------------
 
+    def _broker_semantic_protective_sl_cancel_enabled(self) -> bool:
+        import os
+
+        value = os.getenv(
+            "BROKER_SEMANTIC_PROTECTIVE_SL_CANCEL_ENABLED",
+            "false",
+        ).strip().lower()
+        return value in {"1", "true", "yes", "y", "on"}
+
+    async def _cancel_protective_stop_semantic(self, order_id: str) -> bool:
+        t = self.trader
+        try:
+            result = await t.broker_semantic_executor.cancel_protective_stop(
+                symbol=t.symbol,
+                order_id=order_id,
+            )
+            if result.ok:
+                return True
+
+            text = str(result.message or "").lower()
+            if (
+                "not found" in text
+                or "not exist" in text
+                or "does not exist" in text
+                or "already" in text
+            ):
+                return True
+
+            return False
+        except Exception as exc:
+            text = str(exc).lower()
+            if (
+                "not found" in text
+                or "not exist" in text
+                or "does not exist" in text
+                or "already" in text
+            ):
+                return True
+            logger.warning(
+                "NEAR_TP_PROTECTIVE_SL_CANCEL_ON_FLAT | algoId=%s failed=%s",
+                order_id,
+                exc,
+            )
+            return False
+
     async def cancel_near_tp_protective_stop(self, order_id: str | None) -> bool:
         t = self.trader
         if not order_id:
             return True
+
+        if self._broker_semantic_protective_sl_cancel_enabled():
+            ok = await self._cancel_protective_stop_semantic(order_id)
+            if ok:
+                if t.near_tp_protective_sl_order_id == order_id:
+                    t.near_tp_protective_sl_order_id = None
+                logger.warning(
+                    "NEAR_TP_PROTECTIVE_SL_CANCEL_ON_FLAT | algoId=%s semantic=true",
+                    order_id,
+                )
+            return ok
+
         try:
             await t.request("POST", "/api/v5/trade/cancel-algos", order_specs.build_cancel_algo_body(
                 inst_id=t.symbol,

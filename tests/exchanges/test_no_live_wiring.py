@@ -6,11 +6,13 @@
 @File       : test_no_live_wiring.py
 @Description: Boundary guard – prove the exchange abstraction is NOT wired
               into live trading paths beyond Trader lazy sidecar access and
-              the optional core TP semantic placement switch.
+              the optional core TP semantic placement switch and targeted
+              TP/SL semantic cancel switches.
 
 Trader may lazily expose the OKX broker semantic executor.  Core TP may own
-the optional semantic TP placement switch; adapters must not be routed through
-other TP/SL managers, live workers, strategies, or the live entry script.
+the optional semantic TP placement switch; the TP/SL execution manager may own
+targeted semantic cancel switches.  Adapters must not be routed through other
+TP/SL managers, live workers, strategies, or the live entry script.
 """
 
 from __future__ import annotations
@@ -164,6 +166,43 @@ def test_semantic_reduce_only_cancel_switch_boundary() -> None:
             continue
         text = path.read_text(encoding="utf-8")
         for token in FORBIDDEN_SEMANTIC_REDUCE_ONLY_CANCEL_TOKENS:
+            assert token not in text, f"{token} unexpectedly found in {file_name}"
+
+
+# ---------------------------------------------------------------------------
+# Additional guard – semantic protective SL cancel switch boundary
+# ---------------------------------------------------------------------------
+
+FILES_FORBIDDEN_SEMANTIC_PROTECTIVE_SL_CANCEL: list[str] = [
+    "scripts/run_boll_cvd_live.py",
+    "src/execution/trader.py",
+    "src/execution/tp_sl_core_tp_manager.py",
+    "src/execution/tp_sl_protective_stop_manager.py",
+    "src/execution/tp_sl_market_exit_manager.py",
+    "src/execution/tp_sl_near_tp_manager.py",
+    "src/execution/tp_sl_sidecar_manager.py",
+    "src/live/workers/execution_command_processor.py",
+    "src/live/account_sync/protective_orders_phase.py",
+    "src/live/startup_recovery/order_recovery.py",
+    "src/strategies/boll_cvd_reclaim_strategy.py",
+    "src/strategies/boll_cvd_shock_reclaim_strategy.py",
+]
+
+FORBIDDEN_SEMANTIC_PROTECTIVE_SL_CANCEL_TOKENS: list[str] = [
+    "BROKER_SEMANTIC_PROTECTIVE_SL_CANCEL_ENABLED",
+    "_cancel_protective_stop_semantic",
+]
+
+
+def test_semantic_protective_sl_cancel_switch_boundary() -> None:
+    """The protective SL cancel semantic switch must only live in
+    tp_sl_execution_manager.py and its tests."""
+    for file_name in FILES_FORBIDDEN_SEMANTIC_PROTECTIVE_SL_CANCEL:
+        path = Path(file_name)
+        if not path.exists():
+            continue
+        text = path.read_text(encoding="utf-8")
+        for token in FORBIDDEN_SEMANTIC_PROTECTIVE_SL_CANCEL_TOKENS:
             assert token not in text, f"{token} unexpectedly found in {file_name}"
 
 
