@@ -183,6 +183,10 @@ class Trader:
         orders = await self.recover_broker_open_orders()
         return [dict(order.raw) for order in orders]
 
+    def _broker_semantic_reads_enabled(self) -> bool:
+        value = os.getenv("BROKER_SEMANTIC_READS_ENABLED", "false").strip().lower()
+        return value in {"1", "true", "yes", "y", "on"}
+
     async def start(self) -> None:
         await self._client.start()
 
@@ -525,10 +529,30 @@ class Trader:
         }
 
     async def fetch_pending_orders(self) -> list[dict[str, Any]]:
+        if self._broker_semantic_reads_enabled():
+            try:
+                return await self.fetch_broker_open_order_raws()
+            except Exception as exc:
+                logger.warning(
+                    "BROKER_SEMANTIC_READ_FALLBACK | kind=open_orders symbol=%s error=%s",
+                    self.symbol,
+                    exc,
+                )
+
         res = await self.request("GET", f"/api/v5/trade/orders-pending?instId={self.symbol}")
         return list(res.get("data", []))
 
     async def fetch_pending_algo_orders(self) -> list[dict[str, Any]]:
+        if self._broker_semantic_reads_enabled():
+            try:
+                return await self.fetch_broker_algo_order_raws()
+            except Exception as exc:
+                logger.warning(
+                    "BROKER_SEMANTIC_READ_FALLBACK | kind=algo_orders symbol=%s error=%s",
+                    self.symbol,
+                    exc,
+                )
+
         res = await self.request("GET", f"/api/v5/trade/orders-algo-pending?instId={self.symbol}&ordType=conditional")
         return list(res.get("data", []))
 

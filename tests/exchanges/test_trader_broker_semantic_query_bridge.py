@@ -9,8 +9,10 @@
 
 from __future__ import annotations
 
+import logging
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -96,6 +98,26 @@ def _trader(fake_executor: FakeSemanticExecutor) -> Trader:
     trader.symbol = "ETH-USDT-SWAP"
     trader._broker_client = None
     trader._broker_semantic_executor = fake_executor
+    return trader
+
+
+def _trader_with_legacy_request(fake_executor: FakeSemanticExecutor) -> Trader:
+    trader = _trader(fake_executor)
+    trader.requests = []
+
+    async def fake_request(
+        method: str,
+        endpoint: str,
+        payload: Any | None = None,
+    ) -> dict[str, Any]:
+        trader.requests.append((method, endpoint, payload))
+        if endpoint.startswith("/api/v5/trade/orders-pending?"):
+            return {"data": [{"instId": "ETH-USDT-SWAP", "ordId": "legacy-1"}]}
+        if endpoint.startswith("/api/v5/trade/orders-algo-pending?"):
+            return {"data": [{"instId": "ETH-USDT-SWAP", "algoId": "legacy-algo-1"}]}
+        raise AssertionError(endpoint)
+
+    trader.request = fake_request
     return trader
 
 
@@ -255,14 +277,142 @@ async def test_broker_query_bridge_raises_on_failed_semantic_result(
         await getattr(trader, method_name)()
 
 
-def test_legacy_raw_query_paths_are_not_replaced_by_broker_bridge() -> None:
+@pytest.mark.asyncio
+async def test_pending_order_reads_use_legacy_endpoints_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("BROKER_SEMANTIC_READS_ENABLED", raising=False)
+    fake = FakeSemanticExecutor()
+    trader = _trader_with_legacy_request(fake)
+
+    orders = await Trader.fetch_pending_orders(trader)
+    algo_orders = await Trader.fetch_pending_algo_orders(trader)
+
+    assert orders == [{"instId": "ETH-USDT-SWAP", "ordId": "legacy-1"}]
+    assert algo_orders == [{"instId": "ETH-USDT-SWAP", "algoId": "legacy-algo-1"}]
+    assert (
+        "GET",
+        "/api/v5/trade/orders-pending?instId=ETH-USDT-SWAP",
+        None,
+    ) in trader.requests
+    assert (
+        "GET",
+        "/api/v5/trade/orders-algo-pending?instId=ETH-USDT-SWAP&ordType=conditional",
+        None,
+    ) in trader.requests
+    assert fake.calls == []
+
+
+@pytest.mark.asyncio
+async def test_pending_orders_prefer_semantic_path_when_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BROKER_SEMANTIC_READS_ENABLED", "true")
+    fake = FakeSemanticExecutor()
+    fake.open_orders = (
+        _order(
+            "semantic-1",
+            raw={"instId": "ETH-USDT-SWAP", "ordId": "semantic-1"},
+        ),
+    )
+    trader = _trader_with_legacy_request(fake)
+
+    orders = await Trader.fetch_pending_orders(trader)
+
+    assert orders == [{"instId": "ETH-USDT-SWAP", "ordId": "semantic-1"}]
+    assert fake.calls == [("fetch_open_orders", "ETH-USDT-SWAP")]
+    assert not any(
+        endpoint.startswith("/api/v5/trade/orders-pending?")
+        for _, endpoint, _ in trader.requests
+    )
+
+
+@pytest.mark.asyncio
+async def test_pending_algo_orders_prefer_semantic_path_when_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BROKER_SEMANTIC_READS_ENABLED", "true")
+    fake = FakeSemanticExecutor()
+    fake.algo_orders = (
+        _order(
+            "semantic-algo-1",
+            raw={"instId": "ETH-USDT-SWAP", "algoId": "semantic-algo-1"},
+            metadata={"source": "algo"},
+        ),
+    )
+    trader = _trader_with_legacy_request(fake)
+
+    orders = await Trader.fetch_pending_algo_orders(trader)
+
+    assert orders == [{"instId": "ETH-USDT-SWAP", "algoId": "semantic-algo-1"}]
+    assert fake.calls == [("fetch_algo_orders", "ETH-USDT-SWAP")]
+    assert not any(
+        endpoint.startswith("/api/v5/trade/orders-algo-pending?")
+        for _, endpoint, _ in trader.requests
+    )
+
+
+@pytest.mark.asyncio
+async def test_pending_orders_fallback_to_legacy_when_semantic_path_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setenv("BROKER_SEMANTIC_READS_ENABLED", "true")
+    caplog.set_level(logging.WARNING)
+    fake = FakeSemanticExecutor()
+    fake.fail_actions.add(BrokerSemanticAction.FETCH_OPEN_ORDERS)
+    trader = _trader_with_legacy_request(fake)
+
+    orders = await Trader.fetch_pending_orders(trader)
+
+    assert orders == [{"instId": "ETH-USDT-SWAP", "ordId": "legacy-1"}]
+    assert any(
+        endpoint.startswith("/api/v5/trade/orders-pending?")
+        for _, endpoint, _ in trader.requests
+    )
+    assert "BROKER_SEMANTIC_READ_FALLBACK" in caplog.text
+    assert "kind=open_orders" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_pending_algo_orders_fallback_to_legacy_when_semantic_path_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setenv("BROKER_SEMANTIC_READS_ENABLED", "true")
+    caplog.set_level(logging.WARNING)
+    fake = FakeSemanticExecutor()
+    fake.fail_actions.add(BrokerSemanticAction.FETCH_ALGO_ORDERS)
+    trader = _trader_with_legacy_request(fake)
+
+    orders = await Trader.fetch_pending_algo_orders(trader)
+
+    assert orders == [{"instId": "ETH-USDT-SWAP", "algoId": "legacy-algo-1"}]
+    assert any(
+        endpoint.startswith("/api/v5/trade/orders-algo-pending?")
+        for _, endpoint, _ in trader.requests
+    )
+    assert "BROKER_SEMANTIC_READ_FALLBACK" in caplog.text
+    assert "kind=algo_orders" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_pending_orders_semantic_raw_result_is_a_copy(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BROKER_SEMANTIC_READS_ENABLED", "true")
+    fake = FakeSemanticExecutor()
+    raw = {"instId": "ETH-USDT-SWAP", "ordId": "semantic-1"}
+    fake.open_orders = (_order("semantic-1", raw=raw),)
+    trader = _trader_with_legacy_request(fake)
+
+    orders = await Trader.fetch_pending_orders(trader)
+    orders[0]["ordId"] = "mutated"
+
+    assert raw["ordId"] == "semantic-1"
+
+
+def _method_block(text: str, method_name: str) -> str:
+    return text.split(f"async def {method_name}", 1)[1].split(
+        "\n    async def ",
+        1,
+    )[0]
+
+
+def test_legacy_raw_query_paths_keep_expected_endpoints() -> None:
     text = Path("src/execution/trader.py").read_text()
-    forbidden_bridge_symbols = [
-        "broker_semantic_executor",
-        "fetch_broker_open_orders",
-        "fetch_broker_algo_orders",
-        "recover_broker_open_orders",
-    ]
     expected_endpoints = {
         "fetch_pending_orders": "/api/v5/trade/orders-pending",
         "fetch_pending_algo_orders": "/api/v5/trade/orders-algo-pending",
@@ -270,10 +420,24 @@ def test_legacy_raw_query_paths_are_not_replaced_by_broker_bridge() -> None:
     }
 
     for method_name, endpoint in expected_endpoints.items():
-        block = text.split(f"async def {method_name}", 1)[1].split(
-            "\n    async def ",
-            1,
-        )[0]
+        block = _method_block(text, method_name)
         assert endpoint in block
-        for symbol in forbidden_bridge_symbols:
-            assert symbol not in block
+
+
+def test_fetch_position_snapshot_does_not_use_semantic_reads() -> None:
+    text = Path("src/execution/trader.py").read_text()
+    block = _method_block(text, "fetch_position_snapshot")
+
+    assert "/api/v5/account/positions" in block
+    assert "broker_semantic_executor" not in block
+    assert "fetch_broker_position" not in block
+    assert "BROKER_SEMANTIC_READS_ENABLED" not in block
+
+
+def test_execute_intent_does_not_use_semantic_reads() -> None:
+    text = Path("src/execution/trader.py").read_text()
+    block = _method_block(text, "execute_intent")
+
+    assert "fetch_broker_open_orders" not in block
+    assert "broker_semantic_executor" not in block
+    assert "BROKER_SEMANTIC_READS_ENABLED" not in block
