@@ -178,6 +178,12 @@ async def attach_sidecar_after_combined_entry(
         price=float(intent.price),
         fee_buffer_pct=fee_buffer_pct,
     )
+    # NOTE:
+    # Current sidecar "entry" is not a standalone exchange order.
+    # The sidecar leg is derived from the already-filled combined core entry,
+    # then protected by placing a dedicated sidecar TP order.
+    # Do not wire BrokerSemanticExecutor.sidecar_entry here until the runtime
+    # changes to place an independent sidecar entry order with its own fill lifecycle.
     leg = sidecar_leg_from_fill(
         leg_id=f"{position_id}:SC:{intent.layer_index}:{intent.ts_ms}",
         position_id=str(position_id or ""),
