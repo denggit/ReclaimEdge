@@ -37,6 +37,7 @@ LIVE_FILES_THAT_MUST_NOT_IMPORT_EXCHANGES: list[str] = [
 # Symbols that must not appear in any live-file source text.
 FORBIDDEN_SYMBOLS: list[str] = [
     "src.exchanges",
+    "src.exchanges.okx.client",
     "BrokerSemanticExecutor",
     "OkxBrokerClient",
 ]

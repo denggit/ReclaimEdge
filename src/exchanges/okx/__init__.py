@@ -9,6 +9,7 @@
 Real broker execution is deferred to a later task.
 """
 
+from src.exchanges.okx.client import OkxBrokerClient, OkxBrokerClientNotWired
 from src.exchanges.okx.mapper import (
     broker_balance_from_okx_balance_detail,
     broker_order_from_okx_pending_algo_order,
@@ -17,6 +18,8 @@ from src.exchanges.okx.mapper import (
 )
 
 __all__ = [
+    "OkxBrokerClient",
+    "OkxBrokerClientNotWired",
     "broker_balance_from_okx_balance_detail",
     "broker_order_from_okx_pending_algo_order",
     "broker_order_from_okx_pending_order",
