@@ -15,7 +15,7 @@ values.  It does NOT read any OKX-specific legacy env vars.
 
 Prerequisites (account-level, must be configured BEFORE running):
     MARGIN_MODE   = isolated
-    POSITION_MODE = hedge  (Binance account; adapter currently requires hedge)
+    POSITION_MODE = net    (Binance account must be in One-way Mode, NOT Hedge Mode)
     SYMBOL        = ETHUSDT (canonical: ETH-USDT-PERP)
 
 Unified config env (shared with OKX):
@@ -98,7 +98,6 @@ from src.exchanges.models import (
 
 CANONICAL_SYMBOL: str = "ETH-USDT-PERP"
 BINANCE_SYMBOL: str = "ETHUSDT"
-POSITION_SIDE: str = "LONG"
 CLIENT_ORDER_ID_PREFIX: str = "RE_SMOKE_"
 
 CONFIRM_ENV: str = "BINANCE_LIVE_SMOKE_TEST_CONFIRM"
@@ -115,9 +114,6 @@ DEFAULT_SL_PCT: Decimal = Decimal("0.006")
 EXCHANGE_INFO_PATH: str = "/fapi/v1/exchangeInfo"
 TICKER_PRICE_PATH: str = "/fapi/v1/ticker/price"
 BALANCE_PATH: str = "/fapi/v2/balance"
-DUAL_SIDE_POSITION_PATH: str = "/fapi/v1/positionSide/dual"
-
-
 # ---------------------------------------------------------------------------
 # Preflight state (populated before any order is placed)
 # ---------------------------------------------------------------------------
@@ -239,16 +235,16 @@ def load_binance_credentials() -> tuple[str, str]:
     return api_key, api_secret
 
 
-async def require_hedge_position_mode(api_key: str, api_secret: str) -> None:
-    """Raise ``SystemExit`` unless the account is in Hedge Position Mode.
+async def require_one_way_position_mode(api_key: str, api_secret: str) -> None:
+    """Raise ``SystemExit`` unless the account is in One-way / Net Position Mode.
 
-    Calls GET /fapi/v1/positionSide/dual (signed).  Returns True means
-    Hedge Mode is active.  Returns False means One-Way Mode — the script
-    cannot safely operate.
+    Calls GET /fapi/v1/positionSide/dual (signed).  dualSidePosition=False
+    means One-way Mode is active.  dualSidePosition=True (Hedge Mode) is
+    rejected because the script operates in One-way mode.
     """
     signed = build_signed_request(
         method="GET",
-        path=DUAL_SIDE_POSITION_PATH,
+        path="/fapi/v1/positionSide/dual",
         params={},
         api_key=api_key,
         api_secret=api_secret,
@@ -266,14 +262,15 @@ async def require_hedge_position_mode(api_key: str, api_secret: str) -> None:
         raise SystemExit(1)
 
     dual_side = response.payload.get("dualSidePosition") if isinstance(response.payload, dict) else None
-    if dual_side is not True:
+    if dual_side is not False:
         print(
-            "ERROR: Binance account must be in Hedge Position Mode.  "
-            "Set POSITION_MODE=hedge before running this script.",
+            "ERROR: Binance account must be in One-way / Net Position Mode "
+            "(dualSidePosition=False).  "
+            "Do NOT use Hedge Mode for this script.",
             file=sys.stderr,
         )
         raise SystemExit(1)
-    print("[preflight] position mode = hedge OK")
+    print("[preflight] position mode = one-way/net OK")
 
 
 # ---------------------------------------------------------------------------
@@ -567,19 +564,20 @@ def _make_order_request(
     quantity: Decimal,
     price: Decimal | None = None,
     trigger_price: Decimal | None = None,
+    reduce_only: bool = False,
     client_order_id: str | None = None,
 ) -> BrokerOrderRequest:
     return BrokerOrderRequest(
         exchange=ExchangeName.BINANCE,
         symbol=BINANCE_SYMBOL,
         side=side,
-        position_side=BrokerPositionSide.LONG,
+        position_side=BrokerPositionSide.NET,
         order_type=order_type,
         quantity=quantity,
         quantity_unit=BrokerQuantityUnit.BASE_ASSET,
         price=price,
         trigger_price=trigger_price,
-        reduce_only=False,
+        reduce_only=reduce_only,
         client_order_id=client_order_id,
     )
 
@@ -610,13 +608,13 @@ async def open_long(
 
 
 async def fetch_long_position(client: BinanceBrokerClient) -> BrokerPosition | None:
-    """Return the ETHUSDT LONG position, or None."""
+    """Return the ETHUSDT position if quantity > 0, or None.
+
+    In One-way / net mode the position side may be BOTH / NET / LONG.
+    We only check that quantity is positive.
+    """
     pos = await client.fetch_position(BINANCE_SYMBOL)
-    if pos is not None and pos.position_side != BrokerPositionSide.LONG:
-        print(
-            f"[fetch_position] unexpected side {pos.position_side}, treating as None",
-            file=sys.stderr,
-        )
+    if pos is not None and pos.quantity <= 0:
         return None
     return pos
 
@@ -634,6 +632,7 @@ async def place_tp(
         order_type=BrokerOrderType.LIMIT,
         quantity=quantity,
         price=tp_price,
+        reduce_only=True,
         client_order_id=client_order_id,
     )
     result = await client.place_order(request)
@@ -656,6 +655,7 @@ async def place_sl(
         order_type=BrokerOrderType.STOP_MARKET,
         quantity=quantity,
         trigger_price=sl_price,
+        reduce_only=True,
         client_order_id=client_order_id,
     )
     result = await client.place_order(request)
@@ -722,6 +722,7 @@ async def close_long_position(
         side=BrokerOrderSide.SELL,
         order_type=BrokerOrderType.MARKET,
         quantity=quantity,
+        reduce_only=True,
         client_order_id=client_order_id,
     )
     result = await client.place_order(request)
@@ -930,7 +931,7 @@ async def main() -> int:
 
     # --- preflight (network) ---
     print("[preflight] checking position mode...")
-    await require_hedge_position_mode(api_key, api_secret)
+    await require_one_way_position_mode(api_key, api_secret)
 
     print("[preflight] checking margin mode...")
     await require_isolated_margin(api_key, api_secret)

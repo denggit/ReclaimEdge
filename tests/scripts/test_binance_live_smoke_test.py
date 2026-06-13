@@ -45,7 +45,7 @@ from scripts.binance_live_smoke_test import (
     place_sl,
     place_tp,
     validate_unified_config_for_binance,
-    require_hedge_position_mode,
+    require_one_way_position_mode,
     require_isolated_margin,
     require_live_confirmation,
 )
@@ -125,6 +125,7 @@ def _make_client(*responses: Any) -> BinanceBrokerClient:
         api_key="test-key",
         api_secret="test-secret",
         transport=transport,
+        position_mode="net",
     )
 
 
@@ -427,7 +428,7 @@ class TestMakeOrderRequest:
         assert req.exchange == ExchangeName.BINANCE
         assert req.symbol == BINANCE_SYMBOL
         assert req.side == BrokerOrderSide.BUY
-        assert req.position_side == BrokerPositionSide.LONG
+        assert req.position_side == BrokerPositionSide.NET
         assert req.order_type == BrokerOrderType.MARKET
         assert req.quantity == Decimal("0.1")
         assert req.quantity_unit == BrokerQuantityUnit.BASE_ASSET
@@ -512,11 +513,13 @@ async def test_fetch_long_position_returns_none_when_zero() -> None:
 
 
 @pytest.mark.asyncio
-async def test_fetch_long_position_returns_none_for_short() -> None:
+async def test_fetch_long_position_returns_position_with_positive_quantity() -> None:
+    """In One-way mode, any position with quantity > 0 is returned."""
     payload = _minimal_position_payload(positionAmt="0.1", positionSide="SHORT")
     client = _make_client([payload])
     pos = await fetch_long_position(client)
-    assert pos is None
+    assert pos is not None
+    assert pos.quantity > 0
 
 
 # ---------------------------------------------------------------------------
@@ -793,6 +796,7 @@ async def test_full_sequence_order() -> None:
         api_key="test-key",
         api_secret="test-secret",
         transport=transport,
+        position_mode="net",
     )
 
     # Step 1: Open
@@ -885,25 +889,9 @@ class TestExchangeInfoFilters:
 # ---------------------------------------------------------------------------
 
 
-class TestRequireHedgePositionMode:
+class TestRequireOneWayPositionMode:
     @pytest.mark.asyncio
-    async def test_accepts_hedge_mode(self) -> None:
-        from src.exchanges.binance.aiohttp_transport import AiohttpBinanceTransport
-
-        class FakeTransport:
-            async def send(self, request):
-                return BinanceTransportResponse(
-                    status_code=200,
-                    payload={"dualSidePosition": True},
-                    headers={},
-                )
-
-        with mock.patch.object(AiohttpBinanceTransport, "send", FakeTransport.send):
-            await require_hedge_position_mode("test-key", "test-secret")
-            # does not raise
-
-    @pytest.mark.asyncio
-    async def test_rejects_one_way_mode(self) -> None:
+    async def test_accepts_one_way_mode(self) -> None:
         from src.exchanges.binance.aiohttp_transport import AiohttpBinanceTransport
 
         class FakeTransport:
@@ -915,8 +903,24 @@ class TestRequireHedgePositionMode:
                 )
 
         with mock.patch.object(AiohttpBinanceTransport, "send", FakeTransport.send):
-            with pytest.raises(SystemExit, match="1"):
-                await require_hedge_position_mode("test-key", "test-secret")
+            await require_one_way_position_mode("test-key", "test-secret")
+            # does not raise
+
+    @pytest.mark.asyncio
+    async def test_rejects_hedge_mode(self) -> None:
+        from src.exchanges.binance.aiohttp_transport import AiohttpBinanceTransport
+
+        class FakeTransport:
+            async def send(self, request):
+                return BinanceTransportResponse(
+                    status_code=200,
+                    payload={"dualSidePosition": True},
+                    headers={},
+                )
+
+        with mock.patch.object(AiohttpBinanceTransport, "send", FakeTransport.send):
+            with pytest.raises(SystemExit):
+                await require_one_way_position_mode("test-key", "test-secret")
 
     @pytest.mark.asyncio
     async def test_rejects_http_error(self) -> None:
@@ -931,8 +935,8 @@ class TestRequireHedgePositionMode:
                 )
 
         with mock.patch.object(AiohttpBinanceTransport, "send", FakeTransport.send):
-            with pytest.raises(SystemExit, match="1"):
-                await require_hedge_position_mode("bad-key", "bad-secret")
+            with pytest.raises(SystemExit):
+                await require_one_way_position_mode("bad-key", "bad-secret")
 
 
 # ---------------------------------------------------------------------------

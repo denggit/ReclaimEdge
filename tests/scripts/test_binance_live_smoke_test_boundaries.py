@@ -101,7 +101,7 @@ def test_smoke_test_has_safety_gates() -> None:
     assert "require_live_confirmation" in text
     assert "validate_unified_config_for_binance" in text
     assert "load_unified_runtime_config" in text
-    assert "require_hedge_position_mode" in text
+    assert "require_one_way_position_mode" in text
     assert "require_isolated_margin" in text
     assert CONFIRM_ENV in text
 
@@ -146,3 +146,24 @@ def test_smoke_test_does_not_have_dry_run_path() -> None:
     text = _read_smoke_test_text()
     assert "run_boll_cvd_dry_run" not in text
     assert "dry_run" not in text
+
+
+def test_smoke_test_does_not_have_hedge_mode_tokens() -> None:
+    """Smoke test must not contain hedge-mode tokens."""
+    text = _read_smoke_test_text()
+    assert "POSITION_SIDE" not in text
+    assert "require_hedge_position_mode" not in text
+    assert '"hedge"' not in text and "'hedge'" not in text
+
+
+def test_smoke_test_has_one_way_mode_tokens() -> None:
+    """Smoke test must use one-way mode."""
+    text = _read_smoke_test_text()
+    assert "require_one_way_position_mode" in text
+    assert "one-way/net" in text or "One-way" in text or "one_way" in text
+
+
+def test_smoke_test_has_reduce_only() -> None:
+    """Smoke test TP/SL/close must use reduce_only=True."""
+    text = _read_smoke_test_text()
+    assert "reduce_only=True" in text

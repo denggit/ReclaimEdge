@@ -8,7 +8,7 @@
               through to signed BinanceSignedRequest captured by a
               FakeBinanceTransport.
 
-Verifies the full chain:
+Verifies the full chain for One-way / net position mode:
 
     BinanceBrokerSemanticExecutor
       -> BinanceBrokerClient
@@ -62,6 +62,7 @@ def _make_executor(payload):
         api_key="test-key",
         api_secret="test-secret",
         transport=transport,
+        position_mode="net",
     )
     executor = BinanceBrokerSemanticExecutor(client)
     return executor, transport
@@ -70,14 +71,14 @@ def _make_executor(payload):
 def _order_payload(
     *,
     side="BUY",
-    position_side="LONG",
+    position_side="BOTH",
     order_type="MARKET",
     status="NEW",
     price="0",
     orig_qty="0.1",
     stop_price="0",
 ):
-    """Build a minimal Binance order response payload."""
+    """Build a minimal Binance order response payload (One-way mode)."""
     return {
         "symbol": "ETHUSDT",
         "orderId": 123456,
@@ -104,26 +105,36 @@ def _captured_params(transport):
 
 
 def _assert_common_signed_request(req, params):
-    """Assertions shared by every semantic → signed request test."""
+    """Assertions shared by every semantic -> signed request test."""
     assert req.method == "POST"
     assert req.path == "/fapi/v1/order"
     assert req.headers["X-MBX-APIKEY"] == "test-key"
     assert "timestamp" in params
     assert "recvWindow" in params
     assert "signature" in params
+    # In One-way mode, positionSide is never emitted
+    assert "positionSide" not in params
+
+
+def _assert_reduce_only(params):
+    """Assert reduceOnly is present in close-order params."""
+    assert params["reduceOnly"] == "true"
+
+
+def _assert_no_reduce_only(params):
+    """Assert reduceOnly is absent in open-order params."""
     assert "reduceOnly" not in params
 
 
 # ===================================================================
-# open_position
+# open_position (One-way: no positionSide, no reduceOnly)
 # ===================================================================
 
 
 @pytest.mark.asyncio
-async def test_semantic_open_position_long_builds_buy_long_market_signed_request() -> None:
-    """Semantic open_position LONG → BUY LONG MARKET signed request."""
+async def test_semantic_open_position_long_builds_buy_market_signed_request() -> None:
     executor, transport = _make_executor(
-        _order_payload(side="BUY", position_side="LONG")
+        _order_payload(side="BUY", position_side="BOTH")
     )
 
     await executor.open_position(
@@ -135,19 +146,18 @@ async def test_semantic_open_position_long_builds_buy_long_market_signed_request
 
     req, params = _captured_params(transport)
     _assert_common_signed_request(req, params)
+    _assert_no_reduce_only(params)
 
     assert params["symbol"] == "ETHUSDT"
     assert params["side"] == "BUY"
-    assert params["positionSide"] == "LONG"
     assert params["type"] == "MARKET"
     assert params["quantity"] == "0.2"
 
 
 @pytest.mark.asyncio
-async def test_semantic_open_position_short_builds_sell_short_market_signed_request() -> None:
-    """Semantic open_position SHORT → SELL SHORT MARKET signed request."""
+async def test_semantic_open_position_short_builds_sell_market_signed_request() -> None:
     executor, transport = _make_executor(
-        _order_payload(side="SELL", position_side="SHORT")
+        _order_payload(side="SELL", position_side="BOTH")
     )
 
     await executor.open_position(
@@ -159,24 +169,23 @@ async def test_semantic_open_position_short_builds_sell_short_market_signed_requ
 
     req, params = _captured_params(transport)
     _assert_common_signed_request(req, params)
+    _assert_no_reduce_only(params)
 
     assert params["symbol"] == "ETHUSDT"
     assert params["side"] == "SELL"
-    assert params["positionSide"] == "SHORT"
     assert params["type"] == "MARKET"
     assert params["quantity"] == "0.2"
 
 
 # ===================================================================
-# place_reduce_only_tp
+# place_reduce_only_tp (One-way: SELL/BUY + reduceOnly="true")
 # ===================================================================
 
 
 @pytest.mark.asyncio
-async def test_semantic_tp_long_builds_sell_long_limit_signed_request() -> None:
-    """Semantic reduce-only TP LONG → SELL LONG LIMIT price/timeInForce."""
+async def test_semantic_tp_long_builds_sell_limit_reduce_only_signed_request() -> None:
     executor, transport = _make_executor(
-        _order_payload(side="SELL", position_side="LONG", order_type="LIMIT", price="3550")
+        _order_payload(side="SELL", position_side="BOTH", order_type="LIMIT", price="3550")
     )
 
     await executor.place_reduce_only_tp(
@@ -189,10 +198,10 @@ async def test_semantic_tp_long_builds_sell_long_limit_signed_request() -> None:
 
     req, params = _captured_params(transport)
     _assert_common_signed_request(req, params)
+    _assert_reduce_only(params)
 
     assert params["symbol"] == "ETHUSDT"
     assert params["side"] == "SELL"
-    assert params["positionSide"] == "LONG"
     assert params["type"] == "LIMIT"
     assert params["quantity"] == "0.2"
     assert params["price"] == "3550"
@@ -200,10 +209,9 @@ async def test_semantic_tp_long_builds_sell_long_limit_signed_request() -> None:
 
 
 @pytest.mark.asyncio
-async def test_semantic_tp_short_builds_buy_short_limit_signed_request() -> None:
-    """Semantic reduce-only TP SHORT → BUY SHORT LIMIT price/timeInForce."""
+async def test_semantic_tp_short_builds_buy_limit_reduce_only_signed_request() -> None:
     executor, transport = _make_executor(
-        _order_payload(side="BUY", position_side="SHORT", order_type="LIMIT", price="2550")
+        _order_payload(side="BUY", position_side="BOTH", order_type="LIMIT", price="2550")
     )
 
     await executor.place_reduce_only_tp(
@@ -216,10 +224,10 @@ async def test_semantic_tp_short_builds_buy_short_limit_signed_request() -> None
 
     req, params = _captured_params(transport)
     _assert_common_signed_request(req, params)
+    _assert_reduce_only(params)
 
     assert params["symbol"] == "ETHUSDT"
     assert params["side"] == "BUY"
-    assert params["positionSide"] == "SHORT"
     assert params["type"] == "LIMIT"
     assert params["quantity"] == "0.2"
     assert params["price"] == "2550"
@@ -227,16 +235,15 @@ async def test_semantic_tp_short_builds_buy_short_limit_signed_request() -> None
 
 
 # ===================================================================
-# place_protective_stop
+# place_protective_stop (One-way: SELL/BUY + reduceOnly="true")
 # ===================================================================
 
 
 @pytest.mark.asyncio
-async def test_semantic_protective_stop_long_builds_sell_long_stop_market_signed_request() -> None:
-    """Semantic protective stop LONG → SELL LONG STOP_MARKET stopPrice."""
+async def test_semantic_protective_stop_long_builds_sell_stop_market_reduce_only_signed_request() -> None:
     executor, transport = _make_executor(
         _order_payload(
-            side="SELL", position_side="LONG", order_type="STOP_MARKET", stop_price="2950"
+            side="SELL", position_side="BOTH", order_type="STOP_MARKET", stop_price="2950"
         )
     )
 
@@ -250,21 +257,20 @@ async def test_semantic_protective_stop_long_builds_sell_long_stop_market_signed
 
     req, params = _captured_params(transport)
     _assert_common_signed_request(req, params)
+    _assert_reduce_only(params)
 
     assert params["symbol"] == "ETHUSDT"
     assert params["side"] == "SELL"
-    assert params["positionSide"] == "LONG"
     assert params["type"] == "STOP_MARKET"
     assert params["quantity"] == "0.2"
     assert params["stopPrice"] == "2950"
 
 
 @pytest.mark.asyncio
-async def test_semantic_protective_stop_short_builds_buy_short_stop_market_signed_request() -> None:
-    """Semantic protective stop SHORT → BUY SHORT STOP_MARKET stopPrice."""
+async def test_semantic_protective_stop_short_builds_buy_stop_market_reduce_only_signed_request() -> None:
     executor, transport = _make_executor(
         _order_payload(
-            side="BUY", position_side="SHORT", order_type="STOP_MARKET", stop_price="3350"
+            side="BUY", position_side="BOTH", order_type="STOP_MARKET", stop_price="3350"
         )
     )
 
@@ -278,25 +284,24 @@ async def test_semantic_protective_stop_short_builds_buy_short_stop_market_signe
 
     req, params = _captured_params(transport)
     _assert_common_signed_request(req, params)
+    _assert_reduce_only(params)
 
     assert params["symbol"] == "ETHUSDT"
     assert params["side"] == "BUY"
-    assert params["positionSide"] == "SHORT"
     assert params["type"] == "STOP_MARKET"
     assert params["quantity"] == "0.2"
     assert params["stopPrice"] == "3350"
 
 
 # ===================================================================
-# market_exit
+# market_exit (One-way: SELL/BUY + reduceOnly="true")
 # ===================================================================
 
 
 @pytest.mark.asyncio
-async def test_semantic_market_exit_long_builds_sell_long_market_signed_request() -> None:
-    """Semantic market_exit LONG → SELL LONG MARKET signed request."""
+async def test_semantic_market_exit_long_builds_sell_market_reduce_only_signed_request() -> None:
     executor, transport = _make_executor(
-        _order_payload(side="SELL", position_side="LONG")
+        _order_payload(side="SELL", position_side="BOTH")
     )
 
     await executor.market_exit(
@@ -308,19 +313,18 @@ async def test_semantic_market_exit_long_builds_sell_long_market_signed_request(
 
     req, params = _captured_params(transport)
     _assert_common_signed_request(req, params)
+    _assert_reduce_only(params)
 
     assert params["symbol"] == "ETHUSDT"
     assert params["side"] == "SELL"
-    assert params["positionSide"] == "LONG"
     assert params["type"] == "MARKET"
     assert params["quantity"] == "0.2"
 
 
 @pytest.mark.asyncio
-async def test_semantic_market_exit_short_builds_buy_short_market_signed_request() -> None:
-    """Semantic market_exit SHORT → BUY SHORT MARKET signed request."""
+async def test_semantic_market_exit_short_builds_buy_market_reduce_only_signed_request() -> None:
     executor, transport = _make_executor(
-        _order_payload(side="BUY", position_side="SHORT")
+        _order_payload(side="BUY", position_side="BOTH")
     )
 
     await executor.market_exit(
@@ -332,9 +336,9 @@ async def test_semantic_market_exit_short_builds_buy_short_market_signed_request
 
     req, params = _captured_params(transport)
     _assert_common_signed_request(req, params)
+    _assert_reduce_only(params)
 
     assert params["symbol"] == "ETHUSDT"
     assert params["side"] == "BUY"
-    assert params["positionSide"] == "SHORT"
     assert params["type"] == "MARKET"
     assert params["quantity"] == "0.2"

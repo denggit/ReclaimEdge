@@ -65,6 +65,7 @@ class FakeBinanceTransport:
 
 
 def _make_client(transport=None, **kwargs):
+    kwargs.setdefault("position_mode", "net")
     return BinanceBrokerClient(
         api_key="test-api-key",
         api_secret="test-api-secret",
@@ -78,7 +79,7 @@ def _market_buy_request():
         exchange=ExchangeName.BINANCE,
         symbol="ETHUSDT",
         side=BrokerOrderSide.BUY,
-        position_side=BrokerPositionSide.LONG,
+        position_side=BrokerPositionSide.NET,
         order_type=BrokerOrderType.MARKET,
         quantity=Decimal("1"),
         quantity_unit=BrokerQuantityUnit.BASE_ASSET,

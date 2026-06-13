@@ -4,7 +4,7 @@
 @Author     : Zijun Deng
 @Date       : 2026/06/13
 @File       : test_binance_request_mapper.py
-@Description: Unit tests for Binance request mapper.
+@Description: Unit tests for Binance request mapper (One-way / net mode).
 """
 
 from __future__ import annotations
@@ -16,7 +16,10 @@ import pytest
 from src.exchanges.binance.request_mapper import (
     BINANCE_ETH_CONTRACT_SIZE_BASE,
     _format_decimal,
+    _normalize_binance_position_mode,
     broker_order_request_to_binance_params,
+    broker_order_side_to_binance,
+    broker_position_side_to_binance,
     broker_quantity_to_binance_base_quantity,
 )
 from src.exchanges.models import (
@@ -39,7 +42,7 @@ def _request(**kwargs) -> BrokerOrderRequest:
         exchange=ExchangeName.BINANCE,
         symbol="ETHUSDT",
         side=BrokerOrderSide.BUY,
-        position_side=BrokerPositionSide.LONG,
+        position_side=BrokerPositionSide.NET,
         order_type=BrokerOrderType.MARKET,
         quantity=Decimal("0.1"),
         quantity_unit=BrokerQuantityUnit.BASE_ASSET,
@@ -64,9 +67,10 @@ def test_market_base_asset_quantity_direct() -> None:
 
     assert params["symbol"] == "ETHUSDT"
     assert params["side"] == "BUY"
-    assert params["positionSide"] == "LONG"
     assert params["type"] == "MARKET"
     assert params["quantity"] == "0.5"
+    assert "positionSide" not in params
+    assert "reduceOnly" not in params
     assert "price" not in params
     assert "stopPrice" not in params
     assert "timeInForce" not in params
@@ -86,9 +90,9 @@ def test_market_contracts_converts_to_base_quantity() -> None:
 
     params = broker_order_request_to_binance_params(req)
 
-    # 2 contracts * 0.1 ETH/contract = 0.2 ETH
     assert params["quantity"] == "0.2"
     assert params["type"] == "MARKET"
+    assert "positionSide" not in params
 
 
 def test_broker_quantity_to_binance_base_quantity_contracts() -> None:
@@ -124,6 +128,7 @@ def test_limit_order_requires_price_and_adds_time_in_force_gtc() -> None:
     assert params["type"] == "LIMIT"
     assert params["price"] == "3100.5"
     assert params["timeInForce"] == "GTC"
+    assert "positionSide" not in params
 
 
 def test_limit_order_without_price_raises_value_error() -> None:
@@ -137,7 +142,7 @@ def test_limit_order_without_price_raises_value_error() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 4. STOP_MARKET requires trigger_price and adds stopPrice
+# 4. STOP_MARKET requires trigger_price and adds stopPrice (no positionSide)
 # ---------------------------------------------------------------------------
 
 
@@ -145,7 +150,6 @@ def test_stop_market_requires_trigger_price_and_adds_stop_price() -> None:
     req = _request(
         order_type=BrokerOrderType.STOP_MARKET,
         side=BrokerOrderSide.SELL,
-        position_side=BrokerPositionSide.LONG,
         trigger_price=Decimal("2900.00"),
     )
 
@@ -153,6 +157,7 @@ def test_stop_market_requires_trigger_price_and_adds_stop_price() -> None:
 
     assert params["type"] == "STOP_MARKET"
     assert params["stopPrice"] == "2900"
+    assert "positionSide" not in params
     assert "price" not in params
     assert "timeInForce" not in params
 
@@ -168,7 +173,7 @@ def test_stop_market_without_trigger_price_raises_value_error() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 5. TAKE_PROFIT_MARKET requires trigger_price and adds stopPrice
+# 5. TAKE_PROFIT_MARKET requires trigger_price and adds stopPrice (no positionSide)
 # ---------------------------------------------------------------------------
 
 
@@ -176,7 +181,6 @@ def test_take_profit_market_requires_trigger_price_and_adds_stop_price() -> None
     req = _request(
         order_type=BrokerOrderType.TAKE_PROFIT_MARKET,
         side=BrokerOrderSide.SELL,
-        position_side=BrokerPositionSide.LONG,
         trigger_price=Decimal("3200.00"),
     )
 
@@ -184,6 +188,7 @@ def test_take_profit_market_requires_trigger_price_and_adds_stop_price() -> None
 
     assert params["type"] == "TAKE_PROFIT_MARKET"
     assert params["stopPrice"] == "3200"
+    assert "positionSide" not in params
     assert "price" not in params
     assert "timeInForce" not in params
 
@@ -220,25 +225,24 @@ def test_no_client_order_id_omits_new_client_order_id() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 7. reduce_only=True does NOT emit reduceOnly in hedge mode
+# 7. reduce_only=True emits reduceOnly="true" in One-way mode
 # ---------------------------------------------------------------------------
 
 
-def test_reduce_only_true_does_not_emit_reduce_only_in_hedge_mode() -> None:
+def test_reduce_only_true_emits_reduce_only_in_net_mode() -> None:
     req = _request(
         side=BrokerOrderSide.SELL,
-        position_side=BrokerPositionSide.LONG,
         reduce_only=True,
     )
 
     params = broker_order_request_to_binance_params(req)
 
-    assert "reduceOnly" not in params
+    assert params["reduceOnly"] == "true"
     assert params["side"] == "SELL"
-    assert params["positionSide"] == "LONG"
+    assert "positionSide" not in params
 
 
-def test_reduce_only_false_does_not_emit_reduce_only_either() -> None:
+def test_reduce_only_false_does_not_emit_reduce_only() -> None:
     req = _request(reduce_only=False)
 
     params = broker_order_request_to_binance_params(req)
@@ -302,22 +306,19 @@ def test_non_ethusdt_symbol_rejects() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 12. NET / UNKNOWN position side rejects
+# 12. broker_position_side_to_binance always raises in One-way mode
 # ---------------------------------------------------------------------------
 
 
-def test_net_position_side_rejects() -> None:
-    req = _request(position_side=BrokerPositionSide.NET)
+def test_broker_position_side_to_binance_rejects_all_values() -> None:
+    with pytest.raises(ValueError, match="One-way mode does not use positionSide"):
+        broker_position_side_to_binance(BrokerPositionSide.LONG)
 
-    with pytest.raises(ValueError, match="Unsupported Binance position side"):
-        broker_order_request_to_binance_params(req)
+    with pytest.raises(ValueError, match="One-way mode does not use positionSide"):
+        broker_position_side_to_binance(BrokerPositionSide.SHORT)
 
-
-def test_unknown_position_side_rejects() -> None:
-    req = _request(position_side=BrokerPositionSide.UNKNOWN)
-
-    with pytest.raises(ValueError, match="Unsupported Binance position side"):
-        broker_order_request_to_binance_params(req)
+    with pytest.raises(ValueError, match="One-way mode does not use positionSide"):
+        broker_position_side_to_binance(BrokerPositionSide.NET)
 
 
 # ---------------------------------------------------------------------------
@@ -333,26 +334,82 @@ def test_unsupported_order_type_rejects() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 14. non-hedge position_mode rejects
+# 14. position_mode validation (net / one_way / one-way accepted; hedge rejected)
 # ---------------------------------------------------------------------------
 
 
-def test_net_position_mode_rejects() -> None:
+def test_position_mode_net_works() -> None:
     req = _request()
+    params = broker_order_request_to_binance_params(req, position_mode="net")
+    assert "positionSide" not in params
 
-    with pytest.raises(ValueError, match="Unsupported Binance position mode"):
-        broker_order_request_to_binance_params(req, position_mode="net")
 
-
-def test_one_way_position_mode_rejects() -> None:
+def test_position_mode_one_way_works() -> None:
     req = _request()
+    params = broker_order_request_to_binance_params(req, position_mode="one_way")
+    assert "positionSide" not in params
 
+
+def test_position_mode_oneway_works() -> None:
+    req = _request()
+    params = broker_order_request_to_binance_params(req, position_mode="oneway")
+    assert "positionSide" not in params
+
+
+def test_position_mode_one_way_dash_works() -> None:
+    req = _request()
+    params = broker_order_request_to_binance_params(req, position_mode="one-way")
+    assert "positionSide" not in params
+
+
+def test_position_mode_hedge_rejects() -> None:
+    req = _request()
     with pytest.raises(ValueError, match="Unsupported Binance position mode"):
-        broker_order_request_to_binance_params(req, position_mode="one_way")
+        broker_order_request_to_binance_params(req, position_mode="hedge")
+
+
+def test_position_mode_dual_rejects() -> None:
+    req = _request()
+    with pytest.raises(ValueError, match="Unsupported Binance position mode"):
+        broker_order_request_to_binance_params(req, position_mode="dual")
 
 
 # ---------------------------------------------------------------------------
-# 15. Decimal formatting tests
+# 15. _normalize_binance_position_mode
+# ---------------------------------------------------------------------------
+
+
+class TestNormalizePositionMode:
+    def test_net(self) -> None:
+        assert _normalize_binance_position_mode("net") == "net"
+
+    def test_one_way(self) -> None:
+        assert _normalize_binance_position_mode("one_way") == "net"
+
+    def test_oneway(self) -> None:
+        assert _normalize_binance_position_mode("oneway") == "net"
+
+    def test_one_dash_way(self) -> None:
+        assert _normalize_binance_position_mode("one-way") == "net"
+
+    def test_uppercase(self) -> None:
+        assert _normalize_binance_position_mode("NET") == "net"
+
+    def test_hedge_rejects(self) -> None:
+        with pytest.raises(ValueError, match="Unsupported Binance position mode"):
+            _normalize_binance_position_mode("hedge")
+
+    def test_dual_rejects(self) -> None:
+        with pytest.raises(ValueError, match="Unsupported Binance position mode"):
+            _normalize_binance_position_mode("dual")
+
+    def test_dual_side_rejects(self) -> None:
+        with pytest.raises(ValueError, match="Unsupported Binance position mode"):
+            _normalize_binance_position_mode("dual_side")
+
+
+# ---------------------------------------------------------------------------
+# 16. Decimal formatting tests
 # ---------------------------------------------------------------------------
 
 
@@ -377,7 +434,7 @@ def test_format_decimal_large_number() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 16. contract size constant
+# 17. contract size constant
 # ---------------------------------------------------------------------------
 
 
@@ -386,14 +443,13 @@ def test_contract_size_is_0_1_eth() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 17. full param shape for long open buy market
+# 18. full param shape for open long buy market (One-way)
 # ---------------------------------------------------------------------------
 
 
-def test_full_long_open_buy_market_params() -> None:
+def test_full_open_long_buy_market_params() -> None:
     req = _request(
         side=BrokerOrderSide.BUY,
-        position_side=BrokerPositionSide.LONG,
         order_type=BrokerOrderType.MARKET,
         quantity=Decimal("1.0"),
         quantity_unit=BrokerQuantityUnit.BASE_ASSET,
@@ -405,7 +461,6 @@ def test_full_long_open_buy_market_params() -> None:
     assert params == {
         "symbol": "ETHUSDT",
         "side": "BUY",
-        "positionSide": "LONG",
         "type": "MARKET",
         "quantity": "1",
         "newClientOrderId": "long-open-001",
@@ -413,43 +468,60 @@ def test_full_long_open_buy_market_params() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 18. full param shape for short open sell stop market
+# 19. TP long (SELL LIMIT reduceOnly="true")
 # ---------------------------------------------------------------------------
 
 
-def test_full_short_open_sell_stop_market_params() -> None:
+def test_tp_long_sell_limit_reduce_only() -> None:
     req = _request(
         side=BrokerOrderSide.SELL,
-        position_side=BrokerPositionSide.SHORT,
-        order_type=BrokerOrderType.STOP_MARKET,
-        quantity=Decimal("3"),
-        quantity_unit=BrokerQuantityUnit.CONTRACTS,
-        trigger_price=Decimal("2800.00"),
-        client_order_id="short-open-sl-001",
+        order_type=BrokerOrderType.LIMIT,
+        quantity=Decimal("0.5"),
+        price=Decimal("3200"),
+        reduce_only=True,
     )
 
     params = broker_order_request_to_binance_params(req)
 
-    assert params == {
-        "symbol": "ETHUSDT",
-        "side": "SELL",
-        "positionSide": "SHORT",
-        "type": "STOP_MARKET",
-        "quantity": "0.3",
-        "stopPrice": "2800",
-        "newClientOrderId": "short-open-sl-001",
-    }
+    assert params["side"] == "SELL"
+    assert params["type"] == "LIMIT"
+    assert params["price"] == "3200"
+    assert params["timeInForce"] == "GTC"
+    assert params["reduceOnly"] == "true"
+    assert "positionSide" not in params
 
 
 # ---------------------------------------------------------------------------
-# 19. close long via sell long (hedge mode)
+# 20. SL long (SELL STOP_MARKET reduceOnly="true")
 # ---------------------------------------------------------------------------
 
 
-def test_close_long_via_sell_long_market() -> None:
+def test_sl_long_sell_stop_market_reduce_only() -> None:
     req = _request(
         side=BrokerOrderSide.SELL,
-        position_side=BrokerPositionSide.LONG,
+        order_type=BrokerOrderType.STOP_MARKET,
+        quantity=Decimal("0.5"),
+        trigger_price=Decimal("2900"),
+        reduce_only=True,
+    )
+
+    params = broker_order_request_to_binance_params(req)
+
+    assert params["side"] == "SELL"
+    assert params["type"] == "STOP_MARKET"
+    assert params["stopPrice"] == "2900"
+    assert params["reduceOnly"] == "true"
+    assert "positionSide" not in params
+
+
+# ---------------------------------------------------------------------------
+# 21. market close long (SELL MARKET reduceOnly="true")
+# ---------------------------------------------------------------------------
+
+
+def test_close_long_via_sell_market_reduce_only() -> None:
+    req = _request(
+        side=BrokerOrderSide.SELL,
         order_type=BrokerOrderType.MARKET,
         quantity=Decimal("0.5"),
         reduce_only=True,
@@ -458,28 +530,74 @@ def test_close_long_via_sell_long_market() -> None:
     params = broker_order_request_to_binance_params(req)
 
     assert params["side"] == "SELL"
-    assert params["positionSide"] == "LONG"
+    assert params["type"] == "MARKET"
     assert params["quantity"] == "0.5"
-    assert "reduceOnly" not in params
+    assert params["reduceOnly"] == "true"
+    assert "positionSide" not in params
 
 
 # ---------------------------------------------------------------------------
-# 20. close short via buy short (hedge mode)
+# 22. open short (SELL, no reduceOnly)
 # ---------------------------------------------------------------------------
 
 
-def test_close_short_via_buy_short_market() -> None:
+def test_open_short_sell_no_reduce_only() -> None:
     req = _request(
-        side=BrokerOrderSide.BUY,
-        position_side=BrokerPositionSide.SHORT,
+        side=BrokerOrderSide.SELL,
         order_type=BrokerOrderType.MARKET,
         quantity=Decimal("0.2"),
+        reduce_only=False,
+    )
+
+    params = broker_order_request_to_binance_params(req)
+
+    assert params["side"] == "SELL"
+    assert params["type"] == "MARKET"
+    assert "reduceOnly" not in params
+    assert "positionSide" not in params
+
+
+# ---------------------------------------------------------------------------
+# 23. short TP (BUY LIMIT reduceOnly="true")
+# ---------------------------------------------------------------------------
+
+
+def test_short_tp_buy_limit_reduce_only() -> None:
+    req = _request(
+        side=BrokerOrderSide.BUY,
+        order_type=BrokerOrderType.LIMIT,
+        quantity=Decimal("0.3"),
+        price=Decimal("2800"),
         reduce_only=True,
     )
 
     params = broker_order_request_to_binance_params(req)
 
     assert params["side"] == "BUY"
-    assert params["positionSide"] == "SHORT"
-    assert params["quantity"] == "0.2"
-    assert "reduceOnly" not in params
+    assert params["type"] == "LIMIT"
+    assert params["price"] == "2800"
+    assert params["reduceOnly"] == "true"
+    assert "positionSide" not in params
+
+
+# ---------------------------------------------------------------------------
+# 24. short SL (BUY STOP_MARKET reduceOnly="true")
+# ---------------------------------------------------------------------------
+
+
+def test_short_sl_buy_stop_market_reduce_only() -> None:
+    req = _request(
+        side=BrokerOrderSide.BUY,
+        order_type=BrokerOrderType.STOP_MARKET,
+        quantity=Decimal("0.3"),
+        trigger_price=Decimal("3200"),
+        reduce_only=True,
+    )
+
+    params = broker_order_request_to_binance_params(req)
+
+    assert params["side"] == "BUY"
+    assert params["type"] == "STOP_MARKET"
+    assert params["stopPrice"] == "3200"
+    assert params["reduceOnly"] == "true"
+    assert "positionSide" not in params

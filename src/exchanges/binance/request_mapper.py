@@ -9,7 +9,10 @@
 Translates BrokerOrderRequest -> Binance order params dict.
 No HTTP calls.  No API keys.  No live / Trader / factory wiring.
 
-Only ETHUSDT is supported.  Only hedge position mode is supported.
+Only ETHUSDT is supported.  Binance orders are mapped for One-way / net
+position mode.  ``positionSide`` is never emitted in raw params because
+One-way mode does not require it.  Reduce-only safety is enforced through
+the ``reduceOnly`` param.
 """
 
 from __future__ import annotations
@@ -32,8 +35,8 @@ __all__ = [
     "broker_order_request_to_binance_params",
     "broker_order_side_to_binance",
     "broker_order_type_to_binance",
-    "broker_position_side_to_binance",
     "broker_quantity_to_binance_base_quantity",
+    "_normalize_binance_position_mode",
 ]
 
 # ---------------------------------------------------------------------------
@@ -122,16 +125,15 @@ def broker_order_side_to_binance(side: BrokerOrderSide) -> str:
 
 
 def broker_position_side_to_binance(position_side: BrokerPositionSide) -> str:
-    """Map BrokerPositionSide to Binance positionSide string.
+    """One-way / net mode does NOT use positionSide.
 
-    Only LONG and SHORT are supported — hedge mode exclusively.
+    This function is retained for backward compatibility with the public
+    API surface but always raises an error.  Callers must not invoke it
+    for raw param building.
     """
-    if position_side == BrokerPositionSide.LONG:
-        return "LONG"
-    if position_side == BrokerPositionSide.SHORT:
-        return "SHORT"
     raise ValueError(
-        f"Unsupported Binance position side for hedge mode: {position_side.value}"
+        "Binance One-way mode does not use positionSide; "
+        f"got {position_side.value}"
     )
 
 
@@ -149,6 +151,26 @@ def broker_order_type_to_binance(order_type: BrokerOrderType) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Position mode normalizer
+# ---------------------------------------------------------------------------
+
+
+def _normalize_binance_position_mode(position_mode: str) -> str:
+    """Normalize and validate a Binance position mode string.
+
+    Accepted values are ``net``, ``one_way``, and ``one-way`` (all
+    case-insensitive).  ``hedge``, ``dual``, and ``dual_side`` are
+    explicitly rejected.
+
+    Returns the canonical string ``"net"``.
+    """
+    value = str(position_mode).strip().lower().replace("-", "_")
+    if value in {"net", "one_way", "oneway"}:
+        return "net"
+    raise ValueError(f"Unsupported Binance position mode: {position_mode}")
+
+
+# ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
 
@@ -156,7 +178,7 @@ def broker_order_type_to_binance(order_type: BrokerOrderType) -> str:
 def broker_order_request_to_binance_params(
     request: BrokerOrderRequest,
     *,
-    position_mode: str = "hedge",
+    position_mode: str = "net",
 ) -> dict[str, Any]:
     """Translate a BrokerOrderRequest into Binance order params.
 
@@ -165,7 +187,10 @@ def broker_order_request_to_binance_params(
     request : BrokerOrderRequest
         The canonical order request.
     position_mode : str
-        Must be "hedge".  NET / one-way mode is not supported.
+        Must be one of ``net`` / ``one_way`` / ``one-way``.
+        ``hedge`` is rejected.  One-way / net mode never emits
+        ``positionSide`` in raw params; the order side (BUY/SELL)
+        alone determines direction.
 
     Returns
     -------
@@ -177,8 +202,7 @@ def broker_order_request_to_binance_params(
     ValueError
         If any field is invalid or unsupported.
     """
-    if position_mode.lower() != "hedge":
-        raise ValueError(f"Unsupported Binance position mode: {position_mode}")
+    _normalize_binance_position_mode(position_mode)
 
     _assert_binance_request(request)
 
@@ -190,7 +214,6 @@ def broker_order_request_to_binance_params(
     params: dict[str, Any] = {
         "symbol": request.symbol,
         "side": broker_order_side_to_binance(request.side),
-        "positionSide": broker_position_side_to_binance(request.position_side),
         "type": broker_order_type_to_binance(request.order_type),
         "quantity": _format_decimal(quantity),
     }
@@ -214,8 +237,8 @@ def broker_order_request_to_binance_params(
             )
         params["stopPrice"] = _format_decimal(request.trigger_price)
 
-    # Important:
-    # In Binance hedge mode, do NOT include reduceOnly here.
-    # Reduce-only safety must be enforced by semantic executor direction selection
-    # and later position-size validation.
+    # One-way mode: reduce-only must be explicit for close orders.
+    if request.reduce_only is True:
+        params["reduceOnly"] = "true"
+
     return params
