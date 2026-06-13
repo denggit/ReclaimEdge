@@ -4,7 +4,7 @@ import math
 import os
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from config.env_loader import OKX_CONFIG
 from src.execution import order_specs
@@ -13,6 +13,9 @@ from src.strategies.boll_cvd_reclaim_strategy import PositionSide, TradeIntent
 from src.utils.log import get_logger
 
 logger = get_logger(__name__)
+
+if TYPE_CHECKING:
+    from src.exchanges.models import BrokerOrder, BrokerPosition
 
 
 @dataclass(frozen=True)
@@ -143,6 +146,42 @@ class Trader:
             self._broker_client = broker_client
             self._broker_semantic_executor = OkxBrokerSemanticExecutor(broker_client)
         return self._broker_semantic_executor
+
+    async def fetch_broker_open_orders(self) -> tuple["BrokerOrder", ...]:
+        result = await self.broker_semantic_executor.fetch_open_orders(symbol=self.symbol)
+        if not result.ok:
+            raise RuntimeError(result.message or "broker_open_orders_query_failed")
+        return tuple(result.orders)
+
+    async def fetch_broker_algo_orders(self) -> tuple["BrokerOrder", ...]:
+        result = await self.broker_semantic_executor.fetch_algo_orders(symbol=self.symbol)
+        if not result.ok:
+            raise RuntimeError(result.message or "broker_algo_orders_query_failed")
+        return tuple(result.orders)
+
+    async def recover_broker_open_orders(self) -> tuple["BrokerOrder", ...]:
+        result = await self.broker_semantic_executor.recover_open_orders(symbol=self.symbol)
+        if not result.ok:
+            raise RuntimeError(result.message or "broker_open_orders_recovery_query_failed")
+        return tuple(result.orders)
+
+    async def fetch_broker_position(self) -> "BrokerPosition | None":
+        result = await self.broker_semantic_executor.fetch_position(symbol=self.symbol)
+        if not result.ok:
+            raise RuntimeError(result.message or "broker_position_query_failed")
+        return result.position
+
+    async def fetch_broker_open_order_raws(self) -> list[dict[str, Any]]:
+        orders = await self.fetch_broker_open_orders()
+        return [dict(order.raw) for order in orders]
+
+    async def fetch_broker_algo_order_raws(self) -> list[dict[str, Any]]:
+        orders = await self.fetch_broker_algo_orders()
+        return [dict(order.raw) for order in orders]
+
+    async def recover_broker_open_order_raws(self) -> list[dict[str, Any]]:
+        orders = await self.recover_broker_open_orders()
+        return [dict(order.raw) for order in orders]
 
     async def start(self) -> None:
         await self._client.start()

@@ -33,12 +33,17 @@ LIVE_FILES_THAT_MUST_NOT_REFERENCE_EXCHANGE_ADAPTERS: list[str] = [
     "src/live/workers/execution_worker.py",
     "src/live/workers/execution_command_processor.py",
     "src/live/workers/account_position_sync_worker.py",
+    "src/live/account_sync/protective_orders_phase.py",
+    "src/live/startup_recovery/order_recovery.py",
     "src/strategies/boll_cvd_reclaim_strategy.py",
     "src/strategies/boll_cvd_shock_reclaim_strategy.py",
 ]
 
 # Symbols that must not appear in any live-file source text.
 FORBIDDEN_SYMBOLS: list[str] = [
+    "fetch_broker_open_orders",
+    "fetch_broker_algo_orders",
+    "recover_broker_open_orders",
     "broker_semantic_executor",
     "src.exchanges.okx",
     "OkxBrokerClient",
