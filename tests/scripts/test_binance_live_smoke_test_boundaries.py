@@ -100,6 +100,8 @@ def test_smoke_test_has_safety_gates() -> None:
     text = _read_smoke_test_text()
     assert "require_live_confirmation" in text
     assert "require_binance_exchange" in text
+    assert "require_hedge_position_mode" in text
+    assert "require_isolated_margin" in text
     assert CONFIRM_ENV in text
 
 

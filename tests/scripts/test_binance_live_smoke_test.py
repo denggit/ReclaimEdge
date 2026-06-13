@@ -45,6 +45,8 @@ from scripts.binance_live_smoke_test import (
     place_sl,
     place_tp,
     require_binance_exchange,
+    require_hedge_position_mode,
+    require_isolated_margin,
     require_live_confirmation,
 )
 from src.exchanges.binance.client import BinanceBrokerClient
@@ -851,6 +853,116 @@ class TestExchangeInfoFilters:
         assert f.min_qty == Decimal("0.001")
         assert f.step_size == Decimal("0.001")
         assert f.min_notional == Decimal("5")
+
+
+# ---------------------------------------------------------------------------
+# Tests: require_hedge_position_mode
+# ---------------------------------------------------------------------------
+
+
+class TestRequireHedgePositionMode:
+    @pytest.mark.asyncio
+    async def test_accepts_hedge_mode(self) -> None:
+        from src.exchanges.binance.aiohttp_transport import AiohttpBinanceTransport
+
+        class FakeTransport:
+            async def send(self, request):
+                return BinanceTransportResponse(
+                    status_code=200,
+                    payload={"dualSidePosition": True},
+                    headers={},
+                )
+
+        with mock.patch.object(AiohttpBinanceTransport, "send", FakeTransport.send):
+            await require_hedge_position_mode("test-key", "test-secret")
+            # does not raise
+
+    @pytest.mark.asyncio
+    async def test_rejects_one_way_mode(self) -> None:
+        from src.exchanges.binance.aiohttp_transport import AiohttpBinanceTransport
+
+        class FakeTransport:
+            async def send(self, request):
+                return BinanceTransportResponse(
+                    status_code=200,
+                    payload={"dualSidePosition": False},
+                    headers={},
+                )
+
+        with mock.patch.object(AiohttpBinanceTransport, "send", FakeTransport.send):
+            with pytest.raises(SystemExit, match="1"):
+                await require_hedge_position_mode("test-key", "test-secret")
+
+    @pytest.mark.asyncio
+    async def test_rejects_http_error(self) -> None:
+        from src.exchanges.binance.aiohttp_transport import AiohttpBinanceTransport
+
+        class FakeTransport:
+            async def send(self, request):
+                return BinanceTransportResponse(
+                    status_code=403,
+                    payload={"code": -2015, "msg": "Invalid API-key"},
+                    headers={},
+                )
+
+        with mock.patch.object(AiohttpBinanceTransport, "send", FakeTransport.send):
+            with pytest.raises(SystemExit, match="1"):
+                await require_hedge_position_mode("bad-key", "bad-secret")
+
+
+# ---------------------------------------------------------------------------
+# Tests: require_isolated_margin
+# ---------------------------------------------------------------------------
+
+
+class TestRequireIsolatedMargin:
+    @pytest.mark.asyncio
+    async def test_accepts_isolated_margin(self) -> None:
+        from src.exchanges.binance.aiohttp_transport import AiohttpBinanceTransport
+
+        class FakeTransport:
+            async def send(self, request):
+                return BinanceTransportResponse(
+                    status_code=200,
+                    payload=[{"symbol": "ETHUSDT", "marginType": "isolated", "positionAmt": "0"}],
+                    headers={},
+                )
+
+        with mock.patch.object(AiohttpBinanceTransport, "send", FakeTransport.send):
+            await require_isolated_margin("test-key", "test-secret")
+            # does not raise
+
+    @pytest.mark.asyncio
+    async def test_rejects_cross_margin(self) -> None:
+        from src.exchanges.binance.aiohttp_transport import AiohttpBinanceTransport
+
+        class FakeTransport:
+            async def send(self, request):
+                return BinanceTransportResponse(
+                    status_code=200,
+                    payload=[{"symbol": "ETHUSDT", "marginType": "cross", "positionAmt": "0"}],
+                    headers={},
+                )
+
+        with mock.patch.object(AiohttpBinanceTransport, "send", FakeTransport.send):
+            with pytest.raises(SystemExit, match="1"):
+                await require_isolated_margin("test-key", "test-secret")
+
+    @pytest.mark.asyncio
+    async def test_rejects_empty_payload(self) -> None:
+        from src.exchanges.binance.aiohttp_transport import AiohttpBinanceTransport
+
+        class FakeTransport:
+            async def send(self, request):
+                return BinanceTransportResponse(
+                    status_code=200,
+                    payload=[],
+                    headers={},
+                )
+
+        with mock.patch.object(AiohttpBinanceTransport, "send", FakeTransport.send):
+            with pytest.raises(SystemExit, match="1"):
+                await require_isolated_margin("test-key", "test-secret")
 
 
 # ---------------------------------------------------------------------------

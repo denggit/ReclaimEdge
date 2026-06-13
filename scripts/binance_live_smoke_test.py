@@ -9,16 +9,22 @@
 WARNING: This script places REAL orders on Binance USD-M Futures.
 It requires an explicit environment variable to confirm intent.
 
+Prerequisites (account-level, must be configured BEFORE running):
+    MARGIN_MODE   = isolated
+    POSITION_MODE = hedge
+    SYMBOL        = ETHUSDT (canonical: ETH-USDT-PERP)
+    The script validates position mode in preflight.
+
 Usage::
 
-    EXCHANGE=binance                                    \
-    EXCHANGE_API_KEY=...                                \
-    EXCHANGE_API_SECRET=...                             \
-    BINANCE_LIVE_SMOKE_TEST_CONFIRM=I_UNDERSTAND_THIS_PLACES_REAL_ORDERS \
+    EXCHANGE=binance                                    \\
+    EXCHANGE_API_KEY=...                                \\
+    EXCHANGE_API_SECRET=...                             \\
+    BINANCE_LIVE_SMOKE_TEST_CONFIRM=I_UNDERSTAND_THIS_PLACES_REAL_ORDERS \\
     python scripts/binance_live_smoke_test.py
 
 Trade flow (sequential, fail-fast with cleanup on error):
-    0. preflight — env, symbol, exchangeInfo, mark price, balance, qty
+    0. preflight — env, position mode, exchangeInfo, mark price, balance, qty
     1. open ETHUSDT LONG (MARKET)
     2. place TP (LIMIT SELL)
     3. place SL (STOP_MARKET SELL)
@@ -29,6 +35,7 @@ Trade flow (sequential, fail-fast with cleanup on error):
     8. final cleanup (best-effort cancel + close any residual)
 
 No strategy imports.  No CVD.  No live main loop.
+KLINE_INTERVAL is not consumed by this script.
 """
 
 from __future__ import annotations
@@ -86,6 +93,7 @@ DEFAULT_SL_PCT: Decimal = Decimal("0.006")
 EXCHANGE_INFO_PATH: str = "/fapi/v1/exchangeInfo"
 TICKER_PRICE_PATH: str = "/fapi/v1/ticker/price"
 BALANCE_PATH: str = "/fapi/v2/balance"
+DUAL_SIDE_POSITION_PATH: str = "/fapi/v1/positionSide/dual"
 
 
 # ---------------------------------------------------------------------------
@@ -164,6 +172,43 @@ def load_binance_credentials() -> tuple[str, str]:
     return api_key, api_secret
 
 
+async def require_hedge_position_mode(api_key: str, api_secret: str) -> None:
+    """Raise ``SystemExit`` unless the account is in Hedge Position Mode.
+
+    Calls GET /fapi/v1/positionSide/dual (signed).  Returns True means
+    Hedge Mode is active.  Returns False means One-Way Mode — the script
+    cannot safely operate.
+    """
+    signed = build_signed_request(
+        method="GET",
+        path=DUAL_SIDE_POSITION_PATH,
+        params={},
+        api_key=api_key,
+        api_secret=api_secret,
+        base_url=BINANCE_USDM_BASE_URL,
+    )
+    transport = AiohttpBinanceTransport()
+    response: BinanceTransportResponse = await transport.send(signed)
+
+    if response.status_code >= 400:
+        payload = response.payload if isinstance(response.payload, dict) else {}
+        print(
+            f"ERROR: positionSide/dual request failed (HTTP {response.status_code}): {payload}",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
+    dual_side = response.payload.get("dualSidePosition") if isinstance(response.payload, dict) else None
+    if dual_side is not True:
+        print(
+            "ERROR: Binance account must be in Hedge Position Mode.  "
+            "Set POSITION_MODE=hedge before running this script.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    print("[preflight] position mode = hedge OK")
+
+
 # ---------------------------------------------------------------------------
 # Public market data helpers
 # ---------------------------------------------------------------------------
@@ -180,6 +225,49 @@ async def _public_get(path: str, params: dict[str, str] | None = None) -> Any:
                 msg = data if isinstance(data, dict) else {"message": str(data)}
                 raise RuntimeError(f"Public GET {path} failed (HTTP {resp.status}): {msg}")
             return data
+
+
+async def require_isolated_margin(
+    api_key: str,
+    api_secret: str,
+) -> None:
+    """Raise ``SystemExit`` if ETHUSDT margin type is not 'isolated'.
+
+    Calls GET /fapi/v2/positionRisk?symbol=ETHUSDT (signed).  Even when
+    positionAmt is 0 the response includes ``marginType``.
+    """
+    signed = build_signed_request(
+        method="GET",
+        path="/fapi/v2/positionRisk",
+        params={"symbol": BINANCE_SYMBOL},
+        api_key=api_key,
+        api_secret=api_secret,
+        base_url=BINANCE_USDM_BASE_URL,
+    )
+    transport = AiohttpBinanceTransport()
+    response: BinanceTransportResponse = await transport.send(signed)
+
+    if response.status_code >= 400:
+        payload = response.payload if isinstance(response.payload, dict) else {}
+        print(
+            f"ERROR: positionRisk request failed (HTTP {response.status_code}): {payload}",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
+    if not isinstance(response.payload, list) or len(response.payload) == 0:
+        print("ERROR: positionRisk returned no entries for ETHUSDT", file=sys.stderr)
+        raise SystemExit(1)
+
+    margin_type = str(response.payload[0].get("marginType", "")).lower()
+    if margin_type != "isolated":
+        print(
+            f"ERROR: ETHUSDT margin type is {margin_type!r}, expected 'isolated'.  "
+            "Set MARGIN_MODE=isolated before running this script.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    print("[preflight] margin mode = isolated OK")
 
 
 async def fetch_exchange_info_filters() -> ExchangeInfoFilters:
@@ -771,6 +859,12 @@ async def main() -> int:
     api_key, api_secret = load_binance_credentials()
 
     # --- preflight (network) ---
+    print("[preflight] checking position mode...")
+    await require_hedge_position_mode(api_key, api_secret)
+
+    print("[preflight] checking margin mode...")
+    await require_isolated_margin(api_key, api_secret)
+
     print("[preflight] fetching exchangeInfo...")
     filters = await fetch_exchange_info_filters()
 

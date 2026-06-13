@@ -43,9 +43,10 @@ def test_aiohttp_transport_is_not_wired_into_factory_or_live() -> None:
         # Broker runtime factory boundary test uses the token in its
         # forbidden-import assertion list — not a real wiring.
         "tests/exchanges/test_broker_runtime_factory_boundaries.py",
-        # Smoke test script and its boundary test legitimately reference
+        # Smoke test script and its tests legitimately reference
         # AiohttpBinanceTransport for real (but opt-in) REST calls.
         "scripts/binance_live_smoke_test.py",
+        "tests/scripts/test_binance_live_smoke_test.py",
         "tests/scripts/test_binance_live_smoke_test_boundaries.py",
     }
 
