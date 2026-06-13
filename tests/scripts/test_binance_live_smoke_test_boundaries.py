@@ -99,13 +99,41 @@ def test_smoke_test_has_cleanup_function() -> None:
 def test_smoke_test_has_safety_gates() -> None:
     text = _read_smoke_test_text()
     assert "require_live_confirmation" in text
-    assert "require_binance_exchange" in text
+    assert "validate_unified_config_for_binance" in text
+    assert "load_unified_runtime_config" in text
     assert "require_hedge_position_mode" in text
     assert "require_isolated_margin" in text
     assert CONFIRM_ENV in text
 
 
 CONFIRM_ENV = "BINANCE_LIVE_SMOKE_TEST_CONFIRM"
+
+
+def test_smoke_test_uses_unified_runtime_config() -> None:
+    """The smoke test must load and validate the unified runtime config."""
+    text = _read_smoke_test_text()
+    assert "load_unified_runtime_config()" in text
+    assert "validate_unified_config_for_binance" in text
+
+
+def test_smoke_test_does_not_read_okx_legacy_env_vars() -> None:
+    """The smoke test must not read any OKX_* legacy env vars."""
+    text = _read_smoke_test_text()
+    okx_env_vars = [
+        "OKX_INST_ID",
+        "OKX_BAR",
+        "OKX_TD_MODE",
+        "OKX_POS_SIDE_MODE",
+    ]
+    import_lines = [
+        line for line in text.splitlines()
+        if "OKX_" in line and not line.strip().startswith("#") and "Does NOT" not in line
+    ]
+    for var in okx_env_vars:
+        for line in import_lines:
+            assert var not in line, (
+                f"OKX_* env var {var} must not be read by smoke test: {line.strip()}"
+            )
 
 
 def test_smoke_test_file_compiles() -> None:

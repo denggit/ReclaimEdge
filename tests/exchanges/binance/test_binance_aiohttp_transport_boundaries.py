@@ -48,6 +48,9 @@ def test_aiohttp_transport_is_not_wired_into_factory_or_live() -> None:
         "scripts/binance_live_smoke_test.py",
         "tests/scripts/test_binance_live_smoke_test.py",
         "tests/scripts/test_binance_live_smoke_test_boundaries.py",
+        # Unified runtime config test references AiohttpBinanceTransport
+        # in a forbidden-import assertion check — not a real wiring.
+        "tests/exchanges/test_unified_eth_runtime_config.py",
     }
 
     for path in Path(".").rglob("*.py"):

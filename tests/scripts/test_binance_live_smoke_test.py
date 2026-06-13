@@ -44,7 +44,7 @@ from scripts.binance_live_smoke_test import (
     open_long,
     place_sl,
     place_tp,
-    require_binance_exchange,
+    validate_unified_config_for_binance,
     require_hedge_position_mode,
     require_isolated_margin,
     require_live_confirmation,
@@ -220,26 +220,51 @@ class TestRequireLiveConfirmation:
         require_live_confirmation()  # does not raise
 
 
-class TestRequireBinanceExchange:
-    def test_rejects_when_exchange_not_set(self, monkeypatch) -> None:
-        monkeypatch.delenv("EXCHANGE", raising=False)
-        with pytest.raises(SystemExit) as exc_info:
-            require_binance_exchange()
-        assert exc_info.value.code == 1
+class TestValidateUnifiedConfigForBinance:
+    @staticmethod
+    def _make_rt(**overrides):
+        from dataclasses import replace
+        from src.exchanges.runtime_config import ExchangeRuntimeConfig
+        from src.exchanges.models import ExchangeName
+        base = ExchangeRuntimeConfig(
+            exchange=ExchangeName.BINANCE,
+            trade_asset="ETH",
+            quote_asset="USDT",
+            market_type="PERPETUAL",
+        )
+        if not overrides:
+            return base
+        return replace(base, **overrides)
 
-    def test_rejects_okx(self, monkeypatch) -> None:
-        monkeypatch.setenv("EXCHANGE", "okx")
-        with pytest.raises(SystemExit) as exc_info:
-            require_binance_exchange()
-        assert exc_info.value.code == 1
+    def test_rejects_okx_config(self) -> None:
+        rt = self._make_rt(exchange=ExchangeName.OKX)
+        with pytest.raises(SystemExit):
+            validate_unified_config_for_binance(rt)
 
-    def test_accepts_binance(self, monkeypatch) -> None:
-        monkeypatch.setenv("EXCHANGE", "binance")
-        require_binance_exchange()  # does not raise
+    def test_accepts_binance_config(self) -> None:
+        rt = self._make_rt()
+        symbol = validate_unified_config_for_binance(rt)
+        assert symbol == "ETHUSDT"
 
-    def test_accepts_binance_case_insensitive(self, monkeypatch) -> None:
-        monkeypatch.setenv("EXCHANGE", "BINANCE")
-        require_binance_exchange()  # does not raise
+    def test_rejects_wrong_canonical_symbol(self) -> None:
+        rt = self._make_rt(trade_asset="BTC")
+        with pytest.raises(SystemExit):
+            validate_unified_config_for_binance(rt)
+
+    def test_rejects_hedge_position_mode(self) -> None:
+        rt = self._make_rt(position_mode="hedge")
+        with pytest.raises(SystemExit):
+            validate_unified_config_for_binance(rt)
+
+    def test_rejects_cross_margin_mode(self) -> None:
+        rt = self._make_rt(margin_mode="cross")
+        with pytest.raises(SystemExit):
+            validate_unified_config_for_binance(rt)
+
+    def test_rejects_1m_kline_interval(self) -> None:
+        rt = self._make_rt(kline_interval="1m")
+        with pytest.raises(SystemExit):
+            validate_unified_config_for_binance(rt)
 
 
 class TestLoadBinanceCredentials:

@@ -9,11 +9,24 @@
 WARNING: This script places REAL orders on Binance USD-M Futures.
 It requires an explicit environment variable to confirm intent.
 
+This script reads the unified runtime config (load_unified_runtime_config)
+and validates that all platform-agnostic parameters match the supported
+values.  It does NOT read any OKX-specific legacy env vars.
+
 Prerequisites (account-level, must be configured BEFORE running):
     MARGIN_MODE   = isolated
-    POSITION_MODE = hedge
+    POSITION_MODE = hedge  (Binance account; adapter currently requires hedge)
     SYMBOL        = ETHUSDT (canonical: ETH-USDT-PERP)
-    The script validates position mode in preflight.
+
+Unified config env (shared with OKX):
+    EXCHANGE=binance
+    TRADE_ASSET=ETH
+    QUOTE_ASSET=USDT
+    MARKET_TYPE=PERPETUAL
+    MARGIN_MODE=isolated
+    POSITION_MODE=net
+    LEVERAGE=20
+    KLINE_INTERVAL=15m
 
 Usage::
 
@@ -24,7 +37,7 @@ Usage::
     python scripts/binance_live_smoke_test.py
 
 Trade flow (sequential, fail-fast with cleanup on error):
-    0. preflight — env, position mode, exchangeInfo, mark price, balance, qty
+    0. preflight — unified config, position mode, exchangeInfo, mark price, balance, qty
     1. open ETHUSDT LONG (MARKET)
     2. place TP (LIMIT SELL)
     3. place SL (STOP_MARKET SELL)
@@ -35,7 +48,8 @@ Trade flow (sequential, fail-fast with cleanup on error):
     8. final cleanup (best-effort cancel + close any residual)
 
 No strategy imports.  No CVD.  No live main loop.
-KLINE_INTERVAL is not consumed by this script.
+Does NOT read OKX_INST_ID, OKX_BAR, OKX_TD_MODE, or OKX_POS_SIDE_MODE.
+KLINE_INTERVAL is consumed via unified config only.
 """
 
 from __future__ import annotations
@@ -57,6 +71,14 @@ from src.exchanges.binance.signing import (
     build_signed_request,
 )
 from src.exchanges.binance.transport import BinanceTransportResponse
+from src.exchanges.runtime_config import (
+    ExchangeRuntimeConfig,
+    load_unified_runtime_config,
+    SUPPORTED_CANONICAL_SYMBOL,
+    SUPPORTED_KLINE_INTERVAL,
+    SUPPORTED_MARGIN_MODE,
+    SUPPORTED_POSITION_MODE,
+)
 from src.exchanges.models import (
     BrokerCancelResult,
     BrokerOrder,
@@ -144,16 +166,61 @@ def require_live_confirmation() -> None:
     print("[preflight] live confirmation OK")
 
 
-def require_binance_exchange() -> None:
-    """Raise ``SystemExit`` unless``EXCHANGE=binance``."""
-    exchange = os.environ.get("EXCHANGE", "").strip().lower()
-    if exchange != ExchangeName.BINANCE.value:
+def validate_unified_config_for_binance(rt: ExchangeRuntimeConfig) -> str:
+    """Validate the unified runtime config for Binance smoke test use.
+
+    Returns the validated Binance raw symbol (ETHUSDT).
+
+    Raises ``SystemExit`` on any validation failure.
+    """
+    if rt.exchange != ExchangeName.BINANCE:
         print(
-            f"ERROR: EXCHANGE must be 'binance', got {exchange!r}",
+            f"ERROR: EXCHANGE must be 'binance', got {rt.exchange.value!r}",
             file=sys.stderr,
         )
         raise SystemExit(1)
-    print("[preflight] EXCHANGE=binance OK")
+
+    if rt.canonical_symbol != SUPPORTED_CANONICAL_SYMBOL:
+        print(
+            f"ERROR: canonical_symbol must be {SUPPORTED_CANONICAL_SYMBOL!r}, "
+            f"got {rt.canonical_symbol!r}",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
+    if rt.binance_symbol != "ETHUSDT":
+        print(
+            f"ERROR: binance_symbol must be 'ETHUSDT', got {rt.binance_symbol!r}",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
+    if rt.position_mode != SUPPORTED_POSITION_MODE:
+        print(
+            f"ERROR: POSITION_MODE must be {SUPPORTED_POSITION_MODE!r}, "
+            f"got {rt.position_mode!r}",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
+    if rt.margin_mode != SUPPORTED_MARGIN_MODE:
+        print(
+            f"ERROR: MARGIN_MODE must be {SUPPORTED_MARGIN_MODE!r}, "
+            f"got {rt.margin_mode!r}",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
+    if rt.kline_interval != SUPPORTED_KLINE_INTERVAL:
+        print(
+            f"ERROR: KLINE_INTERVAL must be {SUPPORTED_KLINE_INTERVAL!r}, "
+            f"got {rt.kline_interval!r}",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
+    print("[preflight] unified config validated OK")
+    return rt.binance_symbol
 
 
 def _load_api_credential(key: str) -> str:
@@ -854,9 +921,12 @@ async def _run_smoke_test(
 async def main() -> int:
     """Entry point — runs the smoke test, always attempts cleanup."""
     # --- safety gates (no network) ---
-    require_binance_exchange()
     require_live_confirmation()
     api_key, api_secret = load_binance_credentials()
+
+    # --- unified runtime config ---
+    rt = load_unified_runtime_config()
+    binance_symbol = validate_unified_config_for_binance(rt)
 
     # --- preflight (network) ---
     print("[preflight] checking position mode...")
@@ -924,7 +994,7 @@ async def main() -> int:
         "\n================================================================"
         "\n  BINANCE LIVE SMOKE TEST"
         "\n================================================================"
-        f"\n  Symbol:       {BINANCE_SYMBOL} (ETH-USDT-PERP)"
+        f"\n  Symbol:       {binance_symbol} ({rt.canonical_symbol})"
         f"\n  Side:         LONG"
         f"\n  Quantity:     {calculated_qty} ETH"
         f"\n  Notional:     ≈ {calculated_notional} USDT"

@@ -35,7 +35,10 @@ def test_load_exchange_runtime_config_defaults_to_okx_eth_perpetual() -> None:
     assert config.canonical_symbol == "ETH-USDT-PERP"
     assert config.leverage == 20
     assert config.margin_mode == "isolated"
-    assert config.position_mode == "hedge"
+    assert config.position_mode == "net"
+    assert config.kline_interval == "15m"
+    assert config.okx_inst_id == "ETH-USDT-SWAP"
+    assert config.binance_symbol == "ETHUSDT"
     assert config.api_key == ""
     assert config.api_secret == ""
     assert config.api_passphrase == ""
@@ -58,7 +61,7 @@ def test_load_exchange_runtime_config_okx() -> None:
             "EXCHANGE_API_PASSPHRASE": "okx-pass",
             "LEVERAGE": "20",
             "MARGIN_MODE": "isolated",
-            "POSITION_MODE": "hedge",
+            "POSITION_MODE": "net",
         }
     )
 
@@ -88,7 +91,7 @@ def test_load_exchange_runtime_config_binance_same_canonical_symbol() -> None:
             "EXCHANGE_API_PASSPHRASE": "",
             "LEVERAGE": "20",
             "MARGIN_MODE": "isolated",
-            "POSITION_MODE": "hedge",
+            "POSITION_MODE": "net",
         }
     )
 
@@ -209,7 +212,27 @@ def test_load_exchange_runtime_config_rejects_non_usdt_quote_asset() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 11. Source-level – no _TRUE_VALUES dead code
+# 11. Reject unsupported margin / position / kline values
+# ---------------------------------------------------------------------------
+
+
+def test_rejects_cross_margin_mode() -> None:
+    with pytest.raises(ValueError, match="Unsupported MARGIN_MODE"):
+        load_exchange_runtime_config_from_env({"MARGIN_MODE": "cross"})
+
+
+def test_rejects_hedge_position_mode() -> None:
+    with pytest.raises(ValueError, match="Unsupported POSITION_MODE"):
+        load_exchange_runtime_config_from_env({"POSITION_MODE": "hedge"})
+
+
+def test_rejects_1m_kline_interval() -> None:
+    with pytest.raises(ValueError, match="Unsupported KLINE_INTERVAL"):
+        load_exchange_runtime_config_from_env({"KLINE_INTERVAL": "1m"})
+
+
+# ---------------------------------------------------------------------------
+# 12. Source-level – no _TRUE_VALUES dead code
 # ---------------------------------------------------------------------------
 
 
