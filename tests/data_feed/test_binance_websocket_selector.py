@@ -70,24 +70,22 @@ def test_ws_feed_stream_url_uses_market_stream() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_ws_feed_custom_raw_symbol_in_stream_names() -> None:
-    feed = build_market_data_feed(
-        exchange="binance",
-        raw_symbol="btcusdt",
-        binance_ws_connector=fake_connector,
-    )
-    names = feed.stream_names()
-    assert names[0] == "btcusdt@aggTrade"
+def test_ws_feed_non_eth_raw_symbol_raises_value_error() -> None:
+    with pytest.raises(ValueError, match="Only ETHUSDT is supported for Binance data feed"):
+        build_market_data_feed(
+            exchange="binance",
+            raw_symbol="btcusdt",
+            binance_ws_connector=fake_connector,
+        )
 
 
-def test_ws_feed_custom_kline_interval_in_stream_names() -> None:
-    feed = build_market_data_feed(
-        exchange="binance",
-        kline_interval="1m",
-        binance_ws_connector=fake_connector,
-    )
-    names = feed.stream_names()
-    assert names[1] == "ethusdt@kline_1m"
+def test_ws_feed_non_15m_kline_interval_raises_value_error() -> None:
+    with pytest.raises(ValueError, match="Only 15m kline interval is supported for Binance data feed"):
+        build_market_data_feed(
+            exchange="binance",
+            kline_interval="1m",
+            binance_ws_connector=fake_connector,
+        )
 
 
 # ---------------------------------------------------------------------------

@@ -128,3 +128,58 @@ class TestNormalizeExchangeNameParity:
             normalize_data_feed_exchange_name("bybit")
         with pytest.raises(ValueError):
             normalize_broker_exchange_name("bybit")
+
+
+# ---------------------------------------------------------------------------
+# data_feed selector ETH-only constraints
+# ---------------------------------------------------------------------------
+
+
+class TestDataFeedEthOnlyConstraints:
+    """Verify the data_feed selector locks to ETH-USDT perpetual only."""
+
+    def test_default_is_okx_eth_perp(self) -> None:
+        feed = build_market_data_feed()
+        assert isinstance(feed, OkxMarketDataFeed)
+        assert feed.canonical_symbol == "ETH-USDT-PERP"
+        assert feed.raw_symbol == "ETH-USDT-SWAP"
+
+    def test_okx_rejects_btc_canonical(self) -> None:
+        with pytest.raises(ValueError, match="Only ETH-USDT-PERP is supported"):
+            build_market_data_feed(exchange="okx", canonical_symbol="BTC-USDT-PERP")
+
+    def test_okx_rejects_btc_raw(self) -> None:
+        with pytest.raises(ValueError, match="Only ETH-USDT-SWAP is supported for OKX"):
+            build_market_data_feed(exchange="okx", raw_symbol="BTC-USDT-SWAP")
+
+    def test_binance_shell_returns_eth_perp(self) -> None:
+        feed = build_market_data_feed(
+            exchange="binance", allow_binance_without_ws_connector=True
+        )
+        assert isinstance(feed, BinanceMarketDataFeed)
+        assert feed.canonical_symbol == "ETH-USDT-PERP"
+        assert feed.raw_symbol == "ETHUSDT"
+
+    def test_binance_rejects_btc_canonical(self) -> None:
+        with pytest.raises(ValueError, match="Only ETH-USDT-PERP is supported"):
+            build_market_data_feed(
+                exchange="binance",
+                canonical_symbol="BTC-USDT-PERP",
+                allow_binance_without_ws_connector=True,
+            )
+
+    def test_binance_rejects_btc_raw(self) -> None:
+        with pytest.raises(ValueError, match="Only ETHUSDT is supported for Binance"):
+            build_market_data_feed(
+                exchange="binance",
+                raw_symbol="BTCUSDT",
+                allow_binance_without_ws_connector=True,
+            )
+
+    def test_binance_rejects_1m_interval(self) -> None:
+        with pytest.raises(ValueError, match="Only 15m kline interval is supported for Binance"):
+            build_market_data_feed(
+                exchange="binance",
+                kline_interval="1m",
+                allow_binance_without_ws_connector=True,
+            )

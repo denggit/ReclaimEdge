@@ -136,44 +136,39 @@ def test_build_okx_feed_default_raw_symbol() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_build_market_data_feed_custom_canonical_symbol() -> None:
-    feed = build_market_data_feed(
-        exchange="binance",
-        canonical_symbol="BTC-USDT-PERP",
-        allow_binance_without_ws_connector=True,
-    )
-    assert isinstance(feed, BinanceMarketDataFeed)
-    assert feed.canonical_symbol == "BTC-USDT-PERP"
+def test_non_eth_canonical_symbol_raises_value_error() -> None:
+    with pytest.raises(ValueError, match="Only ETH-USDT-PERP is supported"):
+        build_market_data_feed(
+            exchange="binance",
+            canonical_symbol="BTC-USDT-PERP",
+            allow_binance_without_ws_connector=True,
+        )
 
 
-def test_build_market_data_feed_custom_raw_symbol_binance() -> None:
-    feed = build_market_data_feed(
-        exchange="binance",
-        raw_symbol="BTCUSDT",
-        allow_binance_without_ws_connector=True,
-    )
-    assert isinstance(feed, BinanceMarketDataFeed)
-    assert feed.raw_symbol == "BTCUSDT"
+def test_non_eth_binance_raw_symbol_raises_value_error() -> None:
+    with pytest.raises(ValueError, match="Only ETHUSDT is supported for Binance data feed"):
+        build_market_data_feed(
+            exchange="binance",
+            raw_symbol="BTCUSDT",
+            allow_binance_without_ws_connector=True,
+        )
 
 
-def test_build_market_data_feed_custom_raw_symbol_okx() -> None:
-    feed = build_market_data_feed(
-        exchange="okx",
-        raw_symbol="BTC-USDT-SWAP",
-    )
-    assert isinstance(feed, OkxMarketDataFeed)
-    assert feed.raw_symbol == "BTC-USDT-SWAP"
+def test_non_eth_okx_raw_symbol_raises_value_error() -> None:
+    with pytest.raises(ValueError, match="Only ETH-USDT-SWAP is supported for OKX data feed"):
+        build_market_data_feed(
+            exchange="okx",
+            raw_symbol="BTC-USDT-SWAP",
+        )
 
 
-def test_build_market_data_feed_custom_kline_interval() -> None:
-    feed = build_market_data_feed(
-        exchange="binance",
-        kline_interval="1m",
-        allow_binance_without_ws_connector=True,
-    )
-    assert isinstance(feed, BinanceMarketDataFeed)
-    names = feed.stream_names()
-    assert "kline_1m" in names[1]
+def test_non_15m_kline_interval_raises_value_error() -> None:
+    with pytest.raises(ValueError, match="Only 15m kline interval is supported for Binance data feed"):
+        build_market_data_feed(
+            exchange="binance",
+            kline_interval="1m",
+            allow_binance_without_ws_connector=True,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -247,18 +242,16 @@ def test_build_market_data_feed_binance_ws_feed_stream_url() -> None:
     assert "/market/stream?streams=" in url
 
 
-def test_build_market_data_feed_binance_ws_feed_custom_symbols() -> None:
-    feed = build_market_data_feed(
-        exchange="binance",
-        canonical_symbol="BTC-USDT-PERP",
-        raw_symbol="BTCUSDT",
-        kline_interval="1m",
-        binance_ws_connector=_fake_connector,
-    )
-    assert feed.canonical_symbol == "BTC-USDT-PERP"
-    assert feed.raw_symbol == "BTCUSDT"
-    names = feed.stream_names()
-    assert names == ("btcusdt@aggTrade", "btcusdt@kline_1m")
+def test_build_market_data_feed_binance_ws_feed_custom_symbols_raises_value_error() -> None:
+    """Non-ETH canonical_symbol must raise ValueError even with ws connector."""
+    with pytest.raises(ValueError, match="Only ETH-USDT-PERP is supported"):
+        build_market_data_feed(
+            exchange="binance",
+            canonical_symbol="BTC-USDT-PERP",
+            raw_symbol="BTCUSDT",
+            kline_interval="1m",
+            binance_ws_connector=_fake_connector,
+        )
 
 
 def test_build_market_data_feed_binance_ws_connector_wins_over_shell() -> None:
