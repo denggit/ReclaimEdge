@@ -11,3 +11,10 @@ and domain models (BrokerOrder, BrokerPosition, ...) that are independent of
 any specific exchange.  Concrete adapters live in sub‑packages (okx/, binance/,
 bybit/ …).
 """
+
+from src.exchanges.factory import (
+    build_broker_client,
+    build_broker_semantic_executor,
+    normalize_exchange_name,
+    unsupported_exchange_message,
+)

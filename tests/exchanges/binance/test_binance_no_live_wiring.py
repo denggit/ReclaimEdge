@@ -73,6 +73,10 @@ def test_binance_adapter_shell_not_wired_into_runtime() -> None:
         "tests/exchanges/binance/test_binance_transport_boundaries.py",
         # Pre-existing mention in docstring; not part of this change.
         "src/exchanges/factory.py",
+        # Broker runtime factory tests reference BinanceBrokerClient
+        # in imports / isinstance checks — not real runtime wiring.
+        "tests/exchanges/test_broker_runtime_factory.py",
+        "tests/exchanges/test_broker_runtime_factory_boundaries.py",
     }
 
     for path in Path(".").rglob("*.py"):
