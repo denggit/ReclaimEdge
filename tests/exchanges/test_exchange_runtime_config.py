@@ -186,3 +186,33 @@ def test_exchange_runtime_config_has_no_live_execution_or_config_dependency() ->
             assert token not in stripped, (
                 f"runtime_config.py MUST NOT import/reference '{token}': {stripped}"
             )
+
+
+# ---------------------------------------------------------------------------
+# 9. Reject non-ETH trade asset
+# ---------------------------------------------------------------------------
+
+
+def test_load_exchange_runtime_config_rejects_non_eth_trade_asset() -> None:
+    with pytest.raises(ValueError, match="Unsupported TRADE_ASSET"):
+        load_exchange_runtime_config_from_env({"TRADE_ASSET": "BTC"})
+
+
+# ---------------------------------------------------------------------------
+# 10. Reject non-USDT quote asset
+# ---------------------------------------------------------------------------
+
+
+def test_load_exchange_runtime_config_rejects_non_usdt_quote_asset() -> None:
+    with pytest.raises(ValueError, match="Unsupported QUOTE_ASSET"):
+        load_exchange_runtime_config_from_env({"QUOTE_ASSET": "USDC"})
+
+
+# ---------------------------------------------------------------------------
+# 11. Source-level – no _TRUE_VALUES dead code
+# ---------------------------------------------------------------------------
+
+
+def test_exchange_runtime_config_has_no_unused_true_values_constant() -> None:
+    text = Path("src/exchanges/runtime_config.py").read_text(encoding="utf-8")
+    assert "_TRUE_VALUES" not in text

@@ -20,8 +20,6 @@ from typing import Mapping
 from src.exchanges.models import ExchangeName
 
 
-_TRUE_VALUES = {"1", "true", "yes", "y", "on"}
-
 
 @dataclass(frozen=True)
 class ExchangeRuntimeConfig:
@@ -93,10 +91,10 @@ def load_exchange_runtime_config_from_env(
     quote_asset = str(values.get("QUOTE_ASSET", "USDT")).strip().upper()
     market_type = str(values.get("MARKET_TYPE", "PERPETUAL")).strip().upper()
 
-    if not trade_asset:
-        raise ValueError("TRADE_ASSET must not be empty")
-    if not quote_asset:
-        raise ValueError("QUOTE_ASSET must not be empty")
+    if trade_asset != "ETH":
+        raise ValueError(f"Unsupported TRADE_ASSET: {trade_asset}")
+    if quote_asset != "USDT":
+        raise ValueError(f"Unsupported QUOTE_ASSET: {quote_asset}")
     if market_type != "PERPETUAL":
         raise ValueError(f"Unsupported MARKET_TYPE: {market_type}")
 
