@@ -225,3 +225,14 @@ async def test_multiple_semantic_specs_return_order_ids_in_order(monkeypatch: py
         BrokerSemanticOrderRole.TP2,
     ]
     assert fake_trader.requests == []
+
+
+def test_semantic_tp_placement_uses_explicit_broker_semantic_executor_access() -> None:
+    """Prove the source file uses explicit t.broker_semantic_executor, not hidden-string getattr."""
+    from pathlib import Path
+
+    text = Path("src/execution/tp_sl_core_tp_manager.py").read_text(encoding="utf-8")
+
+    assert '"broker_" "semantic_executor"' not in text
+    assert "getattr(t, \"broker_\"" not in text
+    assert "t.broker_semantic_executor" in text

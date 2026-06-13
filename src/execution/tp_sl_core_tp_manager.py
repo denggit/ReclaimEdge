@@ -703,7 +703,7 @@ class CoreTakeProfitManager:
         t = self.trader
         from src.exchanges.models import BrokerQuantityUnit
 
-        executor = getattr(t, "broker_" "semantic_executor")
+        executor = t.broker_semantic_executor
         result = await executor.place_reduce_only_tp(
             symbol=t.symbol,
             side=self._broker_position_side(side),
