@@ -24,7 +24,6 @@ from pathlib import Path
 
 LIVE_FILES_THAT_MUST_NOT_REFERENCE_EXCHANGE_ADAPTERS: list[str] = [
     "scripts/run_boll_cvd_live.py",
-    "src/execution/tp_sl_protective_stop_manager.py",
     "src/execution/tp_sl_market_exit_manager.py",
     "src/execution/tp_sl_near_tp_manager.py",
     "src/execution/tp_sl_sidecar_manager.py",
@@ -165,4 +164,41 @@ def test_semantic_reduce_only_cancel_switch_boundary() -> None:
             continue
         text = path.read_text(encoding="utf-8")
         for token in FORBIDDEN_SEMANTIC_REDUCE_ONLY_CANCEL_TOKENS:
+            assert token not in text, f"{token} unexpectedly found in {file_name}"
+
+
+# ---------------------------------------------------------------------------
+# Additional guard – semantic protective SL placement switch boundary
+# ---------------------------------------------------------------------------
+
+FILES_FORBIDDEN_SEMANTIC_PROTECTIVE_SL_PLACEMENT: list[str] = [
+    "scripts/run_boll_cvd_live.py",
+    "src/execution/trader.py",
+    "src/execution/tp_sl_core_tp_manager.py",
+    "src/execution/tp_sl_execution_manager.py",
+    "src/execution/tp_sl_market_exit_manager.py",
+    "src/execution/tp_sl_near_tp_manager.py",
+    "src/execution/tp_sl_sidecar_manager.py",
+    "src/live/workers/execution_command_processor.py",
+    "src/live/account_sync/protective_orders_phase.py",
+    "src/live/startup_recovery/order_recovery.py",
+    "src/strategies/boll_cvd_reclaim_strategy.py",
+    "src/strategies/boll_cvd_shock_reclaim_strategy.py",
+]
+
+FORBIDDEN_SEMANTIC_PROTECTIVE_SL_PLACEMENT_TOKENS: list[str] = [
+    "BROKER_SEMANTIC_PROTECTIVE_SL_PLACEMENT_ENABLED",
+    "_place_primary_protective_stop_semantic",
+]
+
+
+def test_semantic_protective_sl_placement_switch_boundary() -> None:
+    """The protective SL placement semantic switch must only live in
+    tp_sl_protective_stop_manager.py and its tests."""
+    for file_name in FILES_FORBIDDEN_SEMANTIC_PROTECTIVE_SL_PLACEMENT:
+        path = Path(file_name)
+        if not path.exists():
+            continue
+        text = path.read_text(encoding="utf-8")
+        for token in FORBIDDEN_SEMANTIC_PROTECTIVE_SL_PLACEMENT_TOKENS:
             assert token not in text, f"{token} unexpectedly found in {file_name}"

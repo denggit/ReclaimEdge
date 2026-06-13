@@ -18,6 +18,52 @@ class ProtectiveStopManager:
     def __init__(self, trader: Trader) -> None:
         self.trader = trader
 
+    # ------------------------------------------------------------------
+    # semantic protective SL placement switch (opt-in)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _broker_semantic_protective_sl_placement_enabled() -> bool:
+        value = os.getenv("BROKER_SEMANTIC_PROTECTIVE_SL_PLACEMENT_ENABLED", "false").strip().lower()
+        return value in {"1", "true", "yes", "y", "on"}
+
+    @staticmethod
+    def _broker_position_side(side: str):
+        from src.exchanges.models import BrokerPositionSide
+
+        if side == "LONG":
+            return BrokerPositionSide.LONG
+        if side == "SHORT":
+            return BrokerPositionSide.SHORT
+        raise RuntimeError(f"unsupported_position_side_for_semantic_protective_sl: {side}")
+
+    async def _place_primary_protective_stop_semantic(
+        self,
+        *,
+        side: str,
+        contracts: Decimal,
+        stop_price: float,
+    ) -> str:
+        t = self.trader
+        from src.exchanges.models import BrokerQuantityUnit
+        from src.exchanges.semantic_models import BrokerSemanticOrderRole
+
+        result = await t.broker_semantic_executor.place_protective_stop(
+            symbol=t.symbol,
+            side=self._broker_position_side(side),
+            quantity=contracts,
+            trigger_price=Decimal(str(stop_price)),
+            quantity_unit=BrokerQuantityUnit.CONTRACTS,
+            role=BrokerSemanticOrderRole.PROTECTIVE_SL,
+        )
+        if not result.ok or not result.order_id:
+            raise RuntimeError(
+                f"semantic_protective_sl_order_failed side={side} "
+                f"contracts={t.decimal_to_str(contracts)} stop_price={t.price_to_str(stop_price)} "
+                f"message={result.message}"
+            )
+        return str(result.order_id)
+
     async def place_near_tp_protective_stop_with_retries(
             self,
             side: PositionSide,
@@ -32,9 +78,16 @@ class ProtectiveStopManager:
         last_error = ""
         for attempt in range(1, retry_count + 1):
             try:
-                body = t._near_tp_protective_sl_algo_body(side, contracts, stop_price)
-                res = await t.request("POST", "/api/v5/trade/order-algo", body)
-                algo_id = t.extract_algo_id(res)
+                if self._broker_semantic_protective_sl_placement_enabled():
+                    algo_id = await self._place_primary_protective_stop_semantic(
+                        side=side,
+                        contracts=contracts,
+                        stop_price=stop_price,
+                    )
+                else:
+                    body = t._near_tp_protective_sl_algo_body(side, contracts, stop_price)
+                    res = await t.request("POST", "/api/v5/trade/order-algo", body)
+                    algo_id = t.extract_algo_id(res)
                 if await self.trader.verify_near_tp_protective_stop(algo_id, side, contracts, stop_price):
                     return True, algo_id, "protective_sl_placed"
                 await self.trader._cancel_unverified_near_tp_algo(algo_id, phase="primary")
