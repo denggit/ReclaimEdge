@@ -1,0 +1,118 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+"""
+@Author     : Zijun Deng
+@Date       : 2026/06/13
+@File       : test_binance_live_smoke_test_boundaries.py
+@Description: Boundary tests — the smoke test must not import strategy,
+              CVD, live loop, OKX, or other forbidden modules.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+
+_SMOKE_TEST_PATH = Path(__file__).resolve().parents[2] / "scripts" / "binance_live_smoke_test.py"
+
+
+def _read_smoke_test_text() -> str:
+    return _SMOKE_TEST_PATH.read_text(encoding="utf-8")
+
+
+def test_smoke_test_file_exists() -> None:
+    assert _SMOKE_TEST_PATH.exists(), f"Smoke test script not found at {_SMOKE_TEST_PATH}"
+    assert _SMOKE_TEST_PATH.is_file()
+
+
+def test_smoke_test_does_not_import_strategy_or_live_loop() -> None:
+    text = _read_smoke_test_text()
+
+    forbidden = [
+        "src.strategies",
+        "CvdTracker",
+        "BollBandBreakoutMonitor",
+        "ExecutionCommandProcessor",
+        "scripts.run_boll_cvd_live",
+        "OKX_CONFIG",
+        "ETH-USDT-SWAP",
+        "BTCUSDT",
+        "BTC-USDT",
+        "from src.live",
+        "from src.position_management",
+        "from src.risk",
+        "from src.reporting",
+        "from src.account_sync",
+        "from src.startup_recovery",
+        "from src.execution.trader",
+        "from src.execution.tp_sl",
+        "from src.data_feed",
+        "from config",
+    ]
+
+    for token in forbidden:
+        assert token not in text, f"'{token}' must not appear in smoke test script"
+
+
+def test_smoke_test_allows_binance_and_models_imports() -> None:
+    text = _read_smoke_test_text()
+
+    allowed = [
+        "BinanceBrokerClient",
+        "AiohttpBinanceTransport",
+        "BinanceTransportResponse",
+        "ExchangeName",
+        "BrokerOrderRequest",
+        "BrokerOrderSide",
+        "BrokerOrderType",
+        "BrokerPositionSide",
+        "BrokerQuantityUnit",
+        "build_signed_request",
+    ]
+
+    for token in allowed:
+        assert token in text, f"'{token}' should appear in smoke test script"
+
+
+def test_smoke_test_has_ethusdt_only() -> None:
+    text = _read_smoke_test_text()
+
+    # Must contain ETHUSDT
+    assert '"ETHUSDT"' in text or "'ETHUSDT'" in text or 'BINANCE_SYMBOL' in text
+
+    # Must NOT reference BTC
+    assert "BTCUSDT" not in text
+    assert "BTC-USDT" not in text
+
+
+def test_smoke_test_has_client_order_id_prefix() -> None:
+    text = _read_smoke_test_text()
+    assert "RE_SMOKE_" in text
+
+
+def test_smoke_test_has_cleanup_function() -> None:
+    text = _read_smoke_test_text()
+    assert "async def cleanup" in text
+    assert "cancel_smoke_orders" in text or "cancel" in text
+
+
+def test_smoke_test_has_safety_gates() -> None:
+    text = _read_smoke_test_text()
+    assert "require_live_confirmation" in text
+    assert "require_binance_exchange" in text
+    assert CONFIRM_ENV in text
+
+
+CONFIRM_ENV = "BINANCE_LIVE_SMOKE_TEST_CONFIRM"
+
+
+def test_smoke_test_file_compiles() -> None:
+    """Ensure the script compiles without syntax errors."""
+    text = _read_smoke_test_text()
+    compile(text, str(_SMOKE_TEST_PATH), "exec")
+
+
+def test_smoke_test_does_not_have_dry_run_path() -> None:
+    text = _read_smoke_test_text()
+    assert "run_boll_cvd_dry_run" not in text
+    assert "dry_run" not in text

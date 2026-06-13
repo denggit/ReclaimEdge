@@ -77,6 +77,11 @@ def test_binance_adapter_shell_not_wired_into_runtime() -> None:
         # in imports / isinstance checks — not real runtime wiring.
         "tests/exchanges/test_broker_runtime_factory.py",
         "tests/exchanges/test_broker_runtime_factory_boundaries.py",
+        # Smoke test script and its tests legitimately use
+        # BinanceBrokerClient for real (but opt-in) REST calls.
+        "scripts/binance_live_smoke_test.py",
+        "tests/scripts/test_binance_live_smoke_test.py",
+        "tests/scripts/test_binance_live_smoke_test_boundaries.py",
     }
 
     for path in Path(".").rglob("*.py"):
