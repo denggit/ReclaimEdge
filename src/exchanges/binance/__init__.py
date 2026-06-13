@@ -30,6 +30,7 @@ from src.exchanges.binance.request_mapper import (
     broker_position_side_to_binance,
     broker_quantity_to_binance_base_quantity,
 )
+from src.exchanges.binance.semantic_executor import BinanceBrokerSemanticExecutor
 from src.exchanges.binance.signing import (
     BINANCE_USDM_BASE_URL,
     BINANCE_USDM_TESTNET_BASE_URL,
@@ -48,6 +49,7 @@ from src.exchanges.binance.transport import BinanceHttpTransport, BinanceTranspo
 
 __all__ = [
     "AiohttpBinanceTransport",
+    "BinanceBrokerSemanticExecutor",
     "BINANCE_ETH_CONTRACT_SIZE_BASE",
     "BINANCE_ETH_USDT_SYMBOL",
     "BINANCE_USDM_BASE_URL",
