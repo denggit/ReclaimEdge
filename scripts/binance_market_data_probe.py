@@ -34,8 +34,7 @@ import os
 import sys
 from typing import Any
 
-import aiohttp
-
+from src.data_feed.binance.aiohttp_ws_connector import connect_binance_market_ws as connect_binance_ws
 from src.data_feed.market_events import MarketCandleEvent, MarketTradeEvent
 from src.data_feed.selector import build_market_data_feed
 from src.exchanges.models import ExchangeName
@@ -154,62 +153,6 @@ def read_max_events() -> int:
         )
         raise SystemExit(1)
     return value
-
-
-# ---------------------------------------------------------------------------
-# Aiohttp WebSocket connection
-# ---------------------------------------------------------------------------
-
-
-class AiohttpBinanceWsConnection:
-    """Async iterator over Binance WebSocket text/binary messages."""
-
-    def __init__(
-        self,
-        ws: aiohttp.ClientWebSocketResponse,
-        session: aiohttp.ClientSession,
-    ) -> None:
-        self._ws = ws
-        self._session = session
-
-    def __aiter__(self) -> "AiohttpBinanceWsConnection":
-        return self
-
-    async def __anext__(self) -> str | bytes:
-        msg = await self._ws.receive()
-        if msg.type == aiohttp.WSMsgType.TEXT:
-            return msg.data
-        if msg.type == aiohttp.WSMsgType.BINARY:
-            return msg.data
-        if msg.type == aiohttp.WSMsgType.CLOSED:
-            raise StopAsyncIteration
-        if msg.type == aiohttp.WSMsgType.ERROR:
-            raise ConnectionError(f"WebSocket error: {self._ws.exception()}")
-        # CLOSING / CLOSE / other sentinel — end iteration
-        raise StopAsyncIteration
-
-    async def close(self) -> None:
-        """Close the underlying WebSocket and HTTP session."""
-        await self._ws.close()
-        await self._session.close()
-
-
-async def connect_binance_ws(url: str) -> AiohttpBinanceWsConnection:
-    """Open an aiohttp WebSocket connection to *url*.
-
-    Returns an :class:`AiohttpBinanceWsConnection` that can be used as an
-    async iterator of raw messages (``str | bytes``).
-
-    Raises ``ConnectionError`` (or aiohttp errors) when the connection fails.
-    """
-    timeout = aiohttp.ClientTimeout(total=30.0)
-    session = aiohttp.ClientSession(timeout=timeout)
-    try:
-        ws = await session.ws_connect(url)
-    except Exception:
-        await session.close()
-        raise
-    return AiohttpBinanceWsConnection(ws, session)
 
 
 # ---------------------------------------------------------------------------

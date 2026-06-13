@@ -330,13 +330,26 @@ class TestBridgeStats:
         assert stats.ignored_events == 0
         assert stats.error_events == 0
 
-    def test_get_stats_returns_same_object(self) -> None:
+    def test_get_stats_returns_copy_not_same_object(self) -> None:
         bridge = BinanceMarketDataSignalBridge()
         bridge.handle_event(_make_trade_event())
         s1 = bridge.stats
         s2 = bridge.get_stats()
-        assert s1 is s2
-        assert s1.trade_events == 1
+        assert s1 is not s2
+        assert s2.trade_events == 1
+        assert s2.trade_events == s1.trade_events
+        assert s2.candle_events == s1.candle_events
+        assert s2.closed_candle_events == s1.closed_candle_events
+        assert s2.ignored_events == s1.ignored_events
+        assert s2.error_events == s1.error_events
+
+    def test_snapshot_modification_does_not_affect_internal_stats(self) -> None:
+        bridge = BinanceMarketDataSignalBridge()
+        bridge.handle_event(_make_trade_event())
+        stats_snapshot = bridge.get_stats()
+        stats_snapshot.trade_events = 999
+        assert bridge.stats.trade_events != 999
+        assert bridge.stats.trade_events == 1
 
 
 # ======================================================================

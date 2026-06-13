@@ -63,6 +63,25 @@ logger = get_logger(__name__)
 
 async def main() -> None:
     load_dotenv()
+
+    # ── Binance signal-only branch ──────────────────────────────────────
+    exchange = os.getenv("EXCHANGE", "okx").strip().lower()
+    if exchange == "binance":
+        signal_only = (
+            os.getenv("BINANCE_SIGNAL_ONLY", "").strip().lower()
+            in {"1", "true", "yes", "y", "on"}
+        )
+        if not signal_only:
+            raise RuntimeError(
+                "Binance main live trading is not wired yet. "
+                "Set BINANCE_SIGNAL_ONLY=true for signal-only observation."
+            )
+        from src.live.binance_signal_only_runtime import run_binance_signal_only
+
+        await run_binance_signal_only()
+        return
+    # ── End Binance branch ──────────────────────────────────────────────
+
     if not live_config_helpers.live_trading_enabled():
         raise RuntimeError("LIVE_TRADING is not true. Refusing to start live runner.")
 

@@ -17,13 +17,14 @@ This module does NOT:
 - modify OKX behaviour
 - support any symbol other than ETH-USDT-PERP / ETHUSDT / 15m
 
-It is a pure stateless converter.  The caller (20C-2B) is responsible for wiring
-the output into the live-runner tick/candle path.
+It is a pure market-event converter with in-memory statistics.  It performs
+no network, secret, broker, or order side effects.  The caller (20C-2B) is
+responsible for wiring the output into the live-runner tick/candle path.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from decimal import Decimal
 from typing import Union
 
@@ -158,8 +159,14 @@ class BinanceMarketDataSignalBridge:
         return self._stats
 
     def get_stats(self) -> BinanceSignalBridgeStats:
-        """Return a snapshot of the current statistics (alias for ``stats``)."""
-        return self._stats
+        """Return a snapshot copy of the current statistics."""
+        return BinanceSignalBridgeStats(
+            trade_events=self._stats.trade_events,
+            candle_events=self._stats.candle_events,
+            closed_candle_events=self._stats.closed_candle_events,
+            ignored_events=self._stats.ignored_events,
+            error_events=self._stats.error_events,
+        )
 
     # -- event handler -----------------------------------------------------
 
