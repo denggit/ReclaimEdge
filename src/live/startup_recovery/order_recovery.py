@@ -21,6 +21,66 @@ from src.utils.log import get_logger
 logger = get_logger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# Reduce-only order selection helpers (compatible with OKX raw dicts and
+# BrokerOrder-like objects – no hard dependency on any exchange model).
+# ---------------------------------------------------------------------------
+
+
+def _order_value(order: Any, *names: str) -> Any:
+    """Return the first matching value from a dict or object attribute.
+
+    Prefer to avoid importing BrokerOrder so startup recovery does not
+    depend on a specific exchange semantic model.
+    """
+    if isinstance(order, dict):
+        for name in names:
+            if name in order:
+                return order.get(name)
+        return None
+    for name in names:
+        if hasattr(order, name):
+            return getattr(order, name)
+    return None
+
+
+def _order_id(order: Any) -> str:
+    value = _order_value(order, "ordId", "order_id", "id")
+    return str(value or "")
+
+
+def _order_symbol(order: Any) -> str:
+    value = _order_value(order, "instId", "symbol")
+    return str(value or "")
+
+
+def _order_reduce_only(order: Any) -> bool:
+    value = _order_value(order, "reduceOnly", "reduce_only")
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"true", "1", "yes", "y", "on"}
+
+
+def _select_recoverable_reduce_only_orders(
+    pending_orders: list[Any],
+    *,
+    symbol: str,
+    protected_order_ids: set[str],
+) -> list[Any]:
+    """Select reduce-only orders matching *symbol* and excluding *protected_order_ids*.
+
+    Returns the original order objects unchanged – callers can extract
+    order ids via ``_order_id()`` when needed.
+    """
+    return [
+        order
+        for order in pending_orders
+        if _order_symbol(order) == symbol
+        and _order_reduce_only(order)
+        and _order_id(order) not in protected_order_ids
+    ]
+
+
 async def apply_sidecar_startup_recovery(
         *,
         strategy: BollCvdReclaimStrategy,
@@ -185,12 +245,11 @@ async def apply_main_tp_startup_recovery(
         for leg in list(getattr(saved_state, "sidecar_legs", []) or [])
         if leg.get("status") == SidecarLegStatus.OPEN.value and leg.get("tp_order_id")
     } if saved_state is not None else set()
-    reduce_only_orders = [
-        item
-        for item in pending_orders
-        if item.get("instId") == trader.symbol and str(item.get("reduceOnly", "")).lower() == "true"
-           and str(item.get("ordId")) not in protected_sidecar_tp_ids
-    ]
+    reduce_only_orders = _select_recoverable_reduce_only_orders(
+        pending_orders,
+        symbol=trader.symbol,
+        protected_order_ids=protected_sidecar_tp_ids,
+    )
     if reduce_only_orders:
         execution_state.trading_halted = True
         execution_state.halt_reason = "main_tp_order_id_missing_on_startup"
@@ -199,7 +258,7 @@ async def apply_main_tp_startup_recovery(
                 "MAIN_TP_ORDER_ID_MISSING_ON_STARTUP",
                 {
                     "pending_reduce_only_order_count": len(reduce_only_orders),
-                    "pending_reduce_only_order_ids": [item.get("ordId") for item in reduce_only_orders],
+                    "pending_reduce_only_order_ids": [_order_id(item) for item in reduce_only_orders],
                     "manual_intervention_required": True,
                 },
                 position_id=execution_state.current_position_id,
