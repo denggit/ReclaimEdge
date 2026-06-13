@@ -15,7 +15,13 @@ from pathlib import Path
 
 def _binance_source_text() -> str:
     root = Path("src/exchanges/binance")
-    return "\n".join(path.read_text(encoding="utf-8") for path in root.rglob("*.py"))
+    # signing.py legitimately references fapi / dapi URLs in endpoint constants;
+    # it is separately guarded by test_binance_signing_boundaries.py.
+    return "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in root.rglob("*.py")
+        if path.name != "signing.py"
+    )
 
 
 def test_binance_adapter_shell_does_not_import_live_execution_or_config_modules() -> None:
