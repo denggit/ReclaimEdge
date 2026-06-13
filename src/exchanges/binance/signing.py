@@ -42,14 +42,14 @@ BINANCE_USDM_POSITION_RISK_PATH = "/fapi/v2/positionRisk"
 class BinanceSignedRequest:
     """A fully-signed Binance REST request, ready for an HTTP transport.
 
-    The *query_string* carries the signature and is excluded from repr so that
-    log output does not leak signed parameters.
+    params, headers, and query_string are excluded from repr to avoid leaking
+    signature or API key material into logs.
     """
 
     method: str
     path: str
-    params: Mapping[str, Any]
-    headers: Mapping[str, str]
+    params: Mapping[str, Any] = field(repr=False)
+    headers: Mapping[str, str] = field(repr=False)
     base_url: str = BINANCE_USDM_BASE_URL
     query_string: str = field(repr=False, default="")
 

@@ -209,16 +209,27 @@ def test_binance_usdm_endpoint_constants() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_signed_request_repr_does_not_include_query_string() -> None:
+def test_signed_request_repr_does_not_include_sensitive_fields() -> None:
     req = BinanceSignedRequest(
         method="POST",
         path="/fapi/v1/order",
-        params={"symbol": "ETHUSDT"},
-        headers={"X-MBX-APIKEY": "key"},
-        query_string="symbol=ETHUSDT&signature=secret-signature",
+        params={
+            "symbol": "ETHUSDT",
+            "signature": "super-secret-signature",
+        },
+        headers={"X-MBX-APIKEY": "super-secret-api-key"},
+        query_string="symbol=ETHUSDT&signature=super-secret-signature",
     )
 
     text = repr(req)
 
-    assert "secret-signature" not in text
+    assert "params=" not in text
+    assert "headers=" not in text
     assert "query_string" not in text
+    assert "super-secret-signature" not in text
+    assert "super-secret-api-key" not in text
+    assert "X-MBX-APIKEY" not in text
+
+    # fields remain accessible
+    assert req.params["signature"] == "super-secret-signature"
+    assert req.headers["X-MBX-APIKEY"] == "super-secret-api-key"
