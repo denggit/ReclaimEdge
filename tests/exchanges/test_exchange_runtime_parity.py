@@ -55,9 +55,10 @@ class TestDataFeedSelectorDefaults:
         feed = build_market_data_feed()
         assert isinstance(feed, OkxMarketDataFeed)
 
-    def test_data_feed_explicit_binance(self) -> None:
-        feed = build_market_data_feed(exchange="binance")
-        assert isinstance(feed, BinanceMarketDataFeed)
+    def test_data_feed_explicit_binance_requires_connector(self) -> None:
+        """Explicit binance without ws connector raises ValueError."""
+        with pytest.raises(ValueError, match="binance_ws_connector is required"):
+            build_market_data_feed(exchange="binance")
 
 
 # ---------------------------------------------------------------------------

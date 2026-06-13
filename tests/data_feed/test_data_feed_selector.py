@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from src.data_feed.binance.adapter import BinanceMarketDataFeed
+from src.data_feed.binance.websocket_feed import BinanceWebSocketMarketDataFeed
 from src.data_feed.okx.adapter import OkxMarketDataFeed
 from src.data_feed.selector import build_market_data_feed, normalize_exchange_name
 from src.exchanges.models import ExchangeName
@@ -86,12 +87,24 @@ def test_build_market_data_feed_exchange_okx_returns_okx() -> None:
 
 
 # ---------------------------------------------------------------------------
-# build_market_data_feed(exchange="binance") returns BinanceMarketDataFeed
+# build_market_data_feed(exchange="binance") raises ValueError without connector
 # ---------------------------------------------------------------------------
 
 
-def test_build_market_data_feed_exchange_binance_returns_binance() -> None:
-    feed = build_market_data_feed(exchange="binance")
+def test_build_market_data_feed_exchange_binance_raises_without_connector() -> None:
+    with pytest.raises(ValueError, match="binance_ws_connector is required"):
+        build_market_data_feed(exchange="binance")
+
+
+# ---------------------------------------------------------------------------
+# Binance shell mode — allow_binance_without_ws_connector=True
+# ---------------------------------------------------------------------------
+
+
+def test_build_market_data_feed_binance_shell_mode() -> None:
+    feed = build_market_data_feed(
+        exchange="binance", allow_binance_without_ws_connector=True
+    )
     assert isinstance(feed, BinanceMarketDataFeed)
     assert feed.exchange == ExchangeName.BINANCE
 
@@ -102,7 +115,9 @@ def test_build_market_data_feed_exchange_binance_returns_binance() -> None:
 
 
 def test_build_binance_feed_default_raw_symbol() -> None:
-    feed = build_market_data_feed(exchange="binance")
+    feed = build_market_data_feed(
+        exchange="binance", allow_binance_without_ws_connector=True
+    )
     assert feed.raw_symbol == "ETHUSDT"
 
 
@@ -125,6 +140,7 @@ def test_build_market_data_feed_custom_canonical_symbol() -> None:
     feed = build_market_data_feed(
         exchange="binance",
         canonical_symbol="BTC-USDT-PERP",
+        allow_binance_without_ws_connector=True,
     )
     assert isinstance(feed, BinanceMarketDataFeed)
     assert feed.canonical_symbol == "BTC-USDT-PERP"
@@ -134,6 +150,7 @@ def test_build_market_data_feed_custom_raw_symbol_binance() -> None:
     feed = build_market_data_feed(
         exchange="binance",
         raw_symbol="BTCUSDT",
+        allow_binance_without_ws_connector=True,
     )
     assert isinstance(feed, BinanceMarketDataFeed)
     assert feed.raw_symbol == "BTCUSDT"
@@ -152,6 +169,7 @@ def test_build_market_data_feed_custom_kline_interval() -> None:
     feed = build_market_data_feed(
         exchange="binance",
         kline_interval="1m",
+        allow_binance_without_ws_connector=True,
     )
     assert isinstance(feed, BinanceMarketDataFeed)
     names = feed.stream_names()
@@ -163,9 +181,16 @@ def test_build_market_data_feed_custom_kline_interval() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_build_market_data_feed_enum_binance() -> None:
-    feed = build_market_data_feed(exchange=ExchangeName.BINANCE)
+def test_build_market_data_feed_enum_binance_shell_mode() -> None:
+    feed = build_market_data_feed(
+        exchange=ExchangeName.BINANCE, allow_binance_without_ws_connector=True
+    )
     assert isinstance(feed, BinanceMarketDataFeed)
+
+
+def test_build_market_data_feed_enum_binance_raises_without_connector() -> None:
+    with pytest.raises(ValueError, match="binance_ws_connector is required"):
+        build_market_data_feed(exchange=ExchangeName.BINANCE)
 
 
 # ---------------------------------------------------------------------------
@@ -176,3 +201,71 @@ def test_build_market_data_feed_enum_binance() -> None:
 def test_build_market_data_feed_enum_okx() -> None:
     feed = build_market_data_feed(exchange=ExchangeName.OKX)
     assert isinstance(feed, OkxMarketDataFeed)
+
+
+# ---------------------------------------------------------------------------
+# Binance websocket feed via selector with fake connector
+# ---------------------------------------------------------------------------
+
+
+class _FakeConnection:
+    def __aiter__(self):
+        return self._iterate()
+
+    async def _iterate(self):
+        if False:
+            yield ""
+
+
+async def _fake_connector(url: str) -> _FakeConnection:
+    return _FakeConnection()
+
+
+def test_build_market_data_feed_binance_ws_connector_returns_ws_feed() -> None:
+    feed = build_market_data_feed(
+        exchange="binance",
+        binance_ws_connector=_fake_connector,
+    )
+    assert isinstance(feed, BinanceWebSocketMarketDataFeed)
+
+
+def test_build_market_data_feed_binance_ws_feed_stream_names() -> None:
+    feed = build_market_data_feed(
+        exchange="binance",
+        binance_ws_connector=_fake_connector,
+    )
+    names = feed.stream_names()
+    assert names == ("ethusdt@aggTrade", "ethusdt@kline_15m")
+
+
+def test_build_market_data_feed_binance_ws_feed_stream_url() -> None:
+    feed = build_market_data_feed(
+        exchange="binance",
+        binance_ws_connector=_fake_connector,
+    )
+    url = feed.stream_url()
+    assert "/market/stream?streams=" in url
+
+
+def test_build_market_data_feed_binance_ws_feed_custom_symbols() -> None:
+    feed = build_market_data_feed(
+        exchange="binance",
+        canonical_symbol="BTC-USDT-PERP",
+        raw_symbol="BTCUSDT",
+        kline_interval="1m",
+        binance_ws_connector=_fake_connector,
+    )
+    assert feed.canonical_symbol == "BTC-USDT-PERP"
+    assert feed.raw_symbol == "BTCUSDT"
+    names = feed.stream_names()
+    assert names == ("btcusdt@aggTrade", "btcusdt@kline_1m")
+
+
+def test_build_market_data_feed_binance_ws_connector_wins_over_shell() -> None:
+    """When both connector and allow flag are set, connector takes precedence."""
+    feed = build_market_data_feed(
+        exchange="binance",
+        binance_ws_connector=_fake_connector,
+        allow_binance_without_ws_connector=True,
+    )
+    assert isinstance(feed, BinanceWebSocketMarketDataFeed)
