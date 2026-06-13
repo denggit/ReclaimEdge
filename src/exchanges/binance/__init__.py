@@ -9,6 +9,7 @@
 Real broker execution is deferred to a later task.
 """
 
+from src.exchanges.binance.aiohttp_transport import AiohttpBinanceTransport
 from src.exchanges.binance.client import BinanceBrokerClient
 from src.exchanges.binance.mapper import (
     BINANCE_ETH_USDT_SYMBOL,
@@ -46,6 +47,7 @@ from src.exchanges.binance.signing import (
 from src.exchanges.binance.transport import BinanceHttpTransport, BinanceTransportResponse
 
 __all__ = [
+    "AiohttpBinanceTransport",
     "BINANCE_ETH_CONTRACT_SIZE_BASE",
     "BINANCE_ETH_USDT_SYMBOL",
     "BINANCE_USDM_BASE_URL",

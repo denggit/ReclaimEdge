@@ -22,7 +22,7 @@ def _binance_source_text() -> str:
     return "\n".join(
         path.read_text(encoding="utf-8")
         for path in root.rglob("*.py")
-        if path.name not in {"signing.py", "client.py"}
+        if path.name not in {"signing.py", "client.py", "aiohttp_transport.py"}
     )
 
 
