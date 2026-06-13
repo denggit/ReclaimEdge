@@ -118,6 +118,8 @@ EXCHANGE_INFO_PATH: str = "/fapi/v1/exchangeInfo"
 TICKER_PRICE_PATH: str = "/fapi/v1/ticker/price"
 BALANCE_PATH: str = "/fapi/v2/balance"
 CHANGE_LEVERAGE_PATH: str = "/fapi/v1/leverage"
+ALGO_ORDER_PATH: str = "/fapi/v1/algoOrder"
+ALGO_OPEN_ORDERS_PATH: str = "/fapi/v1/openAlgoOrders"
 # ---------------------------------------------------------------------------
 # Preflight state (populated before any order is placed)
 # ---------------------------------------------------------------------------
@@ -647,11 +649,21 @@ _cid_counter: int = 0
 
 
 def _generate_client_order_id(label: str) -> str:
-    """Return a unique clientOrderId with the smoke test prefix."""
+    """Return a unique clientOrderId with the smoke test prefix, length <= 36."""
     global _cid_counter
     _cid_counter += 1
-    ts = time.monotonic_ns()
-    return f"{CLIENT_ORDER_ID_PREFIX}{label}_{ts}_{_cid_counter}"
+
+    short_labels: dict[str, str] = {
+        "open": "op",
+        "tp": "tp",
+        "sl": "sl",
+        "close": "cl",
+        "cleanup_close": "cc",
+    }
+    short_label = short_labels.get(label, label[:4])
+    suffix = time.monotonic_ns() % 1_000_000_000
+    cid = f"{CLIENT_ORDER_ID_PREFIX}{short_label}_{suffix}_{_cid_counter}"
+    return cid[:36]
 
 
 # ---------------------------------------------------------------------------
@@ -682,6 +694,197 @@ def _make_order_request(
         reduce_only=reduce_only,
         client_order_id=client_order_id,
     )
+
+
+# ---------------------------------------------------------------------------
+# Algo Order helpers (use direct signed requests — NOT BinanceBrokerClient)
+# ---------------------------------------------------------------------------
+
+
+async def place_stop_loss_algo_order(
+    *,
+    api_key: str,
+    api_secret: str,
+    quantity: Decimal,
+    sl_price: Decimal,
+    client_order_id: str,
+) -> BrokerOrderResult:
+    """Place a STOP_MARKET SELL algo order via Binance Algo Order API.
+
+    Uses ``POST /fapi/v1/algoOrder`` with ``algoType=CONDITIONAL``.
+    This is the dedicated endpoint for conditional orders (STOP_MARKET,
+    TAKE_PROFIT_MARKET, etc.) — the regular ``POST /fapi/v1/order``
+    rejects these types with error -4120.
+
+    Raises ``RuntimeError`` on HTTP or business-level errors.
+    """
+    params: dict[str, Any] = {
+        "algoType": "CONDITIONAL",
+        "symbol": BINANCE_SYMBOL,
+        "side": "SELL",
+        "type": "STOP_MARKET",
+        "quantity": str(quantity),
+        "triggerPrice": str(sl_price),
+        "reduceOnly": "true",
+        "workingType": "MARK_PRICE",
+        "clientAlgoId": client_order_id,
+    }
+
+    signed = build_signed_request(
+        method="POST",
+        path=ALGO_ORDER_PATH,
+        params=params,
+        api_key=api_key,
+        api_secret=api_secret,
+        base_url=BINANCE_USDM_BASE_URL,
+    )
+
+    transport = AiohttpBinanceTransport()
+    response: BinanceTransportResponse = await transport.send(signed)
+
+    if response.status_code >= 400:
+        payload = response.payload if isinstance(response.payload, dict) else {}
+        raise RuntimeError(
+            f"Algo SL order HTTP {response.status_code}: {payload}"
+        )
+
+    if isinstance(response.payload, dict):
+        code = response.payload.get("code")
+        if isinstance(code, int) and code < 0:
+            msg = response.payload.get("msg", "Unknown error")
+            raise RuntimeError(f"Algo SL order rejected: [{code}] {msg}")
+
+    payload = response.payload if isinstance(response.payload, dict) else {}
+    algo_id = payload.get("algoId")
+    cid = payload.get("clientAlgoId") or client_order_id
+
+    print(
+        f"[sl-algo] placed — algoId={algo_id}, clientAlgoId={cid}"
+    )
+    return BrokerOrderResult(
+        exchange=ExchangeName.BINANCE,
+        symbol=BINANCE_SYMBOL,
+        ok=True,
+        order_id=str(algo_id) if algo_id is not None else cid,
+        client_order_id=cid,
+        raw=response.payload,
+    )
+
+
+async def cancel_algo_order_by_client_id(
+    *,
+    api_key: str,
+    api_secret: str,
+    client_order_id: str,
+) -> BrokerCancelResult:
+    """Cancel a single algo order by its ``clientAlgoId``.
+
+    Uses ``DELETE /fapi/v1/algoOrder`` with ``clientAlgoId`` parameter.
+    """
+    signed = build_signed_request(
+        method="DELETE",
+        path=ALGO_ORDER_PATH,
+        params={
+            "symbol": BINANCE_SYMBOL,
+            "clientAlgoId": client_order_id,
+        },
+        api_key=api_key,
+        api_secret=api_secret,
+        base_url=BINANCE_USDM_BASE_URL,
+    )
+
+    transport = AiohttpBinanceTransport()
+    response: BinanceTransportResponse = await transport.send(signed)
+
+    if response.status_code >= 400:
+        payload = response.payload if isinstance(response.payload, dict) else {}
+        print(
+            f"[cancel-algo] WARNING: cancel clientAlgoId={client_order_id} "
+            f"failed (HTTP {response.status_code}): {payload}",
+            file=sys.stderr,
+        )
+        return BrokerCancelResult(
+            exchange=ExchangeName.BINANCE,
+            symbol=BINANCE_SYMBOL,
+            ok=False,
+            order_id=None,
+            client_order_id=client_order_id,
+            raw=str(payload),
+        )
+
+    print(f"[cancel-algo] cancelled clientAlgoId={client_order_id}")
+    return BrokerCancelResult(
+        exchange=ExchangeName.BINANCE,
+        symbol=BINANCE_SYMBOL,
+        ok=True,
+        order_id=None,
+        client_order_id=client_order_id,
+        raw=response.payload,
+    )
+
+
+async def fetch_algo_open_orders(
+    *,
+    api_key: str,
+    api_secret: str,
+) -> list[dict[str, Any]]:
+    """Fetch open algo orders via ``GET /fapi/v1/openAlgoOrders``.
+
+    Returns the raw list of order dicts (may be empty).
+    """
+    signed = build_signed_request(
+        method="GET",
+        path=ALGO_OPEN_ORDERS_PATH,
+        params={"symbol": BINANCE_SYMBOL},
+        api_key=api_key,
+        api_secret=api_secret,
+        base_url=BINANCE_USDM_BASE_URL,
+    )
+
+    transport = AiohttpBinanceTransport()
+    response: BinanceTransportResponse = await transport.send(signed)
+
+    if response.status_code >= 400:
+        payload = response.payload if isinstance(response.payload, dict) else {}
+        print(
+            f"[algo-orders] WARNING: fetch failed (HTTP {response.status_code}): {payload}",
+            file=sys.stderr,
+        )
+        return []
+
+    if not isinstance(response.payload, list):
+        return []
+
+    orders: list[dict[str, Any]] = response.payload
+    print(f"[algo-orders] {len(orders)} open algo order(s)")
+    for o in orders:
+        print(
+            f"  algoId={o.get('algoId')} clientAlgoId={o.get('clientAlgoId')} "
+            f"type={o.get('orderType')} side={o.get('side')} "
+            f"qty={o.get('quantity')} trigger={o.get('triggerPrice')}"
+        )
+    return orders
+
+
+async def cancel_smoke_algo_orders(
+    *,
+    api_key: str,
+    api_secret: str,
+) -> int:
+    """Cancel all open algo orders whose clientAlgoId starts with RE_SMOKE_."""
+    orders = await fetch_algo_open_orders(api_key=api_key, api_secret=api_secret)
+    cancelled = 0
+    for o in orders:
+        cid = str(o.get("clientAlgoId") or "")
+        if not cid.startswith(CLIENT_ORDER_ID_PREFIX):
+            continue
+        await cancel_algo_order_by_client_id(
+            api_key=api_key,
+            api_secret=api_secret,
+            client_order_id=cid,
+        )
+        cancelled += 1
+    return cancelled
 
 
 # ---------------------------------------------------------------------------
@@ -745,26 +948,27 @@ async def place_tp(
 
 
 async def place_sl(
-    client: BinanceBrokerClient,
+    *,
+    api_key: str,
+    api_secret: str,
     quantity: Decimal,
     sl_price: Decimal,
     client_order_id: str,
 ) -> BrokerOrderResult:
-    """Place a STOP_MARKET SELL SL order."""
+    """Place a STOP_MARKET SELL SL order via Binance Algo Order API.
+
+    This no longer uses ``BinanceBrokerClient.place_order()`` because
+    the regular ``POST /fapi/v1/order`` endpoint rejects conditional
+    order types (STOP_MARKET) with error -4120 since 2025-12-09.
+    """
     print(f"[sl] STOP_MARKET SELL {quantity} @ trigger {sl_price} (cid={client_order_id})")
-    request = _make_order_request(
-        side=BrokerOrderSide.SELL,
-        order_type=BrokerOrderType.STOP_MARKET,
+    return await place_stop_loss_algo_order(
+        api_key=api_key,
+        api_secret=api_secret,
         quantity=quantity,
-        trigger_price=sl_price,
-        reduce_only=True,
+        sl_price=sl_price,
         client_order_id=client_order_id,
     )
-    result = await client.place_order(request)
-    if not result.ok:
-        raise RuntimeError(f"Place SL failed: {result.message}")
-    print(f"[sl] placed — orderId={result.order_id}, cid={result.client_order_id}")
-    return result
 
 
 async def fetch_open_orders(client: BinanceBrokerClient) -> list[BrokerOrder]:
@@ -816,10 +1020,17 @@ async def cancel_smoke_orders(
 async def close_long_position(
     client: BinanceBrokerClient,
     quantity: Decimal,
-    client_order_id: str,
+    client_order_id: str | None = None,
 ) -> BrokerOrderResult:
-    """Market-close the LONG position."""
-    print(f"[close] MARKET SELL {quantity} ETHUSDT (cid={client_order_id})")
+    """Market-close the LONG position.
+
+    When *client_order_id* is None the request is sent without a clientOrderId
+    — this is used as a fallback when the primary close-with-cid fails.
+    """
+    if client_order_id:
+        print(f"[close] MARKET SELL {quantity} ETHUSDT (cid={client_order_id})")
+    else:
+        print(f"[close] MARKET SELL {quantity} ETHUSDT (no cid)")
     request = _make_order_request(
         side=BrokerOrderSide.SELL,
         order_type=BrokerOrderType.MARKET,
@@ -841,17 +1052,47 @@ async def close_long_position(
 
 async def cleanup(
     client: BinanceBrokerClient,
+    *,
+    api_key: str | None = None,
+    api_secret: str | None = None,
 ) -> None:
-    """Best-effort cleanup: cancel smoke orders, then close any residual LONG."""
+    """Best-effort cleanup: cancel smoke orders (regular + algo), then close any residual LONG.
+
+    When the primary close (with clientOrderId) fails the function falls back
+    to a close without clientOrderId — this is the safety net for when the
+    clientOrderId is too long or otherwise rejected by the exchange.
+    """
     print("\n[cleanup] starting best-effort cleanup...")
+
+    # --- Cancel regular smoke orders ---
     try:
         cancelled = await cancel_smoke_orders(client)
-        print(f"[cleanup] cancelled {cancelled} smoke order(s)")
+        print(f"[cleanup] cancelled {cancelled} regular smoke order(s)")
     except Exception as exc:
-        print(f"[cleanup] WARNING: cancel step raised: {exc}", file=sys.stderr)
+        print(f"[cleanup] WARNING: cancel regular orders raised: {exc}", file=sys.stderr)
+
+    # --- Cancel algo smoke orders ---
+    if api_key and api_secret:
+        try:
+            algo_cancelled = await cancel_smoke_algo_orders(
+                api_key=api_key,
+                api_secret=api_secret,
+            )
+            print(f"[cleanup] cancelled {algo_cancelled} algo smoke order(s)")
+        except Exception as exc:
+            print(
+                f"[cleanup] WARNING: cancel algo orders raised: {exc}",
+                file=sys.stderr,
+            )
+    else:
+        print(
+            "[cleanup] WARNING: no api_key/api_secret provided — cannot cancel algo orders",
+            file=sys.stderr,
+        )
 
     await asyncio.sleep(0.5)
 
+    # --- Close residual position ---
     try:
         pos = await fetch_long_position(client)
     except Exception as exc:
@@ -859,22 +1100,55 @@ async def cleanup(
         pos = None
 
     if pos is not None and pos.quantity > 0:
+        close_succeeded = False
+
+        # --- Primary close with short clientOrderId ---
         try:
-            print(f"[cleanup] residual LONG position qty={pos.quantity}, attempting close...")
             cid = _generate_client_order_id("cleanup_close")
+            print(
+                f"[cleanup] residual LONG position qty={pos.quantity}, "
+                f"attempting close (cid={cid})..."
+            )
             await close_long_position(client, pos.quantity, cid)
             await asyncio.sleep(1)
             pos_after = await fetch_long_position(client)
             if pos_after is not None and pos_after.quantity > 0:
                 print(
-                    f"[cleanup] WARNING: position still open after cleanup close "
+                    f"[cleanup] WARNING: position still open after primary close "
                     f"(qty={pos_after.quantity})",
                     file=sys.stderr,
                 )
             else:
-                print("[cleanup] residual position closed")
+                print("[cleanup] residual position closed (primary)")
+                close_succeeded = True
         except Exception as exc:
-            print(f"[cleanup] WARNING: close step raised: {exc}", file=sys.stderr)
+            print(
+                f"[cleanup] WARNING: primary close raised: {exc}",
+                file=sys.stderr,
+            )
+
+        # --- Fallback close without clientOrderId ---
+        if not close_succeeded:
+            try:
+                print(
+                    "[cleanup] attempting fallback close without clientOrderId..."
+                )
+                await close_long_position(client, pos.quantity, client_order_id=None)
+                await asyncio.sleep(1)
+                pos_after = await fetch_long_position(client)
+                if pos_after is not None and pos_after.quantity > 0:
+                    print(
+                        f"[cleanup] WARNING: position still open after fallback close "
+                        f"(qty={pos_after.quantity})",
+                        file=sys.stderr,
+                    )
+                else:
+                    print("[cleanup] residual position closed (fallback)")
+            except Exception as exc:
+                print(
+                    f"[cleanup] WARNING: fallback close raised: {exc}",
+                    file=sys.stderr,
+                )
     else:
         print("[cleanup] no residual LONG position")
 
@@ -942,30 +1216,43 @@ async def _run_smoke_test(
     print(f"[smoke] step 3/7: TP placed @ {tp_price} ✓")
 
     # ------------------------------------------------------------------
-    # 4. Place SL
+    # 4. Place SL (via Algo Order API)
     # ------------------------------------------------------------------
     sl_price = entry_price * (1 - preflight.sl_pct)
     sl_price = (sl_price * 100).quantize(Decimal("1")) / 100  # round to 2 dp
-    sl_result = await place_sl(client, opened_qty, sl_price, sl_cid)
-    sl_order_id = sl_result.order_id
-    print(f"[smoke] step 4/7: SL placed @ trigger {sl_price} ✓")
+    sl_result = await place_sl(
+        api_key=preflight.api_key,
+        api_secret=preflight.api_secret,
+        quantity=opened_qty,
+        sl_price=sl_price,
+        client_order_id=sl_cid,
+    )
+    sl_algo_id = sl_result.order_id
+    print(f"[smoke] step 4/7: SL algo placed @ trigger {sl_price} ✓")
 
     # ------------------------------------------------------------------
-    # 5. Fetch open orders
+    # 5. Fetch open orders (regular)
     # ------------------------------------------------------------------
     open_orders = await fetch_open_orders(client)
     tp_found = any(
         (o.order_id == tp_order_id) or (o.client_order_id == tp_cid)
         for o in open_orders
     )
-    sl_found = any(
-        (o.order_id == sl_order_id) or (o.client_order_id == sl_cid)
-        for o in open_orders
-    )
     if not tp_found:
-        print("[smoke] WARNING: TP order not found in open orders", file=sys.stderr)
+        print("[smoke] WARNING: TP order not found in regular open orders", file=sys.stderr)
+
+    # SL is an algo order — check via algo open orders endpoint
+    algo_orders = await fetch_algo_open_orders(
+        api_key=preflight.api_key,
+        api_secret=preflight.api_secret,
+    )
+    sl_found = any(
+        str(o.get("clientAlgoId", "")) == sl_cid
+        for o in algo_orders
+    )
     if not sl_found:
-        print("[smoke] WARNING: SL order not found in open orders", file=sys.stderr)
+        print("[smoke] WARNING: SL algo order not found in algo open orders", file=sys.stderr)
+
     if tp_found and sl_found:
         print("[smoke] step 5/7: open orders confirmed ✓")
     else:
@@ -978,19 +1265,36 @@ async def _run_smoke_test(
     if tp_order_id is not None:
         await cancel_order_by_id(client, tp_order_id)
         cancelled_count += 1
-    if sl_order_id is not None:
-        await cancel_order_by_id(client, sl_order_id)
+    if sl_cid is not None:
+        await cancel_algo_order_by_client_id(
+            api_key=preflight.api_key,
+            api_secret=preflight.api_secret,
+            client_order_id=sl_cid,
+        )
         cancelled_count += 1
 
-    # Verify cancellation
+    # Verify cancellation (regular orders only — algo orders checked separately)
     orders_after_cancel = await fetch_open_orders(client)
     residual_smoke = [
         o for o in orders_after_cancel
         if (o.client_order_id or "").startswith(CLIENT_ORDER_ID_PREFIX)
     ]
-    if residual_smoke:
+    # Also check residual algo orders
+    try:
+        algo_after_cancel = await fetch_algo_open_orders(
+            api_key=preflight.api_key,
+            api_secret=preflight.api_secret,
+        )
+        residual_algo_smoke = [
+            o for o in algo_after_cancel
+            if str(o.get("clientAlgoId", "")).startswith(CLIENT_ORDER_ID_PREFIX)
+        ]
+    except Exception:
+        residual_algo_smoke = []
+    if residual_smoke or residual_algo_smoke:
         print(
-            f"[smoke] WARNING: {len(residual_smoke)} smoke order(s) still open after cancel",
+            f"[smoke] WARNING: {len(residual_smoke)} regular + "
+            f"{len(residual_algo_smoke)} algo smoke order(s) still open after cancel",
             file=sys.stderr,
         )
     else:
@@ -1141,7 +1445,11 @@ async def main() -> int:
         traceback.print_exc()
         success = False
     finally:
-        await cleanup(client)
+        await cleanup(
+            client,
+            api_key=api_key,
+            api_secret=api_secret,
+        )
 
     if success:
         print("\n[smoke] ALL STEPS PASSED ✓")

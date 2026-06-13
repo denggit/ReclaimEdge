@@ -235,3 +235,106 @@ def test_smoke_test_still_isolated() -> None:
     text = _read_smoke_test_text()
     assert "require_isolated_margin" in text
     assert "isolated" in text
+
+
+# ---------------------------------------------------------------------------
+# 20B-FIX-4: Algo Order API + clientOrderId length boundaries
+# ---------------------------------------------------------------------------
+
+
+def test_stop_market_not_sent_via_broker_client_place_order() -> None:
+    """STOP_MARKET must NOT appear as a type passed to BinanceBrokerClient.place_order.
+
+    The script should use the Algo Order API, not the regular order endpoint.
+    """
+    text = _read_smoke_test_text()
+
+    # "STOP_MARKET" may appear in comments / docstrings / type hints,
+    # but must NOT appear in a call to client.place_order.
+    # We check that there is no pattern like:
+    #   order_type=BrokerOrderType.STOP_MARKET
+    #   followed later by client.place_order(request)
+    # A simpler check: STOP_MARKET should only appear in comments/docstrings
+    # and in the algo order params, not in _make_order_request calls.
+    lines = text.splitlines()
+    stop_market_in_code = []
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or stripped.startswith('"""') or stripped.startswith("'"):
+            continue
+        if "STOP_MARKET" in stripped:
+            stop_market_in_code.append((i + 1, stripped))
+
+    # STOP_MARKET should only appear in:
+    # 1. Comments / docstrings
+    # 2. The algo order params (type=STOP_MARKET in the raw dict)
+    # It should NOT be in _make_order_request calls (via BrokerOrderType.STOP_MARKET)
+    for lineno, code in stop_market_in_code:
+        if "BrokerOrderType.STOP_MARKET" in code:
+            assert False, (
+                f"Line {lineno}: STOP_MARKET via BrokerOrderType found — "
+                f"this should use algo order API instead: {code.strip()}"
+            )
+
+
+def test_client_order_id_length_check() -> None:
+    """Script must enforce clientOrderId length <= 36."""
+    text = _read_smoke_test_text()
+    # The generator function must have the 36-char limit
+    assert "[:36]" in text or "<= 36" in text or "len(cid) <= 36" in text
+    assert "short_label" in text or "short_labels" in text
+
+
+def test_smoke_test_contains_algo_order_endpoint() -> None:
+    """Script must reference /fapi/v1/algoOrder."""
+    text = _read_smoke_test_text()
+    assert "/fapi/v1/algoOrder" in text
+
+
+def test_smoke_test_contains_algo_type_conditional() -> None:
+    """Algo order must set algoType=CONDITIONAL."""
+    text = _read_smoke_test_text()
+    assert '"CONDITIONAL"' in text or "'CONDITIONAL'" in text
+
+
+def test_smoke_test_contains_client_algo_id_param() -> None:
+    """Algo order must use clientAlgoId parameter name."""
+    text = _read_smoke_test_text()
+    assert "clientAlgoId" in text
+
+
+def test_cleanup_contains_fallback_close_without_client_order_id() -> None:
+    """cleanup must contain fallback close without clientOrderId."""
+    text = _read_smoke_test_text()
+    assert "fallback close" in text or "fallback" in text
+    # The fallback close should pass client_order_id=None
+    assert "client_order_id=None" in text
+
+
+def test_cleanup_contains_cancel_smoke_algo_orders() -> None:
+    """cleanup must attempt to cancel algo smoke orders."""
+    text = _read_smoke_test_text()
+    assert "cancel_smoke_algo_orders" in text
+
+
+def test_smoke_test_does_not_send_position_side() -> None:
+    """Script must not set positionSide in order params (One-way mode)."""
+    text = _read_smoke_test_text()
+    # positionSide should not appear in order params dicts
+    # (it's only used in BrokerOrderRequest model with NET value)
+    assert '"positionSide"' not in text
+    assert "'positionSide'" not in text
+
+
+def test_no_position_side_in_algo_params() -> None:
+    """Algo order params must not include positionSide (One-way mode uses BOTH default).
+
+    Some string appearances of 'positionSide' are fine (e.g. in the
+    /fapi/v1/positionSide/dual path).  We only assert that positionSide is
+    NOT set as a literal dict key like '"positionSide"' or "'positionSide'"
+    in the code (which would indicate it's being passed as a parameter).
+    """
+    text = _read_smoke_test_text()
+    # Check for positionSide used as a dict key (quoted string key)
+    assert '"positionSide"' not in text, "algo params must not contain positionSide key"
+    assert "'positionSide'" not in text, "algo params must not contain positionSide key"

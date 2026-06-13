@@ -19,6 +19,7 @@ from unittest import mock
 import pytest
 
 from scripts.binance_live_smoke_test import (
+    ALGO_ORDER_PATH,
     BINANCE_SYMBOL,
     CANONICAL_SYMBOL,
     CLIENT_ORDER_ID_PREFIX,
@@ -38,17 +39,21 @@ from scripts.binance_live_smoke_test import (
     _round_up_to_step,
     calculate_required_margin_with_buffer,
     calculate_safe_quantity,
+    cancel_algo_order_by_client_id,
     cancel_order_by_id,
+    cancel_smoke_algo_orders,
     cancel_smoke_orders,
     cleanup,
     close_long_position,
     fetch_account_balance,
+    fetch_algo_open_orders,
     fetch_long_position,
     fetch_open_orders,
     load_binance_credentials,
     main,
     open_long,
     place_sl,
+    place_stop_loss_algo_order,
     place_tp,
     set_initial_leverage,
     validate_unified_config_for_binance,
@@ -418,6 +423,31 @@ class TestGenerateClientOrderId:
         cid2 = _generate_client_order_id("x")
         assert cid1 != cid2
 
+    def test_open_cid_length_le_36(self) -> None:
+        cid = _generate_client_order_id("open")
+        assert len(cid) <= 36
+
+    def test_tp_cid_length_le_36(self) -> None:
+        cid = _generate_client_order_id("tp")
+        assert len(cid) <= 36
+
+    def test_sl_cid_length_le_36(self) -> None:
+        cid = _generate_client_order_id("sl")
+        assert len(cid) <= 36
+
+    def test_close_cid_length_le_36(self) -> None:
+        cid = _generate_client_order_id("close")
+        assert len(cid) <= 36
+
+    def test_cleanup_close_cid_length_le_36(self) -> None:
+        cid = _generate_client_order_id("cleanup_close")
+        assert len(cid) <= 36
+
+    def test_all_start_with_re_smoke(self) -> None:
+        for label in ("open", "tp", "sl", "close", "cleanup_close"):
+            cid = _generate_client_order_id(label)
+            assert cid.startswith(CLIENT_ORDER_ID_PREFIX), f"{label} cid does not start with RE_SMOKE_"
+
 
 # ---------------------------------------------------------------------------
 # Tests: _make_order_request
@@ -568,32 +598,423 @@ async def test_place_tp_raises_on_failure() -> None:
 
 
 @pytest.mark.asyncio
-async def test_place_sl_sends_stop_market_sell() -> None:
-    client = _make_client(
-        _minimal_order_payload(
-            side="SELL", type="STOP_MARKET", price="0", stopPrice="2900",
-        ),
+async def test_place_sl_calls_algo_order_helper() -> None:
+    """place_sl now delegates to place_stop_loss_algo_order — it does NOT
+    go through BinanceBrokerClient.place_order()."""
+    from unittest import mock
+
+    fake_result = BrokerOrderResult(
+        exchange=ExchangeName.BINANCE,
+        symbol="ETHUSDT",
+        ok=True,
+        order_id="12345",
+        client_order_id="RE_SMOKE_sl_123",
     )
-    result = await place_sl(client, Decimal("0.1"), Decimal("2900"), "RE_SMOKE_sl_123")
-    assert result.ok is True
-    transport = client._transport
-    assert len(transport.requests) == 1
-    req = transport.requests[0]
-    assert req.method == "POST"
-    assert req.path == BINANCE_USDM_ORDER_PATH
+
+    async def _fake_algo(*, api_key, api_secret, quantity, sl_price, client_order_id):
+        return fake_result
+
+    with mock.patch(
+        "scripts.binance_live_smoke_test.place_stop_loss_algo_order",
+        side_effect=_fake_algo,
+    ) as mock_algo:
+        result = await place_sl(
+            api_key="test-key",
+            api_secret="test-secret",
+            quantity=Decimal("0.1"),
+            sl_price=Decimal("2900"),
+            client_order_id="RE_SMOKE_sl_123",
+        )
+        assert result is fake_result
+        mock_algo.assert_called_once_with(
+            api_key="test-key",
+            api_secret="test-secret",
+            quantity=Decimal("0.1"),
+            sl_price=Decimal("2900"),
+            client_order_id="RE_SMOKE_sl_123",
+        )
 
 
 @pytest.mark.asyncio
-async def test_place_sl_raises_on_failure() -> None:
-    from src.exchanges.errors import ExchangeError
+async def test_place_sl_does_not_use_client_place_order() -> None:
+    """place_sl must NOT use BinanceBrokerClient.place_order()."""
     client = _make_client(
-        BinanceTransportResponse(
-            status_code=400, payload={"code": -2021, "msg": "Stop price error"}, headers={},
-        ),
+        _minimal_order_payload(side="SELL", type="STOP_MARKET"),
     )
-    with pytest.raises(ExchangeError) as exc_info:
-        await place_sl(client, Decimal("0.1"), Decimal("2900"), "RE_SMOKE_sl_123")
-    assert exc_info.value.kind == ExchangeErrorKind.EXCHANGE_REJECTED
+    # place_sl no longer accepts a client param — it would be a TypeError
+    with pytest.raises(TypeError):
+        await place_sl(client, Decimal("0.1"), Decimal("2900"), "RE_SMOKE_sl_123")  # type: ignore[call-arg]
+
+
+@pytest.mark.asyncio
+async def test_place_sl_raises_on_algo_failure() -> None:
+    """place_sl propagates RuntimeError from the algo helper."""
+    from unittest import mock
+
+    async def _fake_algo_fail(*, api_key, api_secret, quantity, sl_price, client_order_id):
+        raise RuntimeError("Algo SL order rejected: [-2021] Stop price error")
+
+    with mock.patch(
+        "scripts.binance_live_smoke_test.place_stop_loss_algo_order",
+        side_effect=_fake_algo_fail,
+    ):
+        with pytest.raises(RuntimeError, match="Stop price error"):
+            await place_sl(
+                api_key="test-key",
+                api_secret="test-secret",
+                quantity=Decimal("0.1"),
+                sl_price=Decimal("2900"),
+                client_order_id="RE_SMOKE_sl_123",
+            )
+
+
+# ---------------------------------------------------------------------------
+# Tests: place_stop_loss_algo_order
+# ---------------------------------------------------------------------------
+
+
+class TestPlaceStopLossAlgoOrder:
+    @pytest.mark.asyncio
+    async def test_sends_algo_order_request(self) -> None:
+        """place_stop_loss_algo_order sends POST to /fapi/v1/algoOrder."""
+        from unittest import mock
+
+        fake_response = BinanceTransportResponse(
+            status_code=200,
+            payload={"algoId": 99999, "clientAlgoId": "RE_SMOKE_sl_456", "algoType": "CONDITIONAL", "code": 200},
+            headers={},
+        )
+
+        async def fake_send(request):
+            return fake_response
+
+        with mock.patch(
+            "scripts.binance_live_smoke_test.AiohttpBinanceTransport.send",
+            side_effect=fake_send,
+        ):
+            result = await place_stop_loss_algo_order(
+                api_key="test-key",
+                api_secret="test-secret",
+                quantity=Decimal("0.1"),
+                sl_price=Decimal("2900"),
+                client_order_id="RE_SMOKE_sl_456",
+            )
+            assert result.ok is True
+            assert result.order_id == "99999"
+
+    @pytest.mark.asyncio
+    async def test_request_contains_ethusdt(self) -> None:
+        """Algo SL request must include ETHUSDT symbol."""
+        from unittest import mock
+
+        captured_params = {}
+
+        async def fake_send(request):
+            captured_params.update(request.params)
+            return BinanceTransportResponse(
+                status_code=200,
+                payload={"algoId": 1, "clientAlgoId": "cid", "code": 200},
+                headers={},
+            )
+
+        with mock.patch(
+            "scripts.binance_live_smoke_test.AiohttpBinanceTransport.send",
+            side_effect=fake_send,
+        ):
+            await place_stop_loss_algo_order(
+                api_key="test-key",
+                api_secret="test-secret",
+                quantity=Decimal("0.1"),
+                sl_price=Decimal("2900"),
+                client_order_id="RE_SMOKE_sl_789",
+            )
+
+        assert captured_params.get("symbol") == "ETHUSDT"
+
+    @pytest.mark.asyncio
+    async def test_request_contains_sell_side(self) -> None:
+        """Algo SL request must be SELL."""
+        from unittest import mock
+
+        captured_params = {}
+
+        async def fake_send(request):
+            captured_params.update(request.params)
+            return BinanceTransportResponse(
+                status_code=200,
+                payload={"algoId": 2, "clientAlgoId": "cid", "code": 200},
+                headers={},
+            )
+
+        with mock.patch(
+            "scripts.binance_live_smoke_test.AiohttpBinanceTransport.send",
+            side_effect=fake_send,
+        ):
+            await place_stop_loss_algo_order(
+                api_key="test-key",
+                api_secret="test-secret",
+                quantity=Decimal("0.1"),
+                sl_price=Decimal("2900"),
+                client_order_id="RE_SMOKE_sl_789",
+            )
+
+        assert captured_params.get("side") == "SELL"
+
+    @pytest.mark.asyncio
+    async def test_request_contains_reduce_only(self) -> None:
+        """Algo SL request must include reduceOnly=true."""
+        from unittest import mock
+
+        captured_params = {}
+
+        async def fake_send(request):
+            captured_params.update(request.params)
+            return BinanceTransportResponse(
+                status_code=200,
+                payload={"algoId": 3, "clientAlgoId": "cid", "code": 200},
+                headers={},
+            )
+
+        with mock.patch(
+            "scripts.binance_live_smoke_test.AiohttpBinanceTransport.send",
+            side_effect=fake_send,
+        ):
+            await place_stop_loss_algo_order(
+                api_key="test-key",
+                api_secret="test-secret",
+                quantity=Decimal("0.1"),
+                sl_price=Decimal("2900"),
+                client_order_id="RE_SMOKE_sl_789",
+            )
+
+        assert captured_params.get("reduceOnly") == "true"
+
+    @pytest.mark.asyncio
+    async def test_request_contains_short_client_order_id(self) -> None:
+        """Algo SL request must include a short clientAlgoId."""
+        from unittest import mock
+
+        captured_params = {}
+
+        async def fake_send(request):
+            captured_params.update(request.params)
+            return BinanceTransportResponse(
+                status_code=200,
+                payload={"algoId": 4, "clientAlgoId": "cid", "code": 200},
+                headers={},
+            )
+
+        with mock.patch(
+            "scripts.binance_live_smoke_test.AiohttpBinanceTransport.send",
+            side_effect=fake_send,
+        ):
+            await place_stop_loss_algo_order(
+                api_key="test-key",
+                api_secret="test-secret",
+                quantity=Decimal("0.1"),
+                sl_price=Decimal("2900"),
+                client_order_id="RE_SMOKE_sl_789",
+            )
+
+        cid = captured_params.get("clientAlgoId")
+        assert cid is not None
+        assert len(str(cid)) <= 36
+
+    @pytest.mark.asyncio
+    async def test_request_contains_algo_type_conditional(self) -> None:
+        """Algo SL request must include algoType=CONDITIONAL."""
+        from unittest import mock
+
+        captured_params = {}
+
+        async def fake_send(request):
+            captured_params.update(request.params)
+            return BinanceTransportResponse(
+                status_code=200,
+                payload={"algoId": 5, "clientAlgoId": "cid", "code": 200},
+                headers={},
+            )
+
+        with mock.patch(
+            "scripts.binance_live_smoke_test.AiohttpBinanceTransport.send",
+            side_effect=fake_send,
+        ):
+            await place_stop_loss_algo_order(
+                api_key="test-key",
+                api_secret="test-secret",
+                quantity=Decimal("0.1"),
+                sl_price=Decimal("2900"),
+                client_order_id="RE_SMOKE_sl_789",
+            )
+
+        assert captured_params.get("algoType") == "CONDITIONAL"
+
+    @pytest.mark.asyncio
+    async def test_raises_on_http_error(self) -> None:
+        """Algo SL raises RuntimeError on HTTP 400+."""
+        from unittest import mock
+
+        async def fake_send(request):
+            return BinanceTransportResponse(
+                status_code=400,
+                payload={"code": -4120, "msg": "Endpoint not supported"},
+                headers={},
+            )
+
+        with mock.patch(
+            "scripts.binance_live_smoke_test.AiohttpBinanceTransport.send",
+            side_effect=fake_send,
+        ):
+            with pytest.raises(RuntimeError, match="Algo SL order HTTP 400"):
+                await place_stop_loss_algo_order(
+                    api_key="test-key",
+                    api_secret="test-secret",
+                    quantity=Decimal("0.1"),
+                    sl_price=Decimal("2900"),
+                    client_order_id="RE_SMOKE_sl_789",
+                )
+
+    @pytest.mark.asyncio
+    async def test_raises_on_business_error(self) -> None:
+        """Algo SL raises RuntimeError on negative code in 200 response."""
+        from unittest import mock
+
+        async def fake_send(request):
+            return BinanceTransportResponse(
+                status_code=200,
+                payload={"code": -2021, "msg": "Invalid trigger price"},
+                headers={},
+            )
+
+        with mock.patch(
+            "scripts.binance_live_smoke_test.AiohttpBinanceTransport.send",
+            side_effect=fake_send,
+        ):
+            with pytest.raises(RuntimeError, match="Invalid trigger price"):
+                await place_stop_loss_algo_order(
+                    api_key="test-key",
+                    api_secret="test-secret",
+                    quantity=Decimal("0.1"),
+                    sl_price=Decimal("-1"),
+                    client_order_id="RE_SMOKE_sl_789",
+                )
+
+
+# ---------------------------------------------------------------------------
+# Tests: fetch_algo_open_orders
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_fetch_algo_open_orders_returns_list() -> None:
+    """fetch_algo_open_orders returns list of algo order dicts."""
+    from unittest import mock
+
+    fake_orders = [
+        {
+            "algoId": 100,
+            "clientAlgoId": "RE_SMOKE_sl_1",
+            "orderType": "STOP_MARKET",
+            "side": "SELL",
+            "symbol": "ETHUSDT",
+        },
+    ]
+
+    async def fake_send(request):
+        return BinanceTransportResponse(
+            status_code=200,
+            payload=fake_orders,
+            headers={},
+        )
+
+    with mock.patch(
+        "scripts.binance_live_smoke_test.AiohttpBinanceTransport.send",
+        side_effect=fake_send,
+    ):
+        orders = await fetch_algo_open_orders(
+            api_key="test-key",
+            api_secret="test-secret",
+        )
+        assert len(orders) == 1
+        assert orders[0]["clientAlgoId"] == "RE_SMOKE_sl_1"
+
+
+# ---------------------------------------------------------------------------
+# Tests: cancel_algo_order_by_client_id
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_cancel_algo_order_by_client_id() -> None:
+    """cancel_algo_order_by_client_id sends DELETE to /fapi/v1/algoOrder."""
+    from unittest import mock
+
+    async def fake_send(request):
+        return BinanceTransportResponse(
+            status_code=200,
+            payload={"algoId": 100, "clientAlgoId": "RE_SMOKE_sl_1", "code": 200},
+            headers={},
+        )
+
+    with mock.patch(
+        "scripts.binance_live_smoke_test.AiohttpBinanceTransport.send",
+        side_effect=fake_send,
+    ):
+        result = await cancel_algo_order_by_client_id(
+            api_key="test-key",
+            api_secret="test-secret",
+            client_order_id="RE_SMOKE_sl_1",
+        )
+        assert result.ok is True
+        assert result.client_order_id == "RE_SMOKE_sl_1"
+
+
+# ---------------------------------------------------------------------------
+# Tests: cancel_smoke_algo_orders
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_cancel_smoke_algo_orders_only_cancels_prefixed() -> None:
+    """cancel_smoke_algo_orders cancels algo orders with RE_SMOKE_ prefix."""
+    from unittest import mock
+
+    fake_orders = [
+        {"algoId": 1, "clientAlgoId": "RE_SMOKE_sl_1"},
+        {"algoId": 2, "clientAlgoId": "OTHER_ALGO"},
+        {"algoId": 3, "clientAlgoId": "RE_SMOKE_sl_2"},
+    ]
+
+    cancelled_ids = []
+
+    async def fake_fetch(*, api_key, api_secret):
+        return fake_orders
+
+    async def fake_cancel(*, api_key, api_secret, client_order_id):
+        cancelled_ids.append(client_order_id)
+        return BrokerCancelResult(
+            exchange=ExchangeName.BINANCE,
+            symbol="ETHUSDT",
+            ok=True,
+            order_id=None,
+            client_order_id=client_order_id,
+        )
+
+    with mock.patch(
+        "scripts.binance_live_smoke_test.fetch_algo_open_orders",
+        side_effect=fake_fetch,
+    ), mock.patch(
+        "scripts.binance_live_smoke_test.cancel_algo_order_by_client_id",
+        side_effect=fake_cancel,
+    ):
+        count = await cancel_smoke_algo_orders(
+            api_key="test-key",
+            api_secret="test-secret",
+        )
+        assert count == 2
+        assert "RE_SMOKE_sl_1" in cancelled_ids
+        assert "RE_SMOKE_sl_2" in cancelled_ids
+        assert "OTHER_ALGO" not in cancelled_ids
 
 
 # ---------------------------------------------------------------------------
@@ -724,6 +1145,23 @@ async def test_close_long_sends_market_sell() -> None:
     assert transport.requests[0].path == BINANCE_USDM_ORDER_PATH
 
 
+@pytest.mark.asyncio
+async def test_close_long_without_client_order_id() -> None:
+    """close_long_position supports client_order_id=None for fallback."""
+    client = _make_client(
+        _minimal_order_payload(side="SELL", type="MARKET", clientOrderId=""),
+    )
+    result = await close_long_position(client, Decimal("0.1"), client_order_id=None)
+    assert result.ok is True
+    transport = client._transport
+    assert len(transport.requests) == 1
+    req = transport.requests[0]
+    assert req.method == "POST"
+    assert req.path == BINANCE_USDM_ORDER_PATH
+    # With client_order_id=None, no clientOrderId in params
+    assert "clientOrderId" not in req.params
+
+
 # ---------------------------------------------------------------------------
 # Tests: cleanup
 # ---------------------------------------------------------------------------
@@ -736,20 +1174,79 @@ async def test_cleanup_no_residual_position() -> None:
         [_minimal_position_payload(positionAmt="0")],  # position → None
         [_minimal_position_payload(positionAmt="0")],  # final check → None
     )
-    await cleanup(client)  # should not raise
+    await cleanup(client, api_key="test-key", api_secret="test-secret")  # should not raise
 
 
 @pytest.mark.asyncio
-async def test_cleanup_with_open_smoke_orders() -> None:
+async def test_cleanup_cancels_algo_orders() -> None:
+    """cleanup must cancel algo smoke orders when api_key/api_secret provided."""
+    from unittest import mock
+
+    async def fake_cancel_algo(*, api_key, api_secret):
+        return 1
+
+    with mock.patch(
+        "scripts.binance_live_smoke_test.cancel_smoke_algo_orders",
+        side_effect=fake_cancel_algo,
+    ) as mock_cancel:
+        client = _make_client(
+            [],  # open orders
+            [_minimal_position_payload(positionAmt="0")],
+            [_minimal_position_payload(positionAmt="0")],
+        )
+        await cleanup(client, api_key="test-key", api_secret="test-secret")
+        mock_cancel.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_cleanup_fallback_close_without_client_order_id() -> None:
+    """cleanup must fallback to close without clientOrderId when primary close fails."""
+    from unittest import mock
+
+    call_args_list = []
+
+    async def fake_close(client, quantity, client_order_id=None):
+        call_args_list.append(client_order_id)
+        if client_order_id is not None:
+            # Primary close with cid — simulate failure
+            raise RuntimeError("clientOrderId too long")
+        # Fallback close without cid — succeed
+        return BrokerOrderResult(
+            exchange=ExchangeName.BINANCE,
+            symbol="ETHUSDT",
+            ok=True,
+            order_id="fallback-1",
+            client_order_id=None,
+        )
+
     client = _make_client(
-        [
-            _fake_open_order_response(order_id=1, client_order_id="RE_SMOKE_tp_1"),
-        ],
-        _cancel_payload(order_id=1),  # cancel TP
-        [_minimal_position_payload(positionAmt="0")],  # position → None
-        [_minimal_position_payload(positionAmt="0")],  # final → None
+        [],  # open orders
+        [_minimal_position_payload(positionAmt="0.1")],  # position
+        [_minimal_position_payload(positionAmt="0")],  # pos after fallback
+        [_minimal_position_payload(positionAmt="0")],  # final check
     )
-    await cleanup(client)
+
+    with mock.patch(
+        "scripts.binance_live_smoke_test.close_long_position",
+        side_effect=fake_close,
+    ) as mock_close:
+        await cleanup(client, api_key="test-key", api_secret="test-secret")
+        # First call was primary (with cid), second was fallback (None)
+        assert mock_close.call_count == 2
+        assert call_args_list[0] is not None  # primary with cid
+        assert call_args_list[1] is None  # fallback without cid
+
+
+@pytest.mark.asyncio
+async def test_cleanup_without_api_credentials_skips_algo_cancel() -> None:
+    """cleanup must not attempt algo cancel when api_key/api_secret is None."""
+    client = _make_client(
+        [],  # open orders
+        [_minimal_position_payload(positionAmt="0")],
+        [_minimal_position_payload(positionAmt="0")],
+    )
+    # Should not raise even without api credentials
+    await cleanup(client)  # no api_key/api_secret passed
 
 
 # ---------------------------------------------------------------------------
@@ -759,13 +1256,12 @@ async def test_cleanup_with_open_smoke_orders() -> None:
 
 @pytest.mark.asyncio
 async def test_full_sequence_order() -> None:
-    """Verify the smoke test flow goes through all 7 steps in order."""
-    # This test uses the _run_smoke_test flow indirectly by
-    # verifying that the functions are called in the right order.
-    # We can't call _run_smoke_test directly without mocking the
-    # public endpoints, but we can verify that each step function
-    # works with the transport.
+    """Verify the smoke test flow goes through all steps in order.
 
+    SL is tested separately via the algo order path because the
+    regular POST /fapi/v1/order endpoint rejects STOP_MARKET since
+    2025-12-09 (error -4120).
+    """
     responses = [
         _minimal_order_payload(orderId=1, clientOrderId="RE_SMOKE_open_1"),
         [_minimal_position_payload(positionAmt="0.1", entryPrice="3100")],
@@ -773,22 +1269,16 @@ async def test_full_sequence_order() -> None:
             orderId=2, clientOrderId="RE_SMOKE_tp_1",
             side="SELL", type="LIMIT", price="3118.60",
         ),
-        _minimal_order_payload(
-            orderId=3, clientOrderId="RE_SMOKE_sl_1",
-            side="SELL", type="STOP_MARKET", price="0", stopPrice="3081.40",
-        ),
+        # SL is now via algo order API — tested separately
+        # Step 5: fetch open orders (regular — only TP visible)
         [
             _fake_open_order_response(
                 order_id=2, client_order_id="RE_SMOKE_tp_1",
                 side="SELL", order_type="LIMIT", price="3118.60",
             ),
-            _fake_open_order_response(
-                order_id=3, client_order_id="RE_SMOKE_sl_1",
-                side="SELL", order_type="STOP_MARKET", price="0", trigger_price="3081.40",
-            ),
         ],
-        _cancel_payload(order_id=2),
-        _cancel_payload(order_id=3),
+        _cancel_payload(order_id=2),  # cancel TP
+        # Verify regular orders cancelled
         [],
         [_minimal_position_payload(positionAmt="0.1", entryPrice="3100")],
         _minimal_order_payload(
@@ -819,21 +1309,60 @@ async def test_full_sequence_order() -> None:
     tp_result = await place_tp(client, Decimal("0.1"), Decimal("3118.60"), "RE_SMOKE_tp_1")
     assert tp_result.ok
 
-    # Step 4: Place SL
-    sl_result = await place_sl(client, Decimal("0.1"), Decimal("3081.40"), "RE_SMOKE_sl_1")
-    assert sl_result.ok
+    # Step 4: Place SL — via algo order (tested separately)
+    from unittest import mock
 
-    # Step 5: Fetch open orders
+    fake_sl_result = BrokerOrderResult(
+        exchange=ExchangeName.BINANCE,
+        symbol="ETHUSDT",
+        ok=True,
+        order_id="99999",
+        client_order_id="RE_SMOKE_sl_1",
+    )
+
+    async def fake_algo_sl(*, api_key, api_secret, quantity, sl_price, client_order_id):
+        return fake_sl_result
+
+    with mock.patch(
+        "scripts.binance_live_smoke_test.place_stop_loss_algo_order",
+        side_effect=fake_algo_sl,
+    ):
+        sl_result = await place_sl(
+            api_key="test-key",
+            api_secret="test-secret",
+            quantity=Decimal("0.1"),
+            sl_price=Decimal("3081.40"),
+            client_order_id="RE_SMOKE_sl_1",
+        )
+        assert sl_result.ok
+        assert sl_result.order_id == "99999"
+
+    # Step 5: Fetch open orders — only TP in regular orders
     orders = await fetch_open_orders(client)
-    assert len(orders) >= 2
+    assert len(orders) == 1  # only TP, SL is algo
+    assert orders[0].order_id == "2"
 
-    # Step 6: Cancel TP/SL
+    # Step 6: Cancel TP
     c1 = await cancel_order_by_id(client, str(tp_result.order_id or "2"))
-    c2 = await cancel_order_by_id(client, str(sl_result.order_id or "3"))
     assert c1.ok
-    assert c2.ok
 
-    # Verify cancelled
+    # Cancel SL via algo cancel
+    with mock.patch(
+        "scripts.binance_live_smoke_test.AiohttpBinanceTransport.send",
+        return_value=BinanceTransportResponse(
+            status_code=200,
+            payload={"algoId": 99999, "clientAlgoId": "RE_SMOKE_sl_1", "code": 200},
+            headers={},
+        ),
+    ):
+        cancel_sl = await cancel_algo_order_by_client_id(
+            api_key="test-key",
+            api_secret="test-secret",
+            client_order_id="RE_SMOKE_sl_1",
+        )
+        assert cancel_sl.ok
+
+    # Verify regular orders cancelled
     orders_after = await fetch_open_orders(client)
     assert len(orders_after) == 0
 
