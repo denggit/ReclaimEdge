@@ -355,7 +355,6 @@ async def test_sidecar_tp_body_parity() -> None:
 def test_semantic_parity_does_not_import_or_modify_live_modules() -> None:
     root = Path(__file__).resolve().parents[3]
     guarded_files = (
-        root / "src/execution/tp_sl_execution_manager.py",
         root / "src/execution/tp_sl_protective_stop_manager.py",
         root / "src/execution/tp_sl_market_exit_manager.py",
         root / "src/execution/tp_sl_sidecar_manager.py",

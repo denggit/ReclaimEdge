@@ -188,6 +188,23 @@ class TpSlExecutionManager:
     # cancel reduce-only orders
     # ------------------------------------------------------------------
 
+    def _broker_semantic_reduce_only_cancel_enabled(self) -> bool:
+        import os
+
+        value = os.getenv("BROKER_SEMANTIC_REDUCE_ONLY_CANCEL_ENABLED", "false").strip().lower()
+        return value in {"1", "true", "yes", "y", "on"}
+
+    async def _cancel_reduce_only_order_semantic(self, order_id: str) -> None:
+        t = self.trader
+        result = await t.broker_semantic_executor.cancel_reduce_only_tp(
+            symbol=t.symbol,
+            order_id=order_id,
+        )
+        if not result.ok:
+            raise RuntimeError(
+                f"semantic_reduce_only_cancel_failed ordId={order_id} message={result.message}"
+            )
+
     async def cancel_existing_reduce_only_orders(self) -> None:
         t = self.trader
         orders = await t.fetch_pending_orders()
@@ -210,14 +227,22 @@ class TpSlExecutionManager:
                 raise RuntimeError("reduce_only_order_identity_unknown")
             if not managed_order_ids and not allow_unmanaged:
                 raise RuntimeError("reduce_only_order_identity_unknown")
-            try:
-                await t.request("POST", "/api/v5/trade/cancel-order", order_specs.build_cancel_order_body(
-                    inst_id=t.symbol,
-                    order_id=ord_id,
-                ))
-                logger.info("Canceled existing reduce-only order | ordId=%s", ord_id)
-            except Exception:
-                logger.exception("Failed to cancel existing reduce-only order | ordId=%s", ord_id)
+            if self._broker_semantic_reduce_only_cancel_enabled():
+                await self._cancel_reduce_only_order_semantic(ord_id)
+                logger.info("Canceled existing reduce-only order | ordId=%s (semantic)", ord_id)
+            else:
+                try:
+                    await t.request(
+                        "POST",
+                        "/api/v5/trade/cancel-order",
+                        order_specs.build_cancel_order_body(
+                            inst_id=t.symbol,
+                            order_id=ord_id,
+                        ),
+                    )
+                    logger.info("Canceled existing reduce-only order | ordId=%s", ord_id)
+                except Exception:
+                    logger.exception("Failed to cancel existing reduce-only order | ordId=%s", ord_id)
 
     # ------------------------------------------------------------------
     # sidecar fixed TP
