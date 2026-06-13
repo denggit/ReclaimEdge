@@ -1,0 +1,242 @@
+from __future__ import annotations
+
+from decimal import Decimal
+
+import pytest
+
+from src.execution.tp_sl_market_exit_manager import MarketExitManager
+from src.exchanges.models import BrokerPositionSide, BrokerQuantityUnit, ExchangeName
+from src.exchanges.semantic_models import (
+    BrokerSemanticAction,
+    BrokerSemanticOrderRole,
+    BrokerSemanticResult,
+)
+
+
+class FakePositionSnapshot:
+    def __init__(self, *, has_position: bool, side: str | None, contracts: Decimal):
+        self.has_position = has_position
+        self.side = side
+        self.contracts = contracts
+
+
+class FakeSemanticExecutor:
+    def __init__(self):
+        self.calls = []
+        self.ok = True
+        self.order_id = "semantic-exit-1"
+        self.message = ""
+
+    async def market_exit(
+        self,
+        *,
+        symbol,
+        side,
+        quantity,
+        quantity_unit,
+        label=None,
+    ):
+        self.calls.append(
+            {
+                "symbol": symbol,
+                "side": side,
+                "quantity": quantity,
+                "quantity_unit": quantity_unit,
+                "label": label,
+            }
+        )
+        return BrokerSemanticResult(
+            exchange=ExchangeName.OKX,
+            symbol=symbol,
+            action=BrokerSemanticAction.MARKET_EXIT,
+            role=BrokerSemanticOrderRole.MARKET_EXIT,
+            ok=self.ok,
+            order_id=self.order_id if self.ok else None,
+            message=self.message,
+        )
+
+
+class FakeTrader:
+    symbol = "ETH-USDT-SWAP"
+    min_contracts = Decimal("0.01")
+    position_contracts = Decimal("10")
+
+    def __init__(self):
+        self.requests = []
+        self.semantic = FakeSemanticExecutor()
+        self.snapshots = []
+        self.cleanup_called = 0
+
+    @property
+    def broker_semantic_executor(self):
+        return self.semantic
+
+    async def fetch_position_snapshot(self):
+        if not self.snapshots:
+            raise AssertionError("no more snapshots")
+        return self.snapshots.pop(0)
+
+    def _reduce_only_market_order_body(self, side, contracts):
+        return {"legacy_market_exit": True, "side": side, "contracts": str(contracts)}
+
+    async def request(self, method, endpoint, payload=None):
+        self.requests.append((method, endpoint, payload))
+        return {"data": [{"ordId": "legacy-exit-1"}]}
+
+    @staticmethod
+    def extract_order_id(res):
+        return str(res["data"][0]["ordId"])
+
+    async def _cleanup_after_market_exit(self):
+        self.cleanup_called += 1
+
+    @staticmethod
+    def decimal_to_str(value):
+        if not isinstance(value, Decimal):
+            value = Decimal(str(value))
+        return format(value.normalize(), "f")
+
+
+@pytest.mark.asyncio
+async def test_market_exit_defaults_to_legacy_market_order(monkeypatch) -> None:
+    monkeypatch.delenv("BROKER_SEMANTIC_MARKET_EXIT_ENABLED", raising=False)
+    trader = FakeTrader()
+    trader.snapshots = [
+        FakePositionSnapshot(has_position=True, side="LONG", contracts=Decimal("10")),
+        FakePositionSnapshot(has_position=False, side=None, contracts=Decimal("0")),
+    ]
+    manager = MarketExitManager(trader)
+
+    ok, message = await manager.market_exit_remaining_position_with_retries(
+        "LONG",
+        1,
+        context="legacy-default",
+    )
+
+    assert ok is True
+    assert "legacy-exit-1" in message
+    assert len(trader.requests) == 1
+    method, endpoint, payload = trader.requests[0]
+    assert method == "POST"
+    assert endpoint == "/api/v5/trade/order"
+    assert payload["legacy_market_exit"] is True
+    assert trader.semantic.calls == []
+    assert trader.cleanup_called == 1
+
+
+@pytest.mark.asyncio
+async def test_market_exit_uses_semantic_executor_when_enabled(monkeypatch) -> None:
+    monkeypatch.setenv("BROKER_SEMANTIC_MARKET_EXIT_ENABLED", "true")
+    trader = FakeTrader()
+    trader.snapshots = [
+        FakePositionSnapshot(has_position=True, side="LONG", contracts=Decimal("10")),
+        FakePositionSnapshot(has_position=False, side=None, contracts=Decimal("0")),
+    ]
+    manager = MarketExitManager(trader)
+    context = "semantic-enabled"
+
+    ok, message = await manager.market_exit_remaining_position_with_retries(
+        "LONG",
+        1,
+        context=context,
+    )
+
+    assert ok is True
+    assert "semantic-exit-1" in message
+    assert trader.requests == []
+    assert len(trader.semantic.calls) == 1
+    call = trader.semantic.calls[0]
+    assert call["symbol"] == "ETH-USDT-SWAP"
+    assert call["side"] == BrokerPositionSide.LONG
+    assert call["quantity"] == Decimal("10")
+    assert call["quantity_unit"] == BrokerQuantityUnit.CONTRACTS
+    assert call["label"] == context
+    assert trader.cleanup_called == 1
+
+
+@pytest.mark.asyncio
+async def test_market_exit_semantic_maps_short_side(monkeypatch) -> None:
+    monkeypatch.setenv("BROKER_SEMANTIC_MARKET_EXIT_ENABLED", "true")
+    trader = FakeTrader()
+    trader.snapshots = [
+        FakePositionSnapshot(has_position=True, side="SHORT", contracts=Decimal("10")),
+        FakePositionSnapshot(has_position=False, side=None, contracts=Decimal("0")),
+    ]
+    manager = MarketExitManager(trader)
+
+    ok, _message = await manager.market_exit_remaining_position_with_retries(
+        "SHORT",
+        1,
+        context="semantic-short",
+    )
+
+    assert ok is True
+    assert trader.semantic.calls[0]["side"] == BrokerPositionSide.SHORT
+
+
+@pytest.mark.asyncio
+async def test_market_exit_already_flat_does_not_place_order(monkeypatch) -> None:
+    monkeypatch.setenv("BROKER_SEMANTIC_MARKET_EXIT_ENABLED", "true")
+    trader = FakeTrader()
+    trader.snapshots = [
+        FakePositionSnapshot(has_position=False, side=None, contracts=Decimal("0")),
+    ]
+    manager = MarketExitManager(trader)
+
+    ok, message = await manager.market_exit_remaining_position_with_retries(
+        "LONG",
+        1,
+        context="already-flat",
+    )
+
+    assert ok is True
+    assert message == "already_flat"
+    assert trader.requests == []
+    assert trader.semantic.calls == []
+    assert trader.cleanup_called == 1
+
+
+@pytest.mark.asyncio
+async def test_market_exit_target_side_absent_does_not_place_order(monkeypatch) -> None:
+    monkeypatch.setenv("BROKER_SEMANTIC_MARKET_EXIT_ENABLED", "true")
+    trader = FakeTrader()
+    trader.snapshots = [
+        FakePositionSnapshot(has_position=True, side="SHORT", contracts=Decimal("10")),
+    ]
+    manager = MarketExitManager(trader)
+
+    ok, message = await manager.market_exit_remaining_position_with_retries(
+        "LONG",
+        1,
+        context="wrong-side",
+    )
+
+    assert ok is True
+    assert message == "target_side_absent"
+    assert trader.requests == []
+    assert trader.semantic.calls == []
+    assert trader.cleanup_called == 1
+
+
+@pytest.mark.asyncio
+async def test_market_exit_semantic_failure_does_not_fallback_legacy(monkeypatch) -> None:
+    monkeypatch.setenv("BROKER_SEMANTIC_MARKET_EXIT_ENABLED", "true")
+    trader = FakeTrader()
+    trader.semantic.ok = False
+    trader.semantic.message = "boom"
+    trader.snapshots = [
+        FakePositionSnapshot(has_position=True, side="LONG", contracts=Decimal("10")),
+    ]
+    manager = MarketExitManager(trader)
+
+    ok, message = await manager.market_exit_remaining_position_with_retries(
+        "LONG",
+        1,
+        context="semantic-failure",
+    )
+
+    assert ok is False
+    assert "semantic_market_exit_order_failed" in message or "boom" in message
+    assert trader.requests == []
+    assert len(trader.semantic.calls) == 1
+    assert trader.cleanup_called == 0

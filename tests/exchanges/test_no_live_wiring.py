@@ -6,13 +6,15 @@
 @File       : test_no_live_wiring.py
 @Description: Boundary guard – prove the exchange abstraction is NOT wired
               into live trading paths beyond Trader lazy sidecar access and
-              the optional core TP semantic placement switch and targeted
-              TP/SL semantic cancel switches.
+              the optional core TP semantic placement switch, targeted
+              TP/SL semantic cancel switches, and the optional market-exit
+              semantic placement switch.
 
 Trader may lazily expose the OKX broker semantic executor.  Core TP may own
 the optional semantic TP placement switch; the TP/SL execution manager may own
-targeted semantic cancel switches.  Adapters must not be routed through other
-TP/SL managers, live workers, strategies, or the live entry script.
+targeted semantic cancel switches; the market-exit manager may own the optional
+semantic market-exit placement switch.  Adapters must not be routed through
+other TP/SL managers, live workers, strategies, or the live entry script.
 """
 
 from __future__ import annotations
@@ -26,7 +28,6 @@ from pathlib import Path
 
 LIVE_FILES_THAT_MUST_NOT_REFERENCE_EXCHANGE_ADAPTERS: list[str] = [
     "scripts/run_boll_cvd_live.py",
-    "src/execution/tp_sl_market_exit_manager.py",
     "src/execution/tp_sl_near_tp_manager.py",
     "src/execution/tp_sl_sidecar_manager.py",
     "src/live/workers/strategy_tick_worker.py",
@@ -241,3 +242,59 @@ def test_semantic_protective_sl_placement_switch_boundary() -> None:
         text = path.read_text(encoding="utf-8")
         for token in FORBIDDEN_SEMANTIC_PROTECTIVE_SL_PLACEMENT_TOKENS:
             assert token not in text, f"{token} unexpectedly found in {file_name}"
+
+
+# ---------------------------------------------------------------------------
+# Additional guard – semantic market exit placement switch boundary
+# ---------------------------------------------------------------------------
+
+FILES_FORBIDDEN_SEMANTIC_MARKET_EXIT_PLACEMENT: list[str] = [
+    "scripts/run_boll_cvd_live.py",
+    "src/execution/trader.py",
+    "src/execution/tp_sl_core_tp_manager.py",
+    "src/execution/tp_sl_execution_manager.py",
+    "src/execution/tp_sl_protective_stop_manager.py",
+    "src/execution/tp_sl_near_tp_manager.py",
+    "src/execution/tp_sl_sidecar_manager.py",
+    "src/live/workers/execution_command_processor.py",
+    "src/live/account_sync/protective_orders_phase.py",
+    "src/live/startup_recovery/order_recovery.py",
+    "src/strategies/boll_cvd_reclaim_strategy.py",
+    "src/strategies/boll_cvd_shock_reclaim_strategy.py",
+]
+
+SEMANTIC_MARKET_EXIT_PLACEMENT_TOKENS: list[str] = [
+    "BROKER_SEMANTIC_MARKET_EXIT_ENABLED",
+    "_place_market_exit_order_semantic",
+]
+
+ALLOWED_SEMANTIC_MARKET_EXIT_PLACEMENT_FILES: set[str] = {
+    "src/execution/tp_sl_market_exit_manager.py",
+    "tests/test_tp_sl_market_exit_manager_semantic_exit.py",
+    "tests/exchanges/test_no_live_wiring.py",
+}
+
+
+def test_semantic_market_exit_placement_switch_boundary() -> None:
+    """The market-exit semantic switch must only live in the market-exit
+    manager and its tests."""
+    for file_name in FILES_FORBIDDEN_SEMANTIC_MARKET_EXIT_PLACEMENT:
+        path = Path(file_name)
+        if not path.exists():
+            continue
+        text = path.read_text(encoding="utf-8")
+        for token in SEMANTIC_MARKET_EXIT_PLACEMENT_TOKENS:
+            assert token not in text, f"{token} unexpectedly found in {file_name}"
+
+    root = Path(".")
+    for path in root.rglob("*.py"):
+        if any(part in {".git", ".venv", "__pycache__"} for part in path.parts):
+            continue
+        file_name = path.as_posix()
+        text = path.read_text(encoding="utf-8")
+        for token in SEMANTIC_MARKET_EXIT_PLACEMENT_TOKENS:
+            if token in text:
+                assert file_name in ALLOWED_SEMANTIC_MARKET_EXIT_PLACEMENT_FILES, (
+                    f"{token} must only appear in market-exit semantic placement files; "
+                    f"found in {file_name}"
+                )

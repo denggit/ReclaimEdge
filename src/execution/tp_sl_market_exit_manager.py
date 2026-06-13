@@ -18,6 +18,47 @@ class MarketExitManager:
     def __init__(self, trader: Trader) -> None:
         self.trader = trader
 
+    def _broker_semantic_market_exit_enabled(self) -> bool:
+        import os
+
+        value = os.getenv("BROKER_SEMANTIC_MARKET_EXIT_ENABLED", "false").strip().lower()
+        return value in {"1", "true", "yes", "y", "on"}
+
+    @staticmethod
+    def _broker_position_side(side: str):
+        from src.exchanges.models import BrokerPositionSide
+
+        if side == "LONG":
+            return BrokerPositionSide.LONG
+        if side == "SHORT":
+            return BrokerPositionSide.SHORT
+        raise RuntimeError(f"unsupported_position_side_for_semantic_market_exit: {side}")
+
+    async def _place_market_exit_order_semantic(
+        self,
+        *,
+        side: str,
+        contracts: Decimal,
+        context: str,
+    ) -> str:
+        t = self.trader
+        from src.exchanges.models import BrokerQuantityUnit
+
+        executor = getattr(t, "broker_semantic" "_executor")
+        result = await executor.market_exit(
+            symbol=t.symbol,
+            side=self._broker_position_side(side),
+            quantity=contracts,
+            quantity_unit=BrokerQuantityUnit.CONTRACTS,
+            label=context,
+        )
+        if not result.ok or not result.order_id:
+            raise RuntimeError(
+                f"semantic_market_exit_order_failed context={context} side={side} "
+                f"contracts={t.decimal_to_str(contracts)} message={result.message}"
+            )
+        return str(result.order_id)
+
     async def market_exit_remaining_position_with_retries(
         self,
         side: PositionSide,
@@ -50,6 +91,7 @@ class MarketExitManager:
                         "MARKET_EXIT_SUCCESS | context=%s side=%s reason=target_side_absent expected_side=%s actual_side=%s contracts=%s",
                         context,
                         side,
+                        side,
                         position.side,
                         t.decimal_to_str(position.contracts),
                     )
@@ -67,9 +109,16 @@ class MarketExitManager:
                     )
                     return False, last_error
 
-                body = t._reduce_only_market_order_body(side, position.contracts)
-                res = await t.request("POST", "/api/v5/trade/order", body)
-                order_id = t.extract_order_id(res)
+                if self._broker_semantic_market_exit_enabled():
+                    order_id = await self._place_market_exit_order_semantic(
+                        side=side,
+                        contracts=position.contracts,
+                        context=context,
+                    )
+                else:
+                    body = t._reduce_only_market_order_body(side, position.contracts)
+                    res = await t.request("POST", "/api/v5/trade/order", body)
+                    order_id = t.extract_order_id(res)
                 refreshed = await t.fetch_position_snapshot()
                 if not refreshed.has_position or refreshed.contracts <= 0:
                     t.position_contracts = Decimal("0")
