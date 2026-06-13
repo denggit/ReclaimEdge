@@ -352,20 +352,51 @@ async def test_sidecar_tp_body_parity() -> None:
     assert payload == expected_body
 
 
-def test_semantic_parity_does_not_import_or_modify_live_modules() -> None:
+def test_semantic_parity_does_not_wire_live_entrypoint() -> None:
     root = Path(__file__).resolve().parents[3]
-    guarded_files = (
-        root / "src/execution/tp_sl_market_exit_manager.py",
-        root / "src/execution/tp_sl_sidecar_manager.py",
-        root / "scripts/run_boll_cvd_live.py",
-    )
+    source_path = root / "scripts/run_boll_cvd_live.py"
+    source = source_path.read_text(encoding="utf-8")
+
     forbidden_tokens = (
         "OkxBrokerSemanticExecutor",
         "broker_semantic_executor",
         "BROKER_SEMANTIC_EXECUTION",
     )
 
-    for source_path in guarded_files:
-        source = source_path.read_text(encoding="utf-8")
-        for token in forbidden_tokens:
-            assert token not in source, f"{token} unexpectedly found in {source_path}"
+    for token in forbidden_tokens:
+        assert token not in source, f"{token} unexpectedly found in {source_path}"
+
+
+def test_market_exit_semantic_path_is_env_gated_and_indirect() -> None:
+    root = Path(__file__).resolve().parents[3]
+    source_path = root / "src/execution/tp_sl_market_exit_manager.py"
+    source = source_path.read_text(encoding="utf-8")
+
+    assert "BROKER_SEMANTIC_MARKET_EXIT_ENABLED" in source
+    assert "broker_semantic_executor" in source
+
+    forbidden_tokens = (
+        "OkxBrokerSemanticExecutor",
+        "BROKER_SEMANTIC_EXECUTION",
+    )
+
+    for token in forbidden_tokens:
+        assert token not in source, f"{token} unexpectedly found in {source_path}"
+
+
+def test_sidecar_semantic_paths_are_env_gated_and_indirect() -> None:
+    root = Path(__file__).resolve().parents[3]
+    source_path = root / "src/execution/tp_sl_sidecar_manager.py"
+    source = source_path.read_text(encoding="utf-8")
+
+    assert "BROKER_SEMANTIC_SIDECAR_TP_PLACEMENT_ENABLED" in source
+    assert "BROKER_SEMANTIC_SIDECAR_TP_CANCEL_ENABLED" in source
+    assert "broker_semantic_executor" in source
+
+    forbidden_tokens = (
+        "OkxBrokerSemanticExecutor",
+        "BROKER_SEMANTIC_EXECUTION",
+    )
+
+    for token in forbidden_tokens:
+        assert token not in source, f"{token} unexpectedly found in {source_path}"

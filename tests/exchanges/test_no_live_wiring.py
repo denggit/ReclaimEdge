@@ -273,6 +273,7 @@ ALLOWED_SEMANTIC_MARKET_EXIT_PLACEMENT_FILES: set[str] = {
     "src/execution/tp_sl_market_exit_manager.py",
     "tests/test_tp_sl_market_exit_manager_semantic_exit.py",
     "tests/exchanges/test_no_live_wiring.py",
+    "tests/exchanges/okx/test_okx_semantic_order_body_parity.py",
 }
 
 
@@ -329,6 +330,7 @@ ALLOWED_SEMANTIC_SIDECAR_TP_PLACEMENT_FILES: set[str] = {
     "src/execution/tp_sl_sidecar_manager.py",
     "tests/test_tp_sl_sidecar_manager_semantic_tp_placement.py",
     "tests/exchanges/test_no_live_wiring.py",
+    "tests/exchanges/okx/test_okx_semantic_order_body_parity.py",
 }
 
 
@@ -385,6 +387,7 @@ ALLOWED_SEMANTIC_SIDECAR_TP_CANCEL_FILES: set[str] = {
     "src/execution/tp_sl_sidecar_manager.py",
     "tests/test_tp_sl_sidecar_manager_semantic_tp_cancel.py",
     "tests/exchanges/test_no_live_wiring.py",
+    "tests/exchanges/okx/test_okx_semantic_order_body_parity.py",
 }
 
 
