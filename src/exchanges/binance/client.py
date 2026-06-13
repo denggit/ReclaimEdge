@@ -63,7 +63,7 @@ class BinanceBrokerClient(BrokerClient):
         transport: BinanceHttpTransport | None = None,
         base_url: str = BINANCE_USDM_BASE_URL,
         recv_window: int = 5000,
-        position_mode: str = "hedge",
+        position_mode: str = "net",
     ) -> None:
         self._api_key = api_key
         self._api_secret = api_secret
