@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 
@@ -240,3 +241,11 @@ async def test_market_exit_semantic_failure_does_not_fallback_legacy(monkeypatch
     assert trader.requests == []
     assert len(trader.semantic.calls) == 1
     assert trader.cleanup_called == 0
+
+
+def test_semantic_market_exit_uses_explicit_broker_semantic_executor_access() -> None:
+    text = Path("src/execution/tp_sl_market_exit_manager.py").read_text(encoding="utf-8")
+
+    assert '"broker_semantic" "_executor"' not in text
+    assert "getattr(t, \"broker_semantic\"" not in text
+    assert "t.broker_semantic_executor" in text
