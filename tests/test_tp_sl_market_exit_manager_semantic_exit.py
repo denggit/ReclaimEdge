@@ -6,12 +6,35 @@ from pathlib import Path
 import pytest
 
 from src.execution.tp_sl_market_exit_manager import MarketExitManager
+from src.execution.trading_client_port import OrderResult
 from src.exchanges.models import BrokerPositionSide, BrokerQuantityUnit, ExchangeName
 from src.exchanges.semantic_models import (
     BrokerSemanticAction,
     BrokerSemanticOrderRole,
     BrokerSemanticResult,
 )
+
+
+class FakeTradingClient:
+    """A fake trading client that records market order calls."""
+
+    def __init__(self):
+        self.market_calls: list[dict] = []
+        self.next_order_id: str | None = "fake-market-exit-1"
+
+    async def place_market_order(self, *, side, qty, reduce_only, client_order_id):
+        self.market_calls.append({
+            "side": side,
+            "qty": qty,
+            "reduce_only": reduce_only,
+            "client_order_id": client_order_id,
+        })
+        return OrderResult(
+            ok=True,
+            order_id=self.next_order_id,
+            client_order_id=None,
+            raw={"fake": True},
+        )
 
 
 class FakePositionSnapshot:
@@ -97,6 +120,7 @@ class FakeTrader:
         self.semantic = FakeSemanticExecutor()
         self.snapshots = []
         self.cleanup_called = 0
+        self.trading_client = FakeTradingClient()
 
     @property
     def broker_semantic_executor(self):
@@ -136,7 +160,7 @@ async def test_market_exit_defaults_to_legacy_market_order(monkeypatch) -> None:
         FakePositionSnapshot(has_position=True, side="LONG", contracts=Decimal("10")),
         FakePositionSnapshot(has_position=False, side=None, contracts=Decimal("0")),
     ]
-    manager = MarketExitManager(trader)
+    manager = MarketExitManager(trader, trader.trading_client)
 
     ok, message = await manager.market_exit_remaining_position_with_retries(
         "LONG",
@@ -145,12 +169,14 @@ async def test_market_exit_defaults_to_legacy_market_order(monkeypatch) -> None:
     )
 
     assert ok is True
-    assert "legacy-exit-1" in message
-    assert len(trader.requests) == 1
-    method, endpoint, payload = trader.requests[0]
-    assert method == "POST"
-    assert endpoint == "/api/v5/trade/order"
-    assert payload["legacy_market_exit"] is True
+    assert "fake-market-exit-1" in message
+    # After migration, the legacy path routes through trading_client
+    assert len(trader.trading_client.market_calls) == 1
+    call = trader.trading_client.market_calls[0]
+    assert call["reduce_only"] is True
+    assert call["side"] == "LONG"
+    assert call["client_order_id"] == ""
+    assert trader.requests == []
     assert trader.semantic.calls == []
     assert trader.cleanup_called == 1
 
@@ -163,7 +189,7 @@ async def test_market_exit_uses_semantic_executor_when_enabled(monkeypatch) -> N
         FakePositionSnapshot(has_position=True, side="LONG", contracts=Decimal("10")),
         FakePositionSnapshot(has_position=False, side=None, contracts=Decimal("0")),
     ]
-    manager = MarketExitManager(trader)
+    manager = MarketExitManager(trader, trader.trading_client)
     context = "semantic-enabled"
 
     ok, message = await manager.market_exit_remaining_position_with_retries(
@@ -194,7 +220,7 @@ async def test_market_exit_runner_context_uses_runner_semantic_action(monkeypatc
         FakePositionSnapshot(has_position=True, side="LONG", contracts=Decimal("10")),
         FakePositionSnapshot(has_position=False, side=None, contracts=Decimal("0")),
     ]
-    manager = MarketExitManager(trader)
+    manager = MarketExitManager(trader, trader.trading_client)
 
     ok, message = await manager.market_exit_remaining_position_with_retries(
         "LONG",
@@ -222,7 +248,7 @@ async def test_market_exit_semantic_maps_short_side(monkeypatch) -> None:
         FakePositionSnapshot(has_position=True, side="SHORT", contracts=Decimal("10")),
         FakePositionSnapshot(has_position=False, side=None, contracts=Decimal("0")),
     ]
-    manager = MarketExitManager(trader)
+    manager = MarketExitManager(trader, trader.trading_client)
 
     ok, _message = await manager.market_exit_remaining_position_with_retries(
         "SHORT",
@@ -241,7 +267,7 @@ async def test_market_exit_already_flat_does_not_place_order(monkeypatch) -> Non
     trader.snapshots = [
         FakePositionSnapshot(has_position=False, side=None, contracts=Decimal("0")),
     ]
-    manager = MarketExitManager(trader)
+    manager = MarketExitManager(trader, trader.trading_client)
 
     ok, message = await manager.market_exit_remaining_position_with_retries(
         "LONG",
@@ -263,7 +289,7 @@ async def test_market_exit_target_side_absent_does_not_place_order(monkeypatch) 
     trader.snapshots = [
         FakePositionSnapshot(has_position=True, side="SHORT", contracts=Decimal("10")),
     ]
-    manager = MarketExitManager(trader)
+    manager = MarketExitManager(trader, trader.trading_client)
 
     ok, message = await manager.market_exit_remaining_position_with_retries(
         "LONG",
@@ -287,7 +313,7 @@ async def test_market_exit_semantic_failure_does_not_fallback_legacy(monkeypatch
     trader.snapshots = [
         FakePositionSnapshot(has_position=True, side="LONG", contracts=Decimal("10")),
     ]
-    manager = MarketExitManager(trader)
+    manager = MarketExitManager(trader, trader.trading_client)
 
     ok, message = await manager.market_exit_remaining_position_with_retries(
         "LONG",

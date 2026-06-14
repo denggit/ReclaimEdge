@@ -1,11 +1,13 @@
 """Source boundary tests for the modified TP/SL manager files.
 
-Ref: 20C-CLEAN-PORTS-05
+Ref: 20C-CLEAN-PORTS-05 / 20C-CLEAN-PORTS-07
 
-These tests scan ONLY the three modified files:
+These tests scan ONLY the modified files:
 - src/execution/tp_sl_execution_manager.py
 - src/execution/tp_sl_core_tp_manager.py
 - src/execution/tp_sl_protective_stop_manager.py
+- src/execution/tp_sl_market_exit_manager.py
+- src/execution/tp_sl_near_tp_manager.py
 
 They verify that no forbidden patterns leak into the modified code.
 """
@@ -19,13 +21,15 @@ import pytest
 
 
 # ---------------------------------------------------------------------------
-# Files under test (ONLY the three that were modified)
+# Files under test
 # ---------------------------------------------------------------------------
 
 _MODIFIED_FILES = [
     "src/execution/tp_sl_execution_manager.py",
     "src/execution/tp_sl_core_tp_manager.py",
     "src/execution/tp_sl_protective_stop_manager.py",
+    "src/execution/tp_sl_market_exit_manager.py",
+    "src/execution/tp_sl_near_tp_manager.py",
 ]
 
 
@@ -285,6 +289,8 @@ class TestTradingClientAttribute:
         # Sub-managers share the same trading_client instance
         assert manager.core_tp.trading_client is manager.trading_client
         assert manager.protective_stops.trading_client is manager.trading_client
+        assert manager.market_exit.trading_client is manager.trading_client
+        assert manager.near_tp.trading_client is manager.trading_client
 
     def test_core_tp_manager_has_trading_client(self) -> None:
         from src.execution.tp_sl_core_tp_manager import CoreTakeProfitManager

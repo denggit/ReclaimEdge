@@ -7,6 +7,32 @@ from _pytest.logging import LogCaptureFixture
 
 from src.execution.tp_sl_market_exit_manager import MarketExitManager
 from src.execution.trader import PositionSnapshot
+from src.execution.trading_client_port import OrderResult
+
+
+class FakeTradingClient:
+    """A fake trading client that records market order calls."""
+
+    def __init__(self):
+        self.market_calls: list[dict] = []
+        self.next_order_id: str | None = "fake-market-exit-1"
+        self._raise_on_place: Exception | None = None
+
+    async def place_market_order(self, *, side, qty, reduce_only, client_order_id):
+        if self._raise_on_place:
+            raise self._raise_on_place
+        self.market_calls.append({
+            "side": side,
+            "qty": qty,
+            "reduce_only": reduce_only,
+            "client_order_id": client_order_id,
+        })
+        return OrderResult(
+            ok=True,
+            order_id=self.next_order_id,
+            client_order_id=None,
+            raw={"fake": True},
+        )
 
 
 class FakeTrader:
@@ -33,6 +59,7 @@ class FakeTrader:
         self._not_flat_after_order = False
         self._request_fails: Exception | None = None
         self._position_snapshot = PositionSnapshot("LONG", Decimal("1"), 3000.0, 0.1, Decimal("1"))
+        self.trading_client = FakeTradingClient()
 
     def decimal_to_str(self, value):
         if not isinstance(value, Decimal):
@@ -89,7 +116,7 @@ async def test_market_exit_context_in_logs(caplog: LogCaptureFixture) -> None:
     """market_exit logs should contain context and MARKET_EXIT_* prefix, not NEAR_TP_MARKET_EXIT_*."""
     trader = FakeTrader()
     trader._position_was_flat = True
-    mgr = MarketExitManager(trader)
+    mgr = MarketExitManager(trader, trader.trading_client)
 
     with caplog.at_level("WARNING"):
         ok, msg = await mgr.market_exit_remaining_position_with_retries(
@@ -111,7 +138,7 @@ async def test_market_exit_with_retry_interval(caplog: LogCaptureFixture) -> Non
     """market_exit should accept retry_interval_seconds and delay between retries."""
     trader = FakeTrader()
     trader._not_flat_after_order = True
-    mgr = MarketExitManager(trader)
+    mgr = MarketExitManager(trader, trader.trading_client)
 
     with caplog.at_level("ERROR"):
         ok, msg = await mgr.market_exit_remaining_position_with_retries(
@@ -124,6 +151,11 @@ async def test_market_exit_with_retry_interval(caplog: LogCaptureFixture) -> Non
     assert "MARKET_EXIT_FAILED" in log_text
     assert "context=middle_bucket_fast_sl_failed" in log_text
     assert "attempt=1/2" in log_text or "attempt=2/2" in log_text
+    # After migration, market exit routes through trading_client
+    assert len(trader.trading_client.market_calls) >= 1
+    call = trader.trading_client.market_calls[0]
+    assert call["reduce_only"] is True
+    assert call["side"] == "LONG"
 
 
 @pytest.mark.asyncio
@@ -131,7 +163,7 @@ async def test_market_exit_default_context() -> None:
     """market_exit with no context defaults to 'generic'."""
     trader = FakeTrader()
     trader._position_was_flat = True
-    mgr = MarketExitManager(trader)
+    mgr = MarketExitManager(trader, trader.trading_client)
     ok, msg = await mgr.market_exit_remaining_position_with_retries("LONG", 1)
     assert ok is True
 
@@ -140,7 +172,7 @@ async def test_market_exit_default_context() -> None:
 async def test_cleanup_after_market_exit_renamed() -> None:
     """_cleanup_after_market_exit is the new name; old name still works as alias."""
     trader = FakeTrader()
-    mgr = MarketExitManager(trader)
+    mgr = MarketExitManager(trader, trader.trading_client)
 
     # New name works
     await mgr._cleanup_after_market_exit()
@@ -153,10 +185,10 @@ async def test_cleanup_after_market_exit_renamed() -> None:
 
 @pytest.mark.asyncio
 async def test_market_exit_request_exception_logs_context(caplog: LogCaptureFixture) -> None:
-    """When request raises, log should contain context."""
+    """When trading_client raises, log should contain context."""
     trader = FakeTrader()
-    trader._request_fails = RuntimeError("50011: Rate limit reached")
-    mgr = MarketExitManager(trader)
+    trader.trading_client._raise_on_place = RuntimeError("50011: Rate limit reached")
+    mgr = MarketExitManager(trader, trader.trading_client)
 
     with caplog.at_level("ERROR"):
         ok, msg = await mgr.market_exit_remaining_position_with_retries(

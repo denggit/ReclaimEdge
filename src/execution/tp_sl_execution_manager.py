@@ -25,13 +25,14 @@ class TpSlExecutionManager:
         self.trader = trader
         self.trading_client: TradingClientPort = OkxTradingClient(trader)
         self.protective_stops = ProtectiveStopManager(trader, self.trading_client)
-        self.market_exit = MarketExitManager(trader)
+        self.market_exit = MarketExitManager(trader, self.trading_client)
         self.core_tp = CoreTakeProfitManager(trader, self.protective_stops, self.trading_client)
         self.near_tp = NearTpExecutionManager(
             trader=trader,
             core_tp=self.core_tp,
             protective_stops=self.protective_stops,
             market_exit=self.market_exit,
+            trading_client=self.trading_client,
         )
         self.sidecar = SidecarTpManager(trader)
 

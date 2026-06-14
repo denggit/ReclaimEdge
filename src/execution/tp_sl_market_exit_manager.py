@@ -4,19 +4,20 @@ import asyncio
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
-from src.execution import order_specs
 from src.utils.log import get_logger
 
 if TYPE_CHECKING:
     from src.execution.trader import Trader
+    from src.execution.trading_client_port import TradingClientPort
     from src.strategies.boll_cvd_reclaim_strategy import PositionSide
 
 logger = get_logger(__name__)
 
 
 class MarketExitManager:
-    def __init__(self, trader: Trader) -> None:
+    def __init__(self, trader: Trader, trading_client: TradingClientPort) -> None:
         self.trader = trader
+        self.trading_client = trading_client
 
     def _broker_semantic_market_exit_enabled(self) -> bool:
         import os
@@ -125,9 +126,15 @@ class MarketExitManager:
                         context=context,
                     )
                 else:
-                    body = t._reduce_only_market_order_body(side, position.contracts)
-                    res = await t.request("POST", "/api/v5/trade/order", body)
-                    order_id = t.extract_order_id(res)
+                    result = await self.trading_client.place_market_order(
+                        side=side,
+                        qty=position.contracts,
+                        reduce_only=True,
+                        client_order_id="",
+                    )
+                    order_id = result.order_id
+                    if order_id is None:
+                        raise RuntimeError("reduce_only_market_exit_missing_order_id")
                 refreshed = await t.fetch_position_snapshot()
                 if not refreshed.has_position or refreshed.contracts <= 0:
                     t.position_contracts = Decimal("0")

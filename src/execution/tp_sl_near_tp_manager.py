@@ -16,11 +16,12 @@ logger = get_logger(__name__)
 
 
 class NearTpExecutionManager:
-    def __init__(self, trader: Trader, core_tp, protective_stops, market_exit) -> None:
+    def __init__(self, trader: Trader, core_tp, protective_stops, market_exit, trading_client) -> None:
         self.trader = trader
         self.core_tp = core_tp
         self.protective_stops = protective_stops
         self.market_exit = market_exit
+        self.trading_client = trading_client
 
     async def execute_near_tp_reduce(self, intent: TradeIntent) -> LiveTradeResult:
         t = self.trader
@@ -49,9 +50,15 @@ class NearTpExecutionManager:
                 contracts_before=t.decimal_to_str(contracts_before),
             )
 
-        body = t._reduce_only_market_order_body(intent.side, reduce_contracts)
-        res = await t.request("POST", "/api/v5/trade/order", body)
-        order_id = t.extract_order_id(res)
+        result = await self.trading_client.place_market_order(
+            side=intent.side,
+            qty=reduce_contracts,
+            reduce_only=True,
+            client_order_id="",
+        )
+        order_id = result.order_id
+        if order_id is None:
+            raise RuntimeError("near_tp_reduce_only_market_order_missing_order_id")
         logger.warning(
             "NEAR_TP_REDUCE_ORDER_PLACED | side=%s contracts=%s ordId=%s",
             intent.side,
