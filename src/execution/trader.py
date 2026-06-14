@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING, Any, Optional
 from config.env_loader import OKX_CONFIG
 from src.execution import order_specs
 from src.execution.okx_private_client import OkxPrivateClient, OkxPrivateClientConfig, PrivateWriteRateLimiter
+from src.execution.okx_trading_client import OkxTradingClient
+from src.execution.trading_client_port import TradingClientPort
 from src.strategies.boll_cvd_reclaim_strategy import PositionSide, TradeIntent
 from src.utils.log import get_logger
 
@@ -113,6 +115,7 @@ class Trader:
         self._broker_semantic_executor = None
         from src.execution.tp_sl_execution_manager import TpSlExecutionManager
         self._tp_sl_manager = TpSlExecutionManager(self)
+        self.trading_client: TradingClientPort = OkxTradingClient(self)
 
         if not self.api_key or not self.secret_key or not self.passphrase:
             raise ValueError("OKX API config is incomplete. Check OKX_API_KEY, OKX_SECRET_KEY, OKX_PASSPHASE.")
@@ -225,16 +228,15 @@ class Trader:
             return await self.replace_take_profit(intent)
 
         contracts = self.eth_qty_to_contracts(Decimal(str(intent.size.eth_qty)))
-        body = order_specs.build_market_entry_order_body(
-            inst_id=self.symbol,
-            td_mode=self.td_mode,
+        result = await self.trading_client.place_market_order(
             side=intent.side,
-            contracts_text=self.decimal_to_str(contracts),
-            pos_side_mode=self.pos_side_mode,
+            qty=contracts,
+            reduce_only=False,
+            client_order_id="",
         )
-
-        res = await self.request("POST", "/api/v5/trade/order", body)
-        order_id = self.extract_order_id(res)
+        order_id = result.order_id
+        if order_id is None:
+            raise RuntimeError("market_entry_order_missing_order_id")
 
         # From here on, assume the entry may already be live. Never let a later TP
         # failure look like a pre-entry failure to the caller.
