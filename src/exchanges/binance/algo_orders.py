@@ -146,14 +146,21 @@ class BinanceAlgoOrderClient:
 
         algo_id = response.payload.get("algoId")
         cid = response.payload.get("clientAlgoId") or client_algo_id
+        real_algo_id = str(algo_id) if algo_id is not None else None
+
+        # Fix 6: unify — order_id = clientAlgoId for consistent cancel.
+        # Raw response preserves real algoId for recovery.
+        raw_payload = dict(response.payload)
+        if real_algo_id:
+            raw_payload["_algoId"] = real_algo_id
 
         return BrokerOrderResult(
             exchange=ExchangeName.BINANCE,
             symbol=symbol,
             ok=True,
-            order_id=str(algo_id) if algo_id is not None else cid,
+            order_id=cid,  # clientAlgoId — unified ID for cancel
             client_order_id=cid,
-            raw=response.payload,
+            raw=raw_payload,
         )
 
     async def cancel_algo_order(
@@ -211,6 +218,7 @@ class BinanceAlgoOrderClient:
         """Fetch open algo orders via ``GET /fapi/v1/openAlgoOrders``.
 
         Returns the raw list of order dicts (may be empty).
+        Raises ExchangeError on HTTP errors or malformed responses.
         """
         self._ensure_transport("fetch_open_algo_orders")
 
@@ -227,10 +235,23 @@ class BinanceAlgoOrderClient:
         response = await self._transport.send(signed)  # type: ignore[union-attr]
 
         if response.status_code >= 400:
-            return []
+            payload = (
+                response.payload
+                if isinstance(response.payload, dict)
+                else {"message": str(response.payload)}
+            )
+            raise ExchangeError(
+                exchange=ExchangeName.BINANCE,
+                kind=ExchangeErrorKind.EXCHANGE_REJECTED,
+                message=f"fetch_open_algo_orders HTTP {response.status_code}: {payload}",
+            )
 
         if not isinstance(response.payload, list):
-            return []
+            raise ExchangeError(
+                exchange=ExchangeName.BINANCE,
+                kind=ExchangeErrorKind.EXCHANGE_REJECTED,
+                message=f"fetch_open_algo_orders payload is not a list: {type(response.payload)}",
+            )
 
         return response.payload
 

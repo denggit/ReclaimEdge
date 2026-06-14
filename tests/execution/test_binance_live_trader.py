@@ -526,8 +526,10 @@ class TestBoundaries:
         t = _make_trader()
         t.position_contracts = Decimal("5")
         t.tp_order_id = "tp-123"
-        t._managed_order_ids.add("tp-123")
+        t._managed_tp_order_ids.add("tp-123")
+        t._managed_sl_client_algo_ids.add("sl-abc")
         t.mark_flat()
         assert t.position_contracts == Decimal("0")
         assert t.tp_order_id is None
-        assert len(t._managed_order_ids) == 0
+        assert len(t._managed_tp_order_ids) == 0
+        assert len(t._managed_sl_client_algo_ids) == 0

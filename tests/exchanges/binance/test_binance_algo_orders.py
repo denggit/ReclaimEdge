@@ -106,7 +106,8 @@ class TestPlaceStopLoss:
         )
 
         assert result.ok
-        assert result.order_id == "12345"
+        # Fix 6: order_id is now clientAlgoId (unified for cancel)
+        assert result.order_id == "RE_MAIN_sl"
         assert result.client_order_id == "RE_MAIN_sl"
         assert result.exchange == ExchangeName.BINANCE
 
@@ -317,7 +318,8 @@ class TestFetchOpenAlgoOrders:
         )
         assert orders == []
 
-    def test_fetch_http_error_returns_empty(self) -> None:
+    def test_fetch_http_error_raises(self) -> None:
+        """Fix 8: HTTP errors now raise ExchangeError instead of returning []."""
         transport = FakeTransport()
         transport.next_response = BinanceTransportResponse(
             status_code=500, payload={}
@@ -325,10 +327,26 @@ class TestFetchOpenAlgoOrders:
         client = _make_client(transport)
 
         import asyncio
-        orders = asyncio.get_event_loop().run_until_complete(
-            client.fetch_open_algo_orders(symbol="ETHUSDT")
+        from src.exchanges.errors import ExchangeError
+        with pytest.raises(ExchangeError):
+            asyncio.get_event_loop().run_until_complete(
+                client.fetch_open_algo_orders(symbol="ETHUSDT")
+            )
+
+    def test_fetch_payload_not_list_raises(self) -> None:
+        """Fix 8: non-list payload raises ExchangeError."""
+        transport = FakeTransport()
+        transport.next_response = BinanceTransportResponse(
+            status_code=200, payload={"not": "a list"}
         )
-        assert orders == []
+        client = _make_client(transport)
+
+        import asyncio
+        from src.exchanges.errors import ExchangeError
+        with pytest.raises(ExchangeError):
+            asyncio.get_event_loop().run_until_complete(
+                client.fetch_open_algo_orders(symbol="ETHUSDT")
+            )
 
 
 # ======================================================================

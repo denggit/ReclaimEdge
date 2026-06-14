@@ -21,11 +21,13 @@ from __future__ import annotations
 
 import math
 import os
+import time
 from collections.abc import Mapping
 from decimal import Decimal, ROUND_DOWN
 from typing import Any
 
 from src.execution.trader import LiveTradeResult, PositionSnapshot
+from src.exchanges.models import BrokerPositionSide, BrokerQuantityUnit
 from src.strategies.boll_cvd_reclaim_strategy import PositionSide, TradeIntent
 from src.utils.log import get_logger
 
@@ -38,6 +40,26 @@ logger = get_logger(__name__)
 CLIENT_ORDER_ID_PREFIX = "RE_MAIN_"
 SYMBOL = "ETHUSDT"
 _ETH_CONTRACT_MULTIPLIER = Decimal("0.1")
+
+# Default protective SL percentage (as fraction of entry price)
+_DEFAULT_PROTECTIVE_SL_PCT = Decimal("0.006")
+
+
+# ---------------------------------------------------------------------------
+# ID generator
+# ---------------------------------------------------------------------------
+
+
+def _unique_client_order_id(tag: str) -> str:
+    """Generate a unique client order ID with ts_ns + counter.
+
+    Format: RE_MAIN_<tag>_<ns>_<counter>
+    """
+    _unique_client_order_id._counter += 1  # type: ignore[attr-defined]
+    return f"{CLIENT_ORDER_ID_PREFIX}{tag}_{time.time_ns()}_{_unique_client_order_id._counter}"  # type: ignore[attr-defined]
+
+
+_unique_client_order_id._counter = 0  # type: ignore[attr-defined]
 
 
 # ---------------------------------------------------------------------------
@@ -84,16 +106,24 @@ class BinanceLiveTrader:
         self._transport: Any | None = None
         self._own_transport: bool = False
 
-        # Track managed order IDs for safe cancellation
+        # Managed order tracking (Fix 9: split by type)
         self.tp_order_id: str | None = None
         self.tp_order_ids: tuple[str, ...] = ()
         self._protective_sl_order_id: str | None = None
-        self._managed_order_ids: set[str] = set()
+        self._protective_sl_client_algo_id: str | None = None
+        # Regular TP order IDs only — entry IDs never go here
+        self._managed_tp_order_ids: set[str] = set()
+        # Algo SL clientAlgoIds
+        self._managed_sl_client_algo_ids: set[str] = set()
 
         # Limit caps (parsed in initialize)
         self.max_live_equity_usdt: float = 30.0
         self._max_order_notional: Decimal = Decimal("0")
         self._max_position_notional: Decimal = Decimal("0")
+
+        # Protective SL percentage
+        raw_pct = self._env.get("LIVE_PROTECTIVE_SL_PCT", "0.006").strip()
+        self._protective_sl_pct: Decimal = Decimal(raw_pct) if raw_pct else _DEFAULT_PROTECTIVE_SL_PCT
 
     # ==================================================================
     # Lifecycle
@@ -145,7 +175,7 @@ class BinanceLiveTrader:
                 "BinanceLiveTrader: broker_client and semantic_executor are required"
             )
 
-        # ── 4. Fetch equity ────────────────────────────────────────────
+        # ── 4. Fetch equity (fail-fast) ─────────────────────────────────
         equity = await self.fetch_usdt_equity()
         self.account_equity_usdt = equity
         if equity > self.max_live_equity_usdt:
@@ -154,7 +184,7 @@ class BinanceLiveTrader:
                 f"{self.max_live_equity_usdt:.4f}. Refusing live trading."
             )
 
-        # ── 5. Fetch position ──────────────────────────────────────────
+        # ── 5. Fetch position (fail-fast) ──────────────────────────────
         pos = await self.fetch_position_snapshot()
         self.position_contracts = pos.contracts
 
@@ -211,46 +241,147 @@ class BinanceLiveTrader:
             algo_client=self._algo_client,
         )
 
-    async def _verify_config(self) -> None:
-        """Verify position mode, margin mode, and leverage.
+    # ==================================================================
+    # Fix 2: Real _verify_config
+    # ==================================================================
 
-        Currently performs a read-only verify — does not auto-set.
+    async def _verify_config(self) -> None:
+        """Verify one-way / net mode, isolated margin, and leverage.
+
+        Performs signed REST calls to confirm live account configuration
+        matches requirements.  Does NOT auto-set anything.
         """
-        # ── Position mode: must be one-way / net ───────────────────────
-        # This is verified implicitly by the fact that we only support
-        # ETHUSDT in one-way mode.  If a future API call reveals hedge
-        # mode, we raise.
-        pass  # Verified implicitly — hard reject on hedge in mapper
+        if self._transport is None or self._broker_client is None:
+            raise RuntimeError(
+                "Cannot verify Binance config without transport and broker client"
+            )
+
+        # ── 1. Fetch position to verify leverage ─────────────────────────
+        pos = await self._broker_client.fetch_position(self.symbol)
+        if pos is not None:
+            raw = dict(pos.raw) if hasattr(pos, "raw") else {}
+            actual_leverage = raw.get("leverage")
+            if actual_leverage is not None and int(actual_leverage) != self.leverage:
+                raise RuntimeError(
+                    f"Binance leverage mismatch for {self.symbol}: "
+                    f"actual={actual_leverage} expected={self.leverage}"
+                )
+
+        # ── 2. Verify position mode (one-way / net) ──────────────────────
+        # Fetch position config via REST
+        await self._verify_position_mode()
+
+        # ── 3. Verify margin mode (isolated) ─────────────────────────────
+        await self._verify_margin_mode()
+
+        logger.warning(
+            "Binance config verified | position_mode=net margin_mode=isolated leverage=%s",
+            self.leverage,
+        )
+
+    async def _verify_position_mode(self) -> None:
+        """Verify position mode is one-way / net via Binance REST."""
+        if self._transport is None:
+            return
+
+        from src.exchanges.binance.signing import (
+            BINANCE_USDM_BASE_URL,
+            build_signed_request,
+        )
+
+        api_key = self._env.get("EXCHANGE_API_KEY", "").strip()
+        api_secret = self._env.get("EXCHANGE_API_SECRET", "").strip()
+
+        signed = build_signed_request(
+            method="GET",
+            path="/fapi/v1/positionSide/dual",
+            params={},
+            api_key=api_key,
+            api_secret=api_secret,
+            base_url=BINANCE_USDM_BASE_URL,
+        )
+        response = await self._transport.send(signed)
+
+        if isinstance(response.payload, dict):
+            dual = response.payload.get("dualSidePosition")
+            if dual is True:
+                raise RuntimeError(
+                    "Binance position mode is HEDGE (dualSidePosition=true). "
+                    "Only one-way / net mode is supported."
+                )
+
+    async def _verify_margin_mode(self) -> None:
+        """Verify margin mode is isolated for ETHUSDT."""
+        if self._transport is None:
+            return
+
+        from src.exchanges.binance.signing import (
+            BINANCE_USDM_BASE_URL,
+            build_signed_request,
+        )
+
+        api_key = self._env.get("EXCHANGE_API_KEY", "").strip()
+        api_secret = self._env.get("EXCHANGE_API_SECRET", "").strip()
+
+        signed = build_signed_request(
+            method="GET",
+            path="/fapi/v2/positionRisk",
+            params={"symbol": self.symbol},
+            api_key=api_key,
+            api_secret=api_secret,
+            base_url=BINANCE_USDM_BASE_URL,
+        )
+        response = await self._transport.send(signed)
+
+        if isinstance(response.payload, list):
+            for item in response.payload:
+                if isinstance(item, dict) and item.get("symbol") == self.symbol:
+                    margin_type = str(item.get("marginType") or "").lower()
+                    if margin_type == "cross":
+                        raise RuntimeError(
+                            f"Binance margin mode is CROSS for {self.symbol}. "
+                            f"Only isolated mode is supported."
+                        )
+                    return
+
+        raise RuntimeError(
+            f"Could not determine margin mode for {self.symbol}"
+        )
 
     # ==================================================================
-    # Position snapshot
+    # Fix 3 & 4: Position snapshot (fail-fast, enum mapping)
     # ==================================================================
 
     async def fetch_position_snapshot(self) -> PositionSnapshot:
-        """Fetch and map Binance position to ``PositionSnapshot``."""
-        if self._broker_client is None:
-            return PositionSnapshot(None, Decimal("0"), 0.0, 0.0, Decimal("0"))
+        """Fetch and map Binance position to ``PositionSnapshot``.
 
-        try:
-            pos = await self._broker_client.fetch_position(self.symbol)
-        except Exception:
-            logger.exception("Failed to fetch Binance position")
-            return PositionSnapshot(None, Decimal("0"), 0.0, 0.0, Decimal("0"))
+        Raises RuntimeError on fetch failure — never returns flat silently.
+        """
+        if self._broker_client is None:
+            raise RuntimeError("broker_client not configured for position fetch")
+
+        pos = await self._broker_client.fetch_position(self.symbol)
 
         if pos is None or pos.quantity <= 0:
             return PositionSnapshot(None, Decimal("0"), 0.0, 0.0, Decimal("0"))
 
-        # pos.quantity is base-asset qty (ETH)
         eth_qty = float(pos.quantity)
         contracts = self.eth_qty_to_contracts(pos.quantity)
         avg_entry = float(pos.average_entry_price or 0.0)
 
-        if pos.position_side == "LONG":
+        # Fix 4: compare enum properly
+        if pos.position_side == BrokerPositionSide.LONG:
             side: PositionSide | None = "LONG"
-        elif pos.position_side == "SHORT":
+        elif pos.position_side == BrokerPositionSide.SHORT:
             side = "SHORT"
+        elif pos.position_side == BrokerPositionSide.UNKNOWN:
+            raise RuntimeError(
+                f"Binance position side is UNKNOWN for {self.symbol}"
+            )
         else:
-            side = None
+            raise RuntimeError(
+                f"Unsupported Binance position side: {pos.position_side}"
+            )
 
         return PositionSnapshot(
             side=side,
@@ -261,76 +392,71 @@ class BinanceLiveTrader:
         )
 
     async def fetch_usdt_equity(self) -> float:
-        """Fetch USDT balance from Binance."""
+        """Fetch USDT balance from Binance.  Raises on failure."""
         if self._transport is None:
-            return 0.0
+            raise RuntimeError("transport not configured for equity fetch")
 
-        try:
-            from src.exchanges.binance.signing import (
-                BINANCE_USDM_BASE_URL,
-                build_signed_request,
+        from src.exchanges.binance.signing import (
+            BINANCE_USDM_BASE_URL,
+            build_signed_request,
+        )
+
+        api_key = self._env.get("EXCHANGE_API_KEY", "").strip()
+        api_secret = self._env.get("EXCHANGE_API_SECRET", "").strip()
+
+        if not api_key or not api_secret:
+            if self._broker_client is not None:
+                api_key = getattr(self._broker_client, "_api_key", "") or ""
+                api_secret = getattr(self._broker_client, "_api_secret", "") or ""
+
+        if not api_key or not api_secret:
+            raise RuntimeError("API credentials not available for equity fetch")
+
+        signed = build_signed_request(
+            method="GET",
+            path="/fapi/v2/balance",
+            params={},
+            api_key=api_key,
+            api_secret=api_secret,
+            base_url=BINANCE_USDM_BASE_URL,
+        )
+        response = await self._transport.send(signed)
+
+        if isinstance(response.payload, list):
+            for item in response.payload:
+                if isinstance(item, dict) and item.get("asset") == "USDT":
+                    balance = item.get("balance") or item.get("availableBalance")
+                    if balance is not None:
+                        return float(balance)
+            raise RuntimeError(
+                f"No USDT balance row found in Binance balance response"
             )
 
-            api_key = self._env.get("EXCHANGE_API_KEY", "").strip()
-            api_secret = self._env.get("EXCHANGE_API_SECRET", "").strip()
-
-            if not api_key or not api_secret:
-                # If we have a broker_client, try to use its credentials
-                if self._broker_client is not None:
-                    api_key = getattr(self._broker_client, "_api_key", "") or ""
-                    api_secret = getattr(self._broker_client, "_api_secret", "") or ""
-
-            if not api_key or not api_secret:
-                return 0.0
-
-            signed = build_signed_request(
-                method="GET",
-                path="/fapi/v2/balance",
-                params={},
-                api_key=api_key,
-                api_secret=api_secret,
-                base_url=BINANCE_USDM_BASE_URL,
-            )
-            response = await self._transport.send(signed)
-            if isinstance(response.payload, list):
-                for item in response.payload:
-                    if isinstance(item, dict) and item.get("asset") == "USDT":
-                        return float(
-                            item.get("balance")
-                            or item.get("availableBalance")
-                            or 0.0
-                        )
-        except Exception:
-            logger.exception("Failed to fetch Binance USDT balance")
-
-        return 0.0
+        raise RuntimeError(
+            f"Binance balance response malformed: {type(response.payload)}"
+        )
 
     # ==================================================================
     # Quantity conversion
     # ==================================================================
 
     def eth_qty_to_contracts(self, eth_qty: Decimal) -> Decimal:
-        """Convert ETH quantity to internal contracts."""
         raw = eth_qty / _ETH_CONTRACT_MULTIPLIER
         return self._round_contracts(raw)
 
     def contracts_to_eth_qty(self, contracts: Decimal) -> Decimal:
-        """Convert internal contracts back to ETH quantity."""
         return contracts * _ETH_CONTRACT_MULTIPLIER
 
     def _round_contracts(self, contracts: Decimal) -> Decimal:
-        """Round contracts down to ``contract_precision``."""
         precision = self.contract_precision
         return (contracts / precision).quantize(Decimal("1"), rounding=ROUND_DOWN) * precision
 
     @staticmethod
     def decimal_to_str(value: Decimal) -> str:
-        """Format a Decimal without scientific notation."""
         return format(value.normalize(), "f")
 
     @staticmethod
     def price_to_str(price: float) -> str:
-        """Format a price float to 2 decimal places."""
         if not math.isfinite(price):
             raise RuntimeError(f"Invalid price: {price}")
         return f"{price:.2f}"
@@ -340,7 +466,6 @@ class BinanceLiveTrader:
     # ==================================================================
 
     async def execute_intent(self, intent: TradeIntent) -> LiveTradeResult:
-        """Execute a trade intent on Binance (real orders, no dry-run)."""
         intent_type = intent.intent_type
 
         if intent_type in ("OPEN_LONG", "OPEN_SHORT", "ADD_LONG", "ADD_SHORT"):
@@ -366,24 +491,21 @@ class BinanceLiveTrader:
         )
 
     # ==================================================================
-    # OPEN / ADD
+    # Fix 5, 7, 9: OPEN / ADD with TP + SL, unique IDs, split tracking
     # ==================================================================
 
     async def _execute_open_or_add(self, intent: TradeIntent) -> LiveTradeResult:
         exec = self._semantic_executor
         if exec is None:
             return LiveTradeResult(
-                ok=False,
-                action=intent.intent_type,
-                order_id=None,
-                tp_order_id=None,
-                contracts="0",
-                tp_price="",
+                ok=False, action=intent.intent_type,
+                order_id=None, tp_order_id=None,
+                contracts="0", tp_price="",
                 message="semantic_executor_not_configured",
             )
 
         from src.exchanges.models import BrokerPositionSide, BrokerQuantityUnit
-        from src.exchanges.semantic_models import BrokerSemanticAction
+        from src.exchanges.semantic_models import BrokerSemanticAction, BrokerSemanticOrderRole, BrokerSemanticRequest
 
         side: PositionSide = intent.side
         eth_qty = Decimal(str(intent.size.eth_qty))
@@ -395,10 +517,8 @@ class BinanceLiveTrader:
         order_notional = eth_qty * mark_price
         if self._max_order_notional > 0 and order_notional > self._max_order_notional:
             return LiveTradeResult(
-                ok=False,
-                action=intent.intent_type,
-                order_id=None,
-                tp_order_id=None,
+                ok=False, action=intent.intent_type,
+                order_id=None, tp_order_id=None,
                 contracts=contracts_str,
                 tp_price=self.price_to_str(intent.tp_price),
                 message=f"live_max_order_notional_exceeded: {order_notional} > {self._max_order_notional}",
@@ -409,10 +529,8 @@ class BinanceLiveTrader:
         projected_notional = (current_eth + eth_qty) * mark_price
         if self._max_position_notional > 0 and projected_notional > self._max_position_notional:
             return LiveTradeResult(
-                ok=False,
-                action=intent.intent_type,
-                order_id=None,
-                tp_order_id=None,
+                ok=False, action=intent.intent_type,
+                order_id=None, tp_order_id=None,
                 contracts=contracts_str,
                 tp_price=self.price_to_str(intent.tp_price),
                 message=f"live_max_position_notional_exceeded: {projected_notional} > {self._max_position_notional}",
@@ -422,22 +540,18 @@ class BinanceLiveTrader:
         pos_side = BrokerPositionSide.LONG if side == "LONG" else BrokerPositionSide.SHORT
         action = BrokerSemanticAction.ADD_POSITION if is_add else BrokerSemanticAction.OPEN_POSITION
 
-        client_order_id = f"{CLIENT_ORDER_ID_PREFIX}entry_{intent.intent_type.lower()}"
-
-        from src.exchanges.semantic_models import (
-            BrokerSemanticOrderRole,
-            BrokerSemanticRequest,
-        )
+        # Fix 7: unique client_order_id
+        entry_client_order_id = _unique_client_order_id("entry")
 
         request = BrokerSemanticRequest(
-            exchange=self._semantic_executor.exchange,
+            exchange=exec.exchange,
             symbol=self.symbol,
             action=action,
             role=BrokerSemanticOrderRole.ENTRY if not is_add else BrokerSemanticOrderRole.ADD,
             side=pos_side,
             quantity=contracts,
             quantity_unit=BrokerQuantityUnit.CONTRACTS,
-            client_order_id=client_order_id,
+            client_order_id=entry_client_order_id,
         )
 
         try:
@@ -445,10 +559,8 @@ class BinanceLiveTrader:
         except Exception as exc:
             logger.exception("Entry order failed")
             return LiveTradeResult(
-                ok=False,
-                action=intent.intent_type,
-                order_id=None,
-                tp_order_id=None,
+                ok=False, action=intent.intent_type,
+                order_id=None, tp_order_id=None,
                 contracts=contracts_str,
                 tp_price=self.price_to_str(intent.tp_price),
                 message=f"entry_failed: {exc}",
@@ -456,8 +568,7 @@ class BinanceLiveTrader:
 
         if not result.ok:
             return LiveTradeResult(
-                ok=False,
-                action=intent.intent_type,
+                ok=False, action=intent.intent_type,
                 order_id=result.order_id,
                 tp_order_id=None,
                 contracts=contracts_str,
@@ -466,7 +577,9 @@ class BinanceLiveTrader:
             )
 
         order_id = result.order_id
-        self._managed_order_ids.add(order_id) if order_id else None
+
+        # Fix 9: entry order ID does NOT go into managed cancel set
+        # Only TP and SL IDs go into their respective sets.
 
         # ── Refresh position after entry ────────────────────────────────
         try:
@@ -476,35 +589,150 @@ class BinanceLiveTrader:
             logger.exception("Failed to refresh position after entry")
             self.position_contracts += contracts
 
-        # ── Place TP ───────────────────────────────────────────────────
-        tp_result = await self._place_tp_for_intent(intent, contracts, pos_side)
+        # ── Place TP (Fix 5) ────────────────────────────────────────────
+        tp_ok = True
+        tp_message = ""
+        tp_order_id_val: str | None = None
+        tp_order_ids_val: tuple[str, ...] = ()
 
-        if not tp_result.get("ok", False):
+        try:
+            tp_result = await self._place_tp_for_intent(intent, contracts, pos_side)
+            tp_ok = tp_result.get("ok", False)
+            tp_message = tp_result.get("message", "")
+            tp_order_id_val = tp_result.get("tp_order_id")
+            tp_order_ids_val = tp_result.get("tp_order_ids", ())
+        except Exception as exc:
+            tp_ok = False
+            tp_message = str(exc)
+
+        # ── Place protective SL (Fix 5) ──────────────────────────────────
+        sl_ok = False
+        sl_order_id: str | None = None
+        sl_price: str = ""
+        sl_message: str = ""
+
+        try:
+            sl_price_float = self._resolve_sl_price(intent, float(mark_price))
+            sl_price = self.price_to_str(sl_price_float)
+            sl_result = await self._place_protective_sl(pos_side, contracts, Decimal(str(sl_price_float)))
+            sl_ok = sl_result.get("ok", False)
+            sl_order_id = sl_result.get("sl_order_id")
+            sl_message = sl_result.get("message", "")
+        except Exception as exc:
+            sl_ok = False
+            sl_message = str(exc)
+
+        # ── Build result ────────────────────────────────────────────────
+        if not tp_ok:
             return LiveTradeResult(
-                ok=False,
-                action=intent.intent_type,
-                order_id=order_id,
-                tp_order_id=tp_result.get("tp_order_id"),
-                contracts=contracts_str,
-                tp_price=self.price_to_str(intent.tp_price),
-                message=f"entry_filled_but_tp_failed: {tp_result.get('message', '')}",
-                entry_filled=True,
-                tp_ok=False,
-                tp_order_ids=tp_result.get("tp_order_ids", ()),
+                ok=False, action=intent.intent_type,
+                order_id=order_id, tp_order_id=tp_order_id_val,
+                contracts=contracts_str, tp_price=self.price_to_str(intent.tp_price),
+                message=f"entry_filled_but_tp_failed: {tp_message}",
+                entry_filled=True, tp_ok=False,
+                tp_order_ids=tp_order_ids_val,
+                protective_sl_order_id=sl_order_id,
+                protective_sl_price=sl_price,
+                protective_sl_ok=sl_ok,
+            )
+
+        if not sl_ok:
+            return LiveTradeResult(
+                ok=False, action=intent.intent_type,
+                order_id=order_id, tp_order_id=tp_order_id_val,
+                contracts=contracts_str, tp_price=self.price_to_str(intent.tp_price),
+                message=f"entry_filled_but_sl_failed: {sl_message}",
+                entry_filled=True, tp_ok=True,
+                tp_order_ids=tp_order_ids_val,
+                protective_sl_order_id=sl_order_id,
+                protective_sl_price=sl_price,
+                protective_sl_ok=False,
             )
 
         return LiveTradeResult(
-            ok=True,
-            action=intent.intent_type,
-            order_id=order_id,
-            tp_order_id=tp_result.get("tp_order_id"),
-            contracts=contracts_str,
-            tp_price=self.price_to_str(intent.tp_price),
-            message="market order placed and TP protected",
-            entry_filled=True,
-            tp_ok=True,
-            tp_order_ids=tp_result.get("tp_order_ids", ()),
+            ok=True, action=intent.intent_type,
+            order_id=order_id, tp_order_id=tp_order_id_val,
+            contracts=contracts_str, tp_price=self.price_to_str(intent.tp_price),
+            message="market order placed and TP+SL protected",
+            entry_filled=True, tp_ok=True,
+            tp_order_ids=tp_order_ids_val,
+            protective_sl_order_id=sl_order_id,
+            protective_sl_price=sl_price,
+            protective_sl_ok=True,
         )
+
+    def _resolve_sl_price(self, intent: TradeIntent, entry_price: float) -> float:
+        """Determine protective SL trigger price.
+
+        Priority:
+        1. Intent fields: protective_sl_price / sl_price / stop_loss_price
+        2. Fallback: entry_price * (1 ± LIVE_PROTECTIVE_SL_PCT) depending on side
+        """
+        sl_candidate = (
+            getattr(intent, "protective_sl_price", None)
+            or getattr(intent, "sl_price", None)
+            or getattr(intent, "stop_loss_price", None)
+        )
+        if sl_candidate is not None and sl_candidate > 0:
+            return float(sl_candidate)
+
+        pct = float(self._protective_sl_pct)
+        if intent.side == "LONG":
+            return entry_price * (1.0 - pct)
+        else:
+            return entry_price * (1.0 + pct)
+
+    async def _place_protective_sl(
+        self,
+        pos_side: Any,
+        contracts: Decimal,
+        trigger_price: Decimal,
+    ) -> dict[str, Any]:
+        """Place a protective stop-loss via Binance Algo Order API."""
+        exec = self._semantic_executor
+        if exec is None:
+            return {"ok": False, "message": "semantic_executor_not_configured"}
+
+        from src.exchanges.semantic_models import (
+            BrokerSemanticAction,
+            BrokerSemanticOrderRole,
+            BrokerSemanticRequest,
+        )
+
+        # Fix 7: unique client_algo_id
+        sl_client_algo_id = _unique_client_order_id("sl")
+
+        request = BrokerSemanticRequest(
+            exchange=exec.exchange,
+            symbol=self.symbol,
+            action=BrokerSemanticAction.PLACE_PROTECTIVE_STOP,
+            role=BrokerSemanticOrderRole.PROTECTIVE_SL,
+            side=pos_side,
+            quantity=contracts,
+            quantity_unit=BrokerQuantityUnit.CONTRACTS,
+            trigger_price=trigger_price,
+            reduce_only=True,
+            client_order_id=sl_client_algo_id,
+        )
+
+        try:
+            result = await exec.execute(request)
+        except Exception as exc:
+            return {"ok": False, "message": str(exc)}
+
+        # Fix 6: result.order_id is clientAlgoId (unified in semantic executor)
+        sl_order_id = result.order_id or sl_client_algo_id
+        if sl_order_id:
+            self._protective_sl_order_id = sl_order_id
+            self._protective_sl_client_algo_id = sl_client_algo_id
+            # Fix 9: SL IDs go into separate set
+            self._managed_sl_client_algo_ids.add(sl_client_algo_id)
+
+        return {
+            "ok": result.ok,
+            "sl_order_id": sl_order_id,
+            "message": result.message,
+        }
 
     async def _place_tp_for_intent(
         self,
@@ -524,7 +752,8 @@ class BinanceLiveTrader:
             BrokerSemanticAction,
         )
 
-        tp_client_order_id = f"{CLIENT_ORDER_ID_PREFIX}tp_{intent.intent_type.lower()}"
+        # Fix 7: unique client_order_id
+        tp_client_order_id = _unique_client_order_id("tp")
 
         request = BrokerSemanticRequest(
             exchange=exec.exchange,
@@ -548,7 +777,8 @@ class BinanceLiveTrader:
         if tp_order_id:
             self.tp_order_id = tp_order_id
             self.tp_order_ids = (tp_order_id,)
-            self._managed_order_ids.add(tp_order_id)
+            # Fix 9: TP IDs go into TP set only
+            self._managed_tp_order_ids.add(tp_order_id)
 
         return {
             "ok": result.ok,
@@ -574,14 +804,13 @@ class BinanceLiveTrader:
         tp_price_str = self.price_to_str(intent.tp_price)
 
         # ── Cancel existing TP(s) ──────────────────────────────────────
-        for oid in self.tp_order_ids:
+        for oid in self._managed_tp_order_ids:
             if oid:
                 try:
-                    await exec.execute(
-                        self._make_cancel_tp_request(oid)
-                    )
+                    await exec.execute(self._make_cancel_tp_request(oid))
                 except Exception:
                     logger.exception("Failed to cancel old TP: %s", oid)
+        self._managed_tp_order_ids.clear()
 
         # ── Determine current position side and contracts ──────────────
         pos = await self.fetch_position_snapshot()
@@ -594,15 +823,13 @@ class BinanceLiveTrader:
             )
 
         from src.exchanges.models import BrokerPositionSide, BrokerQuantityUnit
-        from src.exchanges.semantic_models import (
-            BrokerSemanticAction,
-            BrokerSemanticOrderRole,
-            BrokerSemanticRequest,
-        )
+        from src.exchanges.semantic_models import BrokerSemanticAction, BrokerSemanticOrderRole, BrokerSemanticRequest
 
+        # Fix 4: compare string side from PositionSnapshot
         pos_side = BrokerPositionSide.LONG if pos.side == "LONG" else BrokerPositionSide.SHORT
         contracts = self.position_contracts if self.position_contracts > 0 else pos.contracts
-        tp_client_order_id = f"{CLIENT_ORDER_ID_PREFIX}tp_update"
+        # Fix 7: unique client_order_id
+        tp_client_order_id = _unique_client_order_id("tp")
 
         request = BrokerSemanticRequest(
             exchange=exec.exchange,
@@ -632,13 +859,11 @@ class BinanceLiveTrader:
         if tp_order_id:
             self.tp_order_id = tp_order_id
             self.tp_order_ids = (tp_order_id,)
-            self._managed_order_ids.add(tp_order_id)
+            self._managed_tp_order_ids.add(tp_order_id)
 
         return LiveTradeResult(
-            ok=result.ok,
-            action="UPDATE_TP",
-            order_id=None,
-            tp_order_id=tp_order_id,
+            ok=result.ok, action="UPDATE_TP",
+            order_id=None, tp_order_id=tp_order_id,
             contracts=self.decimal_to_str(contracts),
             tp_price=tp_price_str,
             tp_order_ids=(tp_order_id,) if tp_order_id else (),
@@ -646,17 +871,23 @@ class BinanceLiveTrader:
         )
 
     def _make_cancel_tp_request(self, order_id: str) -> Any:
-        from src.exchanges.semantic_models import (
-            BrokerSemanticAction,
-            BrokerSemanticOrderRole,
-            BrokerSemanticRequest,
-        )
+        from src.exchanges.semantic_models import BrokerSemanticAction, BrokerSemanticOrderRole, BrokerSemanticRequest
         return BrokerSemanticRequest(
             exchange=self._semantic_executor.exchange,
             symbol=self.symbol,
             action=BrokerSemanticAction.CANCEL_REDUCE_ONLY_TP,
             role=BrokerSemanticOrderRole.CORE_TP,
             order_id=order_id,
+        )
+
+    def _make_cancel_sl_request(self, client_algo_id: str) -> Any:
+        from src.exchanges.semantic_models import BrokerSemanticAction, BrokerSemanticOrderRole, BrokerSemanticRequest
+        return BrokerSemanticRequest(
+            exchange=self._semantic_executor.exchange,
+            symbol=self.symbol,
+            action=BrokerSemanticAction.CANCEL_PROTECTIVE_STOP,
+            role=BrokerSemanticOrderRole.PROTECTIVE_SL,
+            order_id=client_algo_id,
         )
 
     # ==================================================================
@@ -683,14 +914,9 @@ class BinanceLiveTrader:
             )
 
         from src.exchanges.models import BrokerPositionSide, BrokerQuantityUnit
-        from src.exchanges.semantic_models import (
-            BrokerSemanticAction,
-            BrokerSemanticOrderRole,
-            BrokerSemanticRequest,
-        )
+        from src.exchanges.semantic_models import BrokerSemanticAction, BrokerSemanticOrderRole, BrokerSemanticRequest
 
         pos_side = BrokerPositionSide.LONG if pos.side == "LONG" else BrokerPositionSide.SHORT
-        # Reduce contracts = near_tp_reduce_ratio * current position
         reduce_ratio = Decimal(str(intent.near_tp_reduce_ratio)) if intent.near_tp_reduce_ratio > 0 else Decimal("1")
         reduce_contracts = self._round_contracts(self.position_contracts * reduce_ratio)
         if reduce_contracts > self.position_contracts:
@@ -704,7 +930,6 @@ class BinanceLiveTrader:
                 message="zero_reduce_contracts",
             )
 
-        # ── Notional check ─────────────────────────────────────────────
         reduce_eth = self.contracts_to_eth_qty(reduce_contracts)
         mark_price = Decimal(str(intent.price))
         if self._max_order_notional > 0 and reduce_eth * mark_price > self._max_order_notional:
@@ -716,7 +941,8 @@ class BinanceLiveTrader:
                 message="live_max_order_notional_exceeded",
             )
 
-        client_order_id = f"{CLIENT_ORDER_ID_PREFIX}near_tp_reduce"
+        # Fix 7: unique ID
+        client_order_id = _unique_client_order_id("reduce")
 
         request = BrokerSemanticRequest(
             exchange=exec.exchange,
@@ -745,12 +971,9 @@ class BinanceLiveTrader:
             self.position_contracts -= reduce_contracts
 
         return LiveTradeResult(
-            ok=result.ok,
-            action="NEAR_TP_REDUCE",
-            order_id=result.order_id,
-            tp_order_id=None,
-            contracts=self.decimal_to_str(reduce_contracts),
-            tp_price="",
+            ok=result.ok, action="NEAR_TP_REDUCE",
+            order_id=result.order_id, tp_order_id=None,
+            contracts=self.decimal_to_str(reduce_contracts), tp_price="",
             contracts_before=self.decimal_to_str(self.position_contracts + reduce_contracts),
             contracts_reduced=self.decimal_to_str(reduce_contracts),
             contracts_after=self.decimal_to_str(self.position_contracts),
@@ -760,7 +983,7 @@ class BinanceLiveTrader:
         )
 
     # ==================================================================
-    # MARKET_EXIT / MARKET_EXIT_RUNNER
+    # Fix 9: MARKET_EXIT with split cancel
     # ==================================================================
 
     async def _execute_market_exit(self, intent: TradeIntent) -> LiveTradeResult:
@@ -775,7 +998,6 @@ class BinanceLiveTrader:
 
         pos = await self.fetch_position_snapshot()
         if not pos.has_position or pos.side is None or pos.contracts <= 0:
-            # Already flat — still cancel managed orders
             await self._cancel_managed_orders()
             self.position_contracts = Decimal("0")
             return LiveTradeResult(
@@ -786,15 +1008,12 @@ class BinanceLiveTrader:
             )
 
         from src.exchanges.models import BrokerPositionSide, BrokerQuantityUnit
-        from src.exchanges.semantic_models import (
-            BrokerSemanticAction,
-            BrokerSemanticOrderRole,
-            BrokerSemanticRequest,
-        )
+        from src.exchanges.semantic_models import BrokerSemanticAction, BrokerSemanticOrderRole, BrokerSemanticRequest
 
         pos_side = BrokerPositionSide.LONG if pos.side == "LONG" else BrokerPositionSide.SHORT
         contracts = pos.contracts
-        client_order_id = f"{CLIENT_ORDER_ID_PREFIX}exit_{intent.intent_type.lower()}"
+        # Fix 7: unique ID
+        client_order_id = _unique_client_order_id("exit")
 
         request = BrokerSemanticRequest(
             exchange=exec.exchange,
@@ -821,43 +1040,56 @@ class BinanceLiveTrader:
                 message=f"market_exit_failed: {exc}",
             )
 
-        # ── Cancel managed orders (TP / SL) ────────────────────────────
+        # Fix 9: cancel TP and SL separately
         await self._cancel_managed_orders()
 
         if result.ok:
             self.position_contracts = Decimal("0")
 
         return LiveTradeResult(
-            ok=result.ok,
-            action=intent.intent_type,
-            order_id=result.order_id,
-            tp_order_id=None,
-            contracts=self.decimal_to_str(contracts),
-            tp_price="",
+            ok=result.ok, action=intent.intent_type,
+            order_id=result.order_id, tp_order_id=None,
+            contracts=self.decimal_to_str(contracts), tp_price="",
             message=result.message or "market_exit_executed",
         )
 
     async def _cancel_managed_orders(self) -> None:
-        """Cancel all known managed TP orders.  Does NOT cancel unknown orders."""
+        """Cancel all known managed TP and SL orders separately.
+
+        Fix 9: TP via CANCEL_REDUCE_ONLY_TP, SL via CANCEL_PROTECTIVE_STOP.
+        Does NOT cancel entry orders or unknown orders.
+        """
         exec = self._semantic_executor
         if exec is None:
             return
 
-        for oid in list(self._managed_order_ids):
+        # Cancel TP orders
+        for oid in list(self._managed_tp_order_ids):
             if not oid:
                 continue
             try:
                 await exec.execute(self._make_cancel_tp_request(oid))
             except Exception:
-                logger.exception("Failed to cancel managed order: %s", oid)
-            self._managed_order_ids.discard(oid)
+                logger.exception("Failed to cancel managed TP: %s", oid)
+            self._managed_tp_order_ids.discard(oid)
+
+        # Cancel SL orders (via algo cancel)
+        for cid in list(self._managed_sl_client_algo_ids):
+            if not cid:
+                continue
+            try:
+                await exec.execute(self._make_cancel_sl_request(cid))
+            except Exception:
+                logger.exception("Failed to cancel managed SL: %s", cid)
+            self._managed_sl_client_algo_ids.discard(cid)
 
         self.tp_order_id = None
         self.tp_order_ids = ()
         self._protective_sl_order_id = None
+        self._protective_sl_client_algo_id = None
 
     # ==================================================================
-    # Recovery helpers (compatible with existing startup recovery)
+    # Recovery helpers
     # ==================================================================
 
     async def fetch_broker_open_orders(self) -> tuple[Any, ...]:
@@ -943,4 +1175,6 @@ class BinanceLiveTrader:
         self.tp_order_id = None
         self.tp_order_ids = ()
         self._protective_sl_order_id = None
-        self._managed_order_ids.clear()
+        self._protective_sl_client_algo_id = None
+        self._managed_tp_order_ids.clear()
+        self._managed_sl_client_algo_ids.clear()
