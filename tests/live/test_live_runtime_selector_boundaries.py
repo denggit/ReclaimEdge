@@ -157,11 +157,10 @@ class TestRequiredSymbols:
         text = _read_selector_text()
         assert "select_live_runtime" in text
 
-    def test_contains_signal_only_keys(self) -> None:
+    def test_does_not_contain_signal_only_keys(self) -> None:
         text = _read_selector_text()
-        assert "SIGNAL_ONLY" in text
-        # Backward-compatible alias must also be present.
-        assert "BINANCE_SIGNAL_ONLY" in text
+        assert "SIGNAL_ONLY" not in text
+        assert "BINANCE_SIGNAL_ONLY" not in text
 
 
 # ======================================================================

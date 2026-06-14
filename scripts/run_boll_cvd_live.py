@@ -69,12 +69,6 @@ async def main() -> None:
 
     selection = select_live_runtime(os.environ)
 
-    if selection.kind == LiveRuntimeKind.BINANCE_SIGNAL_ONLY:
-        from src.live.binance_signal_only_runtime import run_binance_signal_only
-
-        await run_binance_signal_only()
-        return
-
     if selection.kind == LiveRuntimeKind.BINANCE_LIVE_BLOCKED:
         from src.live.binance_live_preflight import (
             build_binance_live_preflight_report,

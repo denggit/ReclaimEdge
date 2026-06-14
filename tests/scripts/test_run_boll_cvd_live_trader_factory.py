@@ -90,59 +90,6 @@ class TestOkxPathUsesFactory:
 
 
 # ======================================================================
-# Binance signal-only does not call factory
-# ======================================================================
-
-
-class TestBinanceSignalOnlySkipsFactory:
-    """The Binance signal-only path must not call create_live_trader."""
-
-    def test_signal_only_does_not_call_factory(self) -> None:
-        """EXCHANGE=binance + SIGNAL_ONLY=true skips the factory."""
-        env = {
-            "EXCHANGE": "binance",
-            "SIGNAL_ONLY": "true",
-        }
-
-        async def fake_run_signal_only(env_arg=None):
-            return
-
-        with mock.patch.dict(os.environ, env, clear=True), \
-             mock.patch("scripts.run_boll_cvd_live.load_dotenv", return_value=False):
-            with mock.patch(
-                "src.live.binance_signal_only_runtime.run_binance_signal_only",
-                fake_run_signal_only,
-            ):
-                with mock.patch(
-                    "scripts.run_boll_cvd_live.create_live_trader"
-                ) as mock_factory:
-                    from scripts.run_boll_cvd_live import main
-                    asyncio.run(main())
-                    mock_factory.assert_not_called()
-
-    def test_signal_only_does_not_call_trader_directly(self) -> None:
-        """Signal-only path must not call Trader() directly."""
-        env = {
-            "EXCHANGE": "binance",
-            "SIGNAL_ONLY": "true",
-        }
-
-        async def fake_run_signal_only(env_arg=None):
-            return
-
-        with mock.patch.dict(os.environ, env, clear=True), \
-             mock.patch("scripts.run_boll_cvd_live.load_dotenv", return_value=False):
-            with mock.patch(
-                "src.live.binance_signal_only_runtime.run_binance_signal_only",
-                fake_run_signal_only,
-            ):
-                with mock.patch("scripts.run_boll_cvd_live.Trader") as mock_trader:
-                    from scripts.run_boll_cvd_live import main
-                    asyncio.run(main())
-                    mock_trader.assert_not_called()
-
-
-# ======================================================================
 # Binance live blocked does not create trader
 # ======================================================================
 

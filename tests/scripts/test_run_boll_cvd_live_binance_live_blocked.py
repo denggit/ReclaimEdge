@@ -160,54 +160,6 @@ class TestAllConfirmationsStillBlocked:
                 # live_trading_enabled() should never be called (it's OKX-path only)
                 mock_lch.live_trading_enabled.assert_not_called()
 
-    def test_all_confirmations_does_not_enter_signal_only_path(self) -> None:
-        """All confirmations + signal_only=false does NOT enter signal-only path."""
-        env = _binance_all_confirmations_env()
-
-        with mock.patch.dict(os.environ, env, clear=True), \
-             mock.patch("scripts.run_boll_cvd_live.load_dotenv", return_value=False):
-            with mock.patch(
-                "src.live.binance_signal_only_runtime.run_binance_signal_only"
-            ) as mock_signal:
-                from scripts.run_boll_cvd_live import main
-                with pytest.raises(RuntimeError):
-                    asyncio.run(main())
-                mock_signal.assert_not_called()
-
-
-# ======================================================================
-# Binance signal-only does not call preflight
-# ======================================================================
-
-
-class TestSignalOnlyDoesNotCallPreflight:
-    """The signal-only path must NOT invoke preflight."""
-
-    def test_signal_only_skips_preflight(self) -> None:
-        """EXCHANGE=binance + SIGNAL_ONLY=true bypasses preflight."""
-        env = {
-            "EXCHANGE": "binance",
-            "SIGNAL_ONLY": "true",
-        }
-
-        async def fake_run_binance_signal_only(env_arg=None):
-            return
-
-        with mock.patch.dict(os.environ, env, clear=True), \
-             mock.patch("scripts.run_boll_cvd_live.load_dotenv", return_value=False):
-            with mock.patch(
-                "src.live.binance_signal_only_runtime.run_binance_signal_only",
-                fake_run_binance_signal_only,
-            ):
-                with mock.patch(
-                    "src.live.binance_live_preflight.build_binance_live_preflight_report"
-                ) as mock_build:
-                    from scripts.run_boll_cvd_live import main
-                    asyncio.run(main())
-                    # preflight must NOT be called in signal-only path
-                    mock_build.assert_not_called()
-
-
 # ======================================================================
 # OKX path does not call preflight
 # ======================================================================
