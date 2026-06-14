@@ -1921,19 +1921,39 @@ class TestDoubleConfirmation:
 class TestRequireRequestedNotionalCap:
     """Tests for ``require_requested_notional_cap()``."""
 
-    def test_smoke_max_above_hard_cap_exits(self) -> None:
+    def test_smoke_max_above_hard_order_cap_exits(self) -> None:
         with pytest.raises(SystemExit) as exc_info:
             require_requested_notional_cap(
                 smoke_max_notional=Decimal("11"),
                 preflight_max_order_notional=Decimal("5"),
+                preflight_max_position_notional=Decimal("30"),
             )
         assert exc_info.value.code == 1
 
-    def test_smoke_max_above_preflight_max_exits(self) -> None:
+    def test_smoke_max_above_preflight_order_max_exits(self) -> None:
         with pytest.raises(SystemExit) as exc_info:
             require_requested_notional_cap(
                 smoke_max_notional=Decimal("6"),
                 preflight_max_order_notional=Decimal("5"),
+                preflight_max_position_notional=Decimal("30"),
+            )
+        assert exc_info.value.code == 1
+
+    def test_smoke_max_above_hard_position_cap_exits(self) -> None:
+        with pytest.raises(SystemExit) as exc_info:
+            require_requested_notional_cap(
+                smoke_max_notional=Decimal("31"),
+                preflight_max_order_notional=Decimal("50"),
+                preflight_max_position_notional=Decimal("30"),
+            )
+        assert exc_info.value.code == 1
+
+    def test_smoke_max_above_preflight_position_max_exits(self) -> None:
+        with pytest.raises(SystemExit) as exc_info:
+            require_requested_notional_cap(
+                smoke_max_notional=Decimal("6"),
+                preflight_max_order_notional=Decimal("10"),
+                preflight_max_position_notional=Decimal("5"),
             )
         assert exc_info.value.code == 1
 
@@ -1941,31 +1961,53 @@ class TestRequireRequestedNotionalCap:
         require_requested_notional_cap(
             smoke_max_notional=Decimal("5"),
             preflight_max_order_notional=Decimal("6"),
+            preflight_max_position_notional=Decimal("6"),
         )  # does not raise
 
     def test_equal_values_passes(self) -> None:
         require_requested_notional_cap(
             smoke_max_notional=Decimal("6"),
             preflight_max_order_notional=Decimal("6"),
+            preflight_max_position_notional=Decimal("6"),
         )  # does not raise
 
 
 class TestRequireCalculatedNotionalCap:
     """Tests for ``require_calculated_notional_cap()``."""
 
-    def test_above_preflight_max_exits(self) -> None:
-        with pytest.raises(SystemExit) as exc_info:
-            require_calculated_notional_cap(
-                calculated_notional=Decimal("7"),
-                preflight_max_order_notional=Decimal("6"),
-            )
-        assert exc_info.value.code == 1
-
-    def test_above_hard_cap_exits(self) -> None:
+    def test_above_hard_order_cap_exits(self) -> None:
         with pytest.raises(SystemExit) as exc_info:
             require_calculated_notional_cap(
                 calculated_notional=Decimal("11"),
                 preflight_max_order_notional=Decimal("10"),
+                preflight_max_position_notional=Decimal("30"),
+            )
+        assert exc_info.value.code == 1
+
+    def test_above_preflight_order_max_exits(self) -> None:
+        with pytest.raises(SystemExit) as exc_info:
+            require_calculated_notional_cap(
+                calculated_notional=Decimal("7"),
+                preflight_max_order_notional=Decimal("6"),
+                preflight_max_position_notional=Decimal("30"),
+            )
+        assert exc_info.value.code == 1
+
+    def test_above_hard_position_cap_exits(self) -> None:
+        with pytest.raises(SystemExit) as exc_info:
+            require_calculated_notional_cap(
+                calculated_notional=Decimal("31"),
+                preflight_max_order_notional=Decimal("50"),
+                preflight_max_position_notional=Decimal("30"),
+            )
+        assert exc_info.value.code == 1
+
+    def test_above_preflight_position_max_exits(self) -> None:
+        with pytest.raises(SystemExit) as exc_info:
+            require_calculated_notional_cap(
+                calculated_notional=Decimal("6"),
+                preflight_max_order_notional=Decimal("10"),
+                preflight_max_position_notional=Decimal("5"),
             )
         assert exc_info.value.code == 1
 
@@ -1973,6 +2015,14 @@ class TestRequireCalculatedNotionalCap:
         require_calculated_notional_cap(
             calculated_notional=Decimal("5"),
             preflight_max_order_notional=Decimal("6"),
+            preflight_max_position_notional=Decimal("6"),
+        )  # does not raise
+
+    def test_equal_values_passes(self) -> None:
+        require_calculated_notional_cap(
+            calculated_notional=Decimal("6"),
+            preflight_max_order_notional=Decimal("6"),
+            preflight_max_position_notional=Decimal("6"),
         )  # does not raise
 
 
@@ -2467,3 +2517,31 @@ class TestMainWithPreflight:
         with pytest.raises(SystemExit) as exc_info:
             await main()
         assert exc_info.value.code == 1
+
+    @pytest.mark.asyncio
+    async def test_main_passes_position_cap_to_requested_notional_cap(
+        self, monkeypatch,
+    ) -> None:
+        """main must pass preflight_max_position_notional to require_requested_notional_cap."""
+        monkeypatch.setenv(CONFIRM_ENV, CONFIRM_VALUE)
+        monkeypatch.setenv("EXCHANGE", "binance")
+        monkeypatch.setenv("BINANCE_SIGNAL_ONLY", "false")
+        monkeypatch.setenv("BINANCE_LIVE_ENABLED", "true")
+        monkeypatch.setenv("BINANCE_LIVE_ALLOW_ORDERS", "true")
+        monkeypatch.setenv(
+            "BINANCE_LIVE_CONFIRMATION", "I_UNDERSTAND_BINANCE_LIVE_TRADING"
+        )
+        monkeypatch.setenv("BINANCE_LIVE_MAX_ORDER_NOTIONAL_USDT", "10")
+        monkeypatch.setenv("BINANCE_LIVE_MAX_POSITION_NOTIONAL_USDT", "5")
+        monkeypatch.setenv("BINANCE_LIVE_LEVERAGE", "20")
+        monkeypatch.setenv("EXCHANGE_API_KEY", "test-key")
+        monkeypatch.setenv("EXCHANGE_API_SECRET", "test-secret")
+
+        with mock.patch(
+            "scripts.binance_live_smoke_test.require_requested_notional_cap",
+        ) as mock_req:
+            mock_req.side_effect = SystemExit(0)
+            with pytest.raises(SystemExit):
+                await main()
+            assert mock_req.call_args.kwargs["preflight_max_position_notional"] == Decimal("5")
+            assert mock_req.call_args.kwargs["preflight_max_order_notional"] == Decimal("10")

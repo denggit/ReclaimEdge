@@ -450,3 +450,26 @@ def test_smoke_test_does_not_contain_position_side_dict_key() -> None:
     text = _read_smoke_test_text()
     assert '"positionSide"' not in text
     assert "'positionSide'" not in text
+
+
+# ---------------------------------------------------------------------------
+# 20C-4C-PREP-FIX: Enforce live smoke position notional cap
+# ---------------------------------------------------------------------------
+
+
+def test_smoke_test_contains_hard_max_position_notional() -> None:
+    """Script must reference BINANCE_LIVE_HARD_MAX_POSITION_NOTIONAL_USDT."""
+    text = _read_smoke_test_text()
+    assert "BINANCE_LIVE_HARD_MAX_POSITION_NOTIONAL_USDT" in text
+
+
+def test_smoke_test_contains_preflight_max_position() -> None:
+    """Script must compute preflight_max_position from preflight config."""
+    text = _read_smoke_test_text()
+    assert "preflight_max_position" in text
+
+
+def test_smoke_test_contains_max_position_notional() -> None:
+    """Script must reference max_position_notional_usdt from preflight config."""
+    text = _read_smoke_test_text()
+    assert "max_position_notional_usdt" in text
