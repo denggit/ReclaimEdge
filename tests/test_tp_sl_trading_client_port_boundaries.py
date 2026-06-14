@@ -73,30 +73,42 @@ class TestNoDirectRestEndpoints:
                     "direct /api/v5/trade/order"
                 )
 
-    def test_protective_stop_primary_no_direct_order_algo(self) -> None:
-        """ProtectiveStopManager primary SL path must not call
-        /api/v5/trade/order-algo."""
+    def test_protective_stop_placement_methods_no_direct_order_algo(self) -> None:
+        """All ProtectiveStopManager placement methods must not call
+        /api/v5/trade/order-algo or extract_algo_id."""
         text = Path(
             "src/execution/tp_sl_protective_stop_manager.py"
         ).read_text(encoding="utf-8")
 
+        # Placement method names (not cancel methods)
+        placement_methods = [
+            "place_near_tp_protective_stop_with_retries",
+            "place_middle_runner_protective_stop_with_retries",
+            "place_middle_bucket_fast_protective_stop_with_retries",
+            "place_trend_runner_protective_stop_with_retries",
+            "place_three_stage_post_tp1_protective_stop_with_retries",
+            "_place_primary_protective_stop_semantic",
+        ]
+
         lines = text.splitlines()
-        in_method = False
-        fallback_section = False
-        for line in lines:
-            if "def place_near_tp_protective_stop_with_retries" in line:
-                in_method = True
-                fallback_section = False
-                continue
-            if in_method and "fallback" in line.lower() and "conditional" in line.lower():
-                fallback_section = True
-            if in_method and line.startswith("    def "):
-                break
-            if in_method and not fallback_section and '"/api/v5/trade/order-algo"' in line:
-                pytest.fail(
-                    "primary SL path must not contain direct "
-                    "/api/v5/trade/order-algo"
-                )
+        for method_name in placement_methods:
+            in_method = False
+            for line in lines:
+                if f"def {method_name}" in line:
+                    in_method = True
+                    continue
+                if in_method and line.startswith("    def "):
+                    in_method = False
+                    continue
+                if in_method and '"/api/v5/trade/order-algo"' in line:
+                    pytest.fail(
+                        f"{method_name} must not contain direct "
+                        "/api/v5/trade/order-algo"
+                    )
+                if in_method and "extract_algo_id(" in line:
+                    pytest.fail(
+                        f"{method_name} must not call extract_algo_id"
+                    )
 
     def test_execution_manager_cancel_no_direct_cancel_order(self) -> None:
         """cancel_existing_reduce_only_orders non-semantic branch must not
@@ -312,6 +324,93 @@ class TestTradingClientAttribute:
 
         manager = ProtectiveStopManager(trader, trading_client=tc)
         assert manager.trading_client is tc
+
+
+# ===================================================================
+# 6. Method-level boundary checks for protective stop manager
+# ===================================================================
+
+
+class TestProtectiveStopManagerMethodBoundaries:
+    """Granular per-method boundary verification for
+    ProtectiveStopManager."""
+
+    PLACEMENT_METHODS = [
+        "place_near_tp_protective_stop_with_retries",
+        "place_middle_runner_protective_stop_with_retries",
+        "place_middle_bucket_fast_protective_stop_with_retries",
+        "place_trend_runner_protective_stop_with_retries",
+        "place_three_stage_post_tp1_protective_stop_with_retries",
+        "_place_primary_protective_stop_semantic",
+    ]
+
+    CANCEL_METHODS = [
+        "_cancel_unverified_near_tp_algo",
+    ]
+
+    FORBIDDEN_IN_PLACEMENT = [
+        '"/api/v5/trade/order-algo"',
+        "extract_algo_id(",
+        '"/api/v5/trade/cancel-algos"',
+    ]
+
+    @pytest.mark.parametrize("method_name", PLACEMENT_METHODS)
+    def test_placement_methods_no_forbidden_patterns(self, method_name: str) -> None:
+        text = Path(
+            "src/execution/tp_sl_protective_stop_manager.py"
+        ).read_text(encoding="utf-8")
+
+        lines = text.splitlines()
+        in_method = False
+        for i, line in enumerate(lines, 1):
+            if f"def {method_name}" in line:
+                in_method = True
+                continue
+            if in_method and line.startswith("    def "):
+                in_method = False
+                continue
+            if in_method:
+                for forbidden in self.FORBIDDEN_IN_PLACEMENT:
+                    if forbidden in line:
+                        # Skip comments
+                        stripped = line.strip()
+                        if stripped.startswith("#"):
+                            continue
+                        pytest.fail(
+                            f"{method_name}:{i} must not contain {forbidden}"
+                        )
+
+    def test_cancel_method_allows_cancel_algos(self) -> None:
+        """_cancel_unverified_near_tp_algo delegates to trader, which is
+        allowed to use cancel-algos. This test verifies the method itself
+        does not contain placement endpoints."""
+        text = Path(
+            "src/execution/tp_sl_protective_stop_manager.py"
+        ).read_text(encoding="utf-8")
+
+        lines = text.splitlines()
+        in_method = False
+        for i, line in enumerate(lines, 1):
+            if "def _cancel_unverified_near_tp_algo" in line:
+                in_method = True
+                continue
+            if in_method and line.startswith("    def "):
+                in_method = False
+                continue
+            if in_method:
+                stripped = line.strip()
+                if stripped.startswith("#"):
+                    continue
+                if '"/api/v5/trade/order-algo"' in line:
+                    pytest.fail(
+                        f"_cancel_unverified_near_tp_algo:{i} must not "
+                        "contain placement endpoint order-algo"
+                    )
+                if "extract_algo_id(" in line:
+                    pytest.fail(
+                        f"_cancel_unverified_near_tp_algo:{i} must not "
+                        "call extract_algo_id"
+                    )
 
 
 if __name__ == "__main__":

@@ -115,14 +115,22 @@ class ProtectiveStopManager:
                     await asyncio.sleep(retry_interval_seconds)
 
         # NOTE:
-        # This is an OKX-specific safety fallback, not a generic broker semantic action.
-        # Keep it on the legacy OKX body path until a cross-exchange conditional-close
-        # semantic is explicitly designed and covered by parity tests.
+        # This fallback loop uses the same TradingClientPort.place_stop_market_order()
+        # primitive as the primary path. The loop is retained for parity with the
+        # original retry budget (2 × retry_count total attempts) and for distinct
+        # logging / phase labelling.
         for attempt in range(1, retry_count + 1):
             try:
-                body = t._near_tp_fallback_conditional_close_body(side, contracts, stop_price)
-                res = await t.request("POST", "/api/v5/trade/order-algo", body)
-                algo_id = t.extract_algo_id(res)
+                result = await self.trading_client.place_stop_market_order(
+                    side=side,
+                    qty=contracts,
+                    trigger_price=Decimal(str(stop_price)),
+                    reduce_only=True,
+                    client_order_id="",
+                )
+                algo_id = result.order_id
+                if algo_id is None:
+                    raise RuntimeError("protective_stop_fallback_missing_order_id")
                 if await self.trader.verify_near_tp_protective_stop(algo_id, side, contracts, stop_price):
                     return True, algo_id, "fallback_conditional_close_placed"
                 await self.trader._cancel_unverified_near_tp_algo(algo_id, phase="secondary")
@@ -151,7 +159,7 @@ class ProtectiveStopManager:
             retry_count: int,
             retry_interval_seconds: float,
     ) -> tuple[bool, str | None, str]:
-        ok, order_id, message = await self.trader.place_near_tp_protective_stop_with_retries(
+        ok, order_id, message = await self.place_near_tp_protective_stop_with_retries(
             side,
             contracts,
             stop_price,
@@ -170,7 +178,7 @@ class ProtectiveStopManager:
             retry_count: int,
             retry_interval_seconds: float,
     ) -> tuple[bool, str | None, str]:
-        ok, order_id, message = await self.trader.place_near_tp_protective_stop_with_retries(
+        ok, order_id, message = await self.place_near_tp_protective_stop_with_retries(
             side,
             contracts,
             stop_price,
@@ -189,7 +197,7 @@ class ProtectiveStopManager:
             retry_count: int,
             retry_interval_seconds: float,
     ) -> tuple[bool, str | None, str]:
-        ok, order_id, message = await self.trader.place_near_tp_protective_stop_with_retries(
+        ok, order_id, message = await self.place_near_tp_protective_stop_with_retries(
             side,
             contracts,
             stop_price,
@@ -208,7 +216,7 @@ class ProtectiveStopManager:
             retry_count: int,
             retry_interval_seconds: float,
     ) -> tuple[bool, str | None, str]:
-        ok, order_id, message = await self.trader.place_near_tp_protective_stop_with_retries(
+        ok, order_id, message = await self.place_near_tp_protective_stop_with_retries(
             side,
             contracts,
             stop_price,

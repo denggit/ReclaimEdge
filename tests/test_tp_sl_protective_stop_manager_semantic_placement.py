@@ -6,10 +6,13 @@
 @File       : test_tp_sl_protective_stop_manager_semantic_placement.py
 @Description: Tests for the optional semantic protective SL placement path
               in ProtectiveStopManager.place_near_tp_protective_stop_with_retries().
+              When semantic is disabled, placement routes through TradingClientPort.
+              When semantic is enabled, placement routes through semantic executor.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
 
@@ -21,8 +24,42 @@ from src.exchanges.semantic_models import (
     BrokerSemanticOrderRole,
     BrokerSemanticResult,
 )
-from src.execution.okx_trading_client import OkxTradingClient
 from src.execution.tp_sl_protective_stop_manager import ProtectiveStopManager
+
+
+# ---------------------------------------------------------------------------
+# FakeTradingClient — records place_stop_market_order calls
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class FakeOrderResult:
+    ok: bool = True
+    order_id: str | None = "sl-port-1"
+    client_order_id: str | None = None
+    message: str = ""
+
+
+class FakeTradingClient:
+    """Records every TradingClientPort call so tests can assert routing."""
+
+    def __init__(self) -> None:
+        self.place_stop_calls: list[dict[str, Any]] = []
+        self._next_stop_result = FakeOrderResult(order_id="sl-port-1")
+
+    async def place_stop_market_order(
+        self, *, side, qty, trigger_price, reduce_only, client_order_id
+    ) -> FakeOrderResult:
+        self.place_stop_calls.append(
+            {
+                "side": side,
+                "qty": qty,
+                "trigger_price": trigger_price,
+                "reduce_only": reduce_only,
+                "client_order_id": client_order_id,
+            }
+        )
+        return self._next_stop_result
 
 
 # ---------------------------------------------------------------------------
@@ -103,26 +140,6 @@ class FakeTrader:
             return value
         return Decimal(str(value))
 
-    def _near_tp_protective_sl_algo_body(
-        self, side: str, contracts: Decimal, stop_price: float
-    ) -> dict[str, Any]:
-        return {
-            "legacy_primary": True,
-            "side": side,
-            "contracts": str(contracts),
-            "stop_price": str(stop_price),
-        }
-
-    def _near_tp_fallback_conditional_close_body(
-        self, side: str, contracts: Decimal, stop_price: float
-    ) -> dict[str, Any]:
-        return {
-            "legacy_fallback": True,
-            "side": side,
-            "contracts": str(contracts),
-            "stop_price": str(stop_price),
-        }
-
     async def request(
         self, method: str, endpoint: str, payload: Any | None = None
     ) -> dict[str, Any]:
@@ -140,7 +157,8 @@ class FakeTrader:
         self, algo_id: str, side: str, contracts: Decimal, stop_price: float
     ) -> bool:
         self._verify_calls.append(algo_id)
-        # Use fallback_verify_result for fallback algo IDs
+        # Fallback algo IDs from fake trading client don't start with "fallback-"
+        # since they come from FakeTradingClient, not from FakeTrader.request().
         if algo_id.startswith("fallback-"):
             return self.fallback_verify_result
         return self.verify_result
@@ -164,24 +182,31 @@ class FakeTrader:
 # ---------------------------------------------------------------------------
 
 
-def make_manager(trader: FakeTrader, trading_client=None) -> ProtectiveStopManager:
+def make_manager(
+    trader: FakeTrader, trading_client: FakeTradingClient | None = None
+) -> ProtectiveStopManager:
     if trading_client is None:
-        trading_client = OkxTradingClient(trader)
+        trading_client = FakeTradingClient()
     return ProtectiveStopManager(trader, trading_client=trading_client)  # type: ignore[arg-type]
 
 
 # ===================================================================
-# Test: default off → legacy primary
+# Test: default off → TradingClientPort primary
 # ===================================================================
 
 
 @pytest.mark.asyncio
-async def test_default_off_uses_legacy_primary(monkeypatch: pytest.MonkeyPatch) -> None:
-    """When the env var is not set, legacy algo body path is used."""
+async def test_default_off_uses_trading_client_port_primary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the env var is not set, primary placement routes through
+    TradingClientPort.place_stop_market_order()."""
     monkeypatch.delenv("BROKER_SEMANTIC_PROTECTIVE_SL_PLACEMENT_ENABLED", raising=False)
 
     trader = FakeTrader()
-    manager = make_manager(trader)
+    fake_tc = FakeTradingClient()
+    fake_tc._next_stop_result = FakeOrderResult(order_id="sl-tc-1")
+    manager = make_manager(trader, trading_client=fake_tc)
 
     ok, algo_id, message = await manager.place_near_tp_protective_stop_with_retries(
         side="LONG",
@@ -192,31 +217,35 @@ async def test_default_off_uses_legacy_primary(monkeypatch: pytest.MonkeyPatch) 
     )
 
     assert ok is True
-    assert algo_id == "legacy-algo-1"
+    assert algo_id == "sl-tc-1"
     assert message == "protective_sl_placed"
-    assert len(trader.requests) == 1
-    method, endpoint, body = trader.requests[0]
-    assert method == "POST"
-    assert endpoint == "/api/v5/trade/order-algo"
-    assert body["sz"] == "10"
-    assert body["slTriggerPx"] == "3400.00"
-    assert body["reduceOnly"] == "true"
-    assert body["ordType"] == "conditional"
-    assert trader.semantic.calls == []
+    assert len(fake_tc.place_stop_calls) == 1
+    call = fake_tc.place_stop_calls[0]
+    assert call["side"] == "LONG"
+    assert call["qty"] == Decimal("10")
+    assert call["trigger_price"] == Decimal("3400.0")
+    assert call["reduce_only"] is True
+    assert call["client_order_id"] == ""
+    assert trader.requests == [], "No direct REST request when routing through port"
+    assert trader.semantic.calls == [], "Semantic not used when disabled"
 
 
 # ===================================================================
-# Test: enabled → semantic primary, no legacy
+# Test: enabled → semantic primary, no trading client
 # ===================================================================
 
 
 @pytest.mark.asyncio
-async def test_enabled_uses_semantic_primary_no_legacy(monkeypatch: pytest.MonkeyPatch) -> None:
-    """When enabled, primary placement goes through semantic executor, not legacy request."""
+async def test_enabled_uses_semantic_primary_no_trading_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When enabled, primary placement goes through semantic executor,
+    not trading_client."""
     monkeypatch.setenv("BROKER_SEMANTIC_PROTECTIVE_SL_PLACEMENT_ENABLED", "true")
 
     trader = FakeTrader()
-    manager = make_manager(trader)
+    fake_tc = FakeTradingClient()
+    manager = make_manager(trader, trading_client=fake_tc)
 
     ok, algo_id, message = await manager.place_near_tp_protective_stop_with_retries(
         side="LONG",
@@ -230,6 +259,9 @@ async def test_enabled_uses_semantic_primary_no_legacy(monkeypatch: pytest.Monke
     assert algo_id == "semantic-sl-1"
     assert message == "protective_sl_placed"
     assert trader.requests == [], "Legacy request must not be made when semantic is enabled"
+    assert fake_tc.place_stop_calls == [], (
+        "Trading client must not be used when semantic primary succeeds"
+    )
     assert len(trader.semantic.calls) == 1
     call = trader.semantic.calls[0]
     assert call["side"] == BrokerPositionSide.LONG
@@ -270,18 +302,31 @@ async def test_enabled_maps_short_side(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 # ===================================================================
-# Test: verify failure → cancel unverified
+# Test: verify failure → cancel unverified, fallback through port
 # ===================================================================
 
 
 @pytest.mark.asyncio
-async def test_verify_failure_cancels_unverified_semantic(monkeypatch: pytest.MonkeyPatch) -> None:
-    """When verify fails, cancel_unverified is called for the semantic algo_id."""
+async def test_verify_failure_cancels_unverified_semantic_fallback_via_port(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When verify fails, cancel_unverified is called for the semantic algo_id,
+    and the fallback path routes through TradingClientPort."""
     monkeypatch.setenv("BROKER_SEMANTIC_PROTECTIVE_SL_PLACEMENT_ENABLED", "true")
 
     trader = FakeTrader()
-    trader.verify_result = False
-    manager = make_manager(trader)
+    fake_tc = FakeTradingClient()
+    fake_tc._next_stop_result = FakeOrderResult(order_id="sl-fallback-tc")
+    manager = make_manager(trader, trading_client=fake_tc)
+
+    # Use a counting verify: primary (semantic) fails, fallback (port) succeeds
+    verify_count = [0]
+
+    async def counting_verify(_algo_id, _side, _contracts, _stop_price):
+        verify_count[0] += 1
+        return verify_count[0] > 1  # First call fails, subsequent succeed
+
+    trader.verify_near_tp_protective_stop = counting_verify  # type: ignore[method-assign]
 
     ok, algo_id, message = await manager.place_near_tp_protective_stop_with_retries(
         side="LONG",
@@ -291,35 +336,46 @@ async def test_verify_failure_cancels_unverified_semantic(monkeypatch: pytest.Mo
         retry_interval_seconds=0,
     )
 
+    # Primary semantic was attempted, verify failed → cancelled
     assert ("semantic-sl-1", "primary") in trader.cancelled_unverified
 
-    # After primary verify fail → cancel, fallback conditional close kicked in
+    # Fallback routes through trading_client (not legacy request)
     assert ok is True
-    assert algo_id == "fallback-algo-1"
+    assert algo_id == "sl-fallback-tc"
     assert message == "fallback_conditional_close_placed"
 
     # Semantic was called once for primary
     assert len(trader.semantic.calls) == 1
 
-    # Fallback was via legacy request
-    fallback_requests = [r for r in trader.requests if r[2] and r[2].get("legacy_fallback")]
-    assert len(fallback_requests) == 1
+    # Fallback via trading client, not legacy request
+    assert len(fake_tc.place_stop_calls) == 1
+    call = fake_tc.place_stop_calls[0]
+    assert call["side"] == "LONG"
+    assert call["qty"] == Decimal("10")
+    assert call["trigger_price"] == Decimal("3400.0")
+    assert call["reduce_only"] is True
+    assert trader.requests == [], "No direct REST request in fallback path"
 
 
 # ===================================================================
-# Test: semantic failure → retry/fallback
+# Test: semantic failure → fallback through port
 # ===================================================================
 
 
 @pytest.mark.asyncio
-async def test_semantic_failure_enters_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
-    """When semantic primary fails, the exception is caught and fallback conditional close is used."""
+async def test_semantic_failure_enters_fallback_via_port(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When semantic primary fails, the exception is caught and fallback
+    uses TradingClientPort.place_stop_market_order()."""
     monkeypatch.setenv("BROKER_SEMANTIC_PROTECTIVE_SL_PLACEMENT_ENABLED", "true")
 
     trader = FakeTrader()
     trader.semantic.ok = False
     trader.semantic.message = "boom"
-    manager = make_manager(trader)
+    fake_tc = FakeTradingClient()
+    fake_tc._next_stop_result = FakeOrderResult(order_id="sl-fallback-tc")
+    manager = make_manager(trader, trading_client=fake_tc)
 
     ok, algo_id, message = await manager.place_near_tp_protective_stop_with_retries(
         side="LONG",
@@ -332,16 +388,17 @@ async def test_semantic_failure_enters_fallback(monkeypatch: pytest.MonkeyPatch)
     # Semantic was attempted once
     assert len(trader.semantic.calls) == 1
 
-    # No legacy primary request
-    primary_requests = [r for r in trader.requests if r[2] and r[2].get("legacy_primary")]
-    assert primary_requests == [], "Legacy primary must not be used when semantic is enabled"
+    # No legacy request
+    assert trader.requests == [], "Legacy request must not be used"
 
-    # Fallback conditional close was used
-    fallback_requests = [r for r in trader.requests if r[2] and r[2].get("legacy_fallback")]
-    assert len(fallback_requests) == 1
+    # Fallback routes through trading client
+    assert len(fake_tc.place_stop_calls) == 1
+    call = fake_tc.place_stop_calls[0]
+    assert call["side"] == "LONG"
+    assert call["reduce_only"] is True
 
     assert ok is True
-    assert algo_id == "fallback-algo-1"
+    assert algo_id == "sl-fallback-tc"
     assert message == "fallback_conditional_close_placed"
 
 
@@ -373,14 +430,17 @@ class TestEnvVarVariants:
         assert message == "protective_sl_placed"
         assert len(trader.semantic.calls) == 1
         assert trader.requests == []
+        assert manager.trading_client.place_stop_calls == []
 
     @pytest.mark.parametrize("value", ["0", "false", "no", "n", "off", "", "   ", "maybe"])
     async def test_env_var_disabled_variants(self, monkeypatch, value: str) -> None:
-        """All falsy variants keep legacy path."""
+        """All falsy variants route through TradingClientPort."""
         monkeypatch.setenv("BROKER_SEMANTIC_PROTECTIVE_SL_PLACEMENT_ENABLED", value)
 
         trader = FakeTrader()
-        manager = make_manager(trader)
+        fake_tc = FakeTradingClient()
+        fake_tc._next_stop_result = FakeOrderResult(order_id="sl-disabled-tc")
+        manager = make_manager(trader, trading_client=fake_tc)
 
         ok, algo_id, message = await manager.place_near_tp_protective_stop_with_retries(
             side="LONG",
@@ -391,15 +451,17 @@ class TestEnvVarVariants:
         )
 
         assert ok is True
-        assert algo_id == "legacy-algo-1"
+        assert algo_id == "sl-disabled-tc"
         assert message == "protective_sl_placed"
         assert trader.semantic.calls == []
-        assert len(trader.requests) == 1
-        method, endpoint, body = trader.requests[0]
-        assert method == "POST"
-        assert endpoint == "/api/v5/trade/order-algo"
-        assert body["ordType"] == "conditional"
-        assert body["reduceOnly"] == "true"
+        assert trader.requests == [], "No direct REST when disabled — must route through port"
+        assert len(fake_tc.place_stop_calls) == 1
+        call = fake_tc.place_stop_calls[0]
+        assert call["side"] == "LONG"
+        assert call["qty"] == Decimal("10")
+        assert call["trigger_price"] == Decimal("3400.0")
+        assert call["reduce_only"] is True
+        assert call["client_order_id"] == ""
 
 
 # ===================================================================
@@ -407,7 +469,9 @@ class TestEnvVarVariants:
 # ===================================================================
 
 
-def test_broker_semantic_protective_sl_placement_enabled_default(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_broker_semantic_protective_sl_placement_enabled_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Default returns False when the env var is absent."""
     monkeypatch.delenv("BROKER_SEMANTIC_PROTECTIVE_SL_PLACEMENT_ENABLED", raising=False)
 
@@ -427,13 +491,19 @@ def test_broker_position_side_unknown_raises() -> None:
         ProtectiveStopManager._broker_position_side("UNKNOWN")
 
 
-def test_fallback_conditional_close_remains_legacy_boundary() -> None:
+def test_fallback_routes_through_trading_client_port() -> None:
+    """The fallback path no longer uses _near_tp_fallback_conditional_close_body;
+    it now routes through TradingClientPort."""
     from pathlib import Path
 
     text = Path("src/execution/tp_sl_protective_stop_manager.py").read_text(encoding="utf-8")
 
-    assert "_near_tp_fallback_conditional_close_body" in text
-    assert "cross-exchange conditional-close" in text
+    # Fallback placement no longer uses the legacy conditional close body
+    assert "_near_tp_fallback_conditional_close_body" not in text, (
+        "fallback must not use legacy conditional close body — route through TradingClientPort"
+    )
+    # Both primary and fallback use TradingClientPort
+    assert "trading_client.place_stop_market_order" in text
 
 
 def test_no_fallback_conditional_close_semantic_action_exists() -> None:

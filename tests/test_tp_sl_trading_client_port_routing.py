@@ -535,5 +535,264 @@ class TestNoDirectRestEndpointsInReplacedPaths:
         assert "/api/v5/trade/cancel-algos" in text
 
 
+# ===================================================================
+# 5. Fallback protective SL path → place_stop_market_order()
+# ===================================================================
+
+
+class TestProtectiveSlFallbackRoutesToPort:
+    """When primary retries are exhausted, the fallback loop also routes
+    through trading_client.place_stop_market_order()."""
+
+    @pytest.mark.asyncio
+    async def test_fallback_routes_to_port(self) -> None:
+        from src.execution.tp_sl_protective_stop_manager import ProtectiveStopManager
+
+        trader = _make_minimal_trader()
+        trader.decimal_to_str = lambda v: str(v)
+        trader.price_to_str = lambda p: f"{float(p):.2f}"
+
+        fake = FakeTradingClient()
+        fake._next_stop_result = FakeOrderResult(order_id="sl-fallback-1")
+
+        manager = ProtectiveStopManager(trader, trading_client=fake)
+
+        verify_count = [0]
+
+        async def fake_verify(_algo_id, _side, _contracts, _stop_price):
+            verify_count[0] += 1
+            # Primary retries (3 attempts) all fail, fallback succeeds
+            return verify_count[0] > 3
+
+        async def fake_cancel_algo(_algo_id, *, phase=""):
+            return None
+
+        trader.verify_near_tp_protective_stop = fake_verify
+        trader._cancel_unverified_near_tp_algo = fake_cancel_algo
+        trader.cancel_near_tp_protective_stop = lambda _: True
+
+        ok, algo_id, message = await manager.place_near_tp_protective_stop_with_retries(
+            side="LONG",
+            contracts=Decimal("10"),
+            stop_price=2950.0,
+            retry_count=3,
+            retry_interval_seconds=0,
+        )
+
+        assert ok is True
+        assert algo_id == "sl-fallback-1"
+        assert message == "fallback_conditional_close_placed"
+        # 3 primary attempts + 1 successful fallback = 4 total
+        assert len(fake.place_stop_calls) == 4
+        # All calls have the same parameters
+        for call in fake.place_stop_calls:
+            assert call["side"] == "LONG"
+            assert call["qty"] == Decimal("10")
+            assert call["trigger_price"] == Decimal("2950.0")
+            assert call["reduce_only"] is True
+            assert call["client_order_id"] == ""
+
+    @pytest.mark.asyncio
+    async def test_fallback_exhausted_returns_false(self) -> None:
+        """When both primary and fallback are exhausted, returns False."""
+        from src.execution.tp_sl_protective_stop_manager import ProtectiveStopManager
+
+        trader = _make_minimal_trader()
+        trader.decimal_to_str = lambda v: str(v)
+        trader.price_to_str = lambda p: f"{float(p):.2f}"
+
+        fake = FakeTradingClient()
+        fake._next_stop_result = FakeOrderResult(order_id="sl-exhaust-1")
+
+        manager = ProtectiveStopManager(trader, trading_client=fake)
+
+        async def fake_verify(_algo_id, _side, _contracts, _stop_price):
+            return False  # never verifies
+
+        async def fake_cancel_algo(_algo_id, *, phase=""):
+            return None
+
+        trader.verify_near_tp_protective_stop = fake_verify
+        trader._cancel_unverified_near_tp_algo = fake_cancel_algo
+        trader.cancel_near_tp_protective_stop = lambda _: True
+
+        ok, algo_id, message = await manager.place_near_tp_protective_stop_with_retries(
+            side="SHORT",
+            contracts=Decimal("5"),
+            stop_price=3700.0,
+            retry_count=2,
+            retry_interval_seconds=0,
+        )
+
+        assert ok is False
+        assert algo_id is None
+        # 2 primary + 2 fallback = 4 total calls
+        assert len(fake.place_stop_calls) == 4
+        for call in fake.place_stop_calls:
+            assert call["side"] == "SHORT"
+            assert call["reduce_only"] is True
+
+
+# ===================================================================
+# 6. Delegating protective SL methods → place_stop_market_order()
+# ===================================================================
+
+
+class TestDelegatingProtectiveSlMethodsRouteToPort:
+    """place_middle_runner / place_middle_bucket_fast / place_trend_runner /
+    place_three_stage_post_tp1 all delegate to
+    place_near_tp_protective_stop_with_retries and therefore route
+    through trading_client.place_stop_market_order()."""
+
+    @pytest.mark.asyncio
+    async def test_middle_runner_routes_to_port(self) -> None:
+        from src.execution.tp_sl_protective_stop_manager import ProtectiveStopManager
+
+        trader = _make_minimal_trader()
+        trader.decimal_to_str = lambda v: str(v)
+        trader.price_to_str = lambda p: f"{float(p):.2f}"
+
+        fake = FakeTradingClient()
+        fake._next_stop_result = FakeOrderResult(order_id="sl-middle-runner-1")
+
+        manager = ProtectiveStopManager(trader, trading_client=fake)
+
+        async def fake_verify(_algo_id, _side, _contracts, _stop_price):
+            return True
+
+        trader.verify_near_tp_protective_stop = fake_verify
+
+        ok, algo_id, message = await manager.place_middle_runner_protective_stop_with_retries(
+            side="LONG",
+            contracts=Decimal("8"),
+            stop_price=2900.0,
+            retry_count=1,
+            retry_interval_seconds=0,
+        )
+
+        assert ok is True
+        assert algo_id == "sl-middle-runner-1"
+        assert message == "protective_sl_placed"
+        assert trader.middle_runner_protective_sl_order_id == "sl-middle-runner-1"
+        assert len(fake.place_stop_calls) == 1
+        call = fake.place_stop_calls[0]
+        assert call["side"] == "LONG"
+        assert call["qty"] == Decimal("8")
+        assert call["trigger_price"] == Decimal("2900.0")
+        assert call["reduce_only"] is True
+        assert call["client_order_id"] == ""
+
+    @pytest.mark.asyncio
+    async def test_middle_bucket_fast_routes_to_port(self) -> None:
+        from src.execution.tp_sl_protective_stop_manager import ProtectiveStopManager
+
+        trader = _make_minimal_trader()
+        trader.decimal_to_str = lambda v: str(v)
+        trader.price_to_str = lambda p: f"{float(p):.2f}"
+
+        fake = FakeTradingClient()
+        fake._next_stop_result = FakeOrderResult(order_id="sl-bucket-fast-1")
+
+        manager = ProtectiveStopManager(trader, trading_client=fake)
+
+        async def fake_verify(_algo_id, _side, _contracts, _stop_price):
+            return True
+
+        trader.verify_near_tp_protective_stop = fake_verify
+
+        ok, algo_id, message = await manager.place_middle_bucket_fast_protective_stop_with_retries(
+            side="SHORT",
+            contracts=Decimal("6"),
+            stop_price=3750.0,
+            retry_count=1,
+            retry_interval_seconds=0,
+        )
+
+        assert ok is True
+        assert algo_id == "sl-bucket-fast-1"
+        assert message == "protective_sl_placed"
+        assert trader.middle_bucket_fast_sl_order_id == "sl-bucket-fast-1"
+        assert len(fake.place_stop_calls) == 1
+        call = fake.place_stop_calls[0]
+        assert call["side"] == "SHORT"
+        assert call["qty"] == Decimal("6")
+        assert call["trigger_price"] == Decimal("3750.0")
+        assert call["reduce_only"] is True
+
+    @pytest.mark.asyncio
+    async def test_trend_runner_routes_to_port(self) -> None:
+        from src.execution.tp_sl_protective_stop_manager import ProtectiveStopManager
+
+        trader = _make_minimal_trader()
+        trader.decimal_to_str = lambda v: str(v)
+        trader.price_to_str = lambda p: f"{float(p):.2f}"
+
+        fake = FakeTradingClient()
+        fake._next_stop_result = FakeOrderResult(order_id="sl-trend-1")
+
+        manager = ProtectiveStopManager(trader, trading_client=fake)
+
+        async def fake_verify(_algo_id, _side, _contracts, _stop_price):
+            return True
+
+        trader.verify_near_tp_protective_stop = fake_verify
+
+        ok, algo_id, message = await manager.place_trend_runner_protective_stop_with_retries(
+            side="LONG",
+            contracts=Decimal("12"),
+            stop_price=2850.0,
+            retry_count=1,
+            retry_interval_seconds=0,
+        )
+
+        assert ok is True
+        assert algo_id == "sl-trend-1"
+        assert message == "protective_sl_placed"
+        assert trader.trend_runner_sl_order_id == "sl-trend-1"
+        assert len(fake.place_stop_calls) == 1
+        call = fake.place_stop_calls[0]
+        assert call["side"] == "LONG"
+        assert call["qty"] == Decimal("12")
+        assert call["trigger_price"] == Decimal("2850.0")
+        assert call["reduce_only"] is True
+
+    @pytest.mark.asyncio
+    async def test_three_stage_post_tp1_routes_to_port(self) -> None:
+        from src.execution.tp_sl_protective_stop_manager import ProtectiveStopManager
+
+        trader = _make_minimal_trader()
+        trader.decimal_to_str = lambda v: str(v)
+        trader.price_to_str = lambda p: f"{float(p):.2f}"
+
+        fake = FakeTradingClient()
+        fake._next_stop_result = FakeOrderResult(order_id="sl-three-stage-1")
+
+        manager = ProtectiveStopManager(trader, trading_client=fake)
+
+        async def fake_verify(_algo_id, _side, _contracts, _stop_price):
+            return True
+
+        trader.verify_near_tp_protective_stop = fake_verify
+
+        ok, algo_id, message = await manager.place_three_stage_post_tp1_protective_stop_with_retries(
+            side="SHORT",
+            contracts=Decimal("4"),
+            stop_price=3800.0,
+            retry_count=1,
+            retry_interval_seconds=0,
+        )
+
+        assert ok is True
+        assert algo_id == "sl-three-stage-1"
+        assert message == "protective_sl_placed"
+        assert trader.three_stage_post_tp1_protective_sl_order_id == "sl-three-stage-1"
+        assert len(fake.place_stop_calls) == 1
+        call = fake.place_stop_calls[0]
+        assert call["side"] == "SHORT"
+        assert call["qty"] == Decimal("4")
+        assert call["trigger_price"] == Decimal("3800.0")
+        assert call["reduce_only"] is True
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
