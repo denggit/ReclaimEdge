@@ -12,14 +12,14 @@ Trader or the exchangeʼs own broker client and is not wired into live trading
 paths.
 
 Key difference from OKX:
-- Binance USD‑M Futures manages STOP_MARKET / TAKE_PROFIT_MARKET through the
-  ordinary order endpoint, so there is no separate algo-order path.
-- ``place_protective_stop`` maps to ``broker_client.place_order(STOP_MARKET)``
-  instead of a dedicated algo stop method.
-- ``cancel_protective_stop`` maps to ``broker_client.cancel_order()``.
-- ``fetch_algo_orders`` always returns an empty tuple because Binance algo
-  orders are indistinguishable from regular open orders.
-- ``recover_open_orders`` only reads ordinary open orders.
+- Binance USD‑M Futures rejects STOP_MARKET / TAKE_PROFIT_MARKET through the
+  ordinary order endpoint (error -4120).  Protective stops MUST use the
+  Algo Order API (``POST /fapi/v1/algoOrder`` with ``algoType=CONDITIONAL``).
+- An optional ``algo_client`` (``BinanceAlgoOrderClient``) is injected for
+  protective stop operations.  Without it, ``PLACE_PROTECTIVE_STOP`` raises
+  a clear error — it never falls back to regular ``STOP_MARKET``.
+- ``FETCH_ALGO_ORDERS`` returns actual open algo orders when the algo client
+  is available.
 """
 
 from __future__ import annotations
@@ -35,6 +35,7 @@ from src.exchanges.models import (
     BrokerOrderRequest,
     BrokerOrderResult,
     BrokerOrderSide,
+    BrokerOrderStatus,
     BrokerOrderType,
     BrokerPositionSide,
     BrokerQuantityUnit,
@@ -51,8 +52,14 @@ from src.exchanges.semantics import BrokerSemanticExecutor
 class BinanceBrokerSemanticExecutor(BrokerSemanticExecutor):
     """Binance implementation of the broker semantic executor port."""
 
-    def __init__(self, broker_client: Any) -> None:
+    def __init__(
+        self,
+        broker_client: Any,
+        *,
+        algo_client: Any | None = None,
+    ) -> None:
         self._broker_client = broker_client
+        self._algo_client = algo_client
 
     @property
     def exchange(self) -> ExchangeName:
@@ -90,7 +97,6 @@ class BinanceBrokerSemanticExecutor(BrokerSemanticExecutor):
         if request.action in {
             BrokerSemanticAction.CANCEL_ORDER,
             BrokerSemanticAction.CANCEL_REDUCE_ONLY_TP,
-            BrokerSemanticAction.CANCEL_PROTECTIVE_STOP,
         }:
             order_id = _require_order_id(request)
             cancel_result = await self._broker_client.cancel_order(
@@ -101,6 +107,9 @@ class BinanceBrokerSemanticExecutor(BrokerSemanticExecutor):
                 request=request,
                 cancel_result=cancel_result,
             )
+
+        if request.action == BrokerSemanticAction.CANCEL_PROTECTIVE_STOP:
+            return await self._cancel_protective_stop(request)
 
         if request.action == BrokerSemanticAction.CANCEL_ALL_OPEN_ORDERS:
             raise _exchange_error(
@@ -132,36 +141,19 @@ class BinanceBrokerSemanticExecutor(BrokerSemanticExecutor):
             )
 
         if request.action == BrokerSemanticAction.FETCH_ALGO_ORDERS:
-            return BrokerSemanticResult(
-                exchange=request.exchange,
-                symbol=request.symbol,
-                action=request.action,
-                role=request.role,
-                ok=True,
-                orders=(),
-                message="binance_algo_orders_are_regular_open_orders",
-            )
+            return await self._fetch_algo_orders(request)
 
         if request.action == BrokerSemanticAction.RECOVER_OPEN_ORDERS:
-            ordinary_orders = await self._broker_client.fetch_open_orders(request.symbol)
-            recovered = tuple(
-                _with_metadata_source(order, "ordinary")
-                for order in ordinary_orders
-            )
-            return BrokerSemanticResult(
-                exchange=request.exchange,
-                symbol=request.symbol,
-                action=request.action,
-                role=request.role,
-                ok=True,
-                orders=recovered,
-                message="recovered_open_orders",
-            )
+            return await self._recover_open_orders(request)
 
         raise _exchange_error(
             ExchangeErrorKind.UNSUPPORTED_OPERATION,
             f"Unsupported Binance broker semantic action: {request.action}",
         )
+
+    # ------------------------------------------------------------------
+    # Open / add / TP / market exit (unchanged — regular order path)
+    # ------------------------------------------------------------------
 
     async def _place_open_order(
         self,
@@ -213,32 +205,6 @@ class BinanceBrokerSemanticExecutor(BrokerSemanticExecutor):
             order_result=order_result,
         )
 
-    async def _place_protective_stop(
-        self,
-        request: BrokerSemanticRequest,
-    ) -> BrokerSemanticResult:
-        position_side = _require_side(request)
-        quantity = _require_quantity(request)
-        trigger_price = _require_trigger_price(request)
-        order_request = BrokerOrderRequest(
-            exchange=ExchangeName.BINANCE,
-            symbol=request.symbol,
-            side=_close_order_side(position_side),
-            position_side=position_side,
-            order_type=BrokerOrderType.STOP_MARKET,
-            quantity=quantity,
-            quantity_unit=request.quantity_unit or BrokerQuantityUnit.CONTRACTS,
-            trigger_price=trigger_price,
-            reduce_only=True,
-            client_order_id=request.client_order_id,
-            metadata=request.metadata,
-        )
-        order_result = await self._broker_client.place_order(order_request)
-        return _semantic_result_from_order_result(
-            request=request,
-            order_result=order_result,
-        )
-
     async def _place_market_exit(
         self,
         request: BrokerSemanticRequest,
@@ -262,6 +228,208 @@ class BinanceBrokerSemanticExecutor(BrokerSemanticExecutor):
             request=request,
             order_result=order_result,
         )
+
+    # ------------------------------------------------------------------
+    # Protective stop — Algo Order API
+    # ------------------------------------------------------------------
+
+    async def _place_protective_stop(
+        self,
+        request: BrokerSemanticRequest,
+    ) -> BrokerSemanticResult:
+        if self._algo_client is None:
+            raise _exchange_error(
+                ExchangeErrorKind.UNSUPPORTED_OPERATION,
+                "PLACE_PROTECTIVE_STOP requires BinanceAlgoOrderClient; "
+                "regular STOP_MARKET is rejected by Binance (error -4120)",
+            )
+
+        position_side = _require_side(request)
+        quantity = _require_quantity(request)
+        trigger_price = _require_trigger_price(request)
+
+        # Convert contracts → base-asset quantity for algo order
+        from src.exchanges.binance.request_mapper import (
+            BINANCE_ETH_CONTRACT_SIZE_BASE,
+        )
+
+        base_qty = quantity * BINANCE_ETH_CONTRACT_SIZE_BASE
+
+        side = "SELL" if position_side == BrokerPositionSide.LONG else "BUY"
+        client_algo_id = request.client_order_id or ""
+
+        result = await self._algo_client.place_stop_loss(
+            symbol=request.symbol,
+            side=side,
+            quantity=base_qty,
+            trigger_price=trigger_price,
+            client_algo_id=client_algo_id,
+        )
+
+        return BrokerSemanticResult(
+            exchange=request.exchange,
+            symbol=request.symbol,
+            action=request.action,
+            role=request.role,
+            ok=result.ok,
+            order_id=result.order_id,
+            client_order_id=result.client_order_id,
+            message=result.message,
+            raw=result.raw,
+        )
+
+    async def _cancel_protective_stop(
+        self,
+        request: BrokerSemanticRequest,
+    ) -> BrokerSemanticResult:
+        if self._algo_client is None:
+            raise _exchange_error(
+                ExchangeErrorKind.UNSUPPORTED_OPERATION,
+                "CANCEL_PROTECTIVE_STOP requires BinanceAlgoOrderClient",
+            )
+
+        client_algo_id = request.order_id
+        if not client_algo_id:
+            raise _exchange_error(
+                ExchangeErrorKind.EXCHANGE_REJECTED,
+                "CANCEL_PROTECTIVE_STOP requires order_id (clientAlgoId)",
+            )
+
+        result = await self._algo_client.cancel_algo_order(
+            symbol=request.symbol,
+            client_algo_id=client_algo_id,
+        )
+
+        return BrokerSemanticResult(
+            exchange=request.exchange,
+            symbol=request.symbol,
+            action=request.action,
+            role=request.role,
+            ok=result.ok,
+            order_id=result.order_id,
+            client_order_id=result.client_order_id,
+            message=result.message,
+            raw=result.raw,
+        )
+
+    async def _fetch_algo_orders(
+        self,
+        request: BrokerSemanticRequest,
+    ) -> BrokerSemanticResult:
+        if self._algo_client is None:
+            return BrokerSemanticResult(
+                exchange=request.exchange,
+                symbol=request.symbol,
+                action=request.action,
+                role=request.role,
+                ok=True,
+                orders=(),
+                message="binance_algo_client_not_configured",
+            )
+
+        raw_orders = await self._algo_client.fetch_open_algo_orders(
+            symbol=request.symbol,
+        )
+
+        mapped: list[BrokerOrder] = []
+        for raw in raw_orders:
+            mapped.append(_map_algo_order_to_broker_order(raw))
+
+        return BrokerSemanticResult(
+            exchange=request.exchange,
+            symbol=request.symbol,
+            action=request.action,
+            role=request.role,
+            ok=True,
+            orders=tuple(mapped),
+        )
+
+    async def _recover_open_orders(
+        self,
+        request: BrokerSemanticRequest,
+    ) -> BrokerSemanticResult:
+        ordinary_orders = await self._broker_client.fetch_open_orders(request.symbol)
+        recovered = tuple(
+            _with_metadata_source(order, "ordinary")
+            for order in ordinary_orders
+        )
+
+        # Also include algo orders if the algo client is available
+        algo_orders: tuple[BrokerOrder, ...] = ()
+        if self._algo_client is not None:
+            raw_algo = await self._algo_client.fetch_open_algo_orders(
+                symbol=request.symbol,
+            )
+            algo_orders = tuple(
+                _with_metadata_source(_map_algo_order_to_broker_order(raw), "algo")
+                for raw in raw_algo
+            )
+
+        all_orders = recovered + algo_orders
+
+        return BrokerSemanticResult(
+            exchange=request.exchange,
+            symbol=request.symbol,
+            action=request.action,
+            role=request.role,
+            ok=True,
+            orders=all_orders,
+            message="recovered_open_orders",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Algo order → BrokerOrder mapper
+# ---------------------------------------------------------------------------
+
+
+def _map_algo_order_to_broker_order(raw: dict[str, Any]) -> BrokerOrder:
+    """Map a raw Binance algo order dict into a BrokerOrder DTO."""
+    from src.exchanges.binance.mapper import (
+        BINANCE_ETH_USDT_SYMBOL,
+        map_binance_order_side,
+    )
+
+    symbol = str(raw.get("symbol", BINANCE_ETH_USDT_SYMBOL))
+    algo_id = raw.get("algoId")
+    client_algo_id = raw.get("clientAlgoId")
+
+    order_type_str = str(raw.get("orderType") or raw.get("type") or "").upper()
+    if order_type_str == "STOP_MARKET":
+        order_type = BrokerOrderType.STOP_MARKET
+    elif order_type_str == "TAKE_PROFIT_MARKET":
+        order_type = BrokerOrderType.TAKE_PROFIT_MARKET
+    elif order_type_str == "MARKET":
+        order_type = BrokerOrderType.MARKET
+    elif order_type_str == "LIMIT":
+        order_type = BrokerOrderType.LIMIT
+    else:
+        order_type = BrokerOrderType.UNKNOWN
+
+    quantity = Decimal(str(raw.get("quantity") or "0"))
+
+    return BrokerOrder(
+        exchange=ExchangeName.BINANCE,
+        symbol=symbol,
+        order_id=str(algo_id) if algo_id is not None else None,
+        client_order_id=str(client_algo_id) if client_algo_id is not None else None,
+        side=map_binance_order_side(raw.get("side")),
+        position_side=BrokerPositionSide.UNKNOWN,
+        order_type=order_type,
+        status=BrokerOrderStatus.OPEN,
+        price=None,
+        quantity=quantity,
+        quantity_unit=BrokerQuantityUnit.BASE_ASSET,
+        reduce_only=True,
+        trigger_price=Decimal(str(raw.get("triggerPrice") or "0")) if raw.get("triggerPrice") else None,
+        raw=dict(raw),
+        metadata={"source": "algo"},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Shared helpers
+# ---------------------------------------------------------------------------
 
 
 def _require_side(request: BrokerSemanticRequest) -> BrokerPositionSide:

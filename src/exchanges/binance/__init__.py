@@ -10,6 +10,7 @@ Real broker execution is deferred to a later task.
 """
 
 from src.exchanges.binance.aiohttp_transport import AiohttpBinanceTransport
+from src.exchanges.binance.algo_orders import BinanceAlgoOrderClient
 from src.exchanges.binance.client import BinanceBrokerClient
 from src.exchanges.binance.mapper import (
     BINANCE_ETH_USDT_SYMBOL,
@@ -32,11 +33,13 @@ from src.exchanges.binance.request_mapper import (
 )
 from src.exchanges.binance.semantic_executor import BinanceBrokerSemanticExecutor
 from src.exchanges.binance.signing import (
+    BINANCE_USDM_ALGO_ORDER_PATH,
     BINANCE_USDM_BASE_URL,
-    BINANCE_USDM_TESTNET_BASE_URL,
+    BINANCE_USDM_OPEN_ALGO_ORDERS_PATH,
     BINANCE_USDM_ORDER_PATH,
     BINANCE_USDM_OPEN_ORDERS_PATH,
     BINANCE_USDM_POSITION_RISK_PATH,
+    BINANCE_USDM_TESTNET_BASE_URL,
     BinanceSignedRequest,
     binance_api_key_headers,
     build_query_string,
@@ -49,14 +52,17 @@ from src.exchanges.binance.transport import BinanceHttpTransport, BinanceTranspo
 
 __all__ = [
     "AiohttpBinanceTransport",
+    "BinanceAlgoOrderClient",
     "BinanceBrokerSemanticExecutor",
     "BINANCE_ETH_CONTRACT_SIZE_BASE",
     "BINANCE_ETH_USDT_SYMBOL",
+    "BINANCE_USDM_ALGO_ORDER_PATH",
     "BINANCE_USDM_BASE_URL",
-    "BINANCE_USDM_TESTNET_BASE_URL",
+    "BINANCE_USDM_OPEN_ALGO_ORDERS_PATH",
     "BINANCE_USDM_ORDER_PATH",
     "BINANCE_USDM_OPEN_ORDERS_PATH",
     "BINANCE_USDM_POSITION_RISK_PATH",
+    "BINANCE_USDM_TESTNET_BASE_URL",
     "BinanceBrokerClient",
     "BinanceHttpTransport",
     "BinanceSignedRequest",

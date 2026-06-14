@@ -64,26 +64,47 @@ class TestBinanceSignalOnlyBranch:
 
         assert called_with.get("called") is True
 
-    def test_binance_signal_only_false_raises(self) -> None:
-        """EXCHANGE=binance + SIGNAL_ONLY=false raises RuntimeError."""
-        env = {**_base_binance_env(), "SIGNAL_ONLY": "false"}
+    def test_binance_signal_only_false_calls_factory(self) -> None:
+        """EXCHANGE=binance + SIGNAL_ONLY=false now enters main path via factory."""
+        env = {**_base_binance_env(), "SIGNAL_ONLY": "false", "LIVE_TRADING": "true"}
 
         with mock.patch.dict(os.environ, env, clear=True), \
-             mock.patch("scripts.run_boll_cvd_live.load_dotenv", return_value=False):
-            from scripts.run_boll_cvd_live import main
-            with pytest.raises(RuntimeError, match="Binance live trading runtime is not wired"):
-                asyncio.run(main())
+             mock.patch("scripts.run_boll_cvd_live.load_dotenv", return_value=False), \
+             mock.patch("scripts.run_boll_cvd_live.EmailSender"), \
+             mock.patch("scripts.run_boll_cvd_live.LiveTradeJournal"), \
+             mock.patch("scripts.run_boll_cvd_live.RollingLossGuard"), \
+             mock.patch("scripts.run_boll_cvd_live.LiveStateStore"), \
+             mock.patch("scripts.run_boll_cvd_live.DailyTradeReporter"):
+            with mock.patch(
+                "scripts.run_boll_cvd_live.create_live_trader"
+            ) as mock_factory:
+                mock_factory.side_effect = RuntimeError("STOP_AFTER_FACTORY")
+                from scripts.run_boll_cvd_live import main
+                with pytest.raises(RuntimeError, match="STOP_AFTER_FACTORY"):
+                    asyncio.run(main())
+                mock_factory.assert_called_once()
 
-    def test_binance_signal_only_missing_raises(self) -> None:
-        """EXCHANGE=binance without SIGNAL_ONLY raises RuntimeError."""
+    def test_binance_signal_only_missing_enters_main_path(self) -> None:
+        """EXCHANGE=binance without SIGNAL_ONLY enters main path via factory."""
         env = _base_binance_env()
         del env["SIGNAL_ONLY"]
+        env["LIVE_TRADING"] = "true"
 
         with mock.patch.dict(os.environ, env, clear=True), \
-             mock.patch("scripts.run_boll_cvd_live.load_dotenv", return_value=False):
-            from scripts.run_boll_cvd_live import main
-            with pytest.raises(RuntimeError, match="Binance live trading runtime is not wired"):
-                asyncio.run(main())
+             mock.patch("scripts.run_boll_cvd_live.load_dotenv", return_value=False), \
+             mock.patch("scripts.run_boll_cvd_live.EmailSender"), \
+             mock.patch("scripts.run_boll_cvd_live.LiveTradeJournal"), \
+             mock.patch("scripts.run_boll_cvd_live.RollingLossGuard"), \
+             mock.patch("scripts.run_boll_cvd_live.LiveStateStore"), \
+             mock.patch("scripts.run_boll_cvd_live.DailyTradeReporter"):
+            with mock.patch(
+                "scripts.run_boll_cvd_live.create_live_trader"
+            ) as mock_factory:
+                mock_factory.side_effect = RuntimeError("STOP_AFTER_FACTORY")
+                from scripts.run_boll_cvd_live import main
+                with pytest.raises(RuntimeError, match="STOP_AFTER_FACTORY"):
+                    asyncio.run(main())
+                mock_factory.assert_called_once()
 
     def test_binance_signal_only_no_trader_instantiation(self) -> None:
         """Binance signal-only path must NOT instantiate Trader."""

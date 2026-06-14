@@ -76,16 +76,10 @@ async def main() -> None:
         return
 
     if selection.kind == LiveRuntimeKind.BINANCE_LIVE_BLOCKED:
-        from src.live.binance_live_preflight import (
-            build_binance_live_preflight_report,
-            format_binance_live_blocked_message,
-        )
-
-        report = build_binance_live_preflight_report(
-            os.environ,
-            orders_globally_enabled=False,
-        )
-        raise RuntimeError(format_binance_live_blocked_message(report))
+        # Binance main live path is now wired through the factory.
+        # Preflight and safety checks are performed by
+        # BinanceLiveTrader.initialize().
+        pass
 
     # ── OKX legacy path continues below ─────────────────────────────────
 

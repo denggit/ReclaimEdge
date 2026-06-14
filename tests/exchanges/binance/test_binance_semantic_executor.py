@@ -104,6 +104,53 @@ def executor(fake: FakeBrokerClient) -> BinanceBrokerSemanticExecutor:
     return BinanceBrokerSemanticExecutor(fake)
 
 
+# ---------------------------------------------------------------------------
+# Fake algo client helper for protective stop tests
+# ---------------------------------------------------------------------------
+
+
+class FakeAlgoClientSL:
+    """Fake BinanceAlgoOrderClient for testing protective stop paths."""
+
+    def __init__(self) -> None:
+        self.place_calls: list[dict] = []
+        self.cancel_calls: list[dict] = []
+
+    async def place_stop_loss(self, **kwargs) -> BrokerOrderResult:
+        self.place_calls.append(kwargs)
+        return BrokerOrderResult(
+            exchange=ExchangeName.BINANCE,
+            symbol=kwargs.get("symbol", "ETHUSDT"),
+            ok=True,
+            order_id=str(kwargs.get("client_algo_id", "algo-1")),
+            client_order_id=kwargs.get("client_algo_id", ""),
+        )
+
+    async def cancel_algo_order(self, **kwargs) -> BrokerCancelResult:
+        self.cancel_calls.append(kwargs)
+        return BrokerCancelResult(
+            exchange=ExchangeName.BINANCE,
+            symbol=kwargs.get("symbol", "ETHUSDT"),
+            ok=True,
+            order_id=kwargs.get("client_algo_id"),
+            client_order_id=kwargs.get("client_algo_id"),
+        )
+
+    async def fetch_open_algo_orders(self, **kwargs) -> list[dict]:
+        return []
+
+
+def _make_fake_algo_client() -> FakeAlgoClientSL:
+    return FakeAlgoClientSL()
+
+
+def _make_executor_with_algo(
+    fake: FakeBrokerClient,
+    algo: FakeAlgoClientSL | None = None,
+) -> BinanceBrokerSemanticExecutor:
+    return BinanceBrokerSemanticExecutor(fake, algo_client=algo or _make_fake_algo_client())
+
+
 def _request(
     action: BrokerSemanticAction,
     role: BrokerSemanticOrderRole,
@@ -387,9 +434,12 @@ async def test_sidecar_tp_places_limit_close_order_for_short(
 
 @pytest.mark.asyncio
 async def test_place_protective_stop_long_places_sell_stop_market(
-    executor: BinanceBrokerSemanticExecutor,
     fake: FakeBrokerClient,
 ) -> None:
+    """With algo_client, protective stop uses Algo Order API."""
+    algo = _make_fake_algo_client()
+    executor = BinanceBrokerSemanticExecutor(fake, algo_client=algo)
+
     result = await executor.execute(
         _request(
             BrokerSemanticAction.PLACE_PROTECTIVE_STOP,
@@ -400,14 +450,15 @@ async def test_place_protective_stop_long_places_sell_stop_market(
         )
     )
 
-    assert len(fake.place_order_requests) == 1
-    order_request = fake.place_order_requests[0]
-    assert order_request.order_type == BrokerOrderType.STOP_MARKET
-    assert order_request.reduce_only is True
-    assert order_request.side == BrokerOrderSide.SELL
-    assert order_request.position_side == BrokerPositionSide.LONG
-    assert order_request.trigger_price == Decimal("3400")
-    assert result.order_id == "order-1"
+    # Should NOT call regular place_order
+    assert len(fake.place_order_requests) == 0
+    # Should call algo client
+    assert len(algo.place_calls) == 1
+    call = algo.place_calls[0]
+    assert call["side"] == "SELL"
+    assert call["trigger_price"] == Decimal("3400")
+    assert call["client_algo_id"] is not None
+    assert result.ok is True
 
 
 # ---------------------------------------------------------------------------
@@ -417,9 +468,12 @@ async def test_place_protective_stop_long_places_sell_stop_market(
 
 @pytest.mark.asyncio
 async def test_place_protective_stop_short_places_buy_stop_market(
-    executor: BinanceBrokerSemanticExecutor,
     fake: FakeBrokerClient,
 ) -> None:
+    """With algo_client, protective stop SHORT uses BUY side in algo."""
+    algo = _make_fake_algo_client()
+    executor = _make_executor_with_algo(fake, algo)
+
     result = await executor.execute(
         _request(
             BrokerSemanticAction.PLACE_PROTECTIVE_STOP,
@@ -430,12 +484,10 @@ async def test_place_protective_stop_short_places_buy_stop_market(
         )
     )
 
-    order_request = fake.place_order_requests[0]
-    assert order_request.order_type == BrokerOrderType.STOP_MARKET
-    assert order_request.reduce_only is True
-    assert order_request.side == BrokerOrderSide.BUY
-    assert order_request.position_side == BrokerPositionSide.SHORT
-    assert order_request.trigger_price == Decimal("3600")
+    assert len(fake.place_order_requests) == 0
+    assert len(algo.place_calls) == 1
+    assert algo.place_calls[0]["side"] == "BUY"
+    assert algo.place_calls[0]["trigger_price"] == Decimal("3600")
     assert result.ok is True
 
 
@@ -568,10 +620,13 @@ async def test_cancel_reduce_only_tp_calls_broker_client_cancel_order(
 
 
 @pytest.mark.asyncio
-async def test_cancel_protective_stop_calls_broker_client_cancel_order(
-    executor: BinanceBrokerSemanticExecutor,
+async def test_cancel_protective_stop_uses_algo_cancel(
     fake: FakeBrokerClient,
 ) -> None:
+    """CANCEL_PROTECTIVE_STOP now uses algo_client cancel, not regular cancel."""
+    algo = _make_fake_algo_client()
+    executor = _make_executor_with_algo(fake, algo)
+
     result = await executor.execute(
         _request(
             BrokerSemanticAction.CANCEL_PROTECTIVE_STOP,
@@ -580,9 +635,11 @@ async def test_cancel_protective_stop_calls_broker_client_cancel_order(
         )
     )
 
-    assert fake.cancel_order_calls == [(SYMBOL, "sl-1")]
+    # Should use algo cancel, NOT regular cancel_order
+    assert fake.cancel_order_calls == []
+    assert len(algo.cancel_calls) == 1
+    assert algo.cancel_calls[0]["client_algo_id"] == "sl-1"
     assert result.ok is True
-    assert result.order_id == "sl-1"
 
 
 # ---------------------------------------------------------------------------
@@ -698,7 +755,7 @@ async def test_fetch_algo_orders_returns_empty_with_explanatory_message(
 
     assert result.ok is True
     assert result.orders == ()
-    assert result.message == "binance_algo_orders_are_regular_open_orders"
+    assert result.message == "binance_algo_client_not_configured"
 
 
 # ---------------------------------------------------------------------------
@@ -791,8 +848,12 @@ async def test_missing_price_for_tp_raises_invalid_price(
 
 @pytest.mark.asyncio
 async def test_missing_trigger_price_for_sl_raises_invalid_price(
-    executor: BinanceBrokerSemanticExecutor,
+    fake: FakeBrokerClient,
 ) -> None:
+    """With algo_client, missing trigger_price still raises INVALID_PRICE."""
+    algo = _make_fake_algo_client()
+    executor = _make_executor_with_algo(fake, algo)
+
     with pytest.raises(ExchangeError) as exc_info:
         await executor.execute(
             _request(

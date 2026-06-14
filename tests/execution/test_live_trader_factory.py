@@ -4,7 +4,7 @@
 @Author     : Zijun Deng
 @Date       : 2026/06/14
 @File       : test_live_trader_factory.py
-@Description: Tests for create_live_trader factory — exchange routing and blocking.
+@Description: Tests for create_live_trader factory — exchange routing.
 """
 
 from __future__ import annotations
@@ -24,6 +24,15 @@ from src.execution.live_trader_factory import create_live_trader
 class FakeTrader:
     """Lightweight stand-in so we never construct a real OKX Trader."""
     broker_exchange_name = "okx"
+
+
+class FakeBinanceLiveTrader:
+    """Lightweight stand-in for BinanceLiveTrader."""
+    broker_exchange_name = "binance"
+    symbol = "ETHUSDT"
+
+    def __init__(self, *, env=None, **kwargs):
+        pass
 
 
 # ======================================================================
@@ -57,48 +66,54 @@ class TestOkxPath:
 
 
 # ======================================================================
-# Binance path — blocked
+# Binance path — wired
 # ======================================================================
 
 
-class TestBinancePathBlocked:
-    """EXCHANGE=binance raises RuntimeError — not wired yet."""
+class TestBinancePathWired:
+    """EXCHANGE=binance returns BinanceLiveTrader."""
 
-    def test_binance_raises_runtime_error(self) -> None:
-        with pytest.raises(RuntimeError) as exc_info:
-            create_live_trader({"EXCHANGE": "binance"})
-        msg = str(exc_info.value)
-        assert "Binance live trading runtime is not wired yet" in msg
-        assert "blocking_reasons=" in msg
+    def test_binance_returns_binance_live_trader(self, monkeypatch) -> None:
+        monkeypatch.setattr(
+            "src.execution.binance_live_trader.BinanceLiveTrader",
+            FakeBinanceLiveTrader,
+        )
+        trader = create_live_trader({"EXCHANGE": "binance"})
+        assert isinstance(trader, FakeBinanceLiveTrader)
+        assert trader.broker_exchange_name == "binance"
 
-    def test_binance_blocked_message_contains_signal_only_hint(self) -> None:
-        with pytest.raises(RuntimeError) as exc_info:
-            create_live_trader({"EXCHANGE": "binance"})
-        msg = str(exc_info.value)
-        assert "SIGNAL_ONLY=true" in msg
-
-    def test_binance_blocked_contains_disabled_by_build(self) -> None:
-        with pytest.raises(RuntimeError) as exc_info:
-            create_live_trader({"EXCHANGE": "binance"})
-        msg = str(exc_info.value)
-        assert "binance_live_orders_disabled_by_build" in msg
-
-    def test_binance_with_all_confirmations_still_blocked(self) -> None:
-        """Even with all preflight env set, orders_globally_enabled=False blocks."""
+    def test_binance_with_all_confirmations_returns_trader(self, monkeypatch) -> None:
+        """With all preflight env set, Binance path creates BinanceLiveTrader."""
+        monkeypatch.setattr(
+            "src.execution.binance_live_trader.BinanceLiveTrader",
+            FakeBinanceLiveTrader,
+        )
         env = {
             "EXCHANGE": "binance",
             "SIGNAL_ONLY": "false",
             "LIVE_ENABLED": "true",
             "LIVE_ALLOW_ORDERS": "true",
-            "LIVE_CONFIRMATION": "I_UNDERSTAND_BINANCE_LIVE_TRADING",
+            "LIVE_CONFIRMATION": "I_UNDERSTAND_EXCHANGE_LIVE_TRADING",
             "LIVE_MAX_ORDER_NOTIONAL_USDT": "5",
             "LIVE_MAX_POSITION_NOTIONAL_USDT": "20",
             "LIVE_LEVERAGE": "20",
         }
-        with pytest.raises(RuntimeError) as exc_info:
-            create_live_trader(env)
-        msg = str(exc_info.value)
-        assert "binance_live_orders_disabled_by_build" in msg
+        trader = create_live_trader(env)
+        assert isinstance(trader, FakeBinanceLiveTrader)
+
+    def test_factory_does_not_read_api_key(self, monkeypatch) -> None:
+        """Factory passes env to BinanceLiveTrader, does not read API keys itself."""
+        monkeypatch.setattr(
+            "src.execution.binance_live_trader.BinanceLiveTrader",
+            FakeBinanceLiveTrader,
+        )
+        env = {
+            "EXCHANGE": "binance",
+            "EXCHANGE_API_KEY": "should_not_be_read_here",
+            "EXCHANGE_API_SECRET": "should_not_be_read_here",
+        }
+        trader = create_live_trader(env)
+        assert isinstance(trader, FakeBinanceLiveTrader)
 
 
 # ======================================================================
@@ -131,10 +146,10 @@ class TestFactoryFileSafety:
 
     _FACTORY_PATH: Path = Path("src/execution/live_trader_factory.py")
 
-    def test_factory_file_has_no_binance_client_imports(self) -> None:
+    def test_factory_file_has_no_broker_client_init(self) -> None:
+        """Factory creates BinanceLiveTrader via env, not broker clients."""
         text = self._FACTORY_PATH.read_text()
-        assert "BinanceBrokerClient" not in text
-        assert "BinanceBrokerSemanticExecutor" not in text
+        assert "BinanceBrokerClient(" not in text
 
     def test_factory_file_has_no_signing(self) -> None:
         text = self._FACTORY_PATH.read_text()
@@ -153,3 +168,10 @@ class TestFactoryFileSafety:
         text = self._FACTORY_PATH.read_text()
         assert "BTC" not in text
         assert "SPOT" not in text
+
+    def test_factory_lazy_imports_binance_trader(self) -> None:
+        """BinanceLiveTrader is lazily imported only in the binance branch."""
+        text = self._FACTORY_PATH.read_text()
+        # Import should appear inside the 'if exchange == "binance":' block
+        assert "from src.execution.binance_live_trader import" in text
+        assert "BinanceLiveTrader" in text

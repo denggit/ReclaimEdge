@@ -22,7 +22,7 @@ def _binance_source_text() -> str:
     return "\n".join(
         path.read_text(encoding="utf-8")
         for path in root.rglob("*.py")
-        if path.name not in {"signing.py", "client.py", "aiohttp_transport.py"}
+        if path.name not in {"signing.py", "client.py", "aiohttp_transport.py", "algo_orders.py", "semantic_executor.py"}
     )
 
 
@@ -62,8 +62,10 @@ def test_binance_adapter_shell_does_not_import_live_execution_or_config_modules(
 def test_binance_adapter_shell_not_wired_into_runtime() -> None:
     allowed = {
         "src/exchanges/binance/__init__.py",
+        "src/exchanges/binance/algo_orders.py",
         "src/exchanges/binance/client.py",
         "src/exchanges/binance/errors.py",
+        "src/exchanges/binance/semantic_executor.py",
         "src/exchanges/binance/transport.py",
         "tests/exchanges/binance/test_binance_broker_client_shell.py",
         "tests/exchanges/binance/test_binance_broker_client_transport.py",
@@ -71,6 +73,8 @@ def test_binance_adapter_shell_not_wired_into_runtime() -> None:
         "tests/exchanges/binance/test_binance_no_live_wiring.py",
         "tests/exchanges/binance/test_binance_semantic_signed_request_parity.py",
         "tests/exchanges/binance/test_binance_transport_boundaries.py",
+        "tests/exchanges/binance/test_binance_algo_orders.py",
+        "tests/exchanges/binance/test_binance_semantic_executor_algo_sl.py",
         # Pre-existing mention in docstring; not part of this change.
         "src/exchanges/factory.py",
         # Broker runtime factory tests reference BinanceBrokerClient
@@ -96,6 +100,9 @@ def test_binance_adapter_shell_not_wired_into_runtime() -> None:
         # Live trader factory test references BinanceBrokerClient
         # only in a "must not import" safety assertion.
         "tests/execution/test_live_trader_factory.py",
+        # BinanceLiveTrader legitimately uses BinanceBrokerClient.
+        "src/execution/binance_live_trader.py",
+        "tests/execution/test_binance_live_trader.py",
     }
 
     for path in Path(".").rglob("*.py"):

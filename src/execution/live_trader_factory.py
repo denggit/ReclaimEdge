@@ -23,12 +23,10 @@ def create_live_trader(
     LiveTraderProtocol
         A live trader instance:
         - ``EXCHANGE=okx`` (or unset) → ``Trader`` (OKX).
-        - ``EXCHANGE=binance`` → raises ``RuntimeError`` (blocked by build).
+        - ``EXCHANGE=binance`` → ``BinanceLiveTrader``.
 
     Raises
     ------
-    RuntimeError
-        When ``EXCHANGE=binance`` — Binance live trading is not wired yet.
     ValueError
         When ``EXCHANGE`` is set to an unsupported value.
     """
@@ -39,16 +37,9 @@ def create_live_trader(
         return Trader()
 
     if exchange == "binance":
-        from src.live.binance_live_preflight import (
-            build_binance_live_preflight_report,
-            format_binance_live_blocked_message,
-        )
+        from src.execution.binance_live_trader import BinanceLiveTrader
 
-        report = build_binance_live_preflight_report(
-            values,
-            orders_globally_enabled=False,
-        )
-        raise RuntimeError(format_binance_live_blocked_message(report))
+        return BinanceLiveTrader(env=values)
 
     raise ValueError(
         f"Unsupported exchange: {exchange!r}. Supported values are 'okx' and 'binance'."

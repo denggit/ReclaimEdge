@@ -148,36 +148,54 @@ class TestBinanceSignalOnlySkipsFactory:
 
 
 class TestBinanceLiveBlockedNoTrader:
-    """Binance live blocked path must not create a Trader via factory or directly."""
+    """Binance live blocked path now falls through to factory.
+    It no longer raises from the blocked branch.  Factory creates BinanceLiveTrader."""
 
-    def test_blocked_does_not_call_factory(self) -> None:
-        """Binance blocked path should not call create_live_trader."""
+    def test_blocked_now_calls_factory(self) -> None:
+        """Binance blocked path now passes through and calls factory."""
         env = {
             "EXCHANGE": "binance",
             "SIGNAL_ONLY": "false",
+            "LIVE_TRADING": "true",
         }
 
         with mock.patch.dict(os.environ, env, clear=True), \
-             mock.patch("scripts.run_boll_cvd_live.load_dotenv", return_value=False):
+             mock.patch("scripts.run_boll_cvd_live.load_dotenv", return_value=False), \
+             mock.patch("scripts.run_boll_cvd_live.EmailSender"), \
+             mock.patch("scripts.run_boll_cvd_live.LiveTradeJournal"), \
+             mock.patch("scripts.run_boll_cvd_live.RollingLossGuard"), \
+             mock.patch("scripts.run_boll_cvd_live.LiveStateStore"), \
+             mock.patch("scripts.run_boll_cvd_live.DailyTradeReporter"):
             with mock.patch(
                 "scripts.run_boll_cvd_live.create_live_trader"
             ) as mock_factory:
+                mock_factory.side_effect = RuntimeError("STOP_AFTER_FACTORY")
                 from scripts.run_boll_cvd_live import main
-                with pytest.raises(RuntimeError):
+                with pytest.raises(RuntimeError, match="STOP_AFTER_FACTORY"):
                     asyncio.run(main())
-                mock_factory.assert_not_called()
+                mock_factory.assert_called_once()
 
     def test_blocked_does_not_call_trader_directly(self) -> None:
-        """Binance blocked path must not call Trader() directly."""
+        """Binance path must not call OKX Trader() directly."""
         env = {
             "EXCHANGE": "binance",
             "SIGNAL_ONLY": "false",
+            "LIVE_TRADING": "true",
         }
 
         with mock.patch.dict(os.environ, env, clear=True), \
-             mock.patch("scripts.run_boll_cvd_live.load_dotenv", return_value=False):
+             mock.patch("scripts.run_boll_cvd_live.load_dotenv", return_value=False), \
+             mock.patch("scripts.run_boll_cvd_live.EmailSender"), \
+             mock.patch("scripts.run_boll_cvd_live.LiveTradeJournal"), \
+             mock.patch("scripts.run_boll_cvd_live.RollingLossGuard"), \
+             mock.patch("scripts.run_boll_cvd_live.LiveStateStore"), \
+             mock.patch("scripts.run_boll_cvd_live.DailyTradeReporter"):
             with mock.patch("scripts.run_boll_cvd_live.Trader") as mock_trader:
-                from scripts.run_boll_cvd_live import main
-                with pytest.raises(RuntimeError):
-                    asyncio.run(main())
-                mock_trader.assert_not_called()
+                with mock.patch(
+                    "scripts.run_boll_cvd_live.create_live_trader"
+                ) as mock_factory:
+                    mock_factory.side_effect = RuntimeError("STOP_AFTER_FACTORY")
+                    from scripts.run_boll_cvd_live import main
+                    with pytest.raises(RuntimeError, match="STOP_AFTER_FACTORY"):
+                        asyncio.run(main())
+                    mock_trader.assert_not_called()

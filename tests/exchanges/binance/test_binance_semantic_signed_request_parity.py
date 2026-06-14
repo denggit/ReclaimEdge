@@ -68,6 +68,31 @@ def _make_executor(payload):
     return executor, transport
 
 
+def _make_executor_with_algo(payload):
+    """Create a BinanceBrokerSemanticExecutor with a fake algo client.
+
+    The algo client uses its own FakeBinanceTransport for capturing
+    algo-order signed requests.
+    """
+    from src.exchanges.binance.algo_orders import BinanceAlgoOrderClient
+
+    transport = FakeBinanceTransport(payload)
+    algo_transport = FakeBinanceTransport(payload)
+    client = BinanceBrokerClient(
+        api_key="test-key",
+        api_secret="test-secret",
+        transport=transport,
+        position_mode="net",
+    )
+    algo_client = BinanceAlgoOrderClient(
+        api_key="test-key",
+        api_secret="test-secret",
+        transport=algo_transport,
+    )
+    executor = BinanceBrokerSemanticExecutor(client, algo_client=algo_client)
+    return executor, algo_transport
+
+
 def _order_payload(
     *,
     side="BUY",
@@ -241,7 +266,7 @@ async def test_semantic_tp_short_builds_buy_limit_reduce_only_signed_request() -
 
 @pytest.mark.asyncio
 async def test_semantic_protective_stop_long_builds_sell_stop_market_reduce_only_signed_request() -> None:
-    executor, transport = _make_executor(
+    executor, transport = _make_executor_with_algo(
         _order_payload(
             side="SELL", position_side="BOTH", order_type="STOP_MARKET", stop_price="2950"
         )
@@ -256,19 +281,24 @@ async def test_semantic_protective_stop_long_builds_sell_stop_market_reduce_only
     )
 
     req, params = _captured_params(transport)
-    _assert_common_signed_request(req, params)
-    _assert_reduce_only(params)
+    # Protective stop uses Algo Order API, not /fapi/v1/order
+    assert req.method == "POST"
+    assert req.path == "/fapi/v1/algoOrder"
 
+    # Algo order uses different param names
     assert params["symbol"] == "ETHUSDT"
     assert params["side"] == "SELL"
+    assert params["algoType"] == "CONDITIONAL"
     assert params["type"] == "STOP_MARKET"
+    assert params["reduceOnly"] == "true"
+    # Quantity is base-asset: 2 contracts * 0.1 = 0.2 ETH
     assert params["quantity"] == "0.2"
-    assert params["stopPrice"] == "2950"
+    assert params["triggerPrice"] == "2950"
 
 
 @pytest.mark.asyncio
 async def test_semantic_protective_stop_short_builds_buy_stop_market_reduce_only_signed_request() -> None:
-    executor, transport = _make_executor(
+    executor, transport = _make_executor_with_algo(
         _order_payload(
             side="BUY", position_side="BOTH", order_type="STOP_MARKET", stop_price="3350"
         )
@@ -283,14 +313,17 @@ async def test_semantic_protective_stop_short_builds_buy_stop_market_reduce_only
     )
 
     req, params = _captured_params(transport)
-    _assert_common_signed_request(req, params)
-    _assert_reduce_only(params)
+    # Protective stop uses Algo Order API, not /fapi/v1/order
+    assert req.method == "POST"
+    assert req.path == "/fapi/v1/algoOrder"
 
     assert params["symbol"] == "ETHUSDT"
     assert params["side"] == "BUY"
+    assert params["algoType"] == "CONDITIONAL"
     assert params["type"] == "STOP_MARKET"
+    assert params["reduceOnly"] == "true"
     assert params["quantity"] == "0.2"
-    assert params["stopPrice"] == "3350"
+    assert params["triggerPrice"] == "3350"
 
 
 # ===================================================================
