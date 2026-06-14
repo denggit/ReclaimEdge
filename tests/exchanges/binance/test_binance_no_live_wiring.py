@@ -82,6 +82,9 @@ def test_binance_adapter_shell_not_wired_into_runtime() -> None:
         "scripts/binance_live_smoke_test.py",
         "tests/scripts/test_binance_live_smoke_test.py",
         "tests/scripts/test_binance_live_smoke_test_boundaries.py",
+        # Boundary test for Binance live preflight — references
+        # BinanceBrokerClient only in a "must not import" assertion.
+        "tests/live/test_binance_live_preflight_boundaries.py",
     }
 
     for path in Path(".").rglob("*.py"):

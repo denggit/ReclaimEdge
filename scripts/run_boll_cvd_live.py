@@ -75,10 +75,16 @@ async def main() -> None:
         return
 
     if selection.kind == LiveRuntimeKind.BINANCE_LIVE_BLOCKED:
-        raise RuntimeError(
-            "Binance live trading runtime is not wired yet. "
-            "Set BINANCE_SIGNAL_ONLY=true for signal-only observation."
+        from src.live.binance_live_preflight import (
+            build_binance_live_preflight_report,
+            format_binance_live_blocked_message,
         )
+
+        report = build_binance_live_preflight_report(
+            os.environ,
+            orders_globally_enabled=False,
+        )
+        raise RuntimeError(format_binance_live_blocked_message(report))
 
     # ── OKX legacy path continues below ─────────────────────────────────
 

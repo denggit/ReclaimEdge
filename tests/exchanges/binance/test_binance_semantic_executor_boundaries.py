@@ -51,6 +51,9 @@ def test_binance_semantic_executor_not_wired_into_runtime() -> None:
         # in imports / isinstance checks — not real runtime wiring.
         "tests/exchanges/test_broker_runtime_factory.py",
         "tests/exchanges/test_broker_runtime_factory_boundaries.py",
+        # Boundary test for Binance live preflight — references
+        # BinanceBrokerSemanticExecutor only in a "must not import" assertion.
+        "tests/live/test_binance_live_preflight_boundaries.py",
     }
 
     for path in Path(".").rglob("*.py"):

@@ -1,0 +1,255 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+"""
+@Author     : Zijun Deng
+@Date       : 2026/06/14
+@File       : binance_live_preflight.py
+@Description: Binance live trading preflight / confirmation guard.
+
+This module is intentionally free of side-effects:
+- No network connections
+- No API key reading
+- No signing
+- No order placement
+- No imports of strategy / execution / exchange clients / semantic executor
+"""
+
+from __future__ import annotations
+
+import os
+from collections.abc import Mapping
+from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
+
+# ---------------------------------------------------------------------------
+# Public constants
+# ---------------------------------------------------------------------------
+
+BINANCE_LIVE_CONFIRMATION_PHRASE: str = "I_UNDERSTAND_BINANCE_LIVE_TRADING"
+BINANCE_LIVE_HARD_MAX_ORDER_NOTIONAL_USDT: Decimal = Decimal("10")
+BINANCE_LIVE_HARD_MAX_POSITION_NOTIONAL_USDT: Decimal = Decimal("30")
+BINANCE_LIVE_HARD_MAX_LEVERAGE: int = 20
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+_TRUTHY: frozenset[str] = frozenset({"1", "true", "yes", "y", "on"})
+
+
+def _parse_decimal(raw: str) -> Decimal | None:
+    """Parse a Decimal from a trimmed string, returning None on failure."""
+    raw = raw.strip()
+    if not raw:
+        return None
+    try:
+        return Decimal(raw)
+    except InvalidOperation:
+        return None
+
+
+def _parse_int(raw: str) -> int | None:
+    """Parse an int from a trimmed string, returning None on failure."""
+    raw = raw.strip()
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except (ValueError, TypeError):
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Public dataclasses
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class BinanceLivePreflightConfig:
+    """Parsed Binance live trading preflight configuration.
+
+    Only reads public / control environment variables — no secrets.
+    """
+
+    exchange: str
+    signal_only: bool
+    live_enabled: bool
+    allow_orders: bool
+    confirmation: str
+    max_order_notional_usdt: Decimal | None
+    max_position_notional_usdt: Decimal | None
+    leverage: int | None
+
+
+@dataclass(frozen=True)
+class BinanceLivePreflightReport:
+    """Result of the Binance live trading preflight check.
+
+    Attributes:
+        ok: ``True`` when there are zero blocking reasons.
+        config: The parsed preflight configuration.
+        blocking_reasons: Tuple of reason codes that prevent launch.
+    """
+
+    ok: bool
+    config: BinanceLivePreflightConfig
+    blocking_reasons: tuple[str, ...]
+
+
+# ---------------------------------------------------------------------------
+# Public functions
+# ---------------------------------------------------------------------------
+
+
+def load_binance_live_preflight_config(
+    env: Mapping[str, str] | None = None,
+) -> BinanceLivePreflightConfig:
+    """Parse Binance live preflight configuration from environment variables.
+
+    Parameters
+    ----------
+    env:
+        Optional mapping of environment variables.  When ``None`` (the
+        default) the real ``os.environ`` is used.
+
+    Returns
+    -------
+    BinanceLivePreflightConfig
+        A frozen configuration object with all parsed values.
+    """
+    if env is None:
+        env = os.environ
+
+    exchange: str = env.get("EXCHANGE", "okx").strip().lower()
+    if not exchange:
+        exchange = "okx"
+
+    signal_only_raw: str = env.get("BINANCE_SIGNAL_ONLY", "").strip().lower()
+    signal_only: bool = signal_only_raw in _TRUTHY
+
+    live_enabled_raw: str = env.get("BINANCE_LIVE_ENABLED", "").strip().lower()
+    live_enabled: bool = live_enabled_raw in _TRUTHY
+
+    allow_orders_raw: str = env.get("BINANCE_LIVE_ALLOW_ORDERS", "").strip().lower()
+    allow_orders: bool = allow_orders_raw in _TRUTHY
+
+    confirmation: str = env.get("BINANCE_LIVE_CONFIRMATION", "").strip()
+
+    max_order_notional_usdt: Decimal | None = _parse_decimal(
+        env.get("BINANCE_LIVE_MAX_ORDER_NOTIONAL_USDT", "")
+    )
+    max_position_notional_usdt: Decimal | None = _parse_decimal(
+        env.get("BINANCE_LIVE_MAX_POSITION_NOTIONAL_USDT", "")
+    )
+    leverage: int | None = _parse_int(env.get("BINANCE_LIVE_LEVERAGE", ""))
+
+    return BinanceLivePreflightConfig(
+        exchange=exchange,
+        signal_only=signal_only,
+        live_enabled=live_enabled,
+        allow_orders=allow_orders,
+        confirmation=confirmation,
+        max_order_notional_usdt=max_order_notional_usdt,
+        max_position_notional_usdt=max_position_notional_usdt,
+        leverage=leverage,
+    )
+
+
+def build_binance_live_preflight_report(
+    env: Mapping[str, str] | None = None,
+    *,
+    orders_globally_enabled: bool = False,
+) -> BinanceLivePreflightReport:
+    """Build a preflight report for Binance live trading.
+
+    Parameters
+    ----------
+    env:
+        Optional mapping of environment variables.
+    orders_globally_enabled:
+        Code-level gate.  When ``False`` (the default) the report will
+        always include ``binance_live_orders_disabled_by_build``, ensuring
+        Binance live trading cannot be launched by accident.
+
+    Returns
+    -------
+    BinanceLivePreflightReport
+        A frozen report with ``ok=True`` only when every gate is satisfied.
+    """
+    config = load_binance_live_preflight_config(env)
+    blocking: list[str] = []
+
+    # ── Gate 1: exchange must be binance ────────────────────────────────
+    if config.exchange != "binance":
+        blocking.append("exchange_is_not_binance")
+        return BinanceLivePreflightReport(
+            ok=False,
+            config=config,
+            blocking_reasons=tuple(blocking),
+        )
+
+    # ── Gate 2: must NOT be signal-only ─────────────────────────────────
+    if config.signal_only:
+        blocking.append("binance_signal_only_enabled")
+        return BinanceLivePreflightReport(
+            ok=False,
+            config=config,
+            blocking_reasons=tuple(blocking),
+        )
+
+    # ── Gate 3: BINANCE_LIVE_ENABLED must be truthy ─────────────────────
+    if not config.live_enabled:
+        blocking.append("binance_live_enabled_not_true")
+
+    # ── Gate 4: BINANCE_LIVE_ALLOW_ORDERS must be truthy ────────────────
+    if not config.allow_orders:
+        blocking.append("binance_live_allow_orders_not_true")
+
+    # ── Gate 5: BINANCE_LIVE_CONFIRMATION must match the exact phrase ───
+    if config.confirmation != BINANCE_LIVE_CONFIRMATION_PHRASE:
+        blocking.append("binance_live_confirmation_missing_or_invalid")
+
+    # ── Gate 6: BINANCE_LIVE_MAX_ORDER_NOTIONAL_USDT ────────────────────
+    if config.max_order_notional_usdt is None or not (
+        Decimal("0") < config.max_order_notional_usdt <= BINANCE_LIVE_HARD_MAX_ORDER_NOTIONAL_USDT
+    ):
+        blocking.append("binance_live_max_order_notional_invalid")
+
+    # ── Gate 7: BINANCE_LIVE_MAX_POSITION_NOTIONAL_USDT ─────────────────
+    if config.max_position_notional_usdt is None or not (
+        Decimal("0")
+        < config.max_position_notional_usdt
+        <= BINANCE_LIVE_HARD_MAX_POSITION_NOTIONAL_USDT
+    ):
+        blocking.append("binance_live_max_position_notional_invalid")
+
+    # ── Gate 8: BINANCE_LIVE_LEVERAGE ───────────────────────────────────
+    if config.leverage is None or not (
+        1 <= config.leverage <= BINANCE_LIVE_HARD_MAX_LEVERAGE
+    ):
+        blocking.append("binance_live_leverage_invalid")
+
+    # ── Gate 9: code-level orders gate ──────────────────────────────────
+    if not orders_globally_enabled:
+        blocking.append("binance_live_orders_disabled_by_build")
+
+    return BinanceLivePreflightReport(
+        ok=len(blocking) == 0,
+        config=config,
+        blocking_reasons=tuple(blocking),
+    )
+
+
+def format_binance_live_blocked_message(
+    report: BinanceLivePreflightReport,
+) -> str:
+    """Format a human-readable blocked message from a preflight report.
+
+    The message never includes secret values, API keys, or credentials.
+    """
+    reasons: str = ",".join(report.blocking_reasons)
+    return (
+        "Binance live trading runtime is not wired yet. "
+        "Set BINANCE_SIGNAL_ONLY=true for signal-only observation. "
+        f"Binance live preflight blocking_reasons={reasons}"
+    )
