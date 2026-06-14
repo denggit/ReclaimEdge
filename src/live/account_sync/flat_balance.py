@@ -10,54 +10,22 @@ logger = get_logger(__name__)
 
 
 async def fetch_usdt_cash_balance(trader: Trader) -> float:
-    """Fetch USDT *cash* balance (cashBal / availBal) from OKX.
+    """Fetch USDT *cash* balance through the bound TradingClientPort.
 
-    Tries, in order:
-    1. A ``request()`` callable on the trader (backward-compat for test fakes).
-    2. The private REST client wired into the bound trading client.
-    3. ``trader.fetch_usdt_equity()`` as a final fallback.
+    Prefers ``trading_client.fetch_balance().available`` (cashBal /
+    availBal).  Falls back to ``trader.fetch_usdt_equity()`` when no
+    trading client is bound (e.g. in legacy test harnesses).
     """
-    # 1. Backward compat: test FakeTraders often expose request()
-    req = getattr(trader, "request", None)
-    if callable(req):
-        res = await req("GET", "/api/v5/account/balance?ccy=USDT")
-        data = res.get("data", [])
-        if data:
-            for item in data[0].get("details", []):
-                if item.get("ccy") == "USDT":
-                    return float(
-                        item.get("cashBal")
-                        or item.get("availBal")
-                        or item.get("availEq")
-                        or item.get("eq")
-                        or 0.0
-                    )
-            return float(data[0].get("totalEq") or 0.0)
-        return 0.0
-
-    # 2. Production path: use trading client's private REST client
     trading_client = getattr(trader, "trading_client", None)
     if trading_client is not None:
-        private_client = getattr(trading_client, "_client", None)
-        if private_client is not None:
-            res = await private_client.request(
-                "GET", "/api/v5/account/balance?ccy=USDT"
-            )
-            data = res.get("data", [])
-            if not data:
-                return 0.0
-            for item in data[0].get("details", []):
-                if item.get("ccy") == "USDT":
-                    return float(
-                        item.get("cashBal")
-                        or item.get("availBal")
-                        or item.get("availEq")
-                        or item.get("eq")
-                        or 0.0
-                    )
-            return float(data[0].get("totalEq") or 0.0)
+        balance = await trading_client.fetch_balance()
+        if balance.available is not None:
+            return float(balance.available)
+        raw_cash = balance.raw.get("cash_balance_usdt")
+        if raw_cash is not None:
+            return float(raw_cash)
+        return float(balance.total)
 
-    # 3. Final fallback
     return await trader.fetch_usdt_equity()
 
 

@@ -123,6 +123,52 @@ class FakeEmailSender:
         return True
 
 
+class FakeTradingClient:
+    """Minimal TradingClientPort stub backing the FakeTrader below."""
+
+    def __init__(self, trader: object) -> None:
+        self._trader = trader
+
+    async def fetch_balance(self):
+        from decimal import Decimal as D
+        from src.execution.trading_client_port import BalanceSnapshot
+
+        res = await self._trader.request(  # type: ignore[attr-defined]
+            "GET", "/api/v5/account/balance?ccy=USDT"
+        )
+        data = res.get("data", [])
+        equity = 0.0
+        cash = 0.0
+        if data:
+            details = data[0].get("details", [])
+            for item in details:
+                if item.get("ccy") == "USDT":
+                    equity = float(
+                        item.get("eq")
+                        or item.get("availEq")
+                        or item.get("availBal")
+                        or 0.0
+                    )
+                    cash = float(
+                        item.get("cashBal")
+                        or item.get("availBal")
+                        or item.get("availEq")
+                        or item.get("eq")
+                        or 0.0
+                    )
+                    break
+            if equity == 0.0:
+                equity = float(data[0].get("totalEq") or 0.0)
+                if cash == 0.0:
+                    cash = equity
+        return BalanceSnapshot(
+            asset="USDT",
+            total=D(str(equity)),
+            available=D(str(cash)) if cash else None,
+            raw={"account_equity_usdt": equity, "cash_balance_usdt": cash},
+        )
+
+
 class FakeTrader:
     def __init__(self) -> None:
         self.symbol = "ETH-USDT-SWAP"
@@ -142,6 +188,7 @@ class FakeTrader:
         self._market_exit_returns: tuple[bool, str] = (True, "ok")
         self._fetch_position_raises: Exception | None = None
         self._market_exit_raises: Exception | None = None
+        self.trading_client = FakeTradingClient(self)
 
     async def execute_intent(self, trade_intent: TradeIntent) -> LiveTradeResult:
         self.executed.append(trade_intent.ts_ms)

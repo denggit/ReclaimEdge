@@ -266,8 +266,8 @@ class TestFetchBalance:
         assert isinstance(result, BalanceSnapshot)
         assert result.asset == "USDT"
         assert result.total == Decimal("999.88")
-        assert result.available is None
-        assert result.raw == {"account_equity_usdt": 999.88}
+        assert result.available == Decimal("999.88")
+        assert result.raw == {"account_equity_usdt": 999.88, "cash_balance_usdt": 999.88}
 
     @pytest.mark.asyncio
     async def test_zero_equity(self) -> None:
@@ -278,7 +278,8 @@ class TestFetchBalance:
         result = await client.fetch_balance()
 
         assert result.total == Decimal("0")
-        assert result.raw == {"account_equity_usdt": 0.0}
+        assert result.available is None
+        assert result.raw == {"account_equity_usdt": 0.0, "cash_balance_usdt": 0.0}
 
 
 # ======================================================================

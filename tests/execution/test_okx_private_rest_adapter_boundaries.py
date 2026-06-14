@@ -251,3 +251,35 @@ class TestOkxTradingClientNoTraderClient:
         assert "_trader._client" not in text, (
             "src/execution/okx_trading_client.py must NOT contain _trader._client"
         )
+
+
+class TestFlatBalanceNoDirectRest:
+    """flat_balance.py must use TradingClientPort, not direct OKX REST."""
+
+    def test_flat_balance_no_api_v5(self) -> None:
+        filepath = ROOT / "src" / "live" / "account_sync" / "flat_balance.py"
+        text = filepath.read_text(encoding="utf-8")
+        assert "/api/v5" not in text, (
+            "src/live/account_sync/flat_balance.py must NOT contain /api/v5"
+        )
+
+    def test_flat_balance_no_underscore_client(self) -> None:
+        filepath = ROOT / "src" / "live" / "account_sync" / "flat_balance.py"
+        text = filepath.read_text(encoding="utf-8")
+        assert "._client" not in text, (
+            "src/live/account_sync/flat_balance.py must NOT access ._client"
+        )
+
+    def test_flat_balance_no_private_client(self) -> None:
+        filepath = ROOT / "src" / "live" / "account_sync" / "flat_balance.py"
+        text = filepath.read_text(encoding="utf-8")
+        assert "private_client" not in text, (
+            "src/live/account_sync/flat_balance.py must NOT contain private_client"
+        )
+
+    def test_flat_balance_no_request_get(self) -> None:
+        filepath = ROOT / "src" / "live" / "account_sync" / "flat_balance.py"
+        text = filepath.read_text(encoding="utf-8")
+        assert 'request("GET"' not in text and "request('GET'" not in text, (
+            "src/live/account_sync/flat_balance.py must NOT call request('GET', ...)"
+        )

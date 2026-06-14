@@ -119,6 +119,7 @@ class OkxTradingClient(TradingClientPort):
         )
         data = res.get("data", [])
         equity = 0.0
+        cash_balance = 0.0
         if data:
             details = data[0].get("details", [])
             for item in details:
@@ -126,14 +127,26 @@ class OkxTradingClient(TradingClientPort):
                     equity = float(
                         item.get("eq") or item.get("availEq") or item.get("availBal") or 0.0
                     )
+                    cash_balance = float(
+                        item.get("cashBal")
+                        or item.get("availBal")
+                        or item.get("availEq")
+                        or item.get("eq")
+                        or 0.0
+                    )
                     break
             if equity == 0.0:
                 equity = float(data[0].get("totalEq") or 0.0)
+                if cash_balance == 0.0:
+                    cash_balance = equity
         return BalanceSnapshot(
             asset="USDT",
             total=Decimal(str(equity)),
-            available=None,
-            raw={"account_equity_usdt": equity},
+            available=Decimal(str(cash_balance)) if cash_balance else None,
+            raw={
+                "account_equity_usdt": equity,
+                "cash_balance_usdt": cash_balance,
+            },
         )
 
     async def fetch_position(self) -> PositionSnapshot:

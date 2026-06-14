@@ -21,6 +21,7 @@ FORBIDDEN_API_V5_FILES = [
     "scripts/run_boll_cvd_live.py",
     "src/live/runtime_bundle.py",
     "src/live/runtime_factory.py",
+    "src/live/account_sync/flat_balance.py",
     "src/strategies/boll_cvd_reclaim_strategy.py",
     "src/strategies/boll_cvd_shock_reclaim_strategy.py",
     "src/monitors/boll_band_breakout_monitor.py",
@@ -35,6 +36,7 @@ FORBIDDEN_OKX_ENV_FILES = [
     "src/execution/tp_sl_execution_manager.py",
     "src/strategies/boll_cvd_reclaim_strategy.py",
     "src/strategies/boll_cvd_shock_reclaim_strategy.py",
+    "src/live/account_sync/flat_balance.py",
 ]
 
 OKX_LEGACY_ENV_VARS = ["OKX_INST_ID", "OKX_BAR", "OKX_TD_MODE", "OKX_POS_SIDE_MODE"]

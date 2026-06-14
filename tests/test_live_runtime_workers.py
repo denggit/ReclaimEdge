@@ -27,6 +27,7 @@ from src.live.startup_recovery.trust_validation import (  # noqa: E402
     trusted_startup_saved_state,
 )
 from src.execution.trader import LiveTradeResult, PositionSnapshot  # noqa: E402
+from src.execution.trading_client_port import BalanceSnapshot  # noqa: E402
 from src.live.account_sync.flat_balance import fetch_settled_flat_balance  # noqa: E402
 from src.live.queue_helpers import (  # noqa: E402
     enqueue_execution_command,
@@ -210,6 +211,58 @@ class FakeEmailSender:
         return True
 
 
+class FakeTradingClient:
+    """Minimal TradingClientPort stub that serves BalanceSnapshot from
+    the parent FakeTrader's ``request()`` response (backward compat).
+    """
+
+    def __init__(self, trader: object) -> None:
+        self._trader = trader
+
+    async def fetch_balance(self):
+        """Return BalanceSnapshot with both equity and cash balance.
+
+        Reads the OKX-style JSON returned by the fake trader's
+        ``request()`` method so that existing test subclasses only
+        need to override ``request()`` to supply custom cash/equity
+        values.
+        """
+        res = await self._trader.request(  # type: ignore[attr-defined]
+            "GET", "/api/v5/account/balance?ccy=USDT"
+        )
+        data = res.get("data", [])
+        equity = 0.0
+        cash = 0.0
+        if data:
+            details = data[0].get("details", [])
+            for item in details:
+                if item.get("ccy") == "USDT":
+                    equity = float(
+                        item.get("eq")
+                        or item.get("availEq")
+                        or item.get("availBal")
+                        or 0.0
+                    )
+                    cash = float(
+                        item.get("cashBal")
+                        or item.get("availBal")
+                        or item.get("availEq")
+                        or item.get("eq")
+                        or 0.0
+                    )
+                    break
+            if equity == 0.0:
+                equity = float(data[0].get("totalEq") or 0.0)
+                if cash == 0.0:
+                    cash = equity
+        return BalanceSnapshot(
+            asset="USDT",
+            total=Decimal(str(equity)),
+            available=Decimal(str(cash)) if cash else None,
+            raw={"account_equity_usdt": equity, "cash_balance_usdt": cash},
+        )
+
+
 class FakeTrader:
     def __init__(self, execute_delay: float = 0.0, position_delay: float = 0.0) -> None:
         self.symbol = "ETH-USDT-SWAP"
@@ -217,6 +270,7 @@ class FakeTrader:
         self.position_contracts = Decimal("0")
         self.execute_delay = execute_delay
         self.position_delay = position_delay
+        self.trading_client = FakeTradingClient(self)  # ← provides fetch_balance()
         self.executed: list[int] = []
         self.post_tp1_stop_orders = []
         self.cancelled_post_tp1_stop_ids = []
