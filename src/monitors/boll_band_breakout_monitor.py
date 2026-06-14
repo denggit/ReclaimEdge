@@ -10,8 +10,12 @@ from dataclasses import dataclass, replace
 from statistics import mean, pstdev
 from typing import Awaitable, Callable, Literal, Optional
 
-import aiohttp
-
+from src.data_feed.market_data_client_port import (
+    CandleSnapshot,
+    MarketDataClientPort,
+    MarketDataEvent,
+    MarketTradeSnapshot,
+)
 from src.utils.log import get_logger
 
 logger = get_logger(__name__)
@@ -141,48 +145,17 @@ class BollCalculator:
         return middle, middle + std_multiplier * std, middle - std_multiplier * std
 
 
-class OkxPublicMarketClient:
-    def __init__(self, config: BollBandBreakoutMonitorConfig):
-        self.config = config
-        self._session: aiohttp.ClientSession | None = None
-        self._timeout_seconds = float(os.getenv("OKX_REST_TIMEOUT_SECONDS", "10"))
-        self._connector_limit = int(os.getenv("OKX_REST_CONNECTOR_LIMIT", "10"))
-
-    async def start(self) -> None:
-        if self._session is not None and not self._session.closed:
-            return
-        connector = aiohttp.TCPConnector(limit=self._connector_limit)
-        timeout = aiohttp.ClientTimeout(total=self._timeout_seconds)
-        self._session = aiohttp.ClientSession(connector=connector, timeout=timeout)
-
-    async def close(self) -> None:
-        if self._session is None:
-            return
-        await self._session.close()
-        self._session = None
-
-    async def fetch_candles(self, include_live: bool) -> list[Candle]:
-        await self.start()
-        if self._session is None:
-            raise RuntimeError("OKX REST session is not initialized")
-        url = f"{self.config.rest_base_url}/api/v5/market/candles"
-        params = {"instId": self.config.inst_id, "bar": self.config.bar, "limit": str(self.config.candle_limit)}
-        async with self._session.get(url, params=params) as resp:
-            payload = await resp.json()
-        if payload.get("code") != "0":
-            raise RuntimeError(f"OKX candle API error: {payload}")
-        candles: list[Candle] = []
-        for row in payload.get("data", []):
-            if len(row) < 6:
-                continue
-            confirmed = row[8] == "1" if len(row) >= 9 else True
-            if not include_live and not confirmed:
-                continue
-            candles.append(
-                Candle(int(row[0]), float(row[1]), float(row[2]), float(row[3]), float(row[4]), float(row[5]),
-                       confirmed))
-        candles.sort(key=lambda item: item.ts_ms)
-        return candles
+def _candle_from_snapshot(snapshot: CandleSnapshot) -> Candle:
+    """Convert a MarketDataClientPort CandleSnapshot into a monitor-internal Candle."""
+    return Candle(
+        ts_ms=snapshot.open_time_ms,
+        open=float(snapshot.open_price),
+        high=float(snapshot.high_price),
+        low=float(snapshot.low_price),
+        close=float(snapshot.close_price),
+        volume=float(snapshot.volume),
+        confirmed=snapshot.is_closed,
+    )
 
 
 class BollBandBreakoutMonitor:
@@ -191,9 +164,12 @@ class BollBandBreakoutMonitor:
             config: BollBandBreakoutMonitorConfig,
             handlers: Optional[list[SignalHandler]] = None,
             tick_handlers: Optional[list[TickHandler]] = None,
+            market_data_client: MarketDataClientPort | None = None,
     ):
+        if market_data_client is None:
+            raise ValueError("BollBandBreakoutMonitor requires market_data_client")
         self.config = config
-        self.client = OkxPublicMarketClient(config)
+        self.market_data_client = market_data_client
         self.handlers = handlers or []
         self.tick_handlers = tick_handlers or []
         self._candles: list[Candle] = []
@@ -228,7 +204,6 @@ class BollBandBreakoutMonitor:
 
     async def run_forever(self) -> None:
         self._running = True
-        await self.client.start()
         try:
             await asyncio.gather(
                 self._candle_sync_loop(),
@@ -238,7 +213,7 @@ class BollBandBreakoutMonitor:
             )
         finally:
             self._running = False
-            await self.client.close()
+            await self.market_data_client.close()
 
     async def _candle_sync_loop(self) -> None:
         while self._running:
@@ -254,7 +229,8 @@ class BollBandBreakoutMonitor:
             return self._handle_candle_sync_failure(exc)
 
     async def _sync_candles_from_rest(self) -> None:
-        candles = await self.client.fetch_candles(include_live=self.config.use_live_candle)
+        snapshots = await self.market_data_client.fetch_recent_klines(limit=self.config.candle_limit)
+        candles = [_candle_from_snapshot(snapshot) for snapshot in snapshots]
         if len(candles) < self.config.boll_window:
             logger.warning("Not enough candles for BOLL: %s < %s", len(candles), self.config.boll_window)
             return
@@ -383,41 +359,41 @@ class BollBandBreakoutMonitor:
     async def _tick_loop(self) -> None:
         while self._running:
             try:
-                await self._connect_tick_ws()
+                await self.market_data_client.stream_market_events(self._handle_market_data_event)
             except Exception:
-                logger.exception("Tick websocket disconnected, retrying in 3 seconds")
+                logger.exception("Market data stream disconnected, retrying in 3 seconds")
                 await asyncio.sleep(3)
 
-    async def _connect_tick_ws(self) -> None:
-        payload = {"op": "subscribe", "args": [{"channel": "trades", "instId": self.config.inst_id}]}
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None)) as session:
-            async with session.ws_connect(self.config.ws_public_url, heartbeat=20, autoping=True) as ws:
-                await ws.send_json(payload)
-                logger.info("Subscribed OKX trades channel: %s", self.config.inst_id)
-                async for msg in ws:
-                    if msg.type == aiohttp.WSMsgType.TEXT:
-                        await self._handle_ws_payload(msg.json())
-                    elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
-                        break
+    async def _handle_market_data_event(self, event: MarketDataEvent) -> None:
+        if isinstance(event, MarketTradeSnapshot):
+            tick = TradeTick(
+                inst_id=self.config.inst_id,
+                price=float(event.price),
+                size=float(event.qty),
+                side=event.side if event.side else "unknown",
+                ts_ms=event.event_time_ms,
+            )
+            await self._process_tick(tick)
+            return
 
-    async def _handle_ws_payload(self, payload: dict) -> None:
-        if "event" in payload:
-            logger.info("OKX websocket event: %s", payload)
+        if isinstance(event, CandleSnapshot):
+            # Upsert the candle into the local candle list for BOLL recalculation
+            await self._upsert_candle_from_snapshot(event)
             return
-        if payload.get("arg", {}).get("channel") != "trades":
-            return
-        for item in payload.get("data", []):
-            try:
-                tick = TradeTick(
-                    inst_id=self.config.inst_id,
-                    price=float(item["px"]),
-                    size=float(item.get("sz", 0.0)),
-                    side=str(item.get("side", "unknown")),
-                    ts_ms=int(item["ts"]),
-                )
-                await self._process_tick(tick)
-            except Exception:
-                logger.warning("Invalid trade tick payload: %s", item)
+
+    async def _upsert_candle_from_snapshot(self, snapshot: CandleSnapshot) -> None:
+        """Upsert a CandleSnapshot into the local candle list for live BOLL updates."""
+        candle = _candle_from_snapshot(snapshot)
+        async with self._candles_lock:
+            if not self._candles:
+                self._candles = [candle]
+                return
+            # Replace the last candle if same timestamp, otherwise append
+            if self._candles[-1].ts_ms == candle.ts_ms:
+                self._candles[-1] = candle
+            elif candle.ts_ms > self._candles[-1].ts_ms:
+                self._candles.append(candle)
+                self._candles = self._candles[-self.config.candle_limit:]
 
     async def _process_tick(self, tick: TradeTick) -> None:
         if self.config.use_live_candle:

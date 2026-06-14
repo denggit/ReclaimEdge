@@ -107,3 +107,57 @@ class TestSetLeverageDelegates:
         assert "configure_instrument()" in src, (
             "set_leverage must call trading_client.configure_instrument()"
         )
+
+
+class TestTraderDoesNotImportOkxTradingClient:
+    """Trader must NOT import OkxTradingClient."""
+
+    def test_no_okx_trading_client_import(self) -> None:
+        text = _read_source()
+        assert "from src.execution.okx_trading_client import OkxTradingClient" not in text, (
+            "trader.py must NOT import OkxTradingClient"
+        )
+
+    def test_no_okx_trading_client_instantiation(self) -> None:
+        text = _read_source()
+        assert "OkxTradingClient(" not in text, (
+            "trader.py must NOT instantiate OkxTradingClient"
+        )
+
+
+class TestTraderHasBindTradingClient:
+    """Trader must have bind_trading_client method."""
+
+    def test_bind_trading_client_exists(self) -> None:
+        src = _method_source("bind_trading_client")
+        assert src is not None, "trader.py must have bind_trading_client method"
+        assert "trading_client" in src
+
+    def test_require_trading_client_exists(self) -> None:
+        src = _method_source("_require_trading_client")
+        assert src is not None, "trader.py must have _require_trading_client method"
+
+
+class TestTraderInitDoesNotDirectlyReadOkxEnv:
+    """Trader.__init__ must NOT directly read OKX_* env vars."""
+
+    def test_init_no_okx_inst_id(self) -> None:
+        src = _method_source("__init__")
+        assert src is not None
+        assert 'os.getenv("OKX_INST_ID"' not in src, (
+            "__init__ must NOT directly read OKX_INST_ID"
+        )
+
+    def test_init_no_okx_td_mode(self) -> None:
+        src = _method_source("__init__")
+        assert src is not None
+        assert 'os.getenv("OKX_TD_MODE"' not in src, (
+            "__init__ must NOT directly read OKX_TD_MODE"
+        )
+
+    def test_init_no_okx_pos_side_mode(self) -> None:
+        src = _method_source("__init__")
+        assert src is not None
+        assert 'os.getenv("OKX_POS_SIDE_MODE"' not in src, (
+            "__init__ must NOT directly read OKX_POS_SIDE_MODE"
+        )

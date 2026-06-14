@@ -19,6 +19,8 @@ from src.position_management.tp_progress import (
 )
 from src.reporting.trade_journal import LiveTradeJournal
 from src.risk.simple_position_sizer import PositionSize, SimplePositionSizer, SimplePositionSizerConfig
+from src.execution.okx_trading_client import OkxTradingClient
+from src.execution.tp_sl_execution_manager import TpSlExecutionManager
 from src.strategies.boll_cvd_reclaim_strategy import (
     BollCvdReclaimStrategy,
     BollCvdReclaimStrategyConfig,
@@ -839,6 +841,8 @@ class SplitTakeProfitTraderTest(unittest.IsolatedAsyncioTestCase):
         trader.trend_runner_sl_order_id = None
         trader.contract_multiplier = Decimal("0.1")
         trader._client = FakeOkxClient(trader)
+        trader.trading_client = OkxTradingClient(trader)  # type: ignore[assignment]
+        trader._tp_sl_manager = TpSlExecutionManager(trader, trading_client=trader.trading_client)  # type: ignore[arg-type]
         return trader
 
     def test_build_split_order_specs_rounds_half_position(self) -> None:

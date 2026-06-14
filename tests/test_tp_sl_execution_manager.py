@@ -17,6 +17,7 @@ from src.execution.tp_sl_execution_manager import TpSlExecutionManager
 from src.execution.trader import Trader
 from src.risk.simple_position_sizer import PositionSize
 from src.strategies.boll_cvd_reclaim_strategy import TradeIntent
+from src.execution.okx_trading_client import OkxTradingClient
 
 
 def make_intent(**overrides) -> TradeIntent:
@@ -73,6 +74,8 @@ def make_trader(**overrides) -> Trader:
     t._managed_reduce_only_order_ids = set()
     t._allow_cancel_unmanaged_reduce_only = True
     t._client = FakeOkxClient(t)
+    t.trading_client = OkxTradingClient(t)  # type: ignore[assignment]
+    t._tp_sl_manager = TpSlExecutionManager(t, trading_client=t.trading_client)  # type: ignore[arg-type]
     for k, v in overrides.items():
         setattr(t, k, v)
     return t
@@ -87,14 +90,16 @@ class TpSlExecutionManagerTest(unittest.IsolatedAsyncioTestCase):
 
     def test_tp_price_summary_single_spec_returns_price(self) -> None:
         trader = make_trader()
-        manager = TpSlExecutionManager(trader)
+        manager = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = manager  # type: ignore[assignment]
         specs = [("final", Decimal("10"), 3100.0)]
         result = manager._tp_price_summary(specs)
         self.assertEqual(result, "3100.00")
 
     def test_tp_price_summary_multi_spec_returns_labeled_prices(self) -> None:
         trader = make_trader()
-        manager = TpSlExecutionManager(trader)
+        manager = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = manager  # type: ignore[assignment]
         specs = [("partial", Decimal("5"), 3050.0), ("final", Decimal("5"), 3100.0)]
         result = manager._tp_price_summary(specs)
         self.assertEqual(result, "partial:3050.00,final:3100.00")
@@ -129,7 +134,8 @@ class TpSlExecutionManagerTest(unittest.IsolatedAsyncioTestCase):
 
     def test_protected_order_ids_includes_intent_protected_order_ids(self) -> None:
         trader = make_trader()
-        manager = TpSlExecutionManager(trader)
+        manager = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = manager  # type: ignore[assignment]
         intent = make_intent(protected_order_ids=("sidecar-tp", "custom-id"))
         ids = manager._protected_order_ids_from_intent(intent)
         self.assertIn("sidecar-tp", ids)
@@ -137,7 +143,8 @@ class TpSlExecutionManagerTest(unittest.IsolatedAsyncioTestCase):
 
     def test_protected_order_ids_includes_intent_near_tp_sl_order_id(self) -> None:
         trader = make_trader()
-        manager = TpSlExecutionManager(trader)
+        manager = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = manager  # type: ignore[assignment]
         intent = make_intent()
         object.__setattr__(intent, "near_tp_protective_sl_order_id", "near-sl-id")
         ids = manager._protected_order_ids_from_intent(intent)
@@ -149,7 +156,8 @@ class TpSlExecutionManagerTest(unittest.IsolatedAsyncioTestCase):
             middle_runner_protective_sl_order_id="current-mid-sl",
             trend_runner_sl_order_id="current-trend-sl",
         )
-        manager = TpSlExecutionManager(trader)
+        manager = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = manager  # type: ignore[assignment]
         intent = make_intent()
         ids = manager._protected_order_ids_from_intent(intent)
         self.assertIn("current-near-sl", ids)
@@ -158,7 +166,8 @@ class TpSlExecutionManagerTest(unittest.IsolatedAsyncioTestCase):
 
     def test_protected_order_ids_excludes_none_values(self) -> None:
         trader = make_trader()
-        manager = TpSlExecutionManager(trader)
+        manager = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = manager  # type: ignore[assignment]
         intent = make_intent()
         ids = manager._protected_order_ids_from_intent(intent)
         self.assertNotIn(None, ids)
@@ -169,28 +178,32 @@ class TpSlExecutionManagerTest(unittest.IsolatedAsyncioTestCase):
 
     def test_managed_core_contracts_none_returns_none(self) -> None:
         trader = make_trader()
-        manager = TpSlExecutionManager(trader)
+        manager = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = manager  # type: ignore[assignment]
         intent = make_intent(managed_core_contracts=None)
         result = manager._managed_core_contracts_from_intent(intent)
         self.assertIsNone(result)
 
     def test_managed_core_contracts_empty_string_returns_none(self) -> None:
         trader = make_trader()
-        manager = TpSlExecutionManager(trader)
+        manager = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = manager  # type: ignore[assignment]
         intent = make_intent(managed_core_contracts="")
         result = manager._managed_core_contracts_from_intent(intent)
         self.assertIsNone(result)
 
     def test_managed_core_contracts_valid_returns_decimal(self) -> None:
         trader = make_trader()
-        manager = TpSlExecutionManager(trader)
+        manager = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = manager  # type: ignore[assignment]
         intent = make_intent(managed_core_contracts="10")
         result = manager._managed_core_contracts_from_intent(intent)
         self.assertEqual(result, Decimal("10"))
 
     def test_managed_core_contracts_invalid_string_raises_runtime_error(self) -> None:
         trader = make_trader()
-        manager = TpSlExecutionManager(trader)
+        manager = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = manager  # type: ignore[assignment]
         intent = make_intent(managed_core_contracts="not_a_number")
         with self.assertRaises(RuntimeError) as ctx:
             manager._managed_core_contracts_from_intent(intent)
@@ -198,7 +211,8 @@ class TpSlExecutionManagerTest(unittest.IsolatedAsyncioTestCase):
 
     def test_managed_core_contracts_below_min_raises_runtime_error(self) -> None:
         trader = make_trader(min_contracts=Decimal("1"))
-        manager = TpSlExecutionManager(trader)
+        manager = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = manager  # type: ignore[assignment]
         intent = make_intent(managed_core_contracts="0.001")
         with self.assertRaises(RuntimeError) as ctx:
             manager._managed_core_contracts_from_intent(intent)
@@ -206,7 +220,8 @@ class TpSlExecutionManagerTest(unittest.IsolatedAsyncioTestCase):
 
     def test_managed_core_contracts_rounded_down(self) -> None:
         trader = make_trader()
-        manager = TpSlExecutionManager(trader)
+        manager = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = manager  # type: ignore[assignment]
         intent = make_intent(managed_core_contracts="10.005")
         result = manager._managed_core_contracts_from_intent(intent)
         self.assertEqual(result, Decimal("10.00"))
@@ -261,7 +276,8 @@ class TpSlExecutionManagerTest(unittest.IsolatedAsyncioTestCase):
         trader.fetch_broker_open_orders = fake_fetch_broker_open
         trader.request = fake_request  # type: ignore[method-assign]
 
-        manager = TpSlExecutionManager(trader)
+        manager = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = manager  # type: ignore[assignment]
         await manager.cancel_existing_reduce_only_orders()
 
         cancelled_ids = [r[2].get("ordId") for r in requests if "/cancel-order" in r[1]]
@@ -294,7 +310,8 @@ class TpSlExecutionManagerTest(unittest.IsolatedAsyncioTestCase):
 
         trader.fetch_broker_open_orders = fake_fetch_broker_open
 
-        manager = TpSlExecutionManager(trader)
+        manager = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = manager  # type: ignore[assignment]
         with self.assertRaises(RuntimeError) as ctx:
             await manager.cancel_existing_reduce_only_orders()
         self.assertIn("reduce_only_order_identity_unknown", str(ctx.exception))
@@ -305,7 +322,8 @@ class TpSlExecutionManagerTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_cancel_sidecar_take_profit_none_returns_true(self) -> None:
         trader = make_trader()
-        manager = TpSlExecutionManager(trader)
+        manager = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = manager  # type: ignore[assignment]
         result = await manager.cancel_sidecar_take_profit(None)
         self.assertTrue(result)
 
@@ -316,7 +334,8 @@ class TpSlExecutionManagerTest(unittest.IsolatedAsyncioTestCase):
             raise RuntimeError("order does not exist")
 
         trader.request = fake_request  # type: ignore[method-assign]
-        manager = TpSlExecutionManager(trader)
+        manager = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = manager  # type: ignore[assignment]
         result = await manager.cancel_sidecar_take_profit("tp-1")
         self.assertTrue(result)
 
@@ -327,7 +346,8 @@ class TpSlExecutionManagerTest(unittest.IsolatedAsyncioTestCase):
             return {"code": "0", "data": []}
 
         trader.request = fake_request  # type: ignore[method-assign]
-        manager = TpSlExecutionManager(trader)
+        manager = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = manager  # type: ignore[assignment]
         result = await manager.cancel_sidecar_take_profit("tp-1")
         self.assertTrue(result)
 
@@ -349,7 +369,8 @@ class TpSlExecutionManagerTest(unittest.IsolatedAsyncioTestCase):
         trader.request = fake_request  # type: ignore[method-assign]
         trader.verify_near_tp_protective_stop = fake_verify  # type: ignore[method-assign]
 
-        manager = TpSlExecutionManager(trader)
+        manager = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = manager  # type: ignore[assignment]
         ok, algo_id, message = await manager.place_near_tp_protective_stop_with_retries(
             "LONG", Decimal("10"), 3050.0, 3, 0.1
         )
@@ -383,7 +404,8 @@ class TpSlExecutionManagerTest(unittest.IsolatedAsyncioTestCase):
         trader.verify_near_tp_protective_stop = fake_verify  # type: ignore[method-assign]
         trader.cancel_near_tp_protective_stop = fake_cancel_near_tp  # type: ignore[method-assign]
 
-        manager = TpSlExecutionManager(trader)
+        manager = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = manager  # type: ignore[assignment]
         ok, algo_id, message = await manager.place_near_tp_protective_stop_with_retries(
             "LONG", Decimal("10"), 3050.0, 3, 0.0
         )
@@ -407,7 +429,8 @@ class TpSlExecutionManagerTest(unittest.IsolatedAsyncioTestCase):
         trader.fetch_position_snapshot = fake_fetch_snapshot
         trader.cancel_existing_reduce_only_orders = fake_cancel_reduce_only  # type: ignore[method-assign]
 
-        manager = TpSlExecutionManager(trader)
+        manager = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = manager  # type: ignore[assignment]
         ok, message = await manager.market_exit_remaining_position_with_retries("LONG", 3)
 
         self.assertTrue(ok)
@@ -433,7 +456,8 @@ class TpSlExecutionManagerTest(unittest.IsolatedAsyncioTestCase):
             lambda: None
         )
 
-        manager = TpSlExecutionManager(trader)
+        manager = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = manager  # type: ignore[assignment]
         ok, message = await manager.market_exit_remaining_position_with_retries("LONG", 3)
 
         self.assertTrue(ok)
@@ -460,7 +484,8 @@ class TpSlExecutionManagerTest(unittest.IsolatedAsyncioTestCase):
             lambda: None
         )
 
-        manager = TpSlExecutionManager(trader)
+        manager = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = manager  # type: ignore[assignment]
         ok, message = await manager.market_exit_remaining_position_with_retries("LONG", 2)
 
         self.assertFalse(ok)
@@ -581,7 +606,8 @@ class TpSlExecutionManagerTest(unittest.IsolatedAsyncioTestCase):
 
         trader.request = fake_request  # type: ignore[method-assign]
 
-        manager = TpSlExecutionManager(trader)
+        manager = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = manager  # type: ignore[assignment]
         order_id = await manager.place_sidecar_fixed_take_profit(
             side="LONG",
             contracts="0.69",
@@ -606,7 +632,8 @@ class TpSlExecutionManagerTest(unittest.IsolatedAsyncioTestCase):
 
         trader.fetch_position_snapshot = fake_fetch_snapshot
 
-        manager = TpSlExecutionManager(trader)
+        manager = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = manager  # type: ignore[assignment]
         intent = make_intent(intent_type="NEAR_TP_REDUCE")
         result = await manager.execute_near_tp_reduce(intent)
 
@@ -623,7 +650,8 @@ class TpSlExecutionManagerTest(unittest.IsolatedAsyncioTestCase):
 
         trader.fetch_position_snapshot = fake_fetch_snapshot
 
-        manager = TpSlExecutionManager(trader)
+        manager = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = manager  # type: ignore[assignment]
         intent = make_intent()
         result = await manager.replace_take_profit(intent)
 

@@ -12,6 +12,7 @@ from unittest import mock
 import pytest
 
 from tests.conftest import FakeOkxClient
+from src.execution.okx_trading_client import OkxTradingClient
 
 from src.execution.middle_bucket_split_size import (
     MiddleBucketSplitSizeCheck,
@@ -512,13 +513,15 @@ class TestFallbackFinalReturnsSplitExecutedFalse:
         trader.round_contracts_down = lambda c: c
         trader._tp_price_summary = lambda specs: trader.price_to_str(specs[0][2])
         trader._client = FakeOkxClient(trader)
+        trader.trading_client = OkxTradingClient(trader)  # type: ignore[assignment]
 
         # Mock position fetch to return a valid LONG position
         async def fake_fetch():
             return PositionSnapshot("LONG", Decimal("10"), 3000.0, Decimal("1"), Decimal("10"))
         trader.fetch_position_snapshot = fake_fetch
 
-        facade = TpSlExecutionManager(trader)
+        facade = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = facade  # type: ignore[assignment]
 
         # Build intent with split active (following TradeIntent field order)
         from src.strategies.boll_cvd_reclaim_strategy import TradeIntent

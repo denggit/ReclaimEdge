@@ -151,3 +151,11 @@ class TradingClientPort(Protocol):
         client_order_id: str | None = None,
     ) -> CancelResult:
         ...
+
+    async def cancel_algo_order(
+        self,
+        *,
+        order_id: str | None = None,
+        client_order_id: str | None = None,
+    ) -> CancelResult:
+        ...

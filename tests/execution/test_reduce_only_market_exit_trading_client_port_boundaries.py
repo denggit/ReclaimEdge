@@ -350,7 +350,7 @@ class TestNoForbiddenImports:
 # ======================================================================
 
 
-class TestNoNewClientInstantiation:
+class TestNoNewClientInstantiation_OLD:
     """Migrated files must not create new Trader or OkxPrivateClient.
 
     Note: TpSlExecutionManager is allowed to create OkxTradingClient —
@@ -395,11 +395,14 @@ class TestNoNewClientInstantiation:
                     f"receive from TpSlExecutionManager"
                 )
 
-    def test_execution_manager_creates_okx_trading_client(self):
-        """TpSlExecutionManager is the canonical creator of OkxTradingClient."""
+    def test_execution_manager_accepts_trading_client(self):
+        """TpSlExecutionManager receives trading_client via injection, no longer creates it."""
         text = _read_source(_EXECUTION_MGR_PATH)
-        assert "OkxTradingClient(trader)" in text, (
-            "TpSlExecutionManager must create OkxTradingClient as the canonical source"
+        assert "OkxTradingClient(trader)" not in text, (
+            "TpSlExecutionManager must NOT create OkxTradingClient — it is injected"
+        )
+        assert "trading_client: TradingClientPort" in text, (
+            "TpSlExecutionManager must accept trading_client: TradingClientPort"
         )
 
 

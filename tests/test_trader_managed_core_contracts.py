@@ -15,6 +15,8 @@ import src.execution.trader as trader_module  # noqa: E402
 from src.execution.trader import Trader  # noqa: E402
 from src.risk.simple_position_sizer import PositionSize  # noqa: E402
 from src.strategies.boll_cvd_reclaim_strategy import TradeIntent  # noqa: E402
+from src.execution.okx_trading_client import OkxTradingClient
+from src.execution.tp_sl_execution_manager import TpSlExecutionManager
 
 
 def make_intent(**overrides) -> TradeIntent:
@@ -69,6 +71,8 @@ def make_trader(**overrides) -> Trader:
     t._managed_reduce_only_order_ids = set()
     t._allow_cancel_unmanaged_reduce_only = True
     t._client = FakeOkxClient(t)
+    t.trading_client = OkxTradingClient(t)  # type: ignore[assignment]
+    t._tp_sl_manager = TpSlExecutionManager(t, trading_client=t.trading_client)  # type: ignore[arg-type]
     for k, v in overrides.items():
         setattr(t, k, v)
     return t

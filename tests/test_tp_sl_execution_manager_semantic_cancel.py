@@ -28,6 +28,7 @@ from src.exchanges.semantic_models import (
     BrokerSemanticOrderRole,
     BrokerSemanticResult,
 )
+from src.execution.okx_trading_client import OkxTradingClient
 from src.execution.tp_sl_execution_manager import TpSlExecutionManager
 
 
@@ -62,6 +63,43 @@ class FakeSemanticExecutor:
 # ---------------------------------------------------------------------------
 
 
+class FakeTradingClientForCancel:
+    """Minimal mock TradingClientPort for testing cancel operations."""
+
+    def __init__(self, trader: FakeTrader) -> None:
+        self._trader = trader
+
+    async def fetch_open_orders(self):
+        # Return fake OrderSnapshots matching trader.pending_orders
+        # Filter by symbol (like real OkxTradingClient does)
+        from src.execution.trading_client_port import OrderSnapshot
+        from decimal import Decimal
+        result = []
+        for item in self._trader.pending_orders:
+            if item.get("instId") != self._trader.symbol:
+                continue
+            result.append(OrderSnapshot(
+                order_id=item.get("ordId"),
+                client_order_id=item.get("clOrdId"),
+                side=str(item.get("side", "sell")),
+                qty=Decimal(str(item.get("sz", "1"))),
+                price=Decimal(str(item.get("px", "0"))) if item.get("px") else None,
+                reduce_only=str(item.get("reduceOnly", "")).lower() == "true",
+                raw=item,
+            ))
+        return result
+
+    async def cancel_order(self, *, order_id=None, client_order_id=None):
+        from src.execution.trading_client_port import CancelResult
+        self._trader.requests.append(("POST", "/api/v5/trade/cancel-order", {"ordId": order_id}))
+        return CancelResult(ok=True, order_id=order_id, raw={"code": "0", "data": [{"ordId": order_id}]})
+
+    async def cancel_algo_order(self, *, order_id=None, client_order_id=None):
+        from src.execution.trading_client_port import CancelResult
+        self._trader.requests.append(("POST", "/api/v5/trade/cancel-algos", {"algoId": order_id}))
+        return CancelResult(ok=True, order_id=order_id, raw={"code": "0", "data": [{"algoId": order_id}]})
+
+
 class FakeTrader:
     symbol = "ETH-USDT-SWAP"
 
@@ -72,6 +110,7 @@ class FakeTrader:
         self._managed_reduce_only_order_ids: set[str] = set()
         self._allow_cancel_unmanaged_reduce_only: bool = True
         self.semantic = FakeSemanticExecutor()
+        self.trading_client = FakeTradingClientForCancel(self)
 
     @property
     def broker_semantic_executor(self) -> FakeSemanticExecutor:
@@ -142,7 +181,8 @@ class TestDefaultOffLegacyCancel:
         trader.pending_orders = [
             {"instId": "ETH-USDT-SWAP", "ordId": "tp-1", "reduceOnly": "true"},
         ]
-        manager = TpSlExecutionManager(trader)  # type: ignore[arg-type]
+        manager = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = manager  # type: ignore[assignment]  # type: ignore[arg-type]
         await manager.cancel_existing_reduce_only_orders()
 
         assert len(trader.requests) == 1, "Expected 1 legacy request"
@@ -160,7 +200,8 @@ class TestDefaultOffLegacyCancel:
             {"instId": "ETH-USDT-SWAP", "ordId": "tp-1", "reduceOnly": "true"},
             {"instId": "ETH-USDT-SWAP", "ordId": "tp-2", "reduceOnly": "true"},
         ]
-        manager = TpSlExecutionManager(trader)  # type: ignore[arg-type]
+        manager = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = manager  # type: ignore[assignment]  # type: ignore[arg-type]
         await manager.cancel_existing_reduce_only_orders()
 
         assert len(trader.requests) == 2
@@ -184,7 +225,8 @@ class TestEnabledSemanticCancel:
         trader.pending_orders = [
             {"instId": "ETH-USDT-SWAP", "ordId": "tp-1", "reduceOnly": "true"},
         ]
-        manager = TpSlExecutionManager(trader)  # type: ignore[arg-type]
+        manager = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = manager  # type: ignore[assignment]  # type: ignore[arg-type]
         await manager.cancel_existing_reduce_only_orders()
 
         assert trader.semantic.calls == [("ETH-USDT-SWAP", "tp-1")], (
@@ -201,7 +243,8 @@ class TestEnabledSemanticCancel:
             {"instId": "ETH-USDT-SWAP", "ordId": "tp-1", "reduceOnly": "true"},
             {"instId": "ETH-USDT-SWAP", "ordId": "tp-2", "reduceOnly": "true"},
         ]
-        manager = TpSlExecutionManager(trader)  # type: ignore[arg-type]
+        manager = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = manager  # type: ignore[assignment]  # type: ignore[arg-type]
         await manager.cancel_existing_reduce_only_orders()
 
         assert trader.semantic.calls == [
@@ -229,7 +272,8 @@ class TestSemanticFailureNoFallback:
         trader.semantic.ok = False
         trader.semantic.message = "boom"
 
-        manager = TpSlExecutionManager(trader)  # type: ignore[arg-type]
+        manager = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = manager  # type: ignore[assignment]  # type: ignore[arg-type]
 
         with pytest.raises(RuntimeError) as exc_info:
             await manager.cancel_existing_reduce_only_orders()
@@ -252,7 +296,8 @@ class TestSemanticFailureNoFallback:
         trader.semantic.ok = False
         trader.semantic.message = "boom"
 
-        manager = TpSlExecutionManager(trader)  # type: ignore[arg-type]
+        manager = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = manager  # type: ignore[assignment]  # type: ignore[arg-type]
 
         with pytest.raises(RuntimeError) as exc_info:
             await manager.cancel_existing_reduce_only_orders()
@@ -279,7 +324,8 @@ class TestProtectedOrderSkipped:
             {"instId": "ETH-USDT-SWAP", "ordId": "tp-1", "reduceOnly": "true"},
             {"instId": "ETH-USDT-SWAP", "ordId": "tp-2", "reduceOnly": "true"},
         ]
-        manager = TpSlExecutionManager(trader)  # type: ignore[arg-type]
+        manager = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = manager  # type: ignore[assignment]  # type: ignore[arg-type]
         await manager.cancel_existing_reduce_only_orders()
 
         # tp-1 is protected → skipped; only tp-2 is cancelled
@@ -296,7 +342,8 @@ class TestProtectedOrderSkipped:
             {"instId": "ETH-USDT-SWAP", "ordId": "tp-1", "reduceOnly": "true"},
             {"instId": "ETH-USDT-SWAP", "ordId": "tp-2", "reduceOnly": "true"},
         ]
-        manager = TpSlExecutionManager(trader)  # type: ignore[arg-type]
+        manager = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = manager  # type: ignore[assignment]  # type: ignore[arg-type]
         await manager.cancel_existing_reduce_only_orders()
 
         cancelled_ids = [r[2]["ordId"] for r in trader.requests]
@@ -322,7 +369,8 @@ class TestManagedIdsSafety:
             {"instId": "ETH-USDT-SWAP", "ordId": "tp-1", "reduceOnly": "true"},
             {"instId": "ETH-USDT-SWAP", "ordId": "tp-2", "reduceOnly": "true"},
         ]
-        manager = TpSlExecutionManager(trader)  # type: ignore[arg-type]
+        manager = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = manager  # type: ignore[assignment]  # type: ignore[arg-type]
 
         with pytest.raises(RuntimeError) as exc_info:
             await manager.cancel_existing_reduce_only_orders()
@@ -341,7 +389,8 @@ class TestManagedIdsSafety:
             {"instId": "ETH-USDT-SWAP", "ordId": "tp-1", "reduceOnly": "true"},
             {"instId": "ETH-USDT-SWAP", "ordId": "tp-2", "reduceOnly": "true"},
         ]
-        manager = TpSlExecutionManager(trader)  # type: ignore[arg-type]
+        manager = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = manager  # type: ignore[assignment]  # type: ignore[arg-type]
 
         with pytest.raises(RuntimeError) as exc_info:
             await manager.cancel_existing_reduce_only_orders()
@@ -369,7 +418,8 @@ class TestAllowUnmanagedFalse:
         trader.pending_orders = [
             {"instId": "ETH-USDT-SWAP", "ordId": "tp-1", "reduceOnly": "true"},
         ]
-        manager = TpSlExecutionManager(trader)  # type: ignore[arg-type]
+        manager = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = manager  # type: ignore[assignment]  # type: ignore[arg-type]
 
         with pytest.raises(RuntimeError) as exc_info:
             await manager.cancel_existing_reduce_only_orders()
@@ -387,7 +437,8 @@ class TestAllowUnmanagedFalse:
         trader.pending_orders = [
             {"instId": "ETH-USDT-SWAP", "ordId": "tp-1", "reduceOnly": "true"},
         ]
-        manager = TpSlExecutionManager(trader)  # type: ignore[arg-type]
+        manager = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = manager  # type: ignore[assignment]  # type: ignore[arg-type]
 
         with pytest.raises(RuntimeError) as exc_info:
             await manager.cancel_existing_reduce_only_orders()
@@ -412,7 +463,8 @@ class TestSymbolReduceOnlyFiltering:
             {"instId": "BTC-USDT-SWAP", "ordId": "btc-1", "reduceOnly": "true"},
             {"instId": "ETH-USDT-SWAP", "ordId": "eth-1", "reduceOnly": "true"},
         ]
-        manager = TpSlExecutionManager(trader)  # type: ignore[arg-type]
+        manager = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = manager  # type: ignore[assignment]  # type: ignore[arg-type]
         await manager.cancel_existing_reduce_only_orders()
 
         # Only ETH-USDT-SWAP orders are cancelled
@@ -428,7 +480,8 @@ class TestSymbolReduceOnlyFiltering:
             {"instId": "ETH-USDT-SWAP", "ordId": "eth-1", "reduceOnly": "false"},
             {"instId": "ETH-USDT-SWAP", "ordId": "eth-2", "reduceOnly": "true"},
         ]
-        manager = TpSlExecutionManager(trader)  # type: ignore[arg-type]
+        manager = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = manager  # type: ignore[assignment]  # type: ignore[arg-type]
         await manager.cancel_existing_reduce_only_orders()
 
         # Only reduceOnly=true orders are cancelled
@@ -445,7 +498,8 @@ class TestSymbolReduceOnlyFiltering:
             {"instId": "ETH-USDT-SWAP", "ordId": "eth-1", "reduceOnly": "false"},
             {"instId": "ETH-USDT-SWAP", "ordId": "eth-2", "reduceOnly": "true"},
         ]
-        manager = TpSlExecutionManager(trader)  # type: ignore[arg-type]
+        manager = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = manager  # type: ignore[assignment]  # type: ignore[arg-type]
         await manager.cancel_existing_reduce_only_orders()
 
         # Only eth-2 matches: right symbol AND reduceOnly=true
@@ -462,7 +516,8 @@ class TestSymbolReduceOnlyFiltering:
             {"instId": "ETH-USDT-SWAP", "ordId": "eth-1", "reduceOnly": "false"},
             {"instId": "ETH-USDT-SWAP", "ordId": "eth-2", "reduceOnly": "true"},
         ]
-        manager = TpSlExecutionManager(trader)  # type: ignore[arg-type]
+        manager = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = manager  # type: ignore[assignment]  # type: ignore[arg-type]
         await manager.cancel_existing_reduce_only_orders()
 
         cancelled_ids = [r[2]["ordId"] for r in trader.requests]
@@ -485,7 +540,8 @@ class TestOrdIdMissingCheck:
         trader.pending_orders = [
             {"instId": "ETH-USDT-SWAP", "reduceOnly": "true"},
         ]
-        manager = TpSlExecutionManager(trader)  # type: ignore[arg-type]
+        manager = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = manager  # type: ignore[assignment]  # type: ignore[arg-type]
 
         with pytest.raises(RuntimeError) as exc_info:
             await manager.cancel_existing_reduce_only_orders()
@@ -501,7 +557,8 @@ class TestOrdIdMissingCheck:
         trader.pending_orders = [
             {"instId": "ETH-USDT-SWAP", "reduceOnly": "true"},
         ]
-        manager = TpSlExecutionManager(trader)  # type: ignore[arg-type]
+        manager = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = manager  # type: ignore[assignment]  # type: ignore[arg-type]
 
         with pytest.raises(RuntimeError) as exc_info:
             await manager.cancel_existing_reduce_only_orders()
@@ -526,7 +583,8 @@ class TestEnvVarVariants:
         trader.pending_orders = [
             {"instId": "ETH-USDT-SWAP", "ordId": "tp-1", "reduceOnly": "true"},
         ]
-        manager = TpSlExecutionManager(trader)  # type: ignore[arg-type]
+        manager = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = manager  # type: ignore[assignment]  # type: ignore[arg-type]
         await manager.cancel_existing_reduce_only_orders()
 
         assert trader.semantic.calls == [("ETH-USDT-SWAP", "tp-1")]
@@ -541,7 +599,8 @@ class TestEnvVarVariants:
         trader.pending_orders = [
             {"instId": "ETH-USDT-SWAP", "ordId": "tp-1", "reduceOnly": "true"},
         ]
-        manager = TpSlExecutionManager(trader)  # type: ignore[arg-type]
+        manager = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = manager  # type: ignore[assignment]  # type: ignore[arg-type]
         await manager.cancel_existing_reduce_only_orders()
 
         assert len(trader.requests) == 1

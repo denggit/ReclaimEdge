@@ -6,6 +6,8 @@ from decimal import Decimal
 from unittest.mock import patch
 
 from tests.conftest import FakeOkxClient
+from src.execution.okx_trading_client import OkxTradingClient
+from src.execution.tp_sl_execution_manager import TpSlExecutionManager
 from src.execution.trader import PositionSnapshot, Trader
 from src.indicators.cvd_tracker import CvdSnapshot
 from src.monitors.boll_band_breakout_monitor import BollSnapshot
@@ -1778,8 +1780,6 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
 
 class RecordingTrader(Trader):
     def __init__(self, side: str = "LONG") -> None:
-        from src.execution.okx_trading_client import OkxTradingClient
-
         self.symbol = "ETH-USDT-SWAP"
         self.td_mode = "isolated"
         self.pos_side_mode = "net"
@@ -1794,7 +1794,8 @@ class RecordingTrader(Trader):
         self.trend_runner_sl_order_id = None
         self.contract_multiplier = Decimal("0.1")
         self._client = FakeOkxClient(self)
-        self.trading_client = OkxTradingClient(self)
+        self.trading_client = OkxTradingClient(self)  # type: ignore[assignment]
+        self._tp_sl_manager = TpSlExecutionManager(self, trading_client=self.trading_client)  # type: ignore[arg-type]
         self.side = side
         self.placed_specs = []
         self.trend_stop_calls = 0
@@ -1855,6 +1856,8 @@ class ThreeStageTrendRunnerTraderTest(unittest.IsolatedAsyncioTestCase):
         trader.contract_precision = Decimal("0.01")
         trader.min_contracts = Decimal("0.01")
         trader._client = FakeOkxClient(trader)
+        trader.trading_client = OkxTradingClient(trader)  # type: ignore[assignment]
+        trader._tp_sl_manager = TpSlExecutionManager(trader, trading_client=trader.trading_client)  # type: ignore[arg-type]
 
         specs = trader._build_take_profit_order_specs(intent())
 

@@ -3,8 +3,6 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Any, TYPE_CHECKING
 
-from src.execution import order_specs
-from src.execution.okx_trading_client import OkxTradingClient
 from src.execution.tp_sl_core_tp_manager import CoreTakeProfitManager
 from src.execution.tp_sl_market_exit_manager import MarketExitManager
 from src.execution.tp_sl_near_tp_manager import NearTpExecutionManager
@@ -21,9 +19,9 @@ logger = get_logger(__name__)
 
 
 class TpSlExecutionManager:
-    def __init__(self, trader: Trader) -> None:
+    def __init__(self, trader: Trader, *, trading_client: TradingClientPort) -> None:
         self.trader = trader
-        self.trading_client: TradingClientPort = OkxTradingClient(trader)
+        self.trading_client: TradingClientPort = trading_client
         self.protective_stops = ProtectiveStopManager(trader, self.trading_client)
         self.market_exit = MarketExitManager(trader, self.trading_client)
         self.core_tp = CoreTakeProfitManager(trader, self.protective_stops, self.trading_client)
@@ -328,21 +326,14 @@ class TpSlExecutionManager:
                 )
             return ok
 
-        # NOTE: 20C-CLEAN-PORTS-05 — intentionally NOT routed through
-        # TradingClientPort.cancel_order() here.  The caller knows this is
-        # an algo order id, so the regular-cancel → algo-cancel fallback
-        # inside cancel_order() would add unnecessary latency and a
-        # spurious API error.  The legacy direct algo cancel is the
-        # correct path for this specific call-site.
         try:
-            await t.request("POST", "/api/v5/trade/cancel-algos", order_specs.build_cancel_algo_body(
-                inst_id=t.symbol,
-                algo_id=order_id,
-            ))
-            if t.near_tp_protective_sl_order_id == order_id:
-                t.near_tp_protective_sl_order_id = None
-            logger.warning("NEAR_TP_PROTECTIVE_SL_CANCEL_ON_FLAT | algoId=%s", order_id)
-            return True
+            result = await self.trading_client.cancel_algo_order(order_id=order_id)
+            if result.ok:
+                if t.near_tp_protective_sl_order_id == order_id:
+                    t.near_tp_protective_sl_order_id = None
+                logger.warning("NEAR_TP_PROTECTIVE_SL_CANCEL_ON_FLAT | algoId=%s", order_id)
+                return True
+            return False
         except Exception as exc:
             text = str(exc).lower()
             if "not found" in text or "not exist" in text or "does not exist" in text or "already" in text:

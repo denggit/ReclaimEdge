@@ -62,3 +62,33 @@ class TestOkxPrivateRestOnlyInAdapterLayer:
         assert not violations, (
             "Trader legacy wrappers must NOT contain /api/v5:\n" + "\n".join(violations)
         )
+
+    def test_trader_does_not_import_okx_trading_client(self) -> None:
+        """Trader must NOT import or instantiate OkxTradingClient."""
+        filepath = ROOT / "src" / "execution" / "trader.py"
+        text = filepath.read_text(encoding="utf-8")
+        assert "from src.execution.okx_trading_client import OkxTradingClient" not in text, (
+            "trader.py must NOT import OkxTradingClient"
+        )
+        assert "OkxTradingClient(" not in text, (
+            "trader.py must NOT instantiate OkxTradingClient"
+        )
+
+    def test_tp_sl_execution_manager_does_not_import_okx_trading_client(self) -> None:
+        """TpSlExecutionManager must NOT import or instantiate OkxTradingClient."""
+        filepath = ROOT / "src" / "execution" / "tp_sl_execution_manager.py"
+        text = filepath.read_text(encoding="utf-8")
+        assert "from src.execution.okx_trading_client import OkxTradingClient" not in text, (
+            "tp_sl_execution_manager.py must NOT import OkxTradingClient"
+        )
+        assert "OkxTradingClient(" not in text, (
+            "tp_sl_execution_manager.py must NOT instantiate OkxTradingClient"
+        )
+
+    def test_tp_sl_execution_manager_no_api_v5(self) -> None:
+        """TpSlExecutionManager must NOT contain /api/v5 — uses TradingClientPort."""
+        filepath = ROOT / "src" / "execution" / "tp_sl_execution_manager.py"
+        text = filepath.read_text(encoding="utf-8")
+        assert "/api/v5" not in text, (
+            "tp_sl_execution_manager.py must NOT contain /api/v5"
+        )

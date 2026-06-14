@@ -8,6 +8,8 @@ from tests.conftest import FakeOkxClient
 from src.execution.trader import PositionSnapshot, Trader
 from src.risk.simple_position_sizer import PositionSize
 from src.strategies.boll_cvd_reclaim_strategy import TradeIntent
+from src.execution.okx_trading_client import OkxTradingClient
+from src.execution.tp_sl_execution_manager import TpSlExecutionManager
 
 
 # ============================================================
@@ -66,6 +68,8 @@ def make_trader(**overrides) -> Trader:
     t._managed_reduce_only_order_ids = set()
     t._allow_cancel_unmanaged_reduce_only = True
     t._client = FakeOkxClient(t)
+    t.trading_client = OkxTradingClient(t)  # type: ignore[assignment]
+    t._tp_sl_manager = TpSlExecutionManager(t, trading_client=t.trading_client)  # type: ignore[arg-type]
     for k, v in overrides.items():
         setattr(t, k, v)
     return t

@@ -46,7 +46,7 @@ def _extract_method(source: str, method_name: str) -> str:
 
 def _extract_init(source: str) -> str:
     """Extract the __init__ method body (def, not async def)."""
-    marker = "def __init__(self) -> None:"
+    marker = "def __init__(self,"
     idx = source.find(marker)
     if idx == -1:
         raise AssertionError("__init__ not found in source")
@@ -60,7 +60,7 @@ def _extract_init(source: str) -> str:
 
 
 # ======================================================================
-# Positive checks: trader.py __init__ must create trading_client
+# Checks: trader.py __init__ must initialise trading_client (via injection)
 # ======================================================================
 
 
@@ -71,10 +71,18 @@ class TestTraderInitCreatesTradingClient:
             "Trader.__init__ must assign self.trading_client"
         )
 
-    def test_init_creates_okx_trading_client_with_self(self):
+    def test_init_does_not_create_okx_trading_client(self):
+        """Trader.__init__ must NOT create OkxTradingClient directly —
+        it is injected via bind_trading_client()."""
         init_source = _extract_init(_read_source())
-        assert "OkxTradingClient(self)" in init_source, (
-            "Trader.__init__ must create OkxTradingClient(self)"
+        assert "OkxTradingClient(" not in init_source, (
+            "Trader.__init__ must NOT create OkxTradingClient(self) — use injection"
+        )
+
+    def test_bind_trading_client_method_exists(self):
+        source = _read_source()
+        assert "def bind_trading_client" in source, (
+            "Trader must have bind_trading_client method"
         )
 
 
@@ -193,9 +201,10 @@ class TestSidecarMarketEntryUsesTradingClientPort:
 
 
 class TestRequiredImportsPresent:
-    def test_okx_trading_client_imported(self):
+    def test_okx_trading_client_not_imported(self):
+        """Trader must NOT import OkxTradingClient — it's injected."""
         text = _read_source()
-        assert "from src.execution.okx_trading_client import OkxTradingClient" in text
+        assert "from src.execution.okx_trading_client import OkxTradingClient" not in text
 
     def test_trading_client_port_imported(self):
         text = _read_source()

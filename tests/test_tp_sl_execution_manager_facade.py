@@ -8,6 +8,7 @@ from tests.conftest import FakeOkxClient
 import src.execution.trader as trader_module
 from src.execution.tp_sl_execution_manager import TpSlExecutionManager
 from src.execution.trader import LiveTradeResult, PositionSnapshot, Trader
+from src.execution.okx_trading_client import OkxTradingClient
 
 
 # ---------------------------------------------------------------------------
@@ -41,6 +42,8 @@ def make_trader(**overrides) -> Trader:
     t._managed_reduce_only_order_ids = set()
     t._allow_cancel_unmanaged_reduce_only = True
     t._client = FakeOkxClient(t)
+    t.trading_client = OkxTradingClient(t)  # type: ignore[assignment]
+    t._tp_sl_manager = TpSlExecutionManager(t, trading_client=t.trading_client)  # type: ignore[arg-type]
     for k, v in overrides.items():
         setattr(t, k, v)
     return t
@@ -59,7 +62,8 @@ class TpSlExecutionManagerFacadeTest(unittest.TestCase):
 
     def test_facade_has_expected_attributes(self) -> None:
         trader = make_trader()
-        facade = TpSlExecutionManager(trader)
+        facade = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = facade  # type: ignore[assignment]
         self.assertIs(facade.trader, trader)
         self.assertIsNotNone(facade.core_tp)
         self.assertIsNotNone(facade.protective_stops)
@@ -69,7 +73,8 @@ class TpSlExecutionManagerFacadeTest(unittest.TestCase):
 
     def test_sub_managers_share_trader_reference(self) -> None:
         trader = make_trader()
-        facade = TpSlExecutionManager(trader)
+        facade = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = facade  # type: ignore[assignment]
         self.assertIs(facade.core_tp.trader, trader)
         self.assertIs(facade.protective_stops.trader, trader)
         self.assertIs(facade.sidecar.trader, trader)
@@ -98,7 +103,8 @@ class TpSlExecutionManagerFacadeTest(unittest.TestCase):
 
     def test_tp_price_summary_delegates_to_core_tp(self) -> None:
         trader = make_trader()
-        facade = TpSlExecutionManager(trader)
+        facade = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = facade  # type: ignore[assignment]
         specs = [("final", Decimal("10"), 3100.0)]
         mock_result = "3100.00"
         facade.core_tp._tp_price_summary = MagicMock(return_value=mock_result)
@@ -112,7 +118,8 @@ class TpSlExecutionManagerFacadeTest(unittest.TestCase):
 
     def test_protected_order_ids_from_intent_delegates_to_core_tp(self) -> None:
         trader = make_trader()
-        facade = TpSlExecutionManager(trader)
+        facade = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = facade  # type: ignore[assignment]
         mock_ids = {"a", "b"}
         facade.core_tp._protected_order_ids_from_intent = MagicMock(return_value=mock_ids)
         result = facade._protected_order_ids_from_intent(None)
@@ -125,7 +132,8 @@ class TpSlExecutionManagerFacadeTest(unittest.TestCase):
 
     def test_managed_core_contracts_delegates_to_core_tp(self) -> None:
         trader = make_trader()
-        facade = TpSlExecutionManager(trader)
+        facade = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = facade  # type: ignore[assignment]
         facade.core_tp._managed_core_contracts_from_intent = MagicMock(return_value=Decimal("5"))
         result = facade._managed_core_contracts_from_intent(None)
         self.assertEqual(result, Decimal("5"))
@@ -137,7 +145,8 @@ class TpSlExecutionManagerFacadeTest(unittest.TestCase):
 
     def test_build_take_profit_order_specs_delegates_to_core_tp(self) -> None:
         trader = make_trader()
-        facade = TpSlExecutionManager(trader)
+        facade = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = facade  # type: ignore[assignment]
         mock_specs = [("final", Decimal("10"), 3100.0)]
         facade.core_tp._build_take_profit_order_specs_public = MagicMock(return_value=mock_specs)
         result = facade._build_take_profit_order_specs(None)
@@ -150,7 +159,8 @@ class TpSlExecutionManagerFacadeTest(unittest.TestCase):
 
     def test_build_three_stage_order_specs_delegates_to_core_tp(self) -> None:
         trader = make_trader()
-        facade = TpSlExecutionManager(trader)
+        facade = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = facade  # type: ignore[assignment]
         mock_specs = [("partial", Decimal("3"), 3050.0), ("final", Decimal("7"), 3100.0)]
         facade.core_tp._build_three_stage_order_specs_public = MagicMock(return_value=mock_specs)
         result = facade._build_three_stage_order_specs(None)
@@ -163,7 +173,8 @@ class TpSlExecutionManagerFacadeTest(unittest.TestCase):
 
     def test_trend_runner_sl_contracts_delegates_to_core_tp(self) -> None:
         trader = make_trader()
-        facade = TpSlExecutionManager(trader)
+        facade = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = facade  # type: ignore[assignment]
         facade.core_tp._trend_runner_sl_contracts = MagicMock(return_value=Decimal("5"))
         result = facade._trend_runner_sl_contracts(None, Decimal("10"))
         self.assertEqual(result, Decimal("5"))
@@ -175,7 +186,8 @@ class TpSlExecutionManagerFacadeTest(unittest.TestCase):
 
     def test_near_tp_protective_stop_matches_delegates_to_protective_stops(self) -> None:
         trader = make_trader()
-        facade = TpSlExecutionManager(trader)
+        facade = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = facade  # type: ignore[assignment]
         facade.protective_stops._near_tp_protective_stop_matches = MagicMock(return_value=True)
         item = {"algoId": "algo-1"}
         result = facade._near_tp_protective_stop_matches(item, "algo-1", "LONG", Decimal("10"), 3000.0)
@@ -221,7 +233,8 @@ class TpSlExecutionManagerFacadeAsyncTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_replace_take_profit_delegates_to_core_tp(self) -> None:
         trader = make_trader()
-        facade = TpSlExecutionManager(trader)
+        facade = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = facade  # type: ignore[assignment]
         mock_result = LiveTradeResult(True, "test", None, "tp1", "10", "3100.00", "ok")
         facade.core_tp.replace_take_profit = AsyncMock(return_value=mock_result)
         result = await facade.replace_take_profit(None)
@@ -230,21 +243,24 @@ class TpSlExecutionManagerFacadeAsyncTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_cancel_existing_take_profit_orders_delegates_to_core_tp(self) -> None:
         trader = make_trader()
-        facade = TpSlExecutionManager(trader)
+        facade = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = facade  # type: ignore[assignment]
         facade.core_tp._cancel_existing_take_profit_orders_for_intent = AsyncMock()
         await facade._cancel_existing_take_profit_orders_for_intent(None)
         facade.core_tp._cancel_existing_take_profit_orders_for_intent.assert_awaited_once_with(None)
 
     async def test_cancel_stale_runner_protective_stops_delegates_to_core_tp(self) -> None:
         trader = make_trader()
-        facade = TpSlExecutionManager(trader)
+        facade = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = facade  # type: ignore[assignment]
         facade.core_tp._cancel_stale_runner_protective_stops_for_degrade = AsyncMock()
         await facade._cancel_stale_runner_protective_stops_for_degrade(None)
         facade.core_tp._cancel_stale_runner_protective_stops_for_degrade.assert_awaited_once_with(None)
 
     async def test_place_reduce_only_take_profit_orders_delegates_to_core_tp(self) -> None:
         trader = make_trader()
-        facade = TpSlExecutionManager(trader)
+        facade = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = facade  # type: ignore[assignment]
         mock_order_ids = ["ord-1", "ord-2"]
         facade.core_tp._place_reduce_only_take_profit_orders = AsyncMock(return_value=mock_order_ids)
         specs = [("final", Decimal("10"), 3100.0)]
@@ -258,7 +274,8 @@ class TpSlExecutionManagerFacadeAsyncTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_execute_near_tp_reduce_delegates_to_near_tp(self) -> None:
         trader = make_trader()
-        facade = TpSlExecutionManager(trader)
+        facade = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = facade  # type: ignore[assignment]
         mock_result = LiveTradeResult(True, "test", None, None, "5", "3050.00", "ok")
         facade.near_tp.execute_near_tp_reduce = AsyncMock(return_value=mock_result)
         result = await facade.execute_near_tp_reduce(None)
@@ -267,7 +284,8 @@ class TpSlExecutionManagerFacadeAsyncTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_execute_market_exit_runner_delegates_to_near_tp(self) -> None:
         trader = make_trader()
-        facade = TpSlExecutionManager(trader)
+        facade = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = facade  # type: ignore[assignment]
         mock_result = LiveTradeResult(True, "test", None, None, "0", "0.00", "ok")
         facade.near_tp.execute_market_exit_runner = AsyncMock(return_value=mock_result)
         result = await facade.execute_market_exit_runner(None)
@@ -280,7 +298,8 @@ class TpSlExecutionManagerFacadeAsyncTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_place_near_tp_protective_stop_delegates_to_protective_stops(self) -> None:
         trader = make_trader()
-        facade = TpSlExecutionManager(trader)
+        facade = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = facade  # type: ignore[assignment]
         mock_result = (True, "algo-1", "protective_sl_placed")
         facade.protective_stops.place_near_tp_protective_stop_with_retries = AsyncMock(return_value=mock_result)
         ok, algo_id, msg = await facade.place_near_tp_protective_stop_with_retries(
@@ -293,7 +312,8 @@ class TpSlExecutionManagerFacadeAsyncTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_place_middle_runner_protective_stop_delegates_to_protective_stops(self) -> None:
         trader = make_trader()
-        facade = TpSlExecutionManager(trader)
+        facade = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = facade  # type: ignore[assignment]
         mock_result = (True, "algo-mid", "placed")
         facade.protective_stops.place_middle_runner_protective_stop_with_retries = AsyncMock(return_value=mock_result)
         ok, algo_id, msg = await facade.place_middle_runner_protective_stop_with_retries(
@@ -304,7 +324,8 @@ class TpSlExecutionManagerFacadeAsyncTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_place_trend_runner_protective_stop_delegates_to_protective_stops(self) -> None:
         trader = make_trader()
-        facade = TpSlExecutionManager(trader)
+        facade = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = facade  # type: ignore[assignment]
         mock_result = (True, "algo-trend", "placed")
         facade.protective_stops.place_trend_runner_protective_stop_with_retries = AsyncMock(return_value=mock_result)
         ok, algo_id, msg = await facade.place_trend_runner_protective_stop_with_retries(
@@ -315,7 +336,8 @@ class TpSlExecutionManagerFacadeAsyncTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_place_three_stage_post_tp1_protective_stop_delegates_to_protective_stops(self) -> None:
         trader = make_trader()
-        facade = TpSlExecutionManager(trader)
+        facade = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = facade  # type: ignore[assignment]
         mock_result = (True, "algo-3s", "placed")
         facade.protective_stops.place_three_stage_post_tp1_protective_stop_with_retries = AsyncMock(
             return_value=mock_result)
@@ -327,7 +349,8 @@ class TpSlExecutionManagerFacadeAsyncTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_cancel_unverified_near_tp_algo_delegates_to_protective_stops(self) -> None:
         trader = make_trader()
-        facade = TpSlExecutionManager(trader)
+        facade = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = facade  # type: ignore[assignment]
         facade.protective_stops._cancel_unverified_near_tp_algo = AsyncMock()
         await facade._cancel_unverified_near_tp_algo("algo-x", phase="test")
         facade.protective_stops._cancel_unverified_near_tp_algo.assert_awaited_once_with(
@@ -335,7 +358,8 @@ class TpSlExecutionManagerFacadeAsyncTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_verify_near_tp_protective_stop_delegates_to_protective_stops(self) -> None:
         trader = make_trader()
-        facade = TpSlExecutionManager(trader)
+        facade = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = facade  # type: ignore[assignment]
         facade.protective_stops.verify_near_tp_protective_stop = AsyncMock(return_value=True)
         result = await facade.verify_near_tp_protective_stop("algo-1", "LONG", Decimal("10"), 3000.0)
         self.assertTrue(result)
@@ -348,7 +372,8 @@ class TpSlExecutionManagerFacadeAsyncTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_market_exit_remaining_position_delegates_to_market_exit(self) -> None:
         trader = make_trader()
-        facade = TpSlExecutionManager(trader)
+        facade = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = facade  # type: ignore[assignment]
         mock_result = (True, "market_exit_order_id=exit-1")
         facade.market_exit.market_exit_remaining_position_with_retries = AsyncMock(return_value=mock_result)
         ok, msg = await facade.market_exit_remaining_position_with_retries("LONG", 3)
@@ -358,7 +383,8 @@ class TpSlExecutionManagerFacadeAsyncTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_cleanup_after_near_tp_market_exit_delegates_to_market_exit(self) -> None:
         trader = make_trader()
-        facade = TpSlExecutionManager(trader)
+        facade = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = facade  # type: ignore[assignment]
         facade.market_exit._cleanup_after_near_tp_market_exit = AsyncMock()
         await facade._cleanup_after_near_tp_market_exit()
         facade.market_exit._cleanup_after_near_tp_market_exit.assert_awaited_once()
@@ -369,7 +395,8 @@ class TpSlExecutionManagerFacadeAsyncTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_place_sidecar_fixed_take_profit_delegates_to_sidecar(self) -> None:
         trader = make_trader()
-        facade = TpSlExecutionManager(trader)
+        facade = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = facade  # type: ignore[assignment]
         mock_order_id = "tp-sid-1"
         facade.sidecar.place_sidecar_fixed_take_profit = AsyncMock(return_value=mock_order_id)
         result = await facade.place_sidecar_fixed_take_profit(
@@ -380,7 +407,8 @@ class TpSlExecutionManagerFacadeAsyncTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_cancel_sidecar_take_profit_delegates_to_sidecar(self) -> None:
         trader = make_trader()
-        facade = TpSlExecutionManager(trader)
+        facade = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = facade  # type: ignore[assignment]
         facade.sidecar.cancel_sidecar_take_profit = AsyncMock(return_value=True)
         result = await facade.cancel_sidecar_take_profit("tp-1")
         self.assertTrue(result)
@@ -388,7 +416,8 @@ class TpSlExecutionManagerFacadeAsyncTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_fetch_sidecar_order_status_delegates_to_sidecar(self) -> None:
         trader = make_trader()
-        facade = TpSlExecutionManager(trader)
+        facade = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = facade  # type: ignore[assignment]
         mock_status = {"ordId": "tp-1", "state": "filled"}
         facade.sidecar.fetch_sidecar_order_status = AsyncMock(return_value=mock_status)
         result = await facade.fetch_sidecar_order_status("tp-1")
@@ -401,27 +430,32 @@ class TpSlExecutionManagerFacadeAsyncTest(unittest.IsolatedAsyncioTestCase):
 
     def test_cancel_near_tp_protective_stop_exists(self) -> None:
         trader = make_trader()
-        facade = TpSlExecutionManager(trader)
+        facade = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = facade  # type: ignore[assignment]
         self.assertTrue(callable(facade.cancel_near_tp_protective_stop))
 
     def test_cancel_middle_runner_protective_stop_exists(self) -> None:
         trader = make_trader()
-        facade = TpSlExecutionManager(trader)
+        facade = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = facade  # type: ignore[assignment]
         self.assertTrue(callable(facade.cancel_middle_runner_protective_stop))
 
     def test_cancel_trend_runner_protective_stop_exists(self) -> None:
         trader = make_trader()
-        facade = TpSlExecutionManager(trader)
+        facade = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = facade  # type: ignore[assignment]
         self.assertTrue(callable(facade.cancel_trend_runner_protective_stop))
 
     def test_cancel_three_stage_post_tp1_protective_stop_exists(self) -> None:
         trader = make_trader()
-        facade = TpSlExecutionManager(trader)
+        facade = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = facade  # type: ignore[assignment]
         self.assertTrue(callable(facade.cancel_three_stage_post_tp1_protective_stop))
 
     def test_cancel_existing_reduce_only_orders_exists(self) -> None:
         trader = make_trader()
-        facade = TpSlExecutionManager(trader)
+        facade = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = facade  # type: ignore[assignment]
         self.assertTrue(callable(facade.cancel_existing_reduce_only_orders))
 
 

@@ -13,6 +13,7 @@ from unittest import mock
 import pytest
 
 from tests.conftest import FakeOkxClient
+from src.execution.okx_trading_client import OkxTradingClient
 
 
 class TestSplitNormalReturnsSplitFastSlow:
@@ -47,12 +48,14 @@ class TestSplitNormalReturnsSplitFastSlow:
         trader.round_contracts_down = lambda c: c
         trader._tp_price_summary = lambda specs: trader.price_to_str(specs[0][2])
         trader._client = FakeOkxClient(trader)
+        trader.trading_client = OkxTradingClient(trader)  # type: ignore[assignment]
 
         async def fake_fetch():
             return PositionSnapshot("LONG", Decimal("10"), 3000.0, Decimal("1"), Decimal("10"))
         trader.fetch_position_snapshot = fake_fetch
 
-        facade = TpSlExecutionManager(trader)
+        facade = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = facade  # type: ignore[assignment]
 
         from src.strategies.boll_cvd_reclaim_strategy import TradeIntent
         from src.risk.simple_position_sizer import PositionSize
@@ -148,12 +151,14 @@ class TestSublegTooSmallReturnsUnsplitMiddleBucket:
         trader.round_contracts_down = lambda c: c
         trader._tp_price_summary = lambda specs: trader.price_to_str(specs[0][2])
         trader._client = FakeOkxClient(trader)
+        trader.trading_client = OkxTradingClient(trader)  # type: ignore[assignment]
 
         async def fake_fetch():
             return PositionSnapshot("LONG", Decimal("10"), 3000.0, Decimal("1"), Decimal("10"))
         trader.fetch_position_snapshot = fake_fetch
 
-        facade = TpSlExecutionManager(trader)
+        facade = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = facade  # type: ignore[assignment]
 
         from src.strategies.boll_cvd_reclaim_strategy import TradeIntent
         from src.risk.simple_position_sizer import PositionSize
@@ -248,12 +253,14 @@ class TestPlacementFailedReturnsFinalFullSize:
         trader.round_contracts_down = lambda c: c
         trader._tp_price_summary = lambda specs: trader.price_to_str(specs[0][2])
         trader._client = FakeOkxClient(trader)
+        trader.trading_client = OkxTradingClient(trader)  # type: ignore[assignment]
 
         async def fake_fetch():
             return PositionSnapshot("LONG", Decimal("10"), 3000.0, Decimal("1"), Decimal("10"))
         trader.fetch_position_snapshot = fake_fetch
 
-        facade = TpSlExecutionManager(trader)
+        facade = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = facade  # type: ignore[assignment]
 
         from src.strategies.boll_cvd_reclaim_strategy import TradeIntent
         from src.risk.simple_position_sizer import PositionSize
@@ -361,12 +368,14 @@ class TestNoSplitActiveReturnsNone:
         trader.round_contracts_down = lambda c: c
         trader._tp_price_summary = lambda specs: trader.price_to_str(specs[0][2])
         trader._client = FakeOkxClient(trader)
+        trader.trading_client = OkxTradingClient(trader)  # type: ignore[assignment]
 
         async def fake_fetch():
             return PositionSnapshot("LONG", Decimal("10"), 3000.0, Decimal("1"), Decimal("10"))
         trader.fetch_position_snapshot = fake_fetch
 
-        facade = TpSlExecutionManager(trader)
+        facade = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = facade  # type: ignore[assignment]
 
         from src.strategies.boll_cvd_reclaim_strategy import TradeIntent
         from src.risk.simple_position_sizer import PositionSize
@@ -603,12 +612,14 @@ class TestThreeStageTp2TooSmallClassifiesFinalFullSize:
         trader.round_contracts_down = lambda c: c
         trader._tp_price_summary = lambda specs: trader.price_to_str(specs[0][2])
         trader._client = FakeOkxClient(trader)
+        trader.trading_client = OkxTradingClient(trader)  # type: ignore[assignment]
 
         async def fake_fetch():
             return PositionSnapshot("LONG", Decimal("10"), 3000.0, Decimal("1"), Decimal("10"))
         trader.fetch_position_snapshot = fake_fetch
 
-        facade = TpSlExecutionManager(trader)
+        facade = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = facade  # type: ignore[assignment]
 
         from src.strategies.boll_cvd_reclaim_strategy import TradeIntent
         from src.risk.simple_position_sizer import PositionSize
@@ -703,12 +714,14 @@ class TestMiddleRunnerRunnerTooSmallClassifiesFinalFullSize:
         trader.round_contracts_down = lambda c: c
         trader._tp_price_summary = lambda specs: trader.price_to_str(specs[0][2])
         trader._client = FakeOkxClient(trader)
+        trader.trading_client = OkxTradingClient(trader)  # type: ignore[assignment]
 
         async def fake_fetch():
             return PositionSnapshot("LONG", Decimal("10"), 3000.0, Decimal("1"), Decimal("10"))
         trader.fetch_position_snapshot = fake_fetch
 
-        facade = TpSlExecutionManager(trader)
+        facade = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = facade  # type: ignore[assignment]
 
         from src.strategies.boll_cvd_reclaim_strategy import TradeIntent
         from src.risk.simple_position_sizer import PositionSize
@@ -799,12 +812,14 @@ class TestMiddleRunnerSlFailurePreservesActualOrderModeFinalFullSize:
         trader.round_contracts_down = lambda c: c
         trader._tp_price_summary = lambda specs: trader.price_to_str(specs[0][2])
         trader._client = FakeOkxClient(trader)
+        trader.trading_client = OkxTradingClient(trader)  # type: ignore[assignment]
 
         async def fake_fetch():
             return PositionSnapshot("LONG", Decimal("10"), 3000.0, Decimal("1"), Decimal("10"))
         trader.fetch_position_snapshot = fake_fetch
 
-        facade = TpSlExecutionManager(trader)
+        facade = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = facade  # type: ignore[assignment]
 
         from src.strategies.boll_cvd_reclaim_strategy import TradeIntent
         from src.risk.simple_position_sizer import PositionSize
@@ -906,12 +921,14 @@ class TestThreeStagePostTp1SlFailurePreservesActualOrderModeUnsplitMiddleBucket:
         trader.round_contracts_down = lambda c: c
         trader._tp_price_summary = lambda specs: trader.price_to_str(specs[0][2])
         trader._client = FakeOkxClient(trader)
+        trader.trading_client = OkxTradingClient(trader)  # type: ignore[assignment]
 
         async def fake_fetch():
             return PositionSnapshot("LONG", Decimal("10"), 3000.0, Decimal("1"), Decimal("10"))
         trader.fetch_position_snapshot = fake_fetch
 
-        facade = TpSlExecutionManager(trader)
+        facade = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = facade  # type: ignore[assignment]
 
         from src.strategies.boll_cvd_reclaim_strategy import TradeIntent
         from src.risk.simple_position_sizer import PositionSize
@@ -1019,6 +1036,7 @@ class TestTrendRunnerSlFailurePreservesActualOrderModeSplitFastSlow:
         trader.round_contracts_down = lambda c: c
         trader._tp_price_summary = lambda specs: trader.price_to_str(specs[0][2])
         trader._client = FakeOkxClient(trader)
+        trader.trading_client = OkxTradingClient(trader)  # type: ignore[assignment]
 
         # _trend_runner_sl_contracts is needed by the trend runner SL path
         trader._trend_runner_sl_contracts = lambda intent, net: Decimal("5")
@@ -1027,7 +1045,8 @@ class TestTrendRunnerSlFailurePreservesActualOrderModeSplitFastSlow:
             return PositionSnapshot("LONG", Decimal("10"), 3000.0, Decimal("1"), Decimal("10"))
         trader.fetch_position_snapshot = fake_fetch
 
-        facade = TpSlExecutionManager(trader)
+        facade = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = facade  # type: ignore[assignment]
 
         from src.strategies.boll_cvd_reclaim_strategy import TradeIntent
         from src.risk.simple_position_sizer import PositionSize

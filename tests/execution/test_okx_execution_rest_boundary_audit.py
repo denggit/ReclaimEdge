@@ -72,6 +72,8 @@ ALLOWED_DIRECT_REST: dict[tuple[str, str, str], str] = {
         "adapter bridge",
     ("src/execution/okx_trading_client.py", "cancel_order", "/api/v5/trade/cancel-algos"):
         "adapter bridge (fallback)",
+    ("src/execution/okx_trading_client.py", "cancel_algo_order", "/api/v5/trade/cancel-algos"):
+        "adapter bridge — direct algo cancel API",
     ("src/execution/okx_trading_client.py", "fetch_balance", "/api/v5/account/balance"):
         "adapter bridge — direct REST (no recursion via Trader)",
     ("src/execution/okx_trading_client.py", "fetch_position", "/api/v5/account/positions"):
@@ -80,14 +82,6 @@ ALLOWED_DIRECT_REST: dict[tuple[str, str, str], str] = {
         "adapter bridge — direct REST (no recursion via Trader)",
     ("src/execution/okx_trading_client.py", "configure_instrument", "/api/v5/account/set-leverage"):
         "adapter bridge — direct REST (no recursion via Trader)",
-
-    # ── Trader legacy wrappers → delegates to TradingClientPort (NO direct /api/v5) ─
-    # All former direct REST calls in Trader have been migrated to delegate
-    # through self.trading_client.  No entries needed here.
-
-    # ── Known algo-id direct cancel (avoids regular cancel fallback noise)
-    ("src/execution/tp_sl_execution_manager.py", "cancel_near_tp_protective_stop", "/api/v5/trade/cancel-algos"):
-        "known algo-id direct cancel; avoids regular cancel fallback noise",
 
     # ── OkxTradingClient extended reads ──────────────────────────────────
     ("src/execution/okx_trading_client.py", "fetch_order_status", "/api/v5/trade/order"):
@@ -131,6 +125,7 @@ FORBIDDEN_DIRECT_REST_ENDPOINTS: frozenset[str] = frozenset({
     "/api/v5/trade/order",
     "/api/v5/trade/order-algo",
     "/api/v5/trade/cancel-order",
+    "/api/v5/trade/cancel-algos",
     "/api/v5/trade/orders-pending",
     "/api/v5/account/balance",
     "/api/v5/account/positions",
@@ -184,7 +179,7 @@ MIGRATED_METHOD_REQUIRED_PORT_CALLS: dict[tuple[str, str], list[str]] = {
         ".configure_instrument(",
     ],
     ("src/execution/trader.py", "fetch_sidecar_order_status"): [
-        "._tp_sl_manager.fetch_sidecar_order_status(",
+        "._require_tp_sl_manager().fetch_sidecar_order_status(",
     ],
     ("src/execution/tp_sl_sidecar_manager.py", "fetch_sidecar_order_status"): [
         ".fetch_order_status(",

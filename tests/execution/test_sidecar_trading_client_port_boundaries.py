@@ -174,7 +174,7 @@ class TestTpSlExecutionManagerWiresSidecar:
         text = exec_mgr_path.read_text(encoding="utf-8")
 
         # Find __init__
-        idx = text.find("def __init__(self, trader: Trader) -> None:")
+        idx = text.find("def __init__(self, trader: Trader, *, trading_client")
         if idx == -1:
             raise AssertionError("__init__ not found")
         remaining = text[idx:]

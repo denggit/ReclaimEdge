@@ -17,6 +17,7 @@ from src.exchanges.semantic_models import (
     BrokerSemanticOrderRole,
     BrokerSemanticResult,
 )
+from src.execution.okx_trading_client import OkxTradingClient
 from src.execution.tp_sl_execution_manager import TpSlExecutionManager
 
 
@@ -56,6 +57,48 @@ class FakeTrader:
         self.three_stage_post_tp1_protective_sl_order_id = "algo-1"
         self.middle_bucket_fast_sl_order_id = "algo-1"
         self._manager: TpSlExecutionManager | None = None
+        self.pos_side_mode = "net"
+        self.contract_multiplier = __import__("decimal").Decimal("0.1")
+
+        # Create a fake trading client that records cancel_algo_order calls
+        from src.execution.trading_client_port import CancelResult
+        class _FakeTC:
+            def __init__(self, outer):
+                self._outer = outer
+            async def fetch_open_orders(self):
+                return []
+            async def fetch_open_algo_orders(self):
+                return ()
+            async def cancel_order(self, *, order_id=None, client_order_id=None):
+                return CancelResult(ok=True, order_id=order_id)
+            async def cancel_algo_order(self, *, order_id=None, client_order_id=None):
+                if order_id:
+                    body = [{"instId": self._outer.symbol, "algoId": order_id}]
+                else:
+                    body = {"instId": self._outer.symbol, "algoClOrdId": client_order_id}
+                self._outer.requests.append(("POST", "/api/v5/trade/cancel-algos", body))
+                return CancelResult(ok=True, order_id=order_id)
+            async def place_market_order(self, **kwargs):
+                from src.execution.trading_client_port import OrderResult
+                return OrderResult(ok=True, order_id="fake-order")
+            async def place_limit_order(self, **kwargs):
+                from src.execution.trading_client_port import OrderResult
+                return OrderResult(ok=True, order_id="fake-order")
+            async def place_stop_market_order(self, **kwargs):
+                from src.execution.trading_client_port import OrderResult
+                return OrderResult(ok=True, order_id="fake-order")
+            async def fetch_balance(self):
+                from src.execution.trading_client_port import BalanceSnapshot
+                return BalanceSnapshot(asset="USDT", total=__import__("decimal").Decimal("100"))
+            async def fetch_position(self):
+                from src.execution.trading_client_port import PositionSnapshot
+                return PositionSnapshot(side=None, qty=__import__("decimal").Decimal("0"))
+            async def fetch_order_status(self, **kwargs):
+                from src.execution.trading_client_port import OrderStatusSnapshot
+                return OrderStatusSnapshot(order_id=None, status="UNKNOWN")
+            async def configure_instrument(self):
+                pass
+        self.trading_client = _FakeTC(self)
 
     @property
     def broker_semantic_executor(self) -> FakeSemanticExecutor:
@@ -72,7 +115,8 @@ class FakeTrader:
 
 def make_manager() -> tuple[FakeTrader, TpSlExecutionManager]:
     trader = FakeTrader()
-    manager = TpSlExecutionManager(trader)  # type: ignore[arg-type]
+    manager = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+    trader._tp_sl_manager = manager  # type: ignore[assignment]
     trader._manager = manager
     return trader, manager
 

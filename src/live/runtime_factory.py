@@ -79,19 +79,30 @@ def _create_okx_bundle(config) -> LiveRuntimeBundle:
     """Wire the OKX live runtime bundle.
 
     Creates:
-    - Trader (execution facade)
+    - Trader (execution facade) with injected runtime settings
     - OkxTradingClient (trading adapter, wraps Trader)
     - OkxMarketDataClient (market data adapter, standalone)
+    - Calls trader.bind_trading_client() to wire TP/SL manager
     """
     from src.data_feed.okx_market_data_client import (
         OkxMarketDataClient,
         OkxMarketDataClientConfig,
     )
     from src.execution.okx_trading_client import OkxTradingClient
-    from src.execution.trader import Trader
+    from src.execution.trader import Trader, TraderRuntimeSettings
 
-    trader = Trader()
+    settings = TraderRuntimeSettings(
+        symbol=config.okx_inst_id,
+        base_url=os.getenv("OKX_BASE_URL", "https://www.okx.com"),
+        td_mode=config.margin_mode,
+        pos_side_mode=config.position_mode,
+        leverage=os.getenv("LEVERAGE", "50"),
+        live_trading=True,
+        max_live_equity_usdt=float(os.getenv("MAX_LIVE_EQUITY_USDT", "30")),
+    )
+    trader = Trader(settings=settings)
     trading_client = OkxTradingClient(trader)
+    trader.bind_trading_client(trading_client)
 
     market_data_config = OkxMarketDataClientConfig(
         inst_id=config.okx_inst_id,

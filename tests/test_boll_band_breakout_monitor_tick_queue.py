@@ -2,20 +2,20 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import importlib.util
-import sys
-import types
 import unittest
+from decimal import Decimal
 
-if importlib.util.find_spec("aiohttp") is None:
-    sys.modules.setdefault("aiohttp", types.ModuleType("aiohttp"))
-
+from src.data_feed.market_data_client_port import (
+    CandleSnapshot,
+    MarketDataClientPort,
+    MarketDataEvent,
+    MarketTradeSnapshot,
+)
 from src.monitors.boll_band_breakout_monitor import (  # noqa: E402
     BollBandBreakoutMonitor,
     BollBandBreakoutMonitorConfig,
     Candle,
     MarketTickEvent,
-    OkxPublicMarketClient,
     TradeTick,
 )
 
@@ -35,15 +35,46 @@ def candles(count: int = 20) -> list[Candle]:
     ]
 
 
-class FakeCandleClient:
-    def __init__(self, outcomes: list[object]):
-        self.outcomes = outcomes
+def candle_snapshots(count: int = 20) -> list[CandleSnapshot]:
+    return [
+        CandleSnapshot(
+            open_time_ms=index * 60_000,
+            close_time_ms=(index + 1) * 60_000,
+            open_price=Decimal(str(100.0 + index)),
+            high_price=Decimal(str(100.5 + index)),
+            low_price=Decimal(str(99.5 + index)),
+            close_price=Decimal(str(100.0 + index)),
+            volume=Decimal("1.0"),
+            is_closed=True,
+        )
+        for index in range(count)
+    ]
 
-    async def fetch_candles(self, include_live: bool) -> list[Candle]:
-        outcome = self.outcomes.pop(0)
+
+class FakeMarketDataClient:
+    """Fake MarketDataClientPort for testing BollBandBreakoutMonitor."""
+
+    def __init__(self, candle_outcomes: list[object] | None = None) -> None:
+        self._candle_outcomes = candle_outcomes or []
+        self._stream_handler = None
+        self.closed = False
+
+    async def fetch_recent_klines(self, *, limit: int) -> list[CandleSnapshot]:
+        if not self._candle_outcomes:
+            return []
+        outcome = self._candle_outcomes.pop(0)
         if isinstance(outcome, BaseException):
             raise outcome
         return outcome  # type: ignore[return-value]
+
+    async def stream_market_events(self, on_event) -> None:
+        self._stream_handler = on_event
+        # Don't actually stream — tests will push events manually
+        while not self.closed:
+            await asyncio.sleep(0.1)
+
+    async def close(self) -> None:
+        self.closed = True
 
 
 class BollBandBreakoutMonitorTickQueueTest(unittest.IsolatedAsyncioTestCase):
@@ -63,6 +94,7 @@ class BollBandBreakoutMonitorTickQueueTest(unittest.IsolatedAsyncioTestCase):
         monitor = BollBandBreakoutMonitor(
             BollBandBreakoutMonitorConfig(),
             tick_handlers=[handler],
+            market_data_client=FakeMarketDataClient(),
         )
         monitor._running = True
         consumer = asyncio.create_task(monitor._tick_event_consumer_loop())
@@ -85,9 +117,13 @@ class BollBandBreakoutMonitorTickQueueTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(max_active_handlers, 1)
 
     async def test_candle_sync_timeout_does_not_crash_and_logs_low_frequency(self) -> None:
-        monitor = BollBandBreakoutMonitor(BollBandBreakoutMonitorConfig(candle_poll_seconds=1))
-        monitor.client = FakeCandleClient(
-            [TimeoutError("timeout"), TimeoutError("timeout"), TimeoutError("timeout")])  # type: ignore[assignment]
+        fake_mdc = FakeMarketDataClient(
+            [TimeoutError("timeout"), TimeoutError("timeout"), TimeoutError("timeout")]
+        )
+        monitor = BollBandBreakoutMonitor(
+            BollBandBreakoutMonitorConfig(candle_poll_seconds=1),
+            market_data_client=fake_mdc,
+        )
         now_ms = 1_000_000
         monitor._now_ms = lambda: now_ms  # type: ignore[method-assign]
         monitor._candle_sync_started_ts_ms = now_ms
@@ -111,8 +147,11 @@ class BollBandBreakoutMonitorTickQueueTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(third_sleep, 16.0)
 
     async def test_candle_sync_stale_logs_error_after_warn_threshold(self) -> None:
-        monitor = BollBandBreakoutMonitor(BollBandBreakoutMonitorConfig(candle_poll_seconds=1))
-        monitor.client = FakeCandleClient([TimeoutError("timeout")])  # type: ignore[assignment]
+        fake_mdc = FakeMarketDataClient([TimeoutError("timeout")])
+        monitor = BollBandBreakoutMonitor(
+            BollBandBreakoutMonitorConfig(candle_poll_seconds=1),
+            market_data_client=fake_mdc,
+        )
         now_ms = 1_000_000
         monitor._now_ms = lambda: now_ms  # type: ignore[method-assign]
         monitor._candle_sync_started_ts_ms = now_ms - 181_000
@@ -125,8 +164,13 @@ class BollBandBreakoutMonitorTickQueueTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(logs.records[0].exc_info)
 
     async def test_candle_sync_recovery_resets_failures_and_logs_recovered(self) -> None:
-        monitor = BollBandBreakoutMonitor(BollBandBreakoutMonitorConfig(candle_poll_seconds=1, boll_window=20))
-        monitor.client = FakeCandleClient([TimeoutError("timeout"), candles(20)])  # type: ignore[assignment]
+        fake_mdc = FakeMarketDataClient(
+            [TimeoutError("timeout"), candle_snapshots(20)]
+        )
+        monitor = BollBandBreakoutMonitor(
+            BollBandBreakoutMonitorConfig(candle_poll_seconds=1, boll_window=20),
+            market_data_client=fake_mdc,
+        )
         now_ms = 1_000_000
         monitor._now_ms = lambda: now_ms  # type: ignore[method-assign]
         monitor._candle_sync_started_ts_ms = now_ms
@@ -141,19 +185,48 @@ class BollBandBreakoutMonitorTickQueueTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(monitor._last_successful_candle_sync_ts_ms, now_ms)
         self.assertIn("CANDLE_SYNC_RECOVERED", "\n".join(logs.output))
 
-    async def test_okx_public_market_client_close_closes_reused_session(self) -> None:
-        client = OkxPublicMarketClient(BollBandBreakoutMonitorConfig())
+    async def test_market_data_event_trade_tick_passes_to_process_tick(self) -> None:
+        """MarketTradeSnapshot from stream_market_events is processed as tick."""
+        processed_ticks: list[TradeTick] = []
 
-        await client.start()
-        session = client._session
-        self.assertIsNotNone(session)
-        await client.close()
+        async def handler(event: MarketTickEvent) -> None:
+            processed_ticks.append(event.tick)
 
-        self.assertIsNone(client._session)
-        self.assertTrue(session.closed)
+        fake_mdc = FakeMarketDataClient()
+        monitor = BollBandBreakoutMonitor(
+            BollBandBreakoutMonitorConfig(),
+            tick_handlers=[handler],
+            market_data_client=fake_mdc,
+        )
+        monitor._running = True
+        # Start the consumer loop so tick handlers fire
+        consumer = asyncio.create_task(monitor._tick_event_consumer_loop())
+
+        snapshot = MarketTradeSnapshot(
+            event_time_ms=1000,
+            price=Decimal("100.5"),
+            qty=Decimal("1.0"),
+            side="buy",
+        )
+        await monitor._handle_market_data_event(snapshot)
+        # Wait for consumer to process the event
+        await asyncio.wait_for(monitor._tick_event_queue.join(), timeout=1)
+
+        monitor._running = False
+        consumer.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await consumer
+
+        self.assertEqual(len(processed_ticks), 1)
+        self.assertEqual(processed_ticks[0].price, 100.5)
+        self.assertEqual(processed_ticks[0].side, "buy")
+        self.assertEqual(processed_ticks[0].ts_ms, 1000)
 
     async def test_live_candle_from_tick_still_updates_without_rest_success(self) -> None:
-        monitor = BollBandBreakoutMonitor(BollBandBreakoutMonitorConfig(bar="1m", candle_limit=100))
+        monitor = BollBandBreakoutMonitor(
+            BollBandBreakoutMonitorConfig(bar="1m", candle_limit=100),
+            market_data_client=FakeMarketDataClient(),
+        )
         await monitor._update_live_candle_from_tick(100.0, 60_000)
         await monitor._update_live_candle_from_tick(99.0, 61_000)
         await monitor._update_live_candle_from_tick(101.0, 62_000)

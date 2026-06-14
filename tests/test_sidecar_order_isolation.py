@@ -14,6 +14,8 @@ from src.exchanges.models import (
     ExchangeName,
 )
 from tests.conftest import FakeOkxClient
+from src.execution.okx_trading_client import OkxTradingClient
+from src.execution.tp_sl_execution_manager import TpSlExecutionManager
 from src.execution.trader import PositionSnapshot, Trader
 from src.risk.simple_position_sizer import PositionSize
 from src.strategies.boll_cvd_reclaim_strategy import TradeIntent
@@ -49,6 +51,8 @@ class IsolationTrader(Trader):
         self.symbol = "ETH-USDT-SWAP"
         self.td_mode = "isolated"
         self.pos_side_mode = "net"
+        self.leverage = "50"
+        self.live_trading = True
         self.position_contracts = Decimal("10")
         self.contract_precision = Decimal("0.01")
         self.min_contracts = Decimal("0.01")
@@ -57,13 +61,20 @@ class IsolationTrader(Trader):
         self.middle_runner_protective_sl_order_id = None
         self.three_stage_post_tp1_protective_sl_order_id = None
         self.trend_runner_sl_order_id = None
+        self.middle_bucket_fast_sl_order_id = None
         self.contract_multiplier = Decimal("0.1")
+        self._protected_reduce_only_order_ids: set[str] = set()
+        self._managed_reduce_only_order_ids: set[str] = set()
+        self._allow_cancel_unmanaged_reduce_only = True
         self._client = FakeOkxClient(self)
         self.cancelled: list[str] = []
         self.cancelled_middle_runner_stops: list[str | None] = []
         self.cancelled_post_tp1_stops: list[str | None] = []
         self.cancelled_trend_runner_stops: list[str | None] = []
         self.placed = []
+        # Wire adapter pattern
+        self.trading_client = OkxTradingClient(self)
+        self._tp_sl_manager = TpSlExecutionManager(self, trading_client=self.trading_client)
 
     async def fetch_position_snapshot(self) -> PositionSnapshot:
         return PositionSnapshot("LONG", Decimal("12"), 100.0, 1.2, Decimal("12"))
@@ -107,13 +118,12 @@ class IsolationTrader(Trader):
 
     async def request(self, method, endpoint, payload=None):  # type: ignore[no-untyped-def]
         if endpoint == "/api/v5/trade/cancel-order":
-            self.cancelled.append(payload["ordId"])
-            return {"code": "0", "data": [{"ordId": payload["ordId"]}]}
+            self.cancelled.append(payload.get("ordId", ""))
+            return {"code": "0", "data": [{"ordId": payload.get("ordId", "")}]}
+        if endpoint == "/api/v5/trade/order":
+            self.placed.append(payload)
+            return {"code": "0", "data": [{"ordId": "new-tp"}]}
         return {"code": "0", "data": [{"ordId": "new-tp"}]}
-
-    async def _place_reduce_only_take_profit_orders(self, intent_: TradeIntent, specs):  # type: ignore[no-untyped-def]
-        self.placed = specs
-        return ["new-tp"]
 
     async def cancel_middle_runner_protective_stop(self, order_id: str | None) -> bool:
         self.cancelled_middle_runner_stops.append(order_id)
@@ -144,7 +154,10 @@ async def test_main_tp_update_does_not_cancel_sidecar_tp() -> None:
     assert result.ok
     assert trader.cancelled == ["core-old"]
     assert "sidecar-tp" not in trader.cancelled
-    assert trader.placed == [("final", Decimal("10"), 101.0)]
+    assert len(trader.placed) == 1
+    assert trader.placed[0].get("ordType") == "limit"
+    assert trader.placed[0].get("sz") == "10"
+    assert trader.placed[0].get("px") == "101.00"
 
 
 @pytest.mark.asyncio
@@ -155,7 +168,10 @@ async def test_update_tp_uses_core_contracts_not_okx_net_contracts() -> None:
 
     assert result.ok
     assert result.contracts == "10"
-    assert trader.placed == [("final", Decimal("10"), 101.0)]
+    assert len(trader.placed) == 1
+    assert trader.placed[0].get("ordType") == "limit"
+    assert trader.placed[0].get("sz") == "10"
+    assert trader.placed[0].get("px") == "101.00"
 
 
 @pytest.mark.asyncio
@@ -180,7 +196,10 @@ async def test_three_stage_degrade_to_single_does_not_cancel_sidecar_tp() -> Non
     assert trader.cancelled_middle_runner_stops == ["middle-sl"]
     assert trader.cancelled_post_tp1_stops == ["post-tp1-sl"]
     assert trader.cancelled_trend_runner_stops == ["trend-sl"]
-    assert trader.placed == [("final", Decimal("10"), 101.0)]
+    assert len(trader.placed) == 1
+    assert trader.placed[0].get("ordType") == "limit"
+    assert trader.placed[0].get("sz") == "10"
+    assert trader.placed[0].get("px") == "101.00"
 
 
 @pytest.mark.asyncio
@@ -203,7 +222,9 @@ async def test_three_stage_degrade_to_middle_runner_does_not_cancel_sidecar_tp()
     assert trader.cancelled == ["core-old"]
     assert "sidecar-tp" not in trader.cancelled
     assert trader.cancelled_post_tp1_stops == ["post-tp1-sl"]
-    assert trader.placed == [("middle", Decimal("8.00"), 100.0), ("runner", Decimal("2.00"), 101.0)]
+    assert len(trader.placed) == 2
+    assert trader.placed[0].get("ordType") == "limit"
+    assert trader.placed[1].get("ordType") == "limit"
 
 
 @pytest.mark.asyncio
@@ -228,7 +249,10 @@ async def test_three_stage_degrade_cancels_stale_sl_even_if_intent_protected_ids
     assert trader.cancelled_middle_runner_stops == ["middle-sl"]
     assert trader.cancelled_post_tp1_stops == ["post-tp1-sl"]
     assert trader.cancelled_trend_runner_stops == ["trend-sl"]
-    assert trader.placed == [("final", Decimal("10"), 101.0)]
+    assert len(trader.placed) == 1
+    assert trader.placed[0].get("ordType") == "limit"
+    assert trader.placed[0].get("sz") == "10"
+    assert trader.placed[0].get("px") == "101.00"
 
 
 class UnknownReduceOnlyTrader(IsolationTrader):

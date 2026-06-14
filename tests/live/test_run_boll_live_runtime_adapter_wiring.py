@@ -50,3 +50,10 @@ class TestAdapterWiring:
     def test_no_BollBandBreakoutMonitorConfig_from_env(self) -> None:
         """Must NOT call from_env() on the monitor config."""
         assert "BollBandBreakoutMonitorConfig.from_env()" not in _SOURCE_TEXT
+
+    def test_market_data_client_passed_to_monitor(self) -> None:
+        """bundle.market_data_client must be passed to BollBandBreakoutMonitor."""
+        assert "market_data_client=market_data_client" in _SOURCE_TEXT or \
+               "market_data_client=bundle.market_data_client" in _SOURCE_TEXT, (
+            "market_data_client must be passed to BollBandBreakoutMonitor"
+        )

@@ -343,6 +343,43 @@ class OkxTradingClient(TradingClientPort):
 
         return CancelResult(ok=True, order_id=order_id, client_order_id=normalised_cid, raw=res)
 
+    async def cancel_algo_order(
+        self,
+        *,
+        order_id: str | None = None,
+        client_order_id: str | None = None,
+    ) -> CancelResult:
+        """Cancel an algo (conditional) order by *order_id* or *client_order_id*.
+
+        This is the API-level cancel for algo/conditional orders — it always
+        uses the ``/api/v5/trade/cancel-algos`` endpoint.
+        """
+        if order_id is None and client_order_id is None:
+            raise ValueError(
+                "cancel_algo_order requires at least one of order_id or client_order_id"
+            )
+
+        normalised_cid = _normalise_client_order_id(client_order_id)
+
+        if order_id is not None:
+            body: dict[str, Any] = order_specs.build_cancel_algo_body(
+                inst_id=self._trader.symbol,
+                algo_id=order_id,
+            )
+        else:
+            body = {
+                "instId": self._trader.symbol,
+                "algoClOrdId": normalised_cid,
+            }
+
+        res = await self._trader._client.request(
+            "POST", "/api/v5/trade/cancel-algos", body
+        )
+
+        return CancelResult(
+            ok=True, order_id=order_id, client_order_id=normalised_cid, raw=res
+        )
+
     # ------------------------------------------------------------------
     # Instrument configuration
     # ------------------------------------------------------------------

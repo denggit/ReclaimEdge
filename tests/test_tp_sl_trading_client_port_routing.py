@@ -545,17 +545,17 @@ class TestNoDirectRestEndpointsInReplacedPaths:
             "direct /api/v5/trade/cancel-order — route through trading_client"
         )
 
-    def test_algo_cancel_retained_with_comment(self) -> None:
-        """cancel_near_tp_protective_stop intentionally keeps direct algo
-        cancel with an explanatory comment (20C-CLEAN-PORTS-05)."""
+    def test_algo_cancel_routed_through_trading_client_port(self) -> None:
+        """cancel_near_tp_protective_stop now routes through
+        TradingClientPort.cancel_algo_order()."""
         from pathlib import Path
 
         text = Path(
             "src/execution/tp_sl_execution_manager.py"
         ).read_text(encoding="utf-8")
 
-        assert "20C-CLEAN-PORTS-05" in text
-        assert "/api/v5/trade/cancel-algos" in text
+        assert "self.trading_client.cancel_algo_order(" in text
+        assert "/api/v5/trade/cancel-algos" not in text
 
 
 # ===================================================================

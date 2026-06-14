@@ -276,12 +276,15 @@ class TestTradingClientAttribute:
         trader._allow_cancel_unmanaged_reduce_only = True
 
         from unittest import mock
+        from src.execution.okx_trading_client import OkxTradingClient
+
+        trader.trading_client = OkxTradingClient(trader)  # type: ignore[assignment]
 
         with mock.patch.object(trader, "request", return_value={"data": []}):
-            manager = TpSlExecutionManager(trader)
+            manager = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        trader._tp_sl_manager = manager  # type: ignore[assignment]
 
         from src.execution.trading_client_port import TradingClientPort
-        from src.execution.okx_trading_client import OkxTradingClient
 
         assert hasattr(manager, "trading_client")
         assert isinstance(manager.trading_client, OkxTradingClient)

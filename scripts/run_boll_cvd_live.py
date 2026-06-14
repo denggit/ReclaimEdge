@@ -316,14 +316,13 @@ async def main() -> None:
     monitor = BollBandBreakoutMonitor(
         config=monitor_config,
         tick_handlers=[on_market_tick],
+        market_data_client=market_data_client,
     )
 
-    trading_client_port = trading_client
-    market_data_client_port = market_data_client
     logger.info(
         "OKX_RUNTIME_PORTS_READY | trading_client=%s market_data_client=%s",
-        type(trading_client_port).__name__,
-        type(market_data_client_port).__name__,
+        type(trading_client).__name__,
+        type(market_data_client).__name__,
     )
 
     try:

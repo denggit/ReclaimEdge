@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING, Any, Optional
 from config.env_loader import OKX_CONFIG
 from src.execution import order_specs
 from src.execution.okx_private_client import OkxPrivateClient, OkxPrivateClientConfig, PrivateWriteRateLimiter
-from src.execution.okx_trading_client import OkxTradingClient
 from src.execution.trading_client_port import TradingClientPort
 from src.strategies.boll_cvd_reclaim_strategy import PositionSide, TradeIntent
 from src.utils.log import get_logger
@@ -58,6 +57,40 @@ class PositionSnapshot:
         return self.side is not None and self.contracts > 0
 
 
+@dataclass(frozen=True)
+class TraderRuntimeSettings:
+    """Exchange-agnostic runtime settings injected by the runtime factory.
+
+    These values come from ExchangeRuntimeConfig, not from OKX-specific env vars.
+    """
+
+    symbol: str = "ETH-USDT-SWAP"
+    base_url: str = "https://www.okx.com"
+    td_mode: str = "isolated"
+    pos_side_mode: str = "net"
+    leverage: str = "50"
+    live_trading: bool = False
+    max_live_equity_usdt: float = 30.0
+
+    @classmethod
+    def from_env_compat(cls) -> "TraderRuntimeSettings":
+        """Backwards-compatible factory reading legacy env vars.
+
+        Only used for tests; production code should construct this explicitly
+        from ExchangeRuntimeConfig.
+        """
+        return cls(
+            symbol=os.getenv("OKX_INST_ID", "ETH-USDT-SWAP"),
+            base_url=os.getenv("OKX_BASE_URL", "https://www.okx.com"),
+            td_mode=os.getenv("OKX_TD_MODE", "isolated"),
+            pos_side_mode=os.getenv("OKX_POS_SIDE_MODE", "net"),
+            leverage=os.getenv("LEVERAGE", "50"),
+            live_trading=os.getenv("LIVE_TRADING", "false").strip().lower()
+            in {"1", "true", "yes", "y", "on"},
+            max_live_equity_usdt=float(os.getenv("MAX_LIVE_EQUITY_USDT", "30")),
+        )
+
+
 class Trader:
     """Simple OKX live trader for ReclaimEdge.
 
@@ -70,17 +103,20 @@ class Trader:
     - recover existing ETH-USDT-SWAP position on restart
     """
 
-    def __init__(self) -> None:
-        self.symbol = os.getenv("OKX_INST_ID", "ETH-USDT-SWAP")
+    def __init__(self, settings: TraderRuntimeSettings | None = None) -> None:
+        if settings is None:
+            settings = TraderRuntimeSettings.from_env_compat()
+
+        self.symbol = settings.symbol
         if self.symbol != "ETH-USDT-SWAP":
             raise RuntimeError("Live trader only supports ETH-USDT-SWAP for now.")
 
-        self.base_url = os.getenv("OKX_BASE_URL", "https://www.okx.com")
-        self.td_mode = os.getenv("OKX_TD_MODE", "isolated")
-        self.leverage = os.getenv("LEVERAGE", "50")
-        self.pos_side_mode = os.getenv("OKX_POS_SIDE_MODE", "net")
-        self.live_trading = os.getenv("LIVE_TRADING", "false").strip().lower() in {"1", "true", "yes", "y", "on"}
-        self.max_live_equity_usdt = float(os.getenv("MAX_LIVE_EQUITY_USDT", "30"))
+        self.base_url = settings.base_url
+        self.td_mode = settings.td_mode
+        self.leverage = settings.leverage
+        self.pos_side_mode = settings.pos_side_mode
+        self.live_trading = settings.live_trading
+        self.max_live_equity_usdt = settings.max_live_equity_usdt
         self.contract_multiplier = Decimal("0.1")
         self.contract_precision = Decimal("0.01")
         self.min_contracts = Decimal("0.01")
@@ -113,9 +149,8 @@ class Trader:
         )
         self._broker_client = None
         self._broker_semantic_executor = None
-        from src.execution.tp_sl_execution_manager import TpSlExecutionManager
-        self._tp_sl_manager = TpSlExecutionManager(self)
-        self.trading_client: TradingClientPort = OkxTradingClient(self)
+        self._tp_sl_manager: TpSlExecutionManager | None = None
+        self.trading_client: TradingClientPort | None = None
 
         if not self.api_key or not self.secret_key or not self.passphrase:
             raise ValueError(
@@ -126,12 +161,29 @@ class Trader:
         if not self.live_trading:
             raise RuntimeError("LIVE_TRADING is not true. Refusing to initialize live trader.")
 
+    def bind_trading_client(self, trading_client: TradingClientPort) -> None:
+        """Bind a TradingClientPort and initialise the TP/SL execution manager.
+
+        Must be called once after construction, before any trading operations.
+        Typically invoked by the runtime factory.
+        """
+        self.trading_client = trading_client
+        from src.execution.tp_sl_execution_manager import TpSlExecutionManager
+        self._tp_sl_manager = TpSlExecutionManager(self, trading_client=trading_client)
+
+    def _require_trading_client(self) -> TradingClientPort:
+        if self.trading_client is None:
+            raise RuntimeError("trading_client_not_bound")
+        return self.trading_client
+
+    def _require_tp_sl_manager(self) -> "TpSlExecutionManager":
+        if self._tp_sl_manager is None:
+            raise RuntimeError("tp_sl_manager_not_bound")
+        return self._tp_sl_manager
+
     def __getattr__(self, name: str):
         if name == '_tp_sl_manager':
-            from src.execution.tp_sl_execution_manager import TpSlExecutionManager
-            mgr = TpSlExecutionManager(self)
-            object.__setattr__(self, '_tp_sl_manager', mgr)
-            return mgr
+            raise RuntimeError("tp_sl_manager_not_bound")
         if name == '_private_write_limiter':
             from src.execution.okx_private_client import PrivateWriteRateLimiter
             limiter = PrivateWriteRateLimiter()
@@ -306,22 +358,22 @@ class Trader:
             )
 
     async def execute_near_tp_reduce(self, intent: TradeIntent) -> LiveTradeResult:
-        return await self._tp_sl_manager.execute_near_tp_reduce(intent)
+        return await self._require_tp_sl_manager().execute_near_tp_reduce(intent)
 
     async def execute_market_exit_runner(self, intent: TradeIntent) -> LiveTradeResult:
-        return await self._tp_sl_manager.execute_market_exit_runner(intent)
+        return await self._require_tp_sl_manager().execute_market_exit_runner(intent)
 
     async def replace_take_profit(self, intent: TradeIntent) -> LiveTradeResult:
-        return await self._tp_sl_manager.replace_take_profit(intent)
+        return await self._require_tp_sl_manager().replace_take_profit(intent)
 
     async def _cancel_existing_take_profit_orders_for_intent(self, intent: TradeIntent) -> None:
-        return await self._tp_sl_manager._cancel_existing_take_profit_orders_for_intent(intent)
+        return await self._require_tp_sl_manager()._cancel_existing_take_profit_orders_for_intent(intent)
 
     async def _cancel_stale_runner_protective_stops_for_degrade(self, intent: TradeIntent) -> None:
-        return await self._tp_sl_manager._cancel_stale_runner_protective_stops_for_degrade(intent)
+        return await self._require_tp_sl_manager()._cancel_stale_runner_protective_stops_for_degrade(intent)
 
     def _protected_order_ids_from_intent(self, intent: TradeIntent) -> set[str]:
-        return self._tp_sl_manager._protected_order_ids_from_intent(intent)
+        return self._require_tp_sl_manager()._protected_order_ids_from_intent(intent)
 
     @staticmethod
     def _split_order_ids(value: str | None) -> set[str]:
@@ -329,20 +381,20 @@ class Trader:
         return TpSlExecutionManager._split_order_ids(value)
 
     def _managed_core_contracts_from_intent(self, intent: TradeIntent) -> Decimal | None:
-        return self._tp_sl_manager._managed_core_contracts_from_intent(intent)
+        return self._require_tp_sl_manager()._managed_core_contracts_from_intent(intent)
 
     def _build_take_profit_order_specs(self, intent: TradeIntent) -> list[tuple[str, Decimal, float]]:
-        return self._tp_sl_manager._build_take_profit_order_specs(intent)
+        return self._require_tp_sl_manager()._build_take_profit_order_specs(intent)
 
     def _build_three_stage_order_specs(self, intent: TradeIntent) -> list[tuple[str, Decimal, float]]:
-        return self._tp_sl_manager._build_three_stage_order_specs(intent)
+        return self._require_tp_sl_manager()._build_three_stage_order_specs(intent)
 
     def _trend_runner_sl_contracts(self, intent: TradeIntent, net_contracts_for_sl: Decimal) -> Decimal:
-        return self._tp_sl_manager._trend_runner_sl_contracts(intent, net_contracts_for_sl)
+        return self._require_tp_sl_manager()._trend_runner_sl_contracts(intent, net_contracts_for_sl)
 
     async def _place_reduce_only_take_profit_orders(self, intent: TradeIntent,
                                                     specs: list[tuple[str, Decimal, float]]) -> list[str]:
-        return await self._tp_sl_manager._place_reduce_only_take_profit_orders(intent, specs)
+        return await self._require_tp_sl_manager()._place_reduce_only_take_profit_orders(intent, specs)
 
     def _reduce_only_tp_order_body(self, side: PositionSide, contracts: Decimal, price: float) -> dict[str, Any]:
         return order_specs.build_reduce_only_tp_order_body(
@@ -371,7 +423,7 @@ class Trader:
             retry_count: int,
             retry_interval_seconds: float,
     ) -> tuple[bool, str | None, str]:
-        return await self._tp_sl_manager.place_near_tp_protective_stop_with_retries(
+        return await self._require_tp_sl_manager().place_near_tp_protective_stop_with_retries(
             side, contracts, stop_price, retry_count, retry_interval_seconds)
 
     async def place_middle_runner_protective_stop_with_retries(
@@ -382,7 +434,7 @@ class Trader:
             retry_count: int,
             retry_interval_seconds: float,
     ) -> tuple[bool, str | None, str]:
-        return await self._tp_sl_manager.place_middle_runner_protective_stop_with_retries(
+        return await self._require_tp_sl_manager().place_middle_runner_protective_stop_with_retries(
             side, contracts, stop_price, retry_count, retry_interval_seconds)
 
     async def place_middle_bucket_fast_protective_stop_with_retries(
@@ -393,7 +445,7 @@ class Trader:
             retry_count: int,
             retry_interval_seconds: float,
     ) -> tuple[bool, str | None, str]:
-        return await self._tp_sl_manager.place_middle_bucket_fast_protective_stop_with_retries(
+        return await self._require_tp_sl_manager().place_middle_bucket_fast_protective_stop_with_retries(
             side, contracts, stop_price, retry_count, retry_interval_seconds)
 
     async def place_trend_runner_protective_stop_with_retries(
@@ -404,7 +456,7 @@ class Trader:
             retry_count: int,
             retry_interval_seconds: float,
     ) -> tuple[bool, str | None, str]:
-        return await self._tp_sl_manager.place_trend_runner_protective_stop_with_retries(
+        return await self._require_tp_sl_manager().place_trend_runner_protective_stop_with_retries(
             side, contracts, stop_price, retry_count, retry_interval_seconds)
 
     async def place_three_stage_post_tp1_protective_stop_with_retries(
@@ -415,19 +467,19 @@ class Trader:
             retry_count: int,
             retry_interval_seconds: float,
     ) -> tuple[bool, str | None, str]:
-        return await self._tp_sl_manager.place_three_stage_post_tp1_protective_stop_with_retries(
+        return await self._require_tp_sl_manager().place_three_stage_post_tp1_protective_stop_with_retries(
             side, contracts, stop_price, retry_count, retry_interval_seconds)
 
     async def _cancel_unverified_near_tp_algo(self, algo_id: str, *, phase: str) -> None:
-        return await self._tp_sl_manager._cancel_unverified_near_tp_algo(algo_id, phase=phase)
+        return await self._require_tp_sl_manager()._cancel_unverified_near_tp_algo(algo_id, phase=phase)
 
     async def verify_near_tp_protective_stop(self, algo_id: str, side: PositionSide, contracts: Decimal,
                                              stop_price: float) -> bool:
-        return await self._tp_sl_manager.verify_near_tp_protective_stop(algo_id, side, contracts, stop_price)
+        return await self._require_tp_sl_manager().verify_near_tp_protective_stop(algo_id, side, contracts, stop_price)
 
     def _near_tp_protective_stop_matches(self, item: dict[str, Any], algo_id: str, side: PositionSide,
                                          contracts: Decimal, stop_price: float) -> bool:
-        return self._tp_sl_manager._near_tp_protective_stop_matches(item, algo_id, side, contracts, stop_price)
+        return self._require_tp_sl_manager()._near_tp_protective_stop_matches(item, algo_id, side, contracts, stop_price)
 
     def _near_tp_protective_sl_algo_body(self, side: PositionSide, contracts: Decimal, stop_price: float) -> dict[
         str, Any]:
@@ -459,22 +511,22 @@ class Trader:
         context: str = "generic",
         retry_interval_seconds: float | None = None,
     ) -> tuple[bool, str]:
-        return await self._tp_sl_manager.market_exit_remaining_position_with_retries(
+        return await self._require_tp_sl_manager().market_exit_remaining_position_with_retries(
             side, retry_count, context=context, retry_interval_seconds=retry_interval_seconds,
         )
 
     async def _cleanup_after_market_exit(self) -> None:
-        return await self._tp_sl_manager._cleanup_after_market_exit()
+        return await self._require_tp_sl_manager()._cleanup_after_market_exit()
 
     # Backward-compat alias
     async def _cleanup_after_near_tp_market_exit(self) -> None:
         return await self._cleanup_after_market_exit()
 
     def _tp_price_summary(self, specs: list[tuple[str, Decimal, float]]) -> str:
-        return self._tp_sl_manager._tp_price_summary(specs)
+        return self._require_tp_sl_manager()._tp_price_summary(specs)
 
     async def cancel_existing_reduce_only_orders(self) -> None:
-        return await self._tp_sl_manager.cancel_existing_reduce_only_orders()
+        return await self._require_tp_sl_manager().cancel_existing_reduce_only_orders()
 
     async def place_sidecar_market_order(self, *, side: PositionSide, eth_qty: float) -> dict[str, Any]:
         contracts = self.eth_qty_to_contracts(Decimal(str(eth_qty)))
@@ -501,7 +553,7 @@ class Trader:
             tp_price: float,
             client_order_id: str | None = None,
     ) -> str:
-        return await self._tp_sl_manager.place_sidecar_fixed_take_profit(
+        return await self._require_tp_sl_manager().place_sidecar_fixed_take_profit(
             side=side,
             contracts=contracts,
             tp_price=tp_price,
@@ -509,10 +561,10 @@ class Trader:
         )
 
     async def cancel_sidecar_take_profit(self, order_id: str | None) -> bool:
-        return await self._tp_sl_manager.cancel_sidecar_take_profit(order_id)
+        return await self._require_tp_sl_manager().cancel_sidecar_take_profit(order_id)
 
     async def fetch_sidecar_order_status(self, order_id: str) -> dict[str, Any]:
-        return await self._tp_sl_manager.fetch_sidecar_order_status(order_id)
+        return await self._require_tp_sl_manager().fetch_sidecar_order_status(order_id)
 
     async def fetch_pending_orders(self) -> list[dict[str, Any]]:
         """Legacy wrapper — delegates to TradingClientPort.fetch_open_orders().
@@ -551,19 +603,19 @@ class Trader:
         return [dict(o.raw) for o in algo_orders]
 
     async def cancel_near_tp_protective_stop(self, order_id: str | None) -> bool:
-        return await self._tp_sl_manager.cancel_near_tp_protective_stop(order_id)
+        return await self._require_tp_sl_manager().cancel_near_tp_protective_stop(order_id)
 
     async def cancel_middle_runner_protective_stop(self, order_id: str | None) -> bool:
-        return await self._tp_sl_manager.cancel_middle_runner_protective_stop(order_id)
+        return await self._require_tp_sl_manager().cancel_middle_runner_protective_stop(order_id)
 
     async def cancel_middle_bucket_fast_protective_stop(self, order_id: str | None) -> bool:
-        return await self._tp_sl_manager.cancel_middle_bucket_fast_protective_stop(order_id)
+        return await self._require_tp_sl_manager().cancel_middle_bucket_fast_protective_stop(order_id)
 
     async def cancel_trend_runner_protective_stop(self, order_id: str | None) -> bool:
-        return await self._tp_sl_manager.cancel_trend_runner_protective_stop(order_id)
+        return await self._require_tp_sl_manager().cancel_trend_runner_protective_stop(order_id)
 
     async def cancel_three_stage_post_tp1_protective_stop(self, order_id: str | None) -> bool:
-        return await self._tp_sl_manager.cancel_three_stage_post_tp1_protective_stop(order_id)
+        return await self._require_tp_sl_manager().cancel_three_stage_post_tp1_protective_stop(order_id)
 
     async def fetch_usdt_equity(self) -> float:
         """Legacy wrapper — delegates to TradingClientPort.fetch_balance()."""
