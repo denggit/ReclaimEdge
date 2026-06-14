@@ -591,28 +591,27 @@ class TestNearTpReduceMissingOrderId:
 # ======================================================================
 
 
-class TestSidecarNotMigrated:
-    """Sidecar entry / fixed TP are NOT migrated in this task."""
+class TestSidecarMigratedToTradingClientPort:
+    """Sidecar entry / fixed TP are now migrated to TradingClientPort (20C-CLEAN-PORTS-08)."""
 
-    def test_sidecar_fixed_tp_still_uses_direct_request(self):
-        """SidecarManager.place_sidecar_fixed_take_profit still uses direct
-        request via order_specs.build_reduce_only_tp_order_body (limit order,
-        not market order). This is expected and not migrated."""
+    def test_sidecar_fixed_tp_uses_place_limit_order(self):
+        """SidecarManager.place_sidecar_fixed_take_profit now uses
+        .place_limit_order( (migrated)."""
         from pathlib import Path
 
         text = Path("src/execution/tp_sl_sidecar_manager.py").read_text(encoding="utf-8")
-        # The sidecar TP placement uses a limit order, not a market order
-        assert "build_reduce_only_tp_order_body" in text, (
-            "Sidecar fixed TP limit order is not migrated (it is a LIMIT order, not market)"
+        # The sidecar TP placement now uses TradingClientPort.place_limit_order
+        assert ".place_limit_order(" in text, (
+            "Sidecar fixed TP must use .place_limit_order( (migrated)"
         )
         # Verify the sidecar does NOT call place_market_order
         assert ".place_market_order(" not in text, (
             "Sidecar should NOT call place_market_order (no reduce-only market order to migrate)"
         )
 
-    def test_trader_sidecar_market_order_is_entry_not_exit(self):
-        """Trader.place_sidecar_market_order uses build_market_entry_order_body
-        — this is an ENTRY, not a reduce-only close. Not migrated."""
+    def test_trader_sidecar_market_order_uses_place_market_order(self):
+        """Trader.place_sidecar_market_order now uses .place_market_order(
+        via TradingClientPort — migrated."""
         from pathlib import Path
 
         text = Path("src/execution/trader.py").read_text(encoding="utf-8")
@@ -627,6 +626,6 @@ class TestSidecarNotMigrated:
             if in_method:
                 sidecar_method_text += line + "\n"
 
-        assert "build_market_entry_order_body" in sidecar_method_text, (
-            "place_sidecar_market_order is a market ENTRY, not reduce-only close"
+        assert ".place_market_order(" in sidecar_method_text, (
+            "place_sidecar_market_order must use .place_market_order( (migrated)"
         )

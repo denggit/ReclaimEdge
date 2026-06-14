@@ -34,7 +34,7 @@ class TpSlExecutionManager:
             market_exit=self.market_exit,
             trading_client=self.trading_client,
         )
-        self.sidecar = SidecarTpManager(trader)
+        self.sidecar = SidecarTpManager(trader, self.trading_client)
 
     # ------------------------------------------------------------------
     # main TP / SL execution entry points

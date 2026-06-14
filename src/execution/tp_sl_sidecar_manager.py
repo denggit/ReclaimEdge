@@ -9,14 +9,16 @@ from src.utils.log import get_logger
 
 if TYPE_CHECKING:
     from src.execution.trader import Trader
+    from src.execution.trading_client_port import TradingClientPort
     from src.strategies.boll_cvd_reclaim_strategy import PositionSide
 
 logger = get_logger(__name__)
 
 
 class SidecarTpManager:
-    def __init__(self, trader: Trader) -> None:
+    def __init__(self, trader: Trader, trading_client: TradingClientPort) -> None:
         self.trader = trader
+        self.trading_client = trading_client
 
     def _broker_semantic_sidecar_tp_placement_enabled(self) -> bool:
         import os
@@ -88,17 +90,16 @@ class SidecarTpManager:
                 client_order_id=sent_client_order_id or None,
             )
         else:
-            body = order_specs.build_reduce_only_tp_order_body(
-                inst_id=t.symbol,
-                td_mode=t.td_mode,
+            result = await self.trading_client.place_limit_order(
                 side=side,
-                contracts_text=t.decimal_to_str(contracts_decimal),
-                price_text=t.price_to_str(float(tp_price)),
-                pos_side_mode=t.pos_side_mode,
-                client_order_id=sent_client_order_id or None,
+                qty=contracts_decimal,
+                price=Decimal(str(tp_price)),
+                reduce_only=True,
+                client_order_id=sent_client_order_id or "",
             )
-            res = await t.request("POST", "/api/v5/trade/order", body)
-            order_id = t.extract_order_id(res)
+            order_id = result.order_id
+            if order_id is None:
+                raise RuntimeError("sidecar_fixed_tp_missing_order_id")
         logger.warning(
             "SIDECAR_TP_PLACED | side=%s contracts=%s tp_price=%s sent_clOrdId=%s ordId=%s",
             side,

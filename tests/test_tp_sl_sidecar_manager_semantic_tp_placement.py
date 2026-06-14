@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from src.execution.okx_trading_client import OkxTradingClient
 from src.execution.tp_sl_sidecar_manager import SidecarTpManager
 from src.exchanges.models import BrokerPositionSide, BrokerQuantityUnit, ExchangeName
 from src.exchanges.semantic_models import (
@@ -92,7 +93,7 @@ class FakeTrader:
 async def test_sidecar_tp_default_disabled_uses_legacy_request(monkeypatch) -> None:
     monkeypatch.delenv("BROKER_SEMANTIC_SIDECAR_TP_PLACEMENT_ENABLED", raising=False)
     trader = FakeTrader()
-    manager = SidecarTpManager(trader)
+    manager = SidecarTpManager(trader, OkxTradingClient(trader))
     raw_client_order_id = "sidecar client id too long maybe"
 
     order_id = await manager.place_sidecar_fixed_take_profit(
@@ -116,7 +117,7 @@ async def test_sidecar_tp_default_disabled_uses_legacy_request(monkeypatch) -> N
 async def test_sidecar_tp_semantic_enabled_uses_semantic_without_legacy_request(monkeypatch) -> None:
     monkeypatch.setenv("BROKER_SEMANTIC_SIDECAR_TP_PLACEMENT_ENABLED", "true")
     trader = FakeTrader()
-    manager = SidecarTpManager(trader)
+    manager = SidecarTpManager(trader, OkxTradingClient(trader))
     raw_client_order_id = "sidecar client id too long maybe"
 
     order_id = await manager.place_sidecar_fixed_take_profit(
@@ -144,7 +145,7 @@ async def test_sidecar_tp_semantic_enabled_uses_semantic_without_legacy_request(
 async def test_sidecar_tp_semantic_maps_short_side(monkeypatch) -> None:
     monkeypatch.setenv("BROKER_SEMANTIC_SIDECAR_TP_PLACEMENT_ENABLED", "true")
     trader = FakeTrader()
-    manager = SidecarTpManager(trader)
+    manager = SidecarTpManager(trader, OkxTradingClient(trader))
 
     await manager.place_sidecar_fixed_take_profit(
         side="SHORT",
@@ -161,7 +162,7 @@ async def test_sidecar_tp_semantic_failure_does_not_fallback_legacy(monkeypatch)
     trader = FakeTrader()
     trader.semantic.ok = False
     trader.semantic.message = "boom"
-    manager = SidecarTpManager(trader)
+    manager = SidecarTpManager(trader, OkxTradingClient(trader))
 
     with pytest.raises(RuntimeError, match="semantic_sidecar_tp_order_failed"):
         await manager.place_sidecar_fixed_take_profit(
@@ -178,7 +179,7 @@ async def test_sidecar_tp_semantic_failure_does_not_fallback_legacy(monkeypatch)
 async def test_sidecar_tp_semantic_without_client_order_id_passes_none(monkeypatch) -> None:
     monkeypatch.setenv("BROKER_SEMANTIC_SIDECAR_TP_PLACEMENT_ENABLED", "true")
     trader = FakeTrader()
-    manager = SidecarTpManager(trader)
+    manager = SidecarTpManager(trader, OkxTradingClient(trader))
 
     await manager.place_sidecar_fixed_take_profit(
         side="LONG",

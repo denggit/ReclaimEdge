@@ -331,6 +331,8 @@ ALLOWED_SEMANTIC_SIDECAR_TP_PLACEMENT_FILES: set[str] = {
     "tests/test_tp_sl_sidecar_manager_semantic_tp_placement.py",
     "tests/exchanges/test_no_live_wiring.py",
     "tests/exchanges/okx/test_okx_semantic_order_body_parity.py",
+    "tests/execution/test_sidecar_trading_client_port.py",
+    "tests/execution/test_sidecar_trading_client_port_boundaries.py",
 }
 
 
@@ -388,6 +390,8 @@ ALLOWED_SEMANTIC_SIDECAR_TP_CANCEL_FILES: set[str] = {
     "tests/test_tp_sl_sidecar_manager_semantic_tp_cancel.py",
     "tests/exchanges/test_no_live_wiring.py",
     "tests/exchanges/okx/test_okx_semantic_order_body_parity.py",
+    "tests/execution/test_sidecar_trading_client_port.py",
+    "tests/execution/test_sidecar_trading_client_port_boundaries.py",
 }
 
 

@@ -473,16 +473,17 @@ class Trader:
 
     async def place_sidecar_market_order(self, *, side: PositionSide, eth_qty: float) -> dict[str, Any]:
         contracts = self.eth_qty_to_contracts(Decimal(str(eth_qty)))
-        body = order_specs.build_market_entry_order_body(
-            inst_id=self.symbol,
-            td_mode=self.td_mode,
+        result = await self.trading_client.place_market_order(
             side=side,
-            contracts_text=self.decimal_to_str(contracts),
-            pos_side_mode=self.pos_side_mode,
+            qty=contracts,
+            reduce_only=False,
+            client_order_id="",
         )
-        res = await self.request("POST", "/api/v5/trade/order", body)
+        order_id = result.order_id
+        if order_id is None:
+            raise RuntimeError("sidecar_market_entry_missing_order_id")
         return {
-            "order_id": self.extract_order_id(res),
+            "order_id": order_id,
             "contracts": self.decimal_to_str(contracts),
             "qty": float(contracts * self.contract_multiplier),
         }

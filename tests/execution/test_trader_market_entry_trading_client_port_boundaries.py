@@ -150,22 +150,35 @@ class TestNoForbiddenNewImports:
 # ======================================================================
 
 
-class TestLegacyFunctionsStillUseDirectRequest:
-    """Verify that place_sidecar_market_order and other still-untouched
-    methods still use self.request directly — proving we didn't over-replace."""
+class TestSidecarMarketEntryUsesTradingClientPort:
+    """Verify that place_sidecar_market_order now uses TradingClientPort
+    instead of direct OKX request (20C-CLEAN-PORTS-08)."""
 
-    def test_place_sidecar_market_order_still_has_direct_request(self):
+    def test_place_sidecar_market_order_uses_place_market_order(self):
         text = _read_source()
         sidecar_source = _extract_method(text, "place_sidecar_market_order")
-        assert 'self.request("POST", "/api/v5/trade/order"' in sidecar_source, (
-            "place_sidecar_market_order must still use direct request (not yet migrated)"
+        assert ".place_market_order(" in sidecar_source, (
+            "place_sidecar_market_order must use .place_market_order("
         )
 
-    def test_sidecar_order_body_still_uses_build_market_entry_order_body(self):
-        """place_sidecar_market_order still calls build_market_entry_order_body — allowed."""
+    def test_place_sidecar_market_order_no_direct_request(self):
+        text = _read_source()
+        sidecar_source = _extract_method(text, "place_sidecar_market_order")
+        assert 'self.request("POST", "/api/v5/trade/order"' not in sidecar_source, (
+            "place_sidecar_market_order must NOT use direct request (migrated)"
+        )
+
+    def test_place_sidecar_market_order_no_build_market_entry_order_body(self):
+        """place_sidecar_market_order no longer calls build_market_entry_order_body."""
         sidecar_source = _extract_method(_read_source(), "place_sidecar_market_order")
-        assert "build_market_entry_order_body" in sidecar_source, (
-            "place_sidecar_market_order is allowed to use build_market_entry_order_body"
+        assert "build_market_entry_order_body" not in sidecar_source, (
+            "place_sidecar_market_order must NOT use build_market_entry_order_body (migrated)"
+        )
+
+    def test_place_sidecar_market_order_checks_missing_order_id(self):
+        sidecar_source = _extract_method(_read_source(), "place_sidecar_market_order")
+        assert "sidecar_market_entry_missing_order_id" in sidecar_source, (
+            "place_sidecar_market_order must raise on missing order_id"
         )
 
     def test_reduce_only_market_order_body_still_present(self):

@@ -246,23 +246,46 @@ class TestTpSlExecutionManagerWiring:
 # ======================================================================
 
 
-class TestSidecarUntouched:
-    """Sidecar fixed TP limit order is NOT a market order — not migrated."""
+class TestSidecarMigratedToTradingClientPort:
+    """Sidecar fixed TP is now migrated to TradingClientPort.place_limit_order."""
 
-    def test_sidecar_tp_placement_still_uses_direct_request(self):
-        """place_sidecar_fixed_take_profit still uses limit order body
-        (build_reduce_only_tp_order_body). This is correct behavior —
-        it's a LIMIT order, not a market order."""
+    def test_sidecar_tp_placement_uses_place_limit_order(self):
+        """place_sidecar_fixed_take_profit now uses .place_limit_order(
+        (migrated in 20C-CLEAN-PORTS-08)."""
         text = _read_source(_SIDECAR_PATH)
         method_text = _extract_method(text, "place_sidecar_fixed_take_profit")
 
-        # Sidecar fixed TP is a limit order, not migrated
-        assert "build_reduce_only_tp_order_body" in method_text, (
-            "Sidecar fixed TP must still use limit order (not migrated)"
+        assert ".place_limit_order(" in method_text, (
+            "Sidecar fixed TP must use .place_limit_order( (migrated)"
         )
         # Must NOT contain place_market_order
         assert ".place_market_order(" not in method_text, (
             "Sidecar fixed TP is a limit order — must NOT call place_market_order"
+        )
+
+    def test_sidecar_tp_placement_no_direct_request(self):
+        """place_sidecar_fixed_take_profit must NOT contain direct
+        /api/v5/trade/order request."""
+        text = _read_source(_SIDECAR_PATH)
+        method_text = _extract_method(text, "place_sidecar_fixed_take_profit")
+
+        for forbidden in ('"/api/v5/trade/order"', "'/api/v5/trade/order'",
+                          "build_reduce_only_tp_order_body", "extract_order_id("):
+            lines = method_text.splitlines()
+            for i, line in enumerate(lines, 1):
+                stripped = line.strip()
+                if stripped.startswith("#"):
+                    continue
+                if forbidden in line:
+                    pytest.fail(
+                        f"place_sidecar_fixed_take_profit:{i} must not contain {forbidden}"
+                    )
+
+    def test_sidecar_tp_placement_checks_missing_order_id(self):
+        text = _read_source(_SIDECAR_PATH)
+        method_text = _extract_method(text, "place_sidecar_fixed_take_profit")
+        assert "sidecar_fixed_tp_missing_order_id" in method_text, (
+            "Sidecar fixed TP must raise on missing order_id"
         )
 
     def test_sidecar_has_no_reduce_only_market_order(self):
@@ -301,6 +324,7 @@ class TestNoForbiddenImports:
         _MARKET_EXIT_PATH,
         _NEAR_TP_PATH,
         _EXECUTION_MGR_PATH,
+        _SIDECAR_PATH,
     ]
 
     FORBIDDEN_TOKENS = [
@@ -336,6 +360,7 @@ class TestNoNewClientInstantiation:
     MIGRATED_FILES = [
         _MARKET_EXIT_PATH,
         _NEAR_TP_PATH,
+        _SIDECAR_PATH,
     ]
 
     # TpSlExecutionManager is checked separately below
@@ -386,7 +411,7 @@ class TestNoNewClientInstantiation:
 class TestNoNewEnvReads:
     """The trading_client wiring in __init__ must not read env vars."""
 
-    MIGRATED_FILES = [_MARKET_EXIT_PATH, _NEAR_TP_PATH]
+    MIGRATED_FILES = [_MARKET_EXIT_PATH, _NEAR_TP_PATH, _SIDECAR_PATH]
 
     @pytest.mark.parametrize("file_path", MIGRATED_FILES)
     def test_no_load_dotenv(self, file_path: Path) -> None:
@@ -415,14 +440,13 @@ class TestUnmigratedMethodsAllowedDirectRequest:
             "execute_market_exit_runner delegates to market_exit, no direct request needed"
         )
 
-    def test_sidecar_tp_placement_allowed_direct_request(self):
-        """Sidecar TP placement (limit order) still uses direct request —
-        this is allowed and not migrated."""
+    def test_sidecar_tp_placement_uses_trading_client_port(self):
+        """Sidecar TP placement now uses TradingClientPort.place_limit_order
+        (migrated in 20C-CLEAN-PORTS-08)."""
         text = _read_source(_SIDECAR_PATH)
         method_text = _extract_method(text, "place_sidecar_fixed_take_profit")
-        # Allowed: direct request for limit order
-        assert '"/api/v5/trade/order"' in method_text, (
-            "Sidecar fixed TP is a LIMIT order — direct request is allowed"
+        assert ".place_limit_order(" in method_text, (
+            "Sidecar fixed TP must use .place_limit_order( (migrated)"
         )
 
 
@@ -436,6 +460,7 @@ class TestFilesCompile:
         _MARKET_EXIT_PATH,
         _NEAR_TP_PATH,
         _EXECUTION_MGR_PATH,
+        _SIDECAR_PATH,
     ])
     def test_file_compiles(self, file_path: Path) -> None:
         text = _read_source(file_path)

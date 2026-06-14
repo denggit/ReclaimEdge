@@ -66,7 +66,7 @@ class FakeTrader:
 async def test_sidecar_tp_cancel_default_disabled_uses_legacy_request(monkeypatch) -> None:
     monkeypatch.delenv("BROKER_SEMANTIC_SIDECAR_TP_CANCEL_ENABLED", raising=False)
     trader = FakeTrader()
-    manager = SidecarTpManager(trader)
+    manager = SidecarTpManager(trader, None)  # type: ignore[arg-type]
 
     ok = await manager.cancel_sidecar_take_profit("sidecar-tp-1")
 
@@ -83,7 +83,7 @@ async def test_sidecar_tp_cancel_default_disabled_uses_legacy_request(monkeypatc
 async def test_sidecar_tp_cancel_semantic_enabled_uses_semantic_without_legacy_request(monkeypatch) -> None:
     monkeypatch.setenv("BROKER_SEMANTIC_SIDECAR_TP_CANCEL_ENABLED", "true")
     trader = FakeTrader()
-    manager = SidecarTpManager(trader)
+    manager = SidecarTpManager(trader, None)  # type: ignore[arg-type]
 
     ok = await manager.cancel_sidecar_take_profit("sidecar-tp-1")
 
@@ -103,7 +103,7 @@ async def test_sidecar_tp_cancel_semantic_failure_does_not_fallback_legacy(monke
     trader = FakeTrader()
     trader.semantic.ok = False
     trader.semantic.message = "boom"
-    manager = SidecarTpManager(trader)
+    manager = SidecarTpManager(trader, None)  # type: ignore[arg-type]
 
     ok = await manager.cancel_sidecar_take_profit("sidecar-tp-1")
 
@@ -118,7 +118,7 @@ async def test_sidecar_tp_cancel_semantic_already_absent_returns_true(monkeypatc
     trader = FakeTrader()
     trader.semantic.ok = False
     trader.semantic.message = "order not found"
-    manager = SidecarTpManager(trader)
+    manager = SidecarTpManager(trader, None)  # type: ignore[arg-type]
 
     ok = await manager.cancel_sidecar_take_profit("sidecar-tp-1")
 
@@ -131,7 +131,7 @@ async def test_sidecar_tp_cancel_semantic_already_absent_returns_true(monkeypatc
 async def test_sidecar_tp_cancel_order_id_none_returns_true(monkeypatch) -> None:
     monkeypatch.setenv("BROKER_SEMANTIC_SIDECAR_TP_CANCEL_ENABLED", "true")
     trader = FakeTrader()
-    manager = SidecarTpManager(trader)
+    manager = SidecarTpManager(trader, None)  # type: ignore[arg-type]
 
     ok = await manager.cancel_sidecar_take_profit(None)
 
