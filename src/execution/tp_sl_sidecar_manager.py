@@ -3,7 +3,6 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Any, TYPE_CHECKING
 
-from src.execution import order_specs
 from src.position_management.sidecar.model import sanitize_okx_client_order_id
 from src.utils.log import get_logger
 
@@ -148,12 +147,12 @@ class SidecarTpManager:
             return ok
 
         try:
-            await t.request("POST", "/api/v5/trade/cancel-order", order_specs.build_cancel_order_body(
-                inst_id=t.symbol,
-                order_id=order_id,
-            ))
-            logger.warning("SIDECAR_TP_CANCELLED | ordId=%s", order_id)
-            return True
+            result = await self.trading_client.cancel_order(order_id=order_id)
+            if result.ok:
+                logger.warning("SIDECAR_TP_CANCELLED | ordId=%s", order_id)
+                return True
+            logger.error("SIDECAR_TP_CANCEL_FAILED | ordId=%s result=%s", order_id, result.raw)
+            return False
         except Exception as exc:
             text = str(exc).lower()
             if "not found" in text or "not exist" in text or "does not exist" in text or "already" in text:

@@ -90,8 +90,6 @@ ALLOWED_DIRECT_REST: dict[tuple[str, str, str], str] = {
         "known algo-id direct cancel; avoids regular cancel fallback noise",
 
     # ── Legacy sidecar paths ─────────────────────────────────────────────
-    ("src/execution/tp_sl_sidecar_manager.py", "cancel_sidecar_take_profit", "/api/v5/trade/cancel-order"):
-        "known order-id direct cancel; legacy sidecar cancel path",
     ("src/execution/tp_sl_sidecar_manager.py", "fetch_sidecar_order_status", "/api/v5/trade/order"):
         "legacy sidecar order status read",
     ("src/execution/trader.py", "fetch_sidecar_order_status", "/api/v5/trade/order"):
@@ -150,6 +148,7 @@ MIGRATED_METHODS: set[tuple[str, str]] = {
     ("src/execution/tp_sl_market_exit_manager.py", "market_exit_remaining_position_with_retries"),
     ("src/execution/tp_sl_near_tp_manager.py", "execute_near_tp_reduce"),
     ("src/execution/tp_sl_sidecar_manager.py", "place_sidecar_fixed_take_profit"),
+    ("src/execution/tp_sl_sidecar_manager.py", "cancel_sidecar_take_profit"),
 }
 
 # ── Migrated methods must call these port methods ────────────────────────
@@ -174,6 +173,9 @@ MIGRATED_METHOD_REQUIRED_PORT_CALLS: dict[tuple[str, str], list[str]] = {
     ],
     ("src/execution/tp_sl_sidecar_manager.py", "place_sidecar_fixed_take_profit"): [
         ".place_limit_order(",
+    ],
+    ("src/execution/tp_sl_sidecar_manager.py", "cancel_sidecar_take_profit"): [
+        ".cancel_order(",
     ],
 }
 

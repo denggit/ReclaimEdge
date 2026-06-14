@@ -5,12 +5,37 @@ from pathlib import Path
 import pytest
 
 from src.execution.tp_sl_sidecar_manager import SidecarTpManager
+from src.execution.trading_client_port import CancelResult
 from src.exchanges.models import ExchangeName
 from src.exchanges.semantic_models import (
     BrokerSemanticAction,
     BrokerSemanticOrderRole,
     BrokerSemanticResult,
 )
+
+
+class FakeTradingClient:
+    """Trading client for cancel tests."""
+
+    def __init__(self):
+        self.cancel_calls: list[dict] = []
+        self.next_ok = True
+        self.next_raw: dict = {"fake": True}
+        self.raise_exc: Exception | None = None
+
+    async def cancel_order(self, *, order_id=None, client_order_id=None):
+        self.cancel_calls.append({
+            "order_id": order_id,
+            "client_order_id": client_order_id,
+        })
+        if self.raise_exc is not None:
+            raise self.raise_exc
+        return CancelResult(
+            ok=self.next_ok,
+            order_id=order_id,
+            client_order_id=client_order_id,
+            raw=self.next_raw,
+        )
 
 
 class FakeSemanticExecutor:
@@ -63,19 +88,18 @@ class FakeTrader:
 
 
 @pytest.mark.asyncio
-async def test_sidecar_tp_cancel_default_disabled_uses_legacy_request(monkeypatch) -> None:
+async def test_sidecar_tp_cancel_default_disabled_uses_trading_client_port(monkeypatch) -> None:
     monkeypatch.delenv("BROKER_SEMANTIC_SIDECAR_TP_CANCEL_ENABLED", raising=False)
     trader = FakeTrader()
-    manager = SidecarTpManager(trader, None)  # type: ignore[arg-type]
+    trading_client = FakeTradingClient()
+    manager = SidecarTpManager(trader, trading_client)  # type: ignore[arg-type]
 
     ok = await manager.cancel_sidecar_take_profit("sidecar-tp-1")
 
     assert ok is True
-    assert len(trader.requests) == 1
-    method, endpoint, payload = trader.requests[0]
-    assert method == "POST"
-    assert endpoint == "/api/v5/trade/cancel-order"
-    assert payload == {"instId": "ETH-USDT-SWAP", "ordId": "sidecar-tp-1"}
+    # Must route through TradingClientPort, NOT trader.request
+    assert trader.requests == []
+    assert trading_client.cancel_calls == [{"order_id": "sidecar-tp-1", "client_order_id": None}]
     assert trader.semantic.calls == []
 
 

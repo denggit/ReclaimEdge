@@ -392,6 +392,8 @@ ALLOWED_SEMANTIC_SIDECAR_TP_CANCEL_FILES: set[str] = {
     "tests/exchanges/okx/test_okx_semantic_order_body_parity.py",
     "tests/execution/test_sidecar_trading_client_port.py",
     "tests/execution/test_sidecar_trading_client_port_boundaries.py",
+    "tests/execution/test_sidecar_cancel_trading_client_port.py",
+    "tests/execution/test_sidecar_cancel_trading_client_port_boundaries.py",
 }
 
 
