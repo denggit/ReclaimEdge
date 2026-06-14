@@ -157,6 +157,81 @@ def _read_non_negative_float(env: Mapping[str, str], key: str, default: float) -
     return value
 
 
+def _resolve_env_value(
+    env: Mapping[str, str],
+    primary: str,
+    alias: str,
+    *,
+    description: str = "",
+) -> str:
+    """Read *primary* env var, falling back to *alias*.
+
+    When both *primary* and *alias* are set to different non-empty values
+    the function raises ``ValueError`` advising the user to use only
+    *primary*.
+    """
+    p_val = env.get(primary, "").strip()
+    a_val = env.get(alias, "").strip()
+    if p_val and a_val and p_val != a_val:
+        label = f" ({description})" if description else ""
+        raise ValueError(
+            f"Conflicting env vars: {primary}={p_val!r} vs "
+            f"{alias}={a_val!r}{label}. Use only {primary}."
+        )
+    return p_val if p_val else a_val
+
+
+def _resolve_env_bool(
+    env: Mapping[str, str],
+    primary: str,
+    alias: str,
+    default: bool,
+) -> bool:
+    """Read a boolean env var with primary/alias conflict detection."""
+    raw = _resolve_env_value(env, primary, alias).lower()
+    if not raw:
+        return default
+    return raw in {"1", "true", "yes", "y", "on"}
+
+
+def _resolve_env_positive_float(
+    env: Mapping[str, str],
+    primary: str,
+    alias: str,
+    default: float,
+) -> float:
+    """Read a positive float env var with primary/alias conflict detection."""
+    raw = _resolve_env_value(env, primary, alias)
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        raise ValueError(f"{primary} must be a float, got {raw!r}")
+    if value <= 0:
+        raise ValueError(f"{primary} must be positive, got {value}")
+    return value
+
+
+def _resolve_env_positive_int(
+    env: Mapping[str, str],
+    primary: str,
+    alias: str,
+    default: int,
+) -> int:
+    """Read a positive int env var with primary/alias conflict detection."""
+    raw = _resolve_env_value(env, primary, alias)
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        raise ValueError(f"{primary} must be an integer, got {raw!r}")
+    if value <= 0:
+        raise ValueError(f"{primary} must be positive, got {value}")
+    return value
+
+
 _MAX_SEED_KLINES_LIMIT = 1500
 
 
@@ -173,22 +248,26 @@ def _compute_seed_limit(
     so that the seed always fetches enough candles for BOLL readiness.
     """
     default = max(candle_limit, boll_window, tp_boll_window, 100)
-    raw = env.get("BINANCE_SIGNAL_ONLY_SEED_LIMIT", "").strip()
+    raw = _resolve_env_value(
+        env,
+        "SIGNAL_ONLY_SEED_LIMIT",
+        "BINANCE_SIGNAL_ONLY_SEED_LIMIT",
+    )
     if not raw:
         return default
     try:
         value = int(raw)
     except ValueError:
         raise ValueError(
-            f"BINANCE_SIGNAL_ONLY_SEED_LIMIT must be an integer, got {raw!r}"
+            f"SIGNAL_ONLY_SEED_LIMIT must be an integer, got {raw!r}"
         )
     if value <= 0:
         raise ValueError(
-            f"BINANCE_SIGNAL_ONLY_SEED_LIMIT must be positive, got {value}"
+            f"SIGNAL_ONLY_SEED_LIMIT must be positive, got {value}"
         )
     if value > _MAX_SEED_KLINES_LIMIT:
         raise ValueError(
-            f"BINANCE_SIGNAL_ONLY_SEED_LIMIT must not exceed "
+            f"SIGNAL_ONLY_SEED_LIMIT must not exceed "
             f"{_MAX_SEED_KLINES_LIMIT}, got {value}"
         )
     return value
@@ -261,11 +340,11 @@ def load_binance_signal_only_config(
         )
 
     # --- Guard: signal-only must be enabled ---
-    signal_only = _read_bool(values, "BINANCE_SIGNAL_ONLY", False)
+    signal_only = _resolve_env_bool(values, "SIGNAL_ONLY", "BINANCE_SIGNAL_ONLY", False)
     if not signal_only:
         raise RuntimeError(
             "Binance main live trading is not wired yet. "
-            "Set BINANCE_SIGNAL_ONLY=true for signal-only observation."
+            "Set SIGNAL_ONLY=true for signal-only observation."
         )
 
     # --- Build config from env ---
@@ -273,14 +352,14 @@ def load_binance_signal_only_config(
         canonical_symbol=runtime_config.canonical_symbol,
         raw_symbol=binance_symbol,
         kline_interval=runtime_config.kline_interval,
-        duration_seconds=_read_positive_float(
-            values, "BINANCE_SIGNAL_ONLY_SECONDS", 3600.0
+        duration_seconds=_resolve_env_positive_float(
+            values, "SIGNAL_ONLY_SECONDS", "BINANCE_SIGNAL_ONLY_SECONDS", 3600.0
         ),
-        max_events=_read_positive_int(
-            values, "BINANCE_SIGNAL_ONLY_MAX_EVENTS", 100000
+        max_events=_resolve_env_positive_int(
+            values, "SIGNAL_ONLY_MAX_EVENTS", "BINANCE_SIGNAL_ONLY_MAX_EVENTS", 100000
         ),
-        heartbeat_seconds=_read_positive_float(
-            values, "BINANCE_SIGNAL_ONLY_HEARTBEAT_SECONDS", 30.0
+        heartbeat_seconds=_resolve_env_positive_float(
+            values, "SIGNAL_ONLY_HEARTBEAT_SECONDS", "BINANCE_SIGNAL_ONLY_HEARTBEAT_SECONDS", 30.0
         ),
         candle_limit=_read_positive_int(values, "CANDLE_LIMIT", 100),
         boll_window=_read_positive_int(values, "BOLL_WINDOW", 20),
@@ -293,8 +372,8 @@ def load_binance_signal_only_config(
         tp_boll_enabled=_read_bool(values, "TP_BOLL_ENABLED", True),
         tp_boll_window=_read_positive_int(values, "TP_BOLL_WINDOW", 15),
         # --- Seed params ---
-        seed_historical_klines=_read_bool(
-            values, "BINANCE_SIGNAL_ONLY_SEED_KLINES", True
+        seed_historical_klines=_resolve_env_bool(
+            values, "SIGNAL_ONLY_SEED_KLINES", "BINANCE_SIGNAL_ONLY_SEED_KLINES", True
         ),
         seed_kline_limit=_compute_seed_limit(
             values,
@@ -302,8 +381,8 @@ def load_binance_signal_only_config(
             tp_boll_window=_read_positive_int(values, "TP_BOLL_WINDOW", 15),
             candle_limit=_read_positive_int(values, "CANDLE_LIMIT", 100),
         ),
-        seed_kline_timeout_seconds=_read_positive_float(
-            values, "BINANCE_SIGNAL_ONLY_SEED_TIMEOUT_SECONDS", 10.0
+        seed_kline_timeout_seconds=_resolve_env_positive_float(
+            values, "SIGNAL_ONLY_SEED_TIMEOUT_SECONDS", "BINANCE_SIGNAL_ONLY_SEED_TIMEOUT_SECONDS", 10.0
         ),
     )
 

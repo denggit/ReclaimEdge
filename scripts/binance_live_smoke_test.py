@@ -33,7 +33,7 @@ Unified config env (shared with OKX):
 Preflight env (from binance_live_preflight):
     LIVE_ENABLED=true
     LIVE_ALLOW_ORDERS=true
-    LIVE_CONFIRMATION=I_UNDERSTAND_BINANCE_LIVE_TRADING
+    LIVE_CONFIRMATION=I_UNDERSTAND_EXCHANGE_LIVE_TRADING
     LIVE_MAX_ORDER_NOTIONAL_USDT=<value <= 25>
     LIVE_MAX_POSITION_NOTIONAL_USDT=<value <= 30>
     LIVE_LEVERAGE=<value <= 20>
@@ -46,7 +46,7 @@ Usage::
     LIVE_SMOKE_TEST_CONFIRM=I_UNDERSTAND_THIS_PLACES_REAL_EXCHANGE_ORDERS \\
     LIVE_ENABLED=true                                   \\
     LIVE_ALLOW_ORDERS=true                              \\
-    LIVE_CONFIRMATION=I_UNDERSTAND_BINANCE_LIVE_TRADING \\
+    LIVE_CONFIRMATION=I_UNDERSTAND_EXCHANGE_LIVE_TRADING \\
     LIVE_MAX_ORDER_NOTIONAL_USDT=6                      \\
     LIVE_MAX_POSITION_NOTIONAL_USDT=6                   \\
     LIVE_LEVERAGE=20                                    \\

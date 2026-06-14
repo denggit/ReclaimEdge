@@ -58,15 +58,15 @@ class TestOkxDefault:
 
 
 # ======================================================================
-# Binance signal-only (truthy values)
+# Binance signal-only — SIGNAL_ONLY primary (exchange-neutral)
 # ======================================================================
 
 
-class TestBinanceSignalOnlyTruthy:
-    """EXCHANGE=binance + BINANCE_SIGNAL_ONLY=<truthy> → BINANCE_SIGNAL_ONLY."""
+class TestBinanceSignalOnlyPrimary:
+    """EXCHANGE=binance + SIGNAL_ONLY=<truthy> → BINANCE_SIGNAL_ONLY."""
 
     def test_true_lowercase(self) -> None:
-        env = {"EXCHANGE": "binance", "BINANCE_SIGNAL_ONLY": "true"}
+        env = {"EXCHANGE": "binance", "SIGNAL_ONLY": "true"}
         result = select_live_runtime(env)
         assert result.kind == LiveRuntimeKind.BINANCE_SIGNAL_ONLY
         assert result.exchange == "binance"
@@ -74,22 +74,79 @@ class TestBinanceSignalOnlyTruthy:
         assert result.reason == "binance_signal_only"
 
     def test_one(self) -> None:
-        env = {"EXCHANGE": "binance", "BINANCE_SIGNAL_ONLY": "1"}
+        env = {"EXCHANGE": "binance", "SIGNAL_ONLY": "1"}
         result = select_live_runtime(env)
         assert result.kind == LiveRuntimeKind.BINANCE_SIGNAL_ONLY
 
     def test_yes(self) -> None:
-        env = {"EXCHANGE": "binance", "BINANCE_SIGNAL_ONLY": "yes"}
+        env = {"EXCHANGE": "binance", "SIGNAL_ONLY": "yes"}
         result = select_live_runtime(env)
         assert result.kind == LiveRuntimeKind.BINANCE_SIGNAL_ONLY
 
-    def test_y(self) -> None:
-        env = {"EXCHANGE": "binance", "BINANCE_SIGNAL_ONLY": "y"}
+    def test_primary_false_blocked(self) -> None:
+        env = {"EXCHANGE": "binance", "SIGNAL_ONLY": "false"}
+        result = select_live_runtime(env)
+        assert result.kind == LiveRuntimeKind.BINANCE_LIVE_BLOCKED
+
+
+# ======================================================================
+# Binance signal-only — BINANCE_SIGNAL_ONLY alias (backward compat)
+# ======================================================================
+
+
+class TestBinanceSignalOnlyAlias:
+    """EXCHANGE=binance + BINANCE_SIGNAL_ONLY=<truthy> → backward compat."""
+
+    def test_alias_true(self) -> None:
+        env = {"EXCHANGE": "binance", "BINANCE_SIGNAL_ONLY": "true"}
         result = select_live_runtime(env)
         assert result.kind == LiveRuntimeKind.BINANCE_SIGNAL_ONLY
 
-    def test_on(self) -> None:
-        env = {"EXCHANGE": "binance", "BINANCE_SIGNAL_ONLY": "on"}
+    def test_alias_false_blocked(self) -> None:
+        env = {"EXCHANGE": "binance", "BINANCE_SIGNAL_ONLY": "false"}
+        result = select_live_runtime(env)
+        assert result.kind == LiveRuntimeKind.BINANCE_LIVE_BLOCKED
+
+    def test_alias_missing_blocked(self) -> None:
+        env = {"EXCHANGE": "binance"}
+        result = select_live_runtime(env)
+        assert result.kind == LiveRuntimeKind.BINANCE_LIVE_BLOCKED
+
+
+# ======================================================================
+# Binance signal-only — conflict detection
+# ======================================================================
+
+
+class TestBinanceSignalOnlyConflict:
+    """SIGNAL_ONLY and BINANCE_SIGNAL_ONLY with different values → ValueError."""
+
+    def test_conflict_true_vs_false_raises(self) -> None:
+        env = {
+            "EXCHANGE": "binance",
+            "SIGNAL_ONLY": "true",
+            "BINANCE_SIGNAL_ONLY": "false",
+        }
+        with pytest.raises(ValueError, match="Conflicting env vars"):
+            select_live_runtime(env)
+
+    def test_conflict_preserves_error_message(self) -> None:
+        env = {
+            "EXCHANGE": "binance",
+            "SIGNAL_ONLY": "1",
+            "BINANCE_SIGNAL_ONLY": "0",
+        }
+        with pytest.raises(ValueError) as exc_info:
+            select_live_runtime(env)
+        assert "SIGNAL_ONLY" in str(exc_info.value)
+        assert "BINANCE_SIGNAL_ONLY" in str(exc_info.value)
+
+    def test_both_same_no_conflict(self) -> None:
+        env = {
+            "EXCHANGE": "binance",
+            "SIGNAL_ONLY": "true",
+            "BINANCE_SIGNAL_ONLY": "true",
+        }
         result = select_live_runtime(env)
         assert result.kind == LiveRuntimeKind.BINANCE_SIGNAL_ONLY
 
@@ -103,7 +160,7 @@ class TestBinanceLiveBlocked:
     """EXCHANGE=binance without truthy signal-only → BINANCE_LIVE_BLOCKED."""
 
     def test_signal_only_false_explicit(self) -> None:
-        env = {"EXCHANGE": "binance", "BINANCE_SIGNAL_ONLY": "false"}
+        env = {"EXCHANGE": "binance", "SIGNAL_ONLY": "false"}
         result = select_live_runtime(env)
         assert result.kind == LiveRuntimeKind.BINANCE_LIVE_BLOCKED
         assert result.exchange == "binance"
@@ -111,7 +168,7 @@ class TestBinanceLiveBlocked:
         assert result.reason == "binance_live_not_wired"
 
     def test_signal_only_zero(self) -> None:
-        env = {"EXCHANGE": "binance", "BINANCE_SIGNAL_ONLY": "0"}
+        env = {"EXCHANGE": "binance", "SIGNAL_ONLY": "0"}
         result = select_live_runtime(env)
         assert result.kind == LiveRuntimeKind.BINANCE_LIVE_BLOCKED
 
@@ -181,7 +238,7 @@ class TestEnvImmutability:
     """select_live_runtime must not mutate the env dict."""
 
     def test_env_not_mutated(self) -> None:
-        env = {"EXCHANGE": "binance", "BINANCE_SIGNAL_ONLY": "true"}
+        env = {"EXCHANGE": "binance", "SIGNAL_ONLY": "true"}
         snapshot = dict(env)
         select_live_runtime(env)
         assert env == snapshot
@@ -208,13 +265,13 @@ class TestEnvNoneUsesOsEnviron:
             assert result.kind == LiveRuntimeKind.OKX_LEGACY
 
     def test_env_none_binance_signal_only(self) -> None:
-        env = {"EXCHANGE": "binance", "BINANCE_SIGNAL_ONLY": "true"}
+        env = {"EXCHANGE": "binance", "SIGNAL_ONLY": "true"}
         with mock.patch.dict(os.environ, env, clear=True):
             result = select_live_runtime(None)
             assert result.kind == LiveRuntimeKind.BINANCE_SIGNAL_ONLY
 
     def test_env_none_binance_blocked(self) -> None:
-        env = {"EXCHANGE": "binance", "BINANCE_SIGNAL_ONLY": "false"}
+        env = {"EXCHANGE": "binance", "SIGNAL_ONLY": "false"}
         with mock.patch.dict(os.environ, env, clear=True):
             result = select_live_runtime(None)
             assert result.kind == LiveRuntimeKind.BINANCE_LIVE_BLOCKED

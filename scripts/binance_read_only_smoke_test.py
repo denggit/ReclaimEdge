@@ -32,7 +32,7 @@ Usage::
     EXCHANGE=binance                                    \\
     EXCHANGE_API_KEY=...                                \\
     EXCHANGE_API_SECRET=...                             \\
-    BINANCE_READ_ONLY_SMOKE_CONFIRM=I_UNDERSTAND_THIS_READS_BINANCE_PRIVATE_ACCOUNT \\
+    READ_ONLY_SMOKE_CONFIRM=I_UNDERSTAND_THIS_READS_EXCHANGE_PRIVATE_ACCOUNT \\
     python scripts/binance_read_only_smoke_test.py
 
 No strategy imports.  No execution imports.  No live runtime imports.
@@ -66,8 +66,19 @@ from src.exchanges.runtime_config import (
 CANONICAL_SYMBOL: str = "ETH-USDT-PERP"
 BINANCE_SYMBOL: str = "ETHUSDT"
 
-READ_ONLY_CONFIRM_ENV: str = "BINANCE_READ_ONLY_SMOKE_CONFIRM"
-READ_ONLY_CONFIRM_VALUE: str = "I_UNDERSTAND_THIS_READS_BINANCE_PRIVATE_ACCOUNT"
+# Primary (exchange-neutral) env var name and confirmation value.
+READ_ONLY_CONFIRM_ENV: str = "READ_ONLY_SMOKE_CONFIRM"
+READ_ONLY_CONFIRM_VALUE: str = "I_UNDERSTAND_THIS_READS_EXCHANGE_PRIVATE_ACCOUNT"
+
+# Legacy Binance env var name and confirmation value (backward compatible).
+_READ_ONLY_CONFIRM_ENV_ALIAS: str = "BINANCE_READ_ONLY_SMOKE_CONFIRM"
+_READ_ONLY_CONFIRM_VALUE_ALIAS: str = "I_UNDERSTAND_THIS_READS_BINANCE_PRIVATE_ACCOUNT"
+
+# Set of all accepted confirmation values (both new and legacy).
+_ACCEPTED_READ_ONLY_CONFIRM_VALUES: frozenset[str] = frozenset({
+    READ_ONLY_CONFIRM_VALUE,
+    _READ_ONLY_CONFIRM_VALUE_ALIAS,
+})
 
 
 # ---------------------------------------------------------------------------
@@ -75,17 +86,36 @@ READ_ONLY_CONFIRM_VALUE: str = "I_UNDERSTAND_THIS_READS_BINANCE_PRIVATE_ACCOUNT"
 # ---------------------------------------------------------------------------
 
 
+def _resolve_read_only_env(primary: str, alias: str) -> str:
+    """Read *primary* env var, falling back to *alias*.  Exit on conflict."""
+    p_val = os.environ.get(primary, "").strip()
+    a_val = os.environ.get(alias, "").strip()
+    if p_val and a_val and p_val != a_val:
+        print(
+            f"ERROR: both {primary}={p_val!r} and "
+            f"{alias}={a_val!r} are set with conflicting values. "
+            f"Use only {primary}.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    return p_val if p_val else a_val
+
+
 def require_read_only_confirmation() -> None:
     """Raise ``SystemExit`` unless the read-only confirm env var is set correctly.
+
+    Accepts both the exchange-neutral ``READ_ONLY_SMOKE_CONFIRM`` and the
+    legacy ``BINANCE_READ_ONLY_SMOKE_CONFIRM`` env var names, and both the
+    new and legacy confirmation values.
 
     This gate is intentionally distinct from the live-order smoke test
     confirmation.  Even though this script only reads, it accesses private
     account data, so an explicit opt-in is required.
     """
-    value = os.environ.get(READ_ONLY_CONFIRM_ENV, "")
-    if value != READ_ONLY_CONFIRM_VALUE:
+    env_value = _resolve_read_only_env(READ_ONLY_CONFIRM_ENV, _READ_ONLY_CONFIRM_ENV_ALIAS)
+    if env_value not in _ACCEPTED_READ_ONLY_CONFIRM_VALUES:
         print(
-            "ERROR: This script reads Binance USD-M Futures private account data.\n"
+            "ERROR: This script reads exchange private account data.\n"
             f"Set {READ_ONLY_CONFIRM_ENV}={READ_ONLY_CONFIRM_VALUE} to continue.",
             file=sys.stderr,
         )

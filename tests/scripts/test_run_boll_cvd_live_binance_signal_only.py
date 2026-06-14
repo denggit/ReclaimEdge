@@ -30,7 +30,7 @@ def _base_binance_env() -> dict[str, str]:
         "QUOTE_ASSET": "USDT",
         "MARKET_TYPE": "PERPETUAL",
         "KLINE_INTERVAL": "15m",
-        "BINANCE_SIGNAL_ONLY": "true",
+        "SIGNAL_ONLY": "true",
     }
 
 
@@ -43,7 +43,7 @@ class TestBinanceSignalOnlyBranch:
     """Tests for the Binance signal-only branch in main()."""
 
     def test_binance_signal_only_true_calls_runtime(self) -> None:
-        """EXCHANGE=binance + BINANCE_SIGNAL_ONLY=true calls run_binance_signal_only."""
+        """EXCHANGE=binance + SIGNAL_ONLY=true calls run_binance_signal_only."""
         env = _base_binance_env()
 
         called_with = {}
@@ -65,8 +65,8 @@ class TestBinanceSignalOnlyBranch:
         assert called_with.get("called") is True
 
     def test_binance_signal_only_false_raises(self) -> None:
-        """EXCHANGE=binance + BINANCE_SIGNAL_ONLY=false raises RuntimeError."""
-        env = {**_base_binance_env(), "BINANCE_SIGNAL_ONLY": "false"}
+        """EXCHANGE=binance + SIGNAL_ONLY=false raises RuntimeError."""
+        env = {**_base_binance_env(), "SIGNAL_ONLY": "false"}
 
         with mock.patch.dict(os.environ, env, clear=True), \
              mock.patch("scripts.run_boll_cvd_live.load_dotenv", return_value=False):
@@ -75,9 +75,9 @@ class TestBinanceSignalOnlyBranch:
                 asyncio.run(main())
 
     def test_binance_signal_only_missing_raises(self) -> None:
-        """EXCHANGE=binance without BINANCE_SIGNAL_ONLY raises RuntimeError."""
+        """EXCHANGE=binance without SIGNAL_ONLY raises RuntimeError."""
         env = _base_binance_env()
-        del env["BINANCE_SIGNAL_ONLY"]
+        del env["SIGNAL_ONLY"]
 
         with mock.patch.dict(os.environ, env, clear=True), \
              mock.patch("scripts.run_boll_cvd_live.load_dotenv", return_value=False):
@@ -154,7 +154,7 @@ class TestOkxDefaultPathUnchanged:
         env = {
             "EXCHANGE": "okx",
             "LIVE_TRADING": "false",
-            "BINANCE_SIGNAL_ONLY": "true",  # irrelevant for OKX
+            "SIGNAL_ONLY": "true",  # irrelevant for OKX
         }
         with mock.patch.dict(os.environ, env, clear=True), \
              mock.patch("scripts.run_boll_cvd_live.load_dotenv", return_value=False):

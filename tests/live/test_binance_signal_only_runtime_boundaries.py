@@ -210,7 +210,7 @@ class TestSymbolRestrictions:
             "QUOTE_ASSET": "USDT",
             "MARKET_TYPE": "PERPETUAL",
             "KLINE_INTERVAL": "15m",
-            "BINANCE_SIGNAL_ONLY": "true",
+            "SIGNAL_ONLY": "true",
         }
         with mock.patch.dict(os.environ, env, clear=True):
             with pytest.raises(ValueError):
@@ -226,7 +226,7 @@ class TestSymbolRestrictions:
             "QUOTE_ASSET": "USDT",
             "MARKET_TYPE": "PERPETUAL",
             "KLINE_INTERVAL": "1m",
-            "BINANCE_SIGNAL_ONLY": "true",
+            "SIGNAL_ONLY": "true",
         }
         with mock.patch.dict(os.environ, env, clear=True):
             with pytest.raises(ValueError):
@@ -242,7 +242,7 @@ class TestSymbolRestrictions:
             "QUOTE_ASSET": "USDT",
             "MARKET_TYPE": "PERPETUAL",
             "KLINE_INTERVAL": "5m",
-            "BINANCE_SIGNAL_ONLY": "true",
+            "SIGNAL_ONLY": "true",
         }
         with mock.patch.dict(os.environ, env, clear=True):
             with pytest.raises(ValueError):
@@ -258,7 +258,7 @@ class TestSymbolRestrictions:
             "QUOTE_ASSET": "USDT",
             "MARKET_TYPE": "PERPETUAL",
             "KLINE_INTERVAL": "15m",
-            "BINANCE_SIGNAL_ONLY": "true",
+            "SIGNAL_ONLY": "true",
         }
         with mock.patch.dict(os.environ, env, clear=True):
             with pytest.raises(ValueError):

@@ -25,7 +25,17 @@ from decimal import Decimal, InvalidOperation
 # Public constants
 # ---------------------------------------------------------------------------
 
+# Primary (exchange-neutral) confirmation phrase — use this for new deployments.
+LIVE_CONFIRMATION_PHRASE: str = "I_UNDERSTAND_EXCHANGE_LIVE_TRADING"
+# Legacy Binance confirmation phrase — accepted for backward compatibility.
 BINANCE_LIVE_CONFIRMATION_PHRASE: str = "I_UNDERSTAND_BINANCE_LIVE_TRADING"
+
+# Set of all accepted confirmation phrases (both new and legacy).
+_ACCEPTED_CONFIRMATION_PHRASES: frozenset[str] = frozenset({
+    LIVE_CONFIRMATION_PHRASE,
+    BINANCE_LIVE_CONFIRMATION_PHRASE,
+})
+
 BINANCE_LIVE_HARD_MAX_ORDER_NOTIONAL_USDT: Decimal = Decimal("25")
 BINANCE_LIVE_HARD_MAX_POSITION_NOTIONAL_USDT: Decimal = Decimal("30")
 BINANCE_LIVE_HARD_MAX_LEVERAGE: int = 20
@@ -35,6 +45,7 @@ BINANCE_LIVE_HARD_MAX_LEVERAGE: int = 20
 # ---------------------------------------------------------------------------
 
 _ENV_PRIMARY_ALIAS_PAIRS: tuple[tuple[str, str], ...] = (
+    ("SIGNAL_ONLY", "BINANCE_SIGNAL_ONLY"),
     ("LIVE_ENABLED", "BINANCE_LIVE_ENABLED"),
     ("LIVE_ALLOW_ORDERS", "BINANCE_LIVE_ALLOW_ORDERS"),
     ("LIVE_CONFIRMATION", "BINANCE_LIVE_CONFIRMATION"),
@@ -171,7 +182,7 @@ def load_binance_live_preflight_config(
     if not exchange:
         exchange = "okx"
 
-    signal_only_raw: str = env.get("BINANCE_SIGNAL_ONLY", "").strip().lower()
+    signal_only_raw: str = _resolve_env(env, "SIGNAL_ONLY", "BINANCE_SIGNAL_ONLY").strip().lower()
     signal_only: bool = signal_only_raw in _TRUTHY
 
     live_enabled_raw: str = _resolve_env(env, "LIVE_ENABLED", "BINANCE_LIVE_ENABLED").strip().lower()
@@ -263,8 +274,8 @@ def build_binance_live_preflight_report(
     if not config.allow_orders:
         blocking.append("binance_live_allow_orders_not_true")
 
-    # ── Gate 5: BINANCE_LIVE_CONFIRMATION must match the exact phrase ───
-    if config.confirmation != BINANCE_LIVE_CONFIRMATION_PHRASE:
+    # ── Gate 5: LIVE_CONFIRMATION must match an accepted phrase ─────────
+    if config.confirmation not in _ACCEPTED_CONFIRMATION_PHRASES:
         blocking.append("binance_live_confirmation_missing_or_invalid")
 
     # ── Gate 6: BINANCE_LIVE_MAX_ORDER_NOTIONAL_USDT ────────────────────

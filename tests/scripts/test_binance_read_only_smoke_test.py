@@ -111,11 +111,38 @@ class TestRequireReadOnlyConfirmation:
     ) -> None:
         """Setting the live-smoke env var with the right read-only value
         must NOT satisfy the gate, because the gate reads
-        BINANCE_READ_ONLY_SMOKE_CONFIRM, not BINANCE_LIVE_SMOKE_TEST_CONFIRM."""
+        READ_ONLY_SMOKE_CONFIRM, not LIVE_SMOKE_TEST_CONFIRM."""
         monkeypatch.setenv(
-            "BINANCE_LIVE_SMOKE_TEST_CONFIRM", READ_ONLY_CONFIRM_VALUE
+            "LIVE_SMOKE_TEST_CONFIRM", READ_ONLY_CONFIRM_VALUE
         )
         monkeypatch.delenv(READ_ONLY_CONFIRM_ENV, raising=False)
+        with pytest.raises(SystemExit) as exc_info:
+            require_read_only_confirmation()
+        assert exc_info.value.code == 1
+
+    # --- Alias backward compat ---
+
+    def test_alias_env_passes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """BINANCE_READ_ONLY_SMOKE_CONFIRM with new value passes."""
+        monkeypatch.delenv(READ_ONLY_CONFIRM_ENV, raising=False)
+        monkeypatch.setenv("BINANCE_READ_ONLY_SMOKE_CONFIRM", READ_ONLY_CONFIRM_VALUE)
+        require_read_only_confirmation()  # does not raise
+
+    def test_alias_env_with_alias_value_passes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Old env + old value still passes."""
+        monkeypatch.delenv(READ_ONLY_CONFIRM_ENV, raising=False)
+        monkeypatch.setenv(
+            "BINANCE_READ_ONLY_SMOKE_CONFIRM",
+            "I_UNDERSTAND_THIS_READS_BINANCE_PRIVATE_ACCOUNT",
+        )
+        require_read_only_confirmation()  # does not raise
+
+    # --- Conflict detection ---
+
+    def test_env_conflict_exits(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """READ_ONLY_SMOKE_CONFIRM vs BINANCE_READ_ONLY_SMOKE_CONFIRM conflict."""
+        monkeypatch.setenv("READ_ONLY_SMOKE_CONFIRM", "val1")
+        monkeypatch.setenv("BINANCE_READ_ONLY_SMOKE_CONFIRM", "val2")
         with pytest.raises(SystemExit) as exc_info:
             require_read_only_confirmation()
         assert exc_info.value.code == 1
@@ -448,7 +475,7 @@ class TestMainWiring:
     ) -> None:
         """Confirm the full wiring: main creates transport + client and calls
         the read-only runner without invoking any order methods."""
-        # Gate
+        # Gate (primary exchange-neutral name)
         monkeypatch.setenv(READ_ONLY_CONFIRM_ENV, READ_ONLY_CONFIRM_VALUE)
 
         # Credentials

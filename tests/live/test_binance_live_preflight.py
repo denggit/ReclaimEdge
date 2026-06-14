@@ -16,6 +16,7 @@ import pytest
 
 from src.live.binance_live_preflight import (
     BINANCE_LIVE_CONFIRMATION_PHRASE,
+    LIVE_CONFIRMATION_PHRASE,
     BinanceLivePreflightConfig,
     BinanceLivePreflightReport,
     build_binance_live_preflight_report,
@@ -77,31 +78,39 @@ class TestConfigExchangeBinance:
 
 
 class TestConfigSignalOnly:
-    """BINANCE_SIGNAL_ONLY truthy values."""
+    """SIGNAL_ONLY (primary) truthy values."""
 
     def test_signal_only_true(self) -> None:
-        cfg = load_binance_live_preflight_config({"BINANCE_SIGNAL_ONLY": "true"})
+        cfg = load_binance_live_preflight_config({"SIGNAL_ONLY": "true"})
         assert cfg.signal_only is True
 
     def test_signal_only_1(self) -> None:
-        cfg = load_binance_live_preflight_config({"BINANCE_SIGNAL_ONLY": "1"})
-        assert cfg.signal_only is True
-
-    def test_signal_only_yes(self) -> None:
-        cfg = load_binance_live_preflight_config({"BINANCE_SIGNAL_ONLY": "yes"})
-        assert cfg.signal_only is True
-
-    def test_signal_only_y(self) -> None:
-        cfg = load_binance_live_preflight_config({"BINANCE_SIGNAL_ONLY": "y"})
-        assert cfg.signal_only is True
-
-    def test_signal_only_on(self) -> None:
-        cfg = load_binance_live_preflight_config({"BINANCE_SIGNAL_ONLY": "on"})
+        cfg = load_binance_live_preflight_config({"SIGNAL_ONLY": "1"})
         assert cfg.signal_only is True
 
     def test_signal_only_false_explicit(self) -> None:
+        cfg = load_binance_live_preflight_config({"SIGNAL_ONLY": "false"})
+        assert cfg.signal_only is False
+
+    # --- Alias (backward compat) ---
+
+    def test_alias_true(self) -> None:
+        cfg = load_binance_live_preflight_config({"BINANCE_SIGNAL_ONLY": "true"})
+        assert cfg.signal_only is True
+
+    def test_alias_false(self) -> None:
         cfg = load_binance_live_preflight_config({"BINANCE_SIGNAL_ONLY": "false"})
         assert cfg.signal_only is False
+
+    # --- Conflict detection ---
+
+    def test_conflict_primary_vs_alias_raises(self) -> None:
+        """SIGNAL_ONLY=true vs BINANCE_SIGNAL_ONLY=false → blocked."""
+        report = build_binance_live_preflight_report(
+            {"EXCHANGE": "binance", "SIGNAL_ONLY": "false", "BINANCE_SIGNAL_ONLY": "true"}
+        )
+        assert report.ok is False
+        assert "live_env_var_conflict" in report.blocking_reasons
 
 
 class TestConfigLiveEnabled:
@@ -135,9 +144,15 @@ class TestConfigAllowOrders:
 
 
 class TestConfigConfirmation:
-    """BINANCE_LIVE_CONFIRMATION field."""
+    """LIVE_CONFIRMATION field — accepts both new and legacy phrases."""
 
-    def test_confirmation_correct_phrase(self) -> None:
+    def test_confirmation_new_phrase(self) -> None:
+        cfg = load_binance_live_preflight_config(
+            {"LIVE_CONFIRMATION": LIVE_CONFIRMATION_PHRASE}
+        )
+        assert cfg.confirmation == LIVE_CONFIRMATION_PHRASE
+
+    def test_confirmation_legacy_phrase(self) -> None:
         cfg = load_binance_live_preflight_config(
             {"BINANCE_LIVE_CONFIRMATION": BINANCE_LIVE_CONFIRMATION_PHRASE}
         )
@@ -145,7 +160,7 @@ class TestConfigConfirmation:
 
     def test_confirmation_wrong_value(self) -> None:
         cfg = load_binance_live_preflight_config(
-            {"BINANCE_LIVE_CONFIRMATION": "I_AGREE"}
+            {"LIVE_CONFIRMATION": "I_AGREE"}
         )
         assert cfg.confirmation == "I_AGREE"
 
@@ -249,12 +264,12 @@ class TestBlockingSignalOnly:
 
     def test_signal_only_true_blocked(self) -> None:
         report = build_binance_live_preflight_report(
-            {"EXCHANGE": "binance", "BINANCE_SIGNAL_ONLY": "true"}
+            {"EXCHANGE": "binance", "SIGNAL_ONLY": "true"}
         )
         assert report.ok is False
         assert "binance_signal_only_enabled" in report.blocking_reasons
 
-    def test_signal_only_yes_blocked(self) -> None:
+    def test_signal_only_alias_blocked(self) -> None:
         report = build_binance_live_preflight_report(
             {"EXCHANGE": "binance", "BINANCE_SIGNAL_ONLY": "yes"}
         )
@@ -267,7 +282,7 @@ class TestBlockingLiveEnabled:
 
     def test_live_enabled_missing_blocked(self) -> None:
         report = build_binance_live_preflight_report(
-            {"EXCHANGE": "binance", "BINANCE_SIGNAL_ONLY": "false"}
+            {"EXCHANGE": "binance", "SIGNAL_ONLY": "false"}
         )
         assert report.ok is False
         assert "binance_live_enabled_not_true" in report.blocking_reasons
@@ -276,8 +291,8 @@ class TestBlockingLiveEnabled:
         report = build_binance_live_preflight_report(
             {
                 "EXCHANGE": "binance",
-                "BINANCE_SIGNAL_ONLY": "false",
-                "BINANCE_LIVE_ENABLED": "false",
+                "SIGNAL_ONLY": "false",
+                "LIVE_ENABLED": "false",
             }
         )
         assert "binance_live_enabled_not_true" in report.blocking_reasons
@@ -290,8 +305,8 @@ class TestBlockingAllowOrders:
         report = build_binance_live_preflight_report(
             {
                 "EXCHANGE": "binance",
-                "BINANCE_SIGNAL_ONLY": "false",
-                "BINANCE_LIVE_ENABLED": "true",
+                "SIGNAL_ONLY": "false",
+                "LIVE_ENABLED": "true",
             }
         )
         assert "binance_live_allow_orders_not_true" in report.blocking_reasons
@@ -300,9 +315,9 @@ class TestBlockingAllowOrders:
         report = build_binance_live_preflight_report(
             {
                 "EXCHANGE": "binance",
-                "BINANCE_SIGNAL_ONLY": "false",
-                "BINANCE_LIVE_ENABLED": "true",
-                "BINANCE_LIVE_ALLOW_ORDERS": "false",
+                "SIGNAL_ONLY": "false",
+                "LIVE_ENABLED": "true",
+                "LIVE_ALLOW_ORDERS": "false",
             }
         )
         assert "binance_live_allow_orders_not_true" in report.blocking_reasons
@@ -315,9 +330,9 @@ class TestBlockingConfirmation:
         report = build_binance_live_preflight_report(
             {
                 "EXCHANGE": "binance",
-                "BINANCE_SIGNAL_ONLY": "false",
-                "BINANCE_LIVE_ENABLED": "true",
-                "BINANCE_LIVE_ALLOW_ORDERS": "true",
+                "SIGNAL_ONLY": "false",
+                "LIVE_ENABLED": "true",
+                "LIVE_ALLOW_ORDERS": "true",
             }
         )
         assert "binance_live_confirmation_missing_or_invalid" in report.blocking_reasons
@@ -326,13 +341,47 @@ class TestBlockingConfirmation:
         report = build_binance_live_preflight_report(
             {
                 "EXCHANGE": "binance",
-                "BINANCE_SIGNAL_ONLY": "false",
-                "BINANCE_LIVE_ENABLED": "true",
-                "BINANCE_LIVE_ALLOW_ORDERS": "true",
-                "BINANCE_LIVE_CONFIRMATION": "WRONG_PHRASE",
+                "SIGNAL_ONLY": "false",
+                "LIVE_ENABLED": "true",
+                "LIVE_ALLOW_ORDERS": "true",
+                "LIVE_CONFIRMATION": "WRONG_PHRASE",
             }
         )
         assert "binance_live_confirmation_missing_or_invalid" in report.blocking_reasons
+
+    def test_new_confirmation_phrase_passes(self) -> None:
+        """LIVE_CONFIRMATION=I_UNDERSTAND_EXCHANGE_LIVE_TRADING passes."""
+        report = build_binance_live_preflight_report(
+            {
+                "EXCHANGE": "binance",
+                "SIGNAL_ONLY": "false",
+                "LIVE_ENABLED": "true",
+                "LIVE_ALLOW_ORDERS": "true",
+                "LIVE_CONFIRMATION": LIVE_CONFIRMATION_PHRASE,
+                "LIVE_MAX_ORDER_NOTIONAL_USDT": "25",
+                "LIVE_MAX_POSITION_NOTIONAL_USDT": "25",
+                "LIVE_LEVERAGE": "10",
+            },
+            orders_globally_enabled=True,
+        )
+        assert report.ok is True
+
+    def test_legacy_confirmation_phrase_passes(self) -> None:
+        """BINANCE_LIVE_CONFIRMATION=old-phrase still passes."""
+        report = build_binance_live_preflight_report(
+            {
+                "EXCHANGE": "binance",
+                "SIGNAL_ONLY": "false",
+                "LIVE_ENABLED": "true",
+                "LIVE_ALLOW_ORDERS": "true",
+                "BINANCE_LIVE_CONFIRMATION": BINANCE_LIVE_CONFIRMATION_PHRASE,
+                "LIVE_MAX_ORDER_NOTIONAL_USDT": "25",
+                "LIVE_MAX_POSITION_NOTIONAL_USDT": "25",
+                "LIVE_LEVERAGE": "10",
+            },
+            orders_globally_enabled=True,
+        )
+        assert report.ok is True
 
 
 class TestBlockingMaxOrderNotional:
@@ -342,7 +391,7 @@ class TestBlockingMaxOrderNotional:
         report = build_binance_live_preflight_report(
             {
                 "EXCHANGE": "binance",
-                "BINANCE_SIGNAL_ONLY": "false",
+                "SIGNAL_ONLY": "false",
                 "LIVE_ENABLED": "true",
                 "LIVE_ALLOW_ORDERS": "true",
                 "LIVE_CONFIRMATION": BINANCE_LIVE_CONFIRMATION_PHRASE,
@@ -354,7 +403,7 @@ class TestBlockingMaxOrderNotional:
         report = build_binance_live_preflight_report(
             {
                 "EXCHANGE": "binance",
-                "BINANCE_SIGNAL_ONLY": "false",
+                "SIGNAL_ONLY": "false",
                 "LIVE_ENABLED": "true",
                 "LIVE_ALLOW_ORDERS": "true",
                 "LIVE_CONFIRMATION": BINANCE_LIVE_CONFIRMATION_PHRASE,
@@ -368,7 +417,7 @@ class TestBlockingMaxOrderNotional:
         report = build_binance_live_preflight_report(
             {
                 "EXCHANGE": "binance",
-                "BINANCE_SIGNAL_ONLY": "false",
+                "SIGNAL_ONLY": "false",
                 "LIVE_ENABLED": "true",
                 "LIVE_ALLOW_ORDERS": "true",
                 "LIVE_CONFIRMATION": BINANCE_LIVE_CONFIRMATION_PHRASE,
@@ -384,7 +433,7 @@ class TestBlockingMaxOrderNotional:
         report = build_binance_live_preflight_report(
             {
                 "EXCHANGE": "binance",
-                "BINANCE_SIGNAL_ONLY": "false",
+                "SIGNAL_ONLY": "false",
                 "LIVE_ENABLED": "true",
                 "LIVE_ALLOW_ORDERS": "true",
                 "LIVE_CONFIRMATION": BINANCE_LIVE_CONFIRMATION_PHRASE,
@@ -397,7 +446,7 @@ class TestBlockingMaxOrderNotional:
         report = build_binance_live_preflight_report(
             {
                 "EXCHANGE": "binance",
-                "BINANCE_SIGNAL_ONLY": "false",
+                "SIGNAL_ONLY": "false",
                 "LIVE_ENABLED": "true",
                 "LIVE_ALLOW_ORDERS": "true",
                 "LIVE_CONFIRMATION": BINANCE_LIVE_CONFIRMATION_PHRASE,
@@ -414,7 +463,7 @@ class TestBlockingMaxPositionNotional:
         report = build_binance_live_preflight_report(
             {
                 "EXCHANGE": "binance",
-                "BINANCE_SIGNAL_ONLY": "false",
+                "SIGNAL_ONLY": "false",
                 "LIVE_ENABLED": "true",
                 "LIVE_ALLOW_ORDERS": "true",
                 "LIVE_CONFIRMATION": BINANCE_LIVE_CONFIRMATION_PHRASE,
@@ -427,7 +476,7 @@ class TestBlockingMaxPositionNotional:
         report = build_binance_live_preflight_report(
             {
                 "EXCHANGE": "binance",
-                "BINANCE_SIGNAL_ONLY": "false",
+                "SIGNAL_ONLY": "false",
                 "LIVE_ENABLED": "true",
                 "LIVE_ALLOW_ORDERS": "true",
                 "LIVE_CONFIRMATION": BINANCE_LIVE_CONFIRMATION_PHRASE,
@@ -442,7 +491,7 @@ class TestBlockingMaxPositionNotional:
         report = build_binance_live_preflight_report(
             {
                 "EXCHANGE": "binance",
-                "BINANCE_SIGNAL_ONLY": "false",
+                "SIGNAL_ONLY": "false",
                 "LIVE_ENABLED": "true",
                 "LIVE_ALLOW_ORDERS": "true",
                 "LIVE_CONFIRMATION": BINANCE_LIVE_CONFIRMATION_PHRASE,
@@ -462,7 +511,7 @@ class TestBlockingLeverage:
         report = build_binance_live_preflight_report(
             {
                 "EXCHANGE": "binance",
-                "BINANCE_SIGNAL_ONLY": "false",
+                "SIGNAL_ONLY": "false",
                 "LIVE_ENABLED": "true",
                 "LIVE_ALLOW_ORDERS": "true",
                 "LIVE_CONFIRMATION": BINANCE_LIVE_CONFIRMATION_PHRASE,
@@ -476,7 +525,7 @@ class TestBlockingLeverage:
         report = build_binance_live_preflight_report(
             {
                 "EXCHANGE": "binance",
-                "BINANCE_SIGNAL_ONLY": "false",
+                "SIGNAL_ONLY": "false",
                 "LIVE_ENABLED": "true",
                 "LIVE_ALLOW_ORDERS": "true",
                 "LIVE_CONFIRMATION": BINANCE_LIVE_CONFIRMATION_PHRASE,
@@ -492,7 +541,7 @@ class TestBlockingLeverage:
         report = build_binance_live_preflight_report(
             {
                 "EXCHANGE": "binance",
-                "BINANCE_SIGNAL_ONLY": "false",
+                "SIGNAL_ONLY": "false",
                 "LIVE_ENABLED": "true",
                 "LIVE_ALLOW_ORDERS": "true",
                 "LIVE_CONFIRMATION": BINANCE_LIVE_CONFIRMATION_PHRASE,
@@ -508,7 +557,7 @@ class TestBlockingLeverage:
         report = build_binance_live_preflight_report(
             {
                 "EXCHANGE": "binance",
-                "BINANCE_SIGNAL_ONLY": "false",
+                "SIGNAL_ONLY": "false",
                 "LIVE_ENABLED": "true",
                 "LIVE_ALLOW_ORDERS": "true",
                 "LIVE_CONFIRMATION": BINANCE_LIVE_CONFIRMATION_PHRASE,
@@ -523,7 +572,7 @@ class TestBlockingLeverage:
         report = build_binance_live_preflight_report(
             {
                 "EXCHANGE": "binance",
-                "BINANCE_SIGNAL_ONLY": "false",
+                "SIGNAL_ONLY": "false",
                 "LIVE_ENABLED": "true",
                 "LIVE_ALLOW_ORDERS": "true",
                 "LIVE_CONFIRMATION": BINANCE_LIVE_CONFIRMATION_PHRASE,
@@ -543,7 +592,7 @@ class TestBlockingOrdersDisabledByBuild:
         report = build_binance_live_preflight_report(
             {
                 "EXCHANGE": "binance",
-                "BINANCE_SIGNAL_ONLY": "false",
+                "SIGNAL_ONLY": "false",
                 "BINANCE_LIVE_ENABLED": "true",
                 "BINANCE_LIVE_ALLOW_ORDERS": "true",
                 "BINANCE_LIVE_CONFIRMATION": BINANCE_LIVE_CONFIRMATION_PHRASE,
@@ -561,7 +610,7 @@ class TestBlockingOrdersDisabledByBuild:
         report = build_binance_live_preflight_report(
             {
                 "EXCHANGE": "binance",
-                "BINANCE_SIGNAL_ONLY": "false",
+                "SIGNAL_ONLY": "false",
                 "BINANCE_LIVE_ENABLED": "true",
                 "BINANCE_LIVE_ALLOW_ORDERS": "true",
                 "BINANCE_LIVE_CONFIRMATION": BINANCE_LIVE_CONFIRMATION_PHRASE,
@@ -582,7 +631,7 @@ class TestBlockingReasonCount:
         report = build_binance_live_preflight_report(
             {
                 "EXCHANGE": "binance",
-                "BINANCE_SIGNAL_ONLY": "false",
+                "SIGNAL_ONLY": "false",
             }
         )
         # live_enabled, allow_orders, confirmation, max_order, max_position,
@@ -645,7 +694,7 @@ class TestMessageFormatting:
         report = build_binance_live_preflight_report(
             {
                 "EXCHANGE": "binance",
-                "BINANCE_SIGNAL_ONLY": "false",
+                "SIGNAL_ONLY": "false",
                 "BINANCE_LIVE_CONFIRMATION": BINANCE_LIVE_CONFIRMATION_PHRASE,
             },
         )
@@ -668,7 +717,7 @@ class TestEnvVarDualNames:
         report = build_binance_live_preflight_report(
             {
                 "EXCHANGE": "binance",
-                "BINANCE_SIGNAL_ONLY": "false",
+                "SIGNAL_ONLY": "false",
                 "LIVE_ENABLED": "true",
                 "LIVE_ALLOW_ORDERS": "true",
                 "LIVE_CONFIRMATION": BINANCE_LIVE_CONFIRMATION_PHRASE,
@@ -685,7 +734,7 @@ class TestEnvVarDualNames:
         report = build_binance_live_preflight_report(
             {
                 "EXCHANGE": "binance",
-                "BINANCE_SIGNAL_ONLY": "false",
+                "SIGNAL_ONLY": "false",
                 "BINANCE_LIVE_ENABLED": "true",
                 "BINANCE_LIVE_ALLOW_ORDERS": "true",
                 "BINANCE_LIVE_CONFIRMATION": BINANCE_LIVE_CONFIRMATION_PHRASE,
@@ -702,7 +751,7 @@ class TestEnvVarDualNames:
         report = build_binance_live_preflight_report(
             {
                 "EXCHANGE": "binance",
-                "BINANCE_SIGNAL_ONLY": "false",
+                "SIGNAL_ONLY": "false",
                 "LIVE_ENABLED": "true",
                 "BINANCE_LIVE_ENABLED": "true",
                 "LIVE_ALLOW_ORDERS": "true",
@@ -725,7 +774,7 @@ class TestEnvVarDualNames:
         report = build_binance_live_preflight_report(
             {
                 "EXCHANGE": "binance",
-                "BINANCE_SIGNAL_ONLY": "false",
+                "SIGNAL_ONLY": "false",
                 "LIVE_ENABLED": "true",
                 "BINANCE_LIVE_ENABLED": "false",
                 "LIVE_ALLOW_ORDERS": "true",

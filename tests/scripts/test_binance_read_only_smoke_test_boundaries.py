@@ -26,11 +26,15 @@ def _smoke_script_source() -> str:
 
 def test_contains_read_only_confirmation_env() -> None:
     source = _smoke_script_source()
+    assert "READ_ONLY_SMOKE_CONFIRM" in source
+    # Legacy alias must also still be present.
     assert "BINANCE_READ_ONLY_SMOKE_CONFIRM" in source
 
 
 def test_contains_read_only_confirmation_value() -> None:
     source = _smoke_script_source()
+    assert "I_UNDERSTAND_THIS_READS_EXCHANGE_PRIVATE_ACCOUNT" in source
+    # Legacy value must also still be present.
     assert "I_UNDERSTAND_THIS_READS_BINANCE_PRIVATE_ACCOUNT" in source
 
 
@@ -155,14 +159,17 @@ def test_does_not_contain_fapi_open_algo_orders_path() -> None:
 # ======================================================================
 
 
-def test_does_not_contain_binance_live_smoke_test_confirm_env() -> None:
+def test_does_not_contain_live_smoke_test_confirm_env() -> None:
     source = _smoke_script_source()
+    assert "LIVE_SMOKE_TEST_CONFIRM" not in source
+    # Neither the primary nor the alias form should appear.
     assert "BINANCE_LIVE_SMOKE_TEST_CONFIRM" not in source
 
 
 def test_does_not_contain_i_understand_this_places_real_orders() -> None:
     source = _smoke_script_source()
     assert "I_UNDERSTAND_THIS_PLACES_REAL_ORDERS" not in source
+    assert "I_UNDERSTAND_THIS_PLACES_REAL_EXCHANGE_ORDERS" not in source
 
 
 # ======================================================================

@@ -1918,15 +1918,15 @@ class TestRequireBinanceLivePreflightForSmoke:
 
     def _set_preflight_envs(self, monkeypatch, **overrides):
         monkeypatch.setenv("EXCHANGE", "binance")
-        monkeypatch.setenv("BINANCE_SIGNAL_ONLY", "false")
-        monkeypatch.setenv("BINANCE_LIVE_ENABLED", "true")
-        monkeypatch.setenv("BINANCE_LIVE_ALLOW_ORDERS", "true")
+        monkeypatch.setenv("SIGNAL_ONLY", "false")
+        monkeypatch.setenv("LIVE_ENABLED", "true")
+        monkeypatch.setenv("LIVE_ALLOW_ORDERS", "true")
         monkeypatch.setenv(
-            "BINANCE_LIVE_CONFIRMATION", "I_UNDERSTAND_BINANCE_LIVE_TRADING"
+            "LIVE_CONFIRMATION", "I_UNDERSTAND_EXCHANGE_LIVE_TRADING"
         )
-        monkeypatch.setenv("BINANCE_LIVE_MAX_ORDER_NOTIONAL_USDT", "6")
-        monkeypatch.setenv("BINANCE_LIVE_MAX_POSITION_NOTIONAL_USDT", "6")
-        monkeypatch.setenv("BINANCE_LIVE_LEVERAGE", "20")
+        monkeypatch.setenv("LIVE_MAX_ORDER_NOTIONAL_USDT", "6")
+        monkeypatch.setenv("LIVE_MAX_POSITION_NOTIONAL_USDT", "6")
+        monkeypatch.setenv("LIVE_LEVERAGE", "20")
         for k, v in overrides.items():
             if v is None:
                 monkeypatch.delenv(k, raising=False)
@@ -1934,20 +1934,21 @@ class TestRequireBinanceLivePreflightForSmoke:
                 monkeypatch.setenv(k, v)
 
     def test_missing_live_confirmation_exits(self, monkeypatch) -> None:
-        self._set_preflight_envs(monkeypatch, BINANCE_LIVE_CONFIRMATION=None)
+        self._set_preflight_envs(monkeypatch, LIVE_CONFIRMATION=None)
+        monkeypatch.delenv("LIVE_CONFIRMATION", raising=False)
         monkeypatch.delenv("BINANCE_LIVE_CONFIRMATION", raising=False)
         with pytest.raises(SystemExit) as exc_info:
             require_binance_live_preflight_for_smoke()
         assert exc_info.value.code == 1
 
     def test_missing_live_enabled_exits(self, monkeypatch) -> None:
-        self._set_preflight_envs(monkeypatch, BINANCE_LIVE_ENABLED="false")
+        self._set_preflight_envs(monkeypatch, LIVE_ENABLED="false")
         with pytest.raises(SystemExit) as exc_info:
             require_binance_live_preflight_for_smoke()
         assert exc_info.value.code == 1
 
     def test_missing_allow_orders_exits(self, monkeypatch) -> None:
-        self._set_preflight_envs(monkeypatch, BINANCE_LIVE_ALLOW_ORDERS="false")
+        self._set_preflight_envs(monkeypatch, LIVE_ALLOW_ORDERS="false")
         with pytest.raises(SystemExit) as exc_info:
             require_binance_live_preflight_for_smoke()
         assert exc_info.value.code == 1
@@ -1961,10 +1962,10 @@ class TestDoubleConfirmation:
     """Tests for double confirmation (smoke + preflight)."""
 
     def test_only_smoke_confirm_exits_in_main(self, monkeypatch) -> None:
-        """Only BINANCE_LIVE_SMOKE_TEST_CONFIRM, missing preflight env → exit."""
+        """Only LIVE_SMOKE_TEST_CONFIRM, missing preflight env → exit."""
         monkeypatch.setenv(CONFIRM_ENV, CONFIRM_VALUE)
         # Preflight envs NOT set — should fail
-        monkeypatch.delenv("BINANCE_LIVE_ENABLED", raising=False)
+        monkeypatch.delenv("LIVE_ENABLED", raising=False)
         with pytest.raises(SystemExit) as exc_info:
             require_binance_live_preflight_for_smoke()
         assert exc_info.value.code == 1
@@ -1973,14 +1974,14 @@ class TestDoubleConfirmation:
         """Only preflight confirm, missing smoke confirm → smoke gate exits."""
         # Set preflight OK
         monkeypatch.setenv("EXCHANGE", "binance")
-        monkeypatch.setenv("BINANCE_LIVE_ENABLED", "true")
-        monkeypatch.setenv("BINANCE_LIVE_ALLOW_ORDERS", "true")
+        monkeypatch.setenv("LIVE_ENABLED", "true")
+        monkeypatch.setenv("LIVE_ALLOW_ORDERS", "true")
         monkeypatch.setenv(
-            "BINANCE_LIVE_CONFIRMATION", "I_UNDERSTAND_BINANCE_LIVE_TRADING"
+            "LIVE_CONFIRMATION", "I_UNDERSTAND_EXCHANGE_LIVE_TRADING"
         )
-        monkeypatch.setenv("BINANCE_LIVE_MAX_ORDER_NOTIONAL_USDT", "6")
-        monkeypatch.setenv("BINANCE_LIVE_MAX_POSITION_NOTIONAL_USDT", "6")
-        monkeypatch.setenv("BINANCE_LIVE_LEVERAGE", "20")
+        monkeypatch.setenv("LIVE_MAX_ORDER_NOTIONAL_USDT", "6")
+        monkeypatch.setenv("LIVE_MAX_POSITION_NOTIONAL_USDT", "6")
+        monkeypatch.setenv("LIVE_LEVERAGE", "20")
         # Preflight passes
         require_binance_live_preflight_for_smoke()
         # But smoke gate should still fail without its own confirmation
@@ -1992,14 +1993,14 @@ class TestDoubleConfirmation:
     def test_both_confirmations_present_passes(self, monkeypatch) -> None:
         monkeypatch.setenv(CONFIRM_ENV, CONFIRM_VALUE)
         monkeypatch.setenv("EXCHANGE", "binance")
-        monkeypatch.setenv("BINANCE_LIVE_ENABLED", "true")
-        monkeypatch.setenv("BINANCE_LIVE_ALLOW_ORDERS", "true")
+        monkeypatch.setenv("LIVE_ENABLED", "true")
+        monkeypatch.setenv("LIVE_ALLOW_ORDERS", "true")
         monkeypatch.setenv(
-            "BINANCE_LIVE_CONFIRMATION", "I_UNDERSTAND_BINANCE_LIVE_TRADING"
+            "LIVE_CONFIRMATION", "I_UNDERSTAND_EXCHANGE_LIVE_TRADING"
         )
-        monkeypatch.setenv("BINANCE_LIVE_MAX_ORDER_NOTIONAL_USDT", "6")
-        monkeypatch.setenv("BINANCE_LIVE_MAX_POSITION_NOTIONAL_USDT", "6")
-        monkeypatch.setenv("BINANCE_LIVE_LEVERAGE", "20")
+        monkeypatch.setenv("LIVE_MAX_ORDER_NOTIONAL_USDT", "6")
+        monkeypatch.setenv("LIVE_MAX_POSITION_NOTIONAL_USDT", "6")
+        monkeypatch.setenv("LIVE_LEVERAGE", "20")
         require_live_confirmation()  # does not raise
         require_binance_live_preflight_for_smoke()  # does not raise
 
@@ -2582,9 +2583,9 @@ class TestMainWithPreflight:
 
     @pytest.mark.asyncio
     async def test_main_exits_when_preflight_fails(self, monkeypatch) -> None:
-        """Main exits when preflight guard fails (missing BINANCE_LIVE_ENABLED)."""
+        """Main exits when preflight guard fails (missing LIVE_ENABLED)."""
         monkeypatch.setenv(CONFIRM_ENV, CONFIRM_VALUE)
-        monkeypatch.delenv("BINANCE_LIVE_ENABLED", raising=False)
+        monkeypatch.delenv("LIVE_ENABLED", raising=False)
         monkeypatch.setenv("EXCHANGE", "binance")
         with pytest.raises(SystemExit) as exc_info:
             await main()
@@ -2597,14 +2598,14 @@ class TestMainWithPreflight:
         monkeypatch.delenv(CONFIRM_ENV, raising=False)
         # But preflight envs are OK
         monkeypatch.setenv("EXCHANGE", "binance")
-        monkeypatch.setenv("BINANCE_LIVE_ENABLED", "true")
-        monkeypatch.setenv("BINANCE_LIVE_ALLOW_ORDERS", "true")
+        monkeypatch.setenv("LIVE_ENABLED", "true")
+        monkeypatch.setenv("LIVE_ALLOW_ORDERS", "true")
         monkeypatch.setenv(
-            "BINANCE_LIVE_CONFIRMATION", "I_UNDERSTAND_BINANCE_LIVE_TRADING"
+            "LIVE_CONFIRMATION", "I_UNDERSTAND_EXCHANGE_LIVE_TRADING"
         )
-        monkeypatch.setenv("BINANCE_LIVE_MAX_ORDER_NOTIONAL_USDT", "6")
-        monkeypatch.setenv("BINANCE_LIVE_MAX_POSITION_NOTIONAL_USDT", "6")
-        monkeypatch.setenv("BINANCE_LIVE_LEVERAGE", "20")
+        monkeypatch.setenv("LIVE_MAX_ORDER_NOTIONAL_USDT", "6")
+        monkeypatch.setenv("LIVE_MAX_POSITION_NOTIONAL_USDT", "6")
+        monkeypatch.setenv("LIVE_LEVERAGE", "20")
         with pytest.raises(SystemExit) as exc_info:
             await main()
         assert exc_info.value.code == 1
@@ -2616,15 +2617,15 @@ class TestMainWithPreflight:
         """main must pass preflight_max_position_notional to require_requested_notional_cap."""
         monkeypatch.setenv(CONFIRM_ENV, CONFIRM_VALUE)
         monkeypatch.setenv("EXCHANGE", "binance")
-        monkeypatch.setenv("BINANCE_SIGNAL_ONLY", "false")
-        monkeypatch.setenv("BINANCE_LIVE_ENABLED", "true")
-        monkeypatch.setenv("BINANCE_LIVE_ALLOW_ORDERS", "true")
+        monkeypatch.setenv("SIGNAL_ONLY", "false")
+        monkeypatch.setenv("LIVE_ENABLED", "true")
+        monkeypatch.setenv("LIVE_ALLOW_ORDERS", "true")
         monkeypatch.setenv(
-            "BINANCE_LIVE_CONFIRMATION", "I_UNDERSTAND_BINANCE_LIVE_TRADING"
+            "LIVE_CONFIRMATION", "I_UNDERSTAND_EXCHANGE_LIVE_TRADING"
         )
-        monkeypatch.setenv("BINANCE_LIVE_MAX_ORDER_NOTIONAL_USDT", "10")
-        monkeypatch.setenv("BINANCE_LIVE_MAX_POSITION_NOTIONAL_USDT", "5")
-        monkeypatch.setenv("BINANCE_LIVE_LEVERAGE", "20")
+        monkeypatch.setenv("LIVE_MAX_ORDER_NOTIONAL_USDT", "10")
+        monkeypatch.setenv("LIVE_MAX_POSITION_NOTIONAL_USDT", "5")
+        monkeypatch.setenv("LIVE_LEVERAGE", "20")
         monkeypatch.setenv("EXCHANGE_API_KEY", "test-key")
         monkeypatch.setenv("EXCHANGE_API_SECRET", "test-secret")
 

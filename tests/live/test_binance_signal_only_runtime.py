@@ -113,13 +113,14 @@ def _make_candle_event(
 
 
 def _base_binance_env() -> dict[str, str]:
+    """Minimal valid Binance signal-only env using exchange-neutral names."""
     return {
         "EXCHANGE": "binance",
         "TRADE_ASSET": "ETH",
         "QUOTE_ASSET": "USDT",
         "MARKET_TYPE": "PERPETUAL",
         "KLINE_INTERVAL": "15m",
-        "BINANCE_SIGNAL_ONLY": "true",
+        "SIGNAL_ONLY": "true",
     }
 
 
@@ -145,6 +146,20 @@ class TestConfigLoading:
     def test_custom_duration_and_max_events(self) -> None:
         env = {
             **_base_binance_env(),
+            "SIGNAL_ONLY_SECONDS": "120",
+            "SIGNAL_ONLY_MAX_EVENTS": "50",
+            "SIGNAL_ONLY_HEARTBEAT_SECONDS": "10",
+        }
+        with mock.patch.dict(os.environ, env, clear=True):
+            config = load_binance_signal_only_config()
+        assert config.duration_seconds == 120.0
+        assert config.max_events == 50
+        assert config.heartbeat_seconds == 10.0
+
+    def test_custom_duration_via_alias(self) -> None:
+        """Old BINANCE_* env names still work as backward-compat aliases."""
+        env = {
+            **_base_binance_env(),
             "BINANCE_SIGNAL_ONLY_SECONDS": "120",
             "BINANCE_SIGNAL_ONLY_MAX_EVENTS": "50",
             "BINANCE_SIGNAL_ONLY_HEARTBEAT_SECONDS": "10",
@@ -156,14 +171,14 @@ class TestConfigLoading:
         assert config.heartbeat_seconds == 10.0
 
     def test_signal_only_false_raises(self) -> None:
-        env = {**_base_binance_env(), "BINANCE_SIGNAL_ONLY": "false"}
+        env = {**_base_binance_env(), "SIGNAL_ONLY": "false"}
         with mock.patch.dict(os.environ, env, clear=True):
             with pytest.raises(RuntimeError, match="Binance main live trading is not wired"):
                 load_binance_signal_only_config()
 
     def test_signal_only_missing_raises(self) -> None:
         env = _base_binance_env()
-        del env["BINANCE_SIGNAL_ONLY"]
+        del env["SIGNAL_ONLY"]
         with mock.patch.dict(os.environ, env, clear=True):
             with pytest.raises(RuntimeError, match="Binance main live trading is not wired"):
                 load_binance_signal_only_config()
@@ -798,7 +813,7 @@ class TestRuntimeExit:
     def test_config_supports_max_events(self) -> None:
         env = {
             **_base_binance_env(),
-            "BINANCE_SIGNAL_ONLY_MAX_EVENTS": "10",
+            "SIGNAL_ONLY_MAX_EVENTS": "10",
         }
         with mock.patch.dict(os.environ, env, clear=True):
             config = load_binance_signal_only_config()
@@ -807,7 +822,7 @@ class TestRuntimeExit:
     def test_config_supports_duration(self) -> None:
         env = {
             **_base_binance_env(),
-            "BINANCE_SIGNAL_ONLY_SECONDS": "30",
+            "SIGNAL_ONLY_SECONDS": "30",
         }
         with mock.patch.dict(os.environ, env, clear=True):
             config = load_binance_signal_only_config()
@@ -866,13 +881,20 @@ class TestSeedConfig:
         assert config.seed_historical_klines is True
 
     def test_seed_disabled_via_env(self) -> None:
-        env = {**_base_binance_env(), "BINANCE_SIGNAL_ONLY_SEED_KLINES": "false"}
+        env = {**_base_binance_env(), "SIGNAL_ONLY_SEED_KLINES": "false"}
         with mock.patch.dict(os.environ, env, clear=True):
             config = load_binance_signal_only_config()
         assert config.seed_historical_klines is False
 
     def test_seed_disabled_via_zero(self) -> None:
-        env = {**_base_binance_env(), "BINANCE_SIGNAL_ONLY_SEED_KLINES": "0"}
+        env = {**_base_binance_env(), "SIGNAL_ONLY_SEED_KLINES": "0"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            config = load_binance_signal_only_config()
+        assert config.seed_historical_klines is False
+
+    def test_seed_disabled_via_alias(self) -> None:
+        """Backward compat: BINANCE_SIGNAL_ONLY_SEED_KLINES still works."""
+        env = {**_base_binance_env(), "BINANCE_SIGNAL_ONLY_SEED_KLINES": "false"}
         with mock.patch.dict(os.environ, env, clear=True):
             config = load_binance_signal_only_config()
         assert config.seed_historical_klines is False
@@ -891,7 +913,7 @@ class TestSeedConfig:
     def test_custom_seed_limit(self) -> None:
         env = {
             **_base_binance_env(),
-            "BINANCE_SIGNAL_ONLY_SEED_LIMIT": "50",
+            "SIGNAL_ONLY_SEED_LIMIT": "50",
         }
         with mock.patch.dict(os.environ, env, clear=True):
             config = load_binance_signal_only_config()
@@ -900,7 +922,7 @@ class TestSeedConfig:
     def test_seed_limit_zero_raises(self) -> None:
         env = {
             **_base_binance_env(),
-            "BINANCE_SIGNAL_ONLY_SEED_LIMIT": "0",
+            "SIGNAL_ONLY_SEED_LIMIT": "0",
         }
         with mock.patch.dict(os.environ, env, clear=True):
             with pytest.raises(ValueError, match="positive"):
@@ -909,7 +931,7 @@ class TestSeedConfig:
     def test_seed_limit_negative_raises(self) -> None:
         env = {
             **_base_binance_env(),
-            "BINANCE_SIGNAL_ONLY_SEED_LIMIT": "-10",
+            "SIGNAL_ONLY_SEED_LIMIT": "-10",
         }
         with mock.patch.dict(os.environ, env, clear=True):
             with pytest.raises(ValueError, match="positive"):
@@ -918,7 +940,7 @@ class TestSeedConfig:
     def test_seed_limit_exceeds_1500_raises(self) -> None:
         env = {
             **_base_binance_env(),
-            "BINANCE_SIGNAL_ONLY_SEED_LIMIT": "2000",
+            "SIGNAL_ONLY_SEED_LIMIT": "2000",
         }
         with mock.patch.dict(os.environ, env, clear=True):
             with pytest.raises(ValueError, match="must not exceed"):
@@ -927,7 +949,7 @@ class TestSeedConfig:
     def test_seed_limit_at_1500_allowed(self) -> None:
         env = {
             **_base_binance_env(),
-            "BINANCE_SIGNAL_ONLY_SEED_LIMIT": "1500",
+            "SIGNAL_ONLY_SEED_LIMIT": "1500",
         }
         with mock.patch.dict(os.environ, env, clear=True):
             config = load_binance_signal_only_config()
@@ -942,7 +964,7 @@ class TestSeedConfig:
     def test_seed_timeout_custom(self) -> None:
         env = {
             **_base_binance_env(),
-            "BINANCE_SIGNAL_ONLY_SEED_TIMEOUT_SECONDS": "5.5",
+            "SIGNAL_ONLY_SEED_TIMEOUT_SECONDS": "5.5",
         }
         with mock.patch.dict(os.environ, env, clear=True):
             config = load_binance_signal_only_config()
@@ -951,7 +973,7 @@ class TestSeedConfig:
     def test_seed_timeout_invalid_raises(self) -> None:
         env = {
             **_base_binance_env(),
-            "BINANCE_SIGNAL_ONLY_SEED_TIMEOUT_SECONDS": "not_a_number",
+            "SIGNAL_ONLY_SEED_TIMEOUT_SECONDS": "not_a_number",
         }
         with mock.patch.dict(os.environ, env, clear=True):
             with pytest.raises(ValueError):
@@ -960,10 +982,32 @@ class TestSeedConfig:
     def test_seed_limit_not_integer_raises(self) -> None:
         env = {
             **_base_binance_env(),
-            "BINANCE_SIGNAL_ONLY_SEED_LIMIT": "abc",
+            "SIGNAL_ONLY_SEED_LIMIT": "abc",
         }
         with mock.patch.dict(os.environ, env, clear=True):
             with pytest.raises(ValueError, match="must be an integer"):
+                load_binance_signal_only_config()
+
+    # --- Conflict detection tests ---
+
+    def test_signal_only_conflict_raises(self) -> None:
+        env = {
+            **_base_binance_env(),
+            "SIGNAL_ONLY": "true",
+            "BINANCE_SIGNAL_ONLY": "false",
+        }
+        with mock.patch.dict(os.environ, env, clear=True):
+            with pytest.raises(ValueError, match="Conflicting env vars"):
+                load_binance_signal_only_config()
+
+    def test_seed_limit_conflict_raises(self) -> None:
+        env = {
+            **_base_binance_env(),
+            "SIGNAL_ONLY_SEED_LIMIT": "50",
+            "BINANCE_SIGNAL_ONLY_SEED_LIMIT": "100",
+        }
+        with mock.patch.dict(os.environ, env, clear=True):
+            with pytest.raises(ValueError, match="Conflicting env vars"):
                 load_binance_signal_only_config()
 
     def test_seed_default_limit_with_large_boll_window(self) -> None:

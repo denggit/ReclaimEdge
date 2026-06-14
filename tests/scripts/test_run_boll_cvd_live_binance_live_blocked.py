@@ -30,7 +30,7 @@ def _binance_blocked_env() -> dict[str, str]:
     """Minimal env that triggers BINANCE_LIVE_BLOCKED."""
     return {
         "EXCHANGE": "binance",
-        "BINANCE_SIGNAL_ONLY": "false",
+        "SIGNAL_ONLY": "false",
     }
 
 
@@ -38,13 +38,13 @@ def _binance_all_confirmations_env() -> dict[str, str]:
     """Every preflight env set to valid values."""
     return {
         "EXCHANGE": "binance",
-        "BINANCE_SIGNAL_ONLY": "false",
-        "BINANCE_LIVE_ENABLED": "true",
-        "BINANCE_LIVE_ALLOW_ORDERS": "true",
-        "BINANCE_LIVE_CONFIRMATION": BINANCE_LIVE_CONFIRMATION_PHRASE,
-        "BINANCE_LIVE_MAX_ORDER_NOTIONAL_USDT": "5",
-        "BINANCE_LIVE_MAX_POSITION_NOTIONAL_USDT": "20",
-        "BINANCE_LIVE_LEVERAGE": "20",
+        "SIGNAL_ONLY": "false",
+        "LIVE_ENABLED": "true",
+        "LIVE_ALLOW_ORDERS": "true",
+        "LIVE_CONFIRMATION": BINANCE_LIVE_CONFIRMATION_PHRASE,
+        "LIVE_MAX_ORDER_NOTIONAL_USDT": "5",
+        "LIVE_MAX_POSITION_NOTIONAL_USDT": "20",
+        "LIVE_LEVERAGE": "20",
     }
 
 
@@ -184,10 +184,10 @@ class TestSignalOnlyDoesNotCallPreflight:
     """The signal-only path must NOT invoke preflight."""
 
     def test_signal_only_skips_preflight(self) -> None:
-        """EXCHANGE=binance + BINANCE_SIGNAL_ONLY=true bypasses preflight."""
+        """EXCHANGE=binance + SIGNAL_ONLY=true bypasses preflight."""
         env = {
             "EXCHANGE": "binance",
-            "BINANCE_SIGNAL_ONLY": "true",
+            "SIGNAL_ONLY": "true",
         }
 
         async def fake_run_binance_signal_only(env_arg=None):

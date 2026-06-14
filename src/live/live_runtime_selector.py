@@ -22,12 +22,15 @@ from dataclasses import dataclass
 from enum import Enum
 
 # ---------------------------------------------------------------------------
-# Sentinel used by boundary tests to confirm BINANCE_SIGNAL_ONLY is referenced.
-# This is NOT a secret — it is the public env var name that gates signal-only.
+# Public env var keys for signal-only gating.
+# PRIMARY is the exchange-neutral name; ALIAS is the legacy Binance name
+# kept for backward compatibility.  Boundary tests reference both.
+# These are NOT secrets — they are public env var names.
 # ---------------------------------------------------------------------------
-_BINANCE_SIGNAL_ONLY_KEY: str = "BINANCE_SIGNAL_ONLY"
+_SIGNAL_ONLY_KEY: str = "SIGNAL_ONLY"
+_SIGNAL_ONLY_ALIAS_KEY: str = "BINANCE_SIGNAL_ONLY"
 
-# Set of values recognised as boolean *true* for BINANCE_SIGNAL_ONLY.
+# Set of values recognised as boolean *true* for SIGNAL_ONLY.
 _TRUTHY: frozenset[str] = frozenset({"1", "true", "yes", "y", "on"})
 
 
@@ -95,7 +98,24 @@ def select_live_runtime(
 
     # ── Binance path ────────────────────────────────────────────────────
     if exchange == "binance":
-        signal_only_raw: str = env.get(_BINANCE_SIGNAL_ONLY_KEY, "").strip().lower()
+        signal_only_primary: str = env.get(_SIGNAL_ONLY_KEY, "").strip()
+        signal_only_alias: str = env.get(_SIGNAL_ONLY_ALIAS_KEY, "").strip()
+
+        # ── Conflict detection ─────────────────────────────────────────
+        if (
+            signal_only_primary
+            and signal_only_alias
+            and signal_only_primary.lower() != signal_only_alias.lower()
+        ):
+            raise ValueError(
+                f"Conflicting env vars: {_SIGNAL_ONLY_KEY}={signal_only_primary!r} vs "
+                f"{_SIGNAL_ONLY_ALIAS_KEY}={signal_only_alias!r}. "
+                f"Use only {_SIGNAL_ONLY_KEY}."
+            )
+
+        signal_only_raw: str = (
+            signal_only_primary if signal_only_primary else signal_only_alias
+        ).lower()
         signal_only: bool = signal_only_raw in _TRUTHY
 
         if signal_only:

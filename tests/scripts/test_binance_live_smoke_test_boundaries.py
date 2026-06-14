@@ -111,7 +111,7 @@ def test_smoke_test_has_safety_gates() -> None:
     assert CONFIRM_ENV in text
 
 
-CONFIRM_ENV = "BINANCE_LIVE_SMOKE_TEST_CONFIRM"
+CONFIRM_ENV = "LIVE_SMOKE_TEST_CONFIRM"
 
 
 def test_smoke_test_uses_unified_runtime_config() -> None:
