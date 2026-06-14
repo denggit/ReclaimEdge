@@ -32,6 +32,7 @@ class FakeTradingClient:
     def __init__(self):
         self.balance_reads = 0
         self.balance_total = Decimal("1234.56")
+        self.configure_instrument_calls = 0
 
     async def fetch_balance(self):
         self.balance_reads += 1
@@ -41,6 +42,9 @@ class FakeTradingClient:
             available=None,
             raw={"fake": True},
         )
+
+    async def configure_instrument(self):
+        self.configure_instrument_calls += 1
 
 
 # ======================================================================
@@ -127,13 +131,24 @@ class TestInitializeUsesTradingClientFetchBalance:
         )
 
     @pytest.mark.asyncio
-    async def test_initialize_still_calls_set_leverage(self):
+    async def test_initialize_calls_configure_instrument(self):
         fake = FakeTradingClient()
         trader = _make_trader(trading_client=fake)
 
         await trader.initialize()
 
-        trader.set_leverage.assert_awaited_once()
+        assert fake.configure_instrument_calls == 1, (
+            f"Expected 1 configure_instrument() call, got {fake.configure_instrument_calls}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_initialize_does_not_call_set_leverage_directly(self):
+        fake = FakeTradingClient()
+        trader = _make_trader(trading_client=fake)
+
+        await trader.initialize()
+
+        trader.set_leverage.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_initialize_still_calls_fetch_position_snapshot(self):

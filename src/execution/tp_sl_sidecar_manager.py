@@ -162,29 +162,15 @@ class SidecarTpManager:
             return False
 
     async def fetch_sidecar_order_status(self, order_id: str) -> dict[str, Any]:
-        t = self.trader
         try:
-            res = await t.request("GET", f"/api/v5/trade/order?instId={t.symbol}&ordId={order_id}")
+            snapshot = await self.trading_client.fetch_order_status(order_id=order_id)
         except Exception:
             return {"order_id": order_id, "status": "UNKNOWN", "filled_qty": None, "avg_fill_price": None}
-        data = res.get("data", [])
-        if not data:
-            return {"order_id": order_id, "status": "NOT_FOUND", "filled_qty": None, "avg_fill_price": None}
-        item = data[0]
-        state = str(item.get("state") or "").lower()
-        if state in {"live", "partially_filled"}:
-            status = "OPEN"
-        elif state == "filled":
-            status = "FILLED"
-        elif state in {"canceled", "cancelled"}:
-            status = "CANCELED"
-        else:
-            status = "UNKNOWN"
         return {
-            "order_id": order_id,
-            "status": status,
-            "filled_qty": _optional_float(item.get("accFillSz")),
-            "avg_fill_price": _optional_float(item.get("avgPx")),
+            "order_id": snapshot.order_id or order_id,
+            "status": snapshot.status,
+            "filled_qty": float(snapshot.filled_qty) if snapshot.filled_qty is not None else None,
+            "avg_fill_price": float(snapshot.avg_fill_price) if snapshot.avg_fill_price is not None else None,
         }
 
 

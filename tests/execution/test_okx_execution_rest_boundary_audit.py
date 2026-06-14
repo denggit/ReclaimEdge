@@ -89,11 +89,9 @@ ALLOWED_DIRECT_REST: dict[tuple[str, str, str], str] = {
     ("src/execution/tp_sl_execution_manager.py", "cancel_near_tp_protective_stop", "/api/v5/trade/cancel-algos"):
         "known algo-id direct cancel; avoids regular cancel fallback noise",
 
-    # ── Legacy sidecar paths ─────────────────────────────────────────────
-    ("src/execution/tp_sl_sidecar_manager.py", "fetch_sidecar_order_status", "/api/v5/trade/order"):
-        "legacy sidecar order status read",
-    ("src/execution/trader.py", "fetch_sidecar_order_status", "/api/v5/trade/order"):
-        "legacy sidecar order status read",
+    # ── OkxTradingClient extended reads ──────────────────────────────────
+    ("src/execution/okx_trading_client.py", "fetch_order_status", "/api/v5/trade/order"):
+        "adapter bridge",
 }
 
 # ── Allowed order body builder whitelist ─────────────────────────────────
@@ -149,6 +147,10 @@ MIGRATED_METHODS: set[tuple[str, str]] = {
     ("src/execution/tp_sl_near_tp_manager.py", "execute_near_tp_reduce"),
     ("src/execution/tp_sl_sidecar_manager.py", "place_sidecar_fixed_take_profit"),
     ("src/execution/tp_sl_sidecar_manager.py", "cancel_sidecar_take_profit"),
+    ("src/execution/trader.py", "initialize"),
+    ("src/execution/trader.py", "fetch_sidecar_order_status"),
+    ("src/execution/tp_sl_sidecar_manager.py", "fetch_sidecar_order_status"),
+    ("src/execution/tp_sl_protective_stop_manager.py", "verify_near_tp_protective_stop"),
 }
 
 # ── Migrated methods must call these port methods ────────────────────────
@@ -176,6 +178,19 @@ MIGRATED_METHOD_REQUIRED_PORT_CALLS: dict[tuple[str, str], list[str]] = {
     ],
     ("src/execution/tp_sl_sidecar_manager.py", "cancel_sidecar_take_profit"): [
         ".cancel_order(",
+    ],
+    ("src/execution/trader.py", "initialize"): [
+        ".fetch_balance(",
+        ".configure_instrument(",
+    ],
+    ("src/execution/trader.py", "fetch_sidecar_order_status"): [
+        "._tp_sl_manager.fetch_sidecar_order_status(",
+    ],
+    ("src/execution/tp_sl_sidecar_manager.py", "fetch_sidecar_order_status"): [
+        ".fetch_order_status(",
+    ],
+    ("src/execution/tp_sl_protective_stop_manager.py", "verify_near_tp_protective_stop"): [
+        ".fetch_open_algo_orders(",
     ],
 }
 

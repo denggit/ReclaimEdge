@@ -204,7 +204,7 @@ class Trader:
             raise RuntimeError(
                 f"USDT equity {equity:.4f} > MAX_LIVE_EQUITY_USDT {self.max_live_equity_usdt:.4f}. Refusing live trading."
             )
-        await self.set_leverage()
+        await self.trading_client.configure_instrument()
         position = await self.fetch_position_snapshot()
         self.position_contracts = position.contracts
         logger.warning(
@@ -508,29 +508,7 @@ class Trader:
         return await self._tp_sl_manager.cancel_sidecar_take_profit(order_id)
 
     async def fetch_sidecar_order_status(self, order_id: str) -> dict[str, Any]:
-        try:
-            res = await self.request("GET", f"/api/v5/trade/order?instId={self.symbol}&ordId={order_id}")
-        except Exception:
-            return {"order_id": order_id, "status": "UNKNOWN", "filled_qty": None, "avg_fill_price": None}
-        data = res.get("data", [])
-        if not data:
-            return {"order_id": order_id, "status": "NOT_FOUND", "filled_qty": None, "avg_fill_price": None}
-        item = data[0]
-        state = str(item.get("state") or "").lower()
-        if state in {"live", "partially_filled"}:
-            status = "OPEN"
-        elif state == "filled":
-            status = "FILLED"
-        elif state in {"canceled", "cancelled"}:
-            status = "CANCELED"
-        else:
-            status = "UNKNOWN"
-        return {
-            "order_id": order_id,
-            "status": status,
-            "filled_qty": _optional_float(item.get("accFillSz")),
-            "avg_fill_price": _optional_float(item.get("avgPx")),
-        }
+        return await self._tp_sl_manager.fetch_sidecar_order_status(order_id)
 
     async def fetch_pending_orders(self) -> list[dict[str, Any]]:
         if self._broker_semantic_reads_enabled():

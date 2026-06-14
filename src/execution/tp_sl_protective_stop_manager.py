@@ -5,6 +5,7 @@ import os
 from decimal import Decimal
 from typing import Any, TYPE_CHECKING
 
+from src.execution.trading_client_port import AlgoOrderSnapshot
 from src.utils.log import get_logger
 
 if TYPE_CHECKING:
@@ -251,9 +252,9 @@ class ProtectiveStopManager:
         interval_seconds = float(os.getenv("NEAR_TP_PROTECTIVE_SL_VERIFY_INTERVAL_SECONDS", "0.2"))
         for attempt in range(1, attempts + 1):
             try:
-                orders = await t.fetch_pending_algo_orders()
+                orders = await self.trading_client.fetch_open_algo_orders()
                 for item in orders:
-                    if self.trader._near_tp_protective_stop_matches(item, algo_id, side, contracts, stop_price):
+                    if self._near_tp_protective_stop_snapshot_matches(item, algo_id, side, contracts, stop_price):
                         return True
             except Exception as exc:
                 logger.warning("NEAR_TP_PROTECTIVE_SL_VERIFY_FAILED | attempt=%s/%s algoId=%s error=%s", attempt,
@@ -263,6 +264,36 @@ class ProtectiveStopManager:
         logger.warning("NEAR_TP_PROTECTIVE_SL_VERIFY_MISSING | algoId=%s side=%s contracts=%s stop_price=%s", algo_id,
                        side, t.decimal_to_str(contracts), t.price_to_str(stop_price))
         return False
+
+    def _near_tp_protective_stop_snapshot_matches(
+        self,
+        item: AlgoOrderSnapshot,
+        algo_id: str,
+        side: PositionSide,
+        contracts: Decimal,
+        stop_price: float,
+    ) -> bool:
+        t = self.trader
+        if item.order_id != str(algo_id):
+            return False
+        close_side = "sell" if side == "LONG" else "buy"
+        if str(item.side or "").lower() != close_side:
+            return False
+        item_qty = item.qty
+        if item_qty is None:
+            return False
+        contract_tolerance = max(t.contract_precision, contracts.copy_abs() * Decimal("0.001"))
+        if abs(item_qty - contracts) > contract_tolerance:
+            return False
+        item_trigger = item.trigger_price
+        if item_trigger is None:
+            return False
+        try:
+            expected_stop = Decimal(t.price_to_str(stop_price))
+        except Exception:
+            return False
+        price_tolerance = max(Decimal("0.01"), expected_stop.copy_abs() * Decimal("0.0001"))
+        return abs(item_trigger - expected_stop) <= price_tolerance
 
     def _near_tp_protective_stop_matches(self, item: dict[str, Any], algo_id: str, side: PositionSide,
                                          contracts: Decimal, stop_price: float) -> bool:

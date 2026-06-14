@@ -19,10 +19,12 @@ from typing import TYPE_CHECKING, Any
 
 from src.execution import order_specs
 from src.execution.trading_client_port import (
+    AlgoOrderSnapshot,
     BalanceSnapshot,
     CancelResult,
     OrderResult,
     OrderSnapshot,
+    OrderStatusSnapshot,
     PositionSnapshot,
     TradingClientPort,
 )
@@ -289,3 +291,133 @@ class OkxTradingClient(TradingClientPort):
             res = await self._trader.request("POST", "/api/v5/trade/cancel-algos", algo_body)
 
         return CancelResult(ok=True, order_id=order_id, client_order_id=normalised_cid, raw=res)
+
+    # ------------------------------------------------------------------
+    # Instrument configuration
+    # ------------------------------------------------------------------
+
+    async def configure_instrument(self) -> None:
+        """Configure instrument-level settings (leverage / margin mode).
+
+        Current phase delegates to Trader.set_leverage() as a legacy
+        bridge.  Future phases may inline the REST call here.
+        """
+        await self._trader.set_leverage()
+
+    # ------------------------------------------------------------------
+    # Order status query
+    # ------------------------------------------------------------------
+
+    async def fetch_order_status(
+        self,
+        *,
+        order_id: str | None = None,
+        client_order_id: str | None = None,
+    ) -> OrderStatusSnapshot:
+        """Fetch the current status of a single order.
+
+        At least one of *order_id* or *client_order_id* must be provided.
+        Prefers *order_id* when both are given.
+        """
+        if order_id is None and client_order_id is None:
+            raise ValueError(
+                "fetch_order_status requires at least one of order_id or client_order_id"
+            )
+
+        if order_id is not None:
+            endpoint = (
+                f"/api/v5/trade/order?instId={self._trader.symbol}&ordId={order_id}"
+            )
+        else:
+            endpoint = (
+                f"/api/v5/trade/order?instId={self._trader.symbol}&clOrdId={client_order_id}"
+            )
+
+        try:
+            res = await self._trader.request("GET", endpoint)
+        except Exception:
+            return OrderStatusSnapshot(
+                order_id=order_id,
+                client_order_id=client_order_id,
+                status="UNKNOWN",
+                raw={},
+            )
+
+        data = res.get("data", [])
+        if not data:
+            return OrderStatusSnapshot(
+                order_id=order_id,
+                client_order_id=client_order_id,
+                status="NOT_FOUND",
+                raw=res,
+            )
+
+        item = data[0]
+        state = str(item.get("state") or "").lower()
+        if state in {"live", "partially_filled"}:
+            status = "OPEN"
+        elif state == "filled":
+            status = "FILLED"
+        elif state in {"canceled", "cancelled"}:
+            status = "CANCELED"
+        else:
+            status = "UNKNOWN"
+
+        return OrderStatusSnapshot(
+            order_id=str(item.get("ordId")) if item.get("ordId") else order_id,
+            client_order_id=str(item.get("clOrdId")) if item.get("clOrdId") else client_order_id,
+            status=status,
+            filled_qty=_safe_decimal(item.get("accFillSz")),
+            avg_fill_price=_safe_decimal(item.get("avgPx")),
+            raw=item,
+        )
+
+    # ------------------------------------------------------------------
+    # Algo order query
+    # ------------------------------------------------------------------
+
+    async def fetch_open_algo_orders(self) -> tuple[AlgoOrderSnapshot, ...]:
+        """Fetch all open algo (conditional) orders.
+
+        Current phase delegates to Trader.fetch_pending_algo_orders()
+        as a legacy bridge, then parses each raw item into an
+        AlgoOrderSnapshot DTO.
+        """
+        raws = await self._trader.fetch_pending_algo_orders()
+        results: list[AlgoOrderSnapshot] = []
+        for item in raws:
+            order_id = str(item.get("algoId") or item.get("ordId") or "")
+            client_order_id = str(item.get("clOrdId")) if item.get("clOrdId") else None
+            side = str(item.get("side", "")) if item.get("side") else None
+            qty = _safe_decimal(item.get("sz"))
+            trigger_price = _safe_decimal(
+                item.get("slTriggerPx") or item.get("triggerPx")
+            )
+            status = str(item.get("state") or "OPEN")
+            results.append(
+                AlgoOrderSnapshot(
+                    order_id=order_id or None,
+                    client_order_id=client_order_id,
+                    side=side,
+                    qty=qty,
+                    trigger_price=trigger_price,
+                    status=status,
+                    raw=item,
+                )
+            )
+        return tuple(results)
+
+
+# ------------------------------------------------------------------
+# Module-level helpers
+# ------------------------------------------------------------------
+
+
+def _safe_decimal(value: Any) -> Decimal | None:
+    """Convert *value* to Decimal, or return None on failure."""
+    try:
+        if value in {None, ""}:
+            return None
+        return Decimal(str(value))
+    except Exception:
+        return None

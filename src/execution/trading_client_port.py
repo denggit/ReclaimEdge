@@ -67,7 +67,31 @@ class CancelResult:
     raw: Mapping[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class OrderStatusSnapshot:
+    order_id: str | None
+    client_order_id: str | None
+    status: str
+    filled_qty: Decimal | None = None
+    avg_fill_price: Decimal | None = None
+    raw: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class AlgoOrderSnapshot:
+    order_id: str | None
+    client_order_id: str | None
+    side: str | None = None
+    qty: Decimal | None = None
+    trigger_price: Decimal | None = None
+    status: str = "OPEN"
+    raw: Mapping[str, Any] = field(default_factory=dict)
+
+
 class TradingClientPort(Protocol):
+    async def configure_instrument(self) -> None:
+        ...
+
     async def fetch_balance(self) -> BalanceSnapshot:
         ...
 
@@ -75,6 +99,17 @@ class TradingClientPort(Protocol):
         ...
 
     async def fetch_open_orders(self) -> list[OrderSnapshot]:
+        ...
+
+    async def fetch_order_status(
+        self,
+        *,
+        order_id: str | None = None,
+        client_order_id: str | None = None,
+    ) -> OrderStatusSnapshot:
+        ...
+
+    async def fetch_open_algo_orders(self) -> tuple[AlgoOrderSnapshot, ...]:
         ...
 
     async def place_market_order(
