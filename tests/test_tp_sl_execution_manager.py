@@ -4,6 +4,15 @@ import unittest
 from decimal import Decimal
 
 import src.execution.trader as trader_module
+from src.exchanges.models import (
+    BrokerOrder,
+    BrokerOrderSide,
+    BrokerOrderStatus,
+    BrokerOrderType,
+    BrokerPositionSide,
+    BrokerQuantityUnit,
+    ExchangeName,
+)
 from src.execution.tp_sl_execution_manager import TpSlExecutionManager
 from src.execution.trader import Trader
 from src.risk.simple_position_sizer import PositionSize
@@ -208,17 +217,45 @@ class TpSlExecutionManagerTest(unittest.IsolatedAsyncioTestCase):
         trader._protected_reduce_only_order_ids = {"sidecar-tp"}
         requests = []
 
-        async def fake_fetch_pending():  # type: ignore[no-untyped-def]
-            return [
-                {"instId": trader.symbol, "reduceOnly": "true", "ordId": "core-old"},
-                {"instId": trader.symbol, "reduceOnly": "true", "ordId": "sidecar-tp"},
-            ]
+        async def fake_fetch_broker_open():  # type: ignore[no-untyped-def]
+            return (
+                BrokerOrder(
+                    exchange=ExchangeName.OKX,
+                    symbol=trader.symbol,
+                    order_id="core-old",
+                    client_order_id=None,
+                    side=BrokerOrderSide.SELL,
+                    position_side=BrokerPositionSide.LONG,
+                    order_type=BrokerOrderType.LIMIT,
+                    status=BrokerOrderStatus.OPEN,
+                    price=Decimal("3100"),
+                    quantity=Decimal("1"),
+                    quantity_unit=BrokerQuantityUnit.CONTRACTS,
+                    reduce_only=True,
+                    raw={"instId": trader.symbol, "reduceOnly": "true", "ordId": "core-old"},
+                ),
+                BrokerOrder(
+                    exchange=ExchangeName.OKX,
+                    symbol=trader.symbol,
+                    order_id="sidecar-tp",
+                    client_order_id=None,
+                    side=BrokerOrderSide.SELL,
+                    position_side=BrokerPositionSide.LONG,
+                    order_type=BrokerOrderType.LIMIT,
+                    status=BrokerOrderStatus.OPEN,
+                    price=Decimal("3100"),
+                    quantity=Decimal("1"),
+                    quantity_unit=BrokerQuantityUnit.CONTRACTS,
+                    reduce_only=True,
+                    raw={"instId": trader.symbol, "reduceOnly": "true", "ordId": "sidecar-tp"},
+                ),
+            )
 
         async def fake_request(method, path, body):  # type: ignore[no-untyped-def]
             requests.append((method, path, body))
             return {"code": "0", "data": []}
 
-        trader.fetch_pending_orders = fake_fetch_pending
+        trader.fetch_broker_open_orders = fake_fetch_broker_open
         trader.request = fake_request  # type: ignore[method-assign]
 
         manager = TpSlExecutionManager(trader)
@@ -233,12 +270,26 @@ class TpSlExecutionManagerTest(unittest.IsolatedAsyncioTestCase):
         trader._managed_reduce_only_order_ids = {"known-id"}
         trader._protected_reduce_only_order_ids = set()
 
-        async def fake_fetch_pending():  # type: ignore[no-untyped-def]
-            return [
-                {"instId": trader.symbol, "reduceOnly": "true", "ordId": "unknown-id"},
-            ]
+        async def fake_fetch_broker_open():  # type: ignore[no-untyped-def]
+            return (
+                BrokerOrder(
+                    exchange=ExchangeName.OKX,
+                    symbol=trader.symbol,
+                    order_id="unknown-id",
+                    client_order_id=None,
+                    side=BrokerOrderSide.SELL,
+                    position_side=BrokerPositionSide.LONG,
+                    order_type=BrokerOrderType.LIMIT,
+                    status=BrokerOrderStatus.OPEN,
+                    price=Decimal("3100"),
+                    quantity=Decimal("1"),
+                    quantity_unit=BrokerQuantityUnit.CONTRACTS,
+                    reduce_only=True,
+                    raw={"instId": trader.symbol, "reduceOnly": "true", "ordId": "unknown-id"},
+                ),
+            )
 
-        trader.fetch_pending_orders = fake_fetch_pending
+        trader.fetch_broker_open_orders = fake_fetch_broker_open
 
         manager = TpSlExecutionManager(trader)
         with self.assertRaises(RuntimeError) as ctx:

@@ -864,12 +864,16 @@ class SplitTakeProfitTraderTest(unittest.IsolatedAsyncioTestCase):
         async def fetch_pending_orders(self) -> list[dict]:  # type: ignore[no-untyped-def]
             return []
 
+        async def fetch_broker_open_orders(self):  # type: ignore[no-untyped-def]
+            return ()
+
         async def request(self, method: str, endpoint: str, payload=None):  # type: ignore[no-untyped-def]
             posted.append(dict(payload or {}))
             return {"code": "0", "data": [{"ordId": f"tp-{len(posted)}"}]}
 
         trader.fetch_position_snapshot = MethodType(fetch_position_snapshot, trader)  # type: ignore[method-assign]
         trader.fetch_pending_orders = MethodType(fetch_pending_orders, trader)  # type: ignore[method-assign]
+        trader.fetch_broker_open_orders = MethodType(fetch_broker_open_orders, trader)  # type: ignore[method-assign]
         trader.request = MethodType(request, trader)  # type: ignore[method-assign]
 
         result = await trader.replace_take_profit(

@@ -10,9 +10,19 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
+
 import pytest
 
-from src.exchanges.models import ExchangeName
+from src.exchanges.models import (
+    BrokerOrder,
+    BrokerOrderSide,
+    BrokerOrderStatus,
+    BrokerOrderType,
+    BrokerPositionSide,
+    BrokerQuantityUnit,
+    ExchangeName,
+)
 from src.exchanges.semantic_models import (
     BrokerSemanticAction,
     BrokerSemanticOrderRole,
@@ -69,6 +79,36 @@ class FakeTrader:
 
     async def fetch_pending_orders(self) -> list[dict]:
         return list(self.pending_orders)
+
+    async def fetch_broker_open_orders(self):
+        """Return BrokerOrder objects built from the raw pending_orders dicts."""
+        orders: list[BrokerOrder] = []
+        for item in self.pending_orders:
+            # Production fetch_broker_open_orders is symbol-filtered
+            if item.get("instId") != self.symbol:
+                continue
+            orders.append(
+                BrokerOrder(
+                    exchange=ExchangeName.OKX,
+                    symbol=item.get("instId", self.symbol),
+                    order_id=item.get("ordId"),
+                    client_order_id=item.get("clOrdId"),
+                    side=(
+                        BrokerOrderSide.BUY
+                        if str(item.get("side", "")).lower() == "buy"
+                        else BrokerOrderSide.SELL
+                    ),
+                    position_side=BrokerPositionSide.LONG,
+                    order_type=BrokerOrderType.LIMIT,
+                    status=BrokerOrderStatus.OPEN,
+                    price=Decimal(item["px"]) if item.get("px") else None,
+                    quantity=Decimal(item["sz"]) if item.get("sz") else Decimal("1"),
+                    quantity_unit=BrokerQuantityUnit.CONTRACTS,
+                    reduce_only=str(item.get("reduceOnly", "")).lower() == "true",
+                    raw=item,
+                )
+            )
+        return tuple(orders)
 
     async def request(self, method: str, endpoint: str, payload: dict | None = None) -> dict:
         self.requests.append((method, endpoint, payload or {}))

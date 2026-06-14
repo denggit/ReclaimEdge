@@ -49,6 +49,7 @@ class FakeTradingClient:
         self.place_limit_calls: list[dict[str, Any]] = []
         self.place_stop_calls: list[dict[str, Any]] = []
         self.cancel_calls: list[dict[str, Any]] = []
+        self.open_orders: list[Any] = []
 
         # Configurable per-call return values
         self._next_limit_result = FakeOrderResult(order_id="fake-tp-1")
@@ -77,6 +78,9 @@ class FakeTradingClient:
             "order_id": order_id, "client_order_id": client_order_id,
         })
         return self._next_cancel_result
+
+    async def fetch_open_orders(self) -> list[Any]:
+        return list(self.open_orders)
 
 
 # ---------------------------------------------------------------------------
@@ -342,9 +346,20 @@ class TestCancelOrderRoutesToPort:
     @pytest.mark.asyncio
     async def test_cancel_reduce_only_order_routes_to_port(self) -> None:
         from src.execution.tp_sl_execution_manager import TpSlExecutionManager
+        from src.execution.trading_client_port import OrderSnapshot
 
         trader = _make_minimal_trader()
         fake = FakeTradingClient()
+        fake.open_orders = [
+            OrderSnapshot(
+                order_id="core-old",
+                client_order_id=None,
+                side="sell",
+                qty=Decimal("1"),
+                reduce_only=True,
+                raw={},
+            ),
+        ]
 
         manager = TpSlExecutionManager.__new__(TpSlExecutionManager)
         manager.trader = trader
@@ -355,13 +370,6 @@ class TestCancelOrderRoutesToPort:
         manager.near_tp = None
         manager.sidecar = None
 
-        async def fake_fetch_pending():
-            return [
-                {"instId": trader.symbol, "reduceOnly": "true", "ordId": "core-old"},
-            ]
-
-        trader.fetch_pending_orders = fake_fetch_pending
-
         await manager.cancel_existing_reduce_only_orders()
 
         assert len(fake.cancel_calls) == 1
@@ -370,10 +378,29 @@ class TestCancelOrderRoutesToPort:
     @pytest.mark.asyncio
     async def test_cancel_skips_protected_orders(self) -> None:
         from src.execution.tp_sl_execution_manager import TpSlExecutionManager
+        from src.execution.trading_client_port import OrderSnapshot
 
         trader = _make_minimal_trader()
         trader._protected_reduce_only_order_ids = {"sidecar-tp"}
         fake = FakeTradingClient()
+        fake.open_orders = [
+            OrderSnapshot(
+                order_id="core-old",
+                client_order_id=None,
+                side="sell",
+                qty=Decimal("1"),
+                reduce_only=True,
+                raw={},
+            ),
+            OrderSnapshot(
+                order_id="sidecar-tp",
+                client_order_id=None,
+                side="sell",
+                qty=Decimal("1"),
+                reduce_only=True,
+                raw={},
+            ),
+        ]
 
         manager = TpSlExecutionManager.__new__(TpSlExecutionManager)
         manager.trader = trader
@@ -384,14 +411,6 @@ class TestCancelOrderRoutesToPort:
         manager.near_tp = None
         manager.sidecar = None
 
-        async def fake_fetch_pending():
-            return [
-                {"instId": trader.symbol, "reduceOnly": "true", "ordId": "core-old"},
-                {"instId": trader.symbol, "reduceOnly": "true", "ordId": "sidecar-tp"},
-            ]
-
-        trader.fetch_pending_orders = fake_fetch_pending
-
         await manager.cancel_existing_reduce_only_orders()
 
         cancelled_ids = [c["order_id"] for c in fake.cancel_calls]
@@ -401,9 +420,20 @@ class TestCancelOrderRoutesToPort:
     @pytest.mark.asyncio
     async def test_cancel_exception_is_caught(self) -> None:
         from src.execution.tp_sl_execution_manager import TpSlExecutionManager
+        from src.execution.trading_client_port import OrderSnapshot
 
         trader = _make_minimal_trader()
         fake = FakeTradingClient()
+        fake.open_orders = [
+            OrderSnapshot(
+                order_id="will-fail",
+                client_order_id=None,
+                side="sell",
+                qty=Decimal("1"),
+                reduce_only=True,
+                raw={},
+            ),
+        ]
 
         async def failing_cancel(*, order_id=None, client_order_id=None):
             raise RuntimeError("cancel failed")
@@ -418,13 +448,6 @@ class TestCancelOrderRoutesToPort:
         manager.market_exit = None
         manager.near_tp = None
         manager.sidecar = None
-
-        async def fake_fetch_pending():
-            return [
-                {"instId": trader.symbol, "reduceOnly": "true", "ordId": "will-fail"},
-            ]
-
-        trader.fetch_pending_orders = fake_fetch_pending
 
         # Must not raise — exception is caught and logged
         await manager.cancel_existing_reduce_only_orders()

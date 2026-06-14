@@ -211,19 +211,16 @@ class TpSlExecutionManager:
 
     async def cancel_existing_reduce_only_orders(self) -> None:
         t = self.trader
-        orders = await t.fetch_pending_orders()
+        orders = await self.trading_client.fetch_open_orders()
         protected_order_ids = set(getattr(t, "_protected_reduce_only_order_ids", set()) or set())
         managed_order_ids = set(getattr(t, "_managed_reduce_only_order_ids", set()) or set())
         allow_unmanaged = bool(getattr(t, "_allow_cancel_unmanaged_reduce_only", True))
-        for item in orders:
-            if item.get("instId") != t.symbol:
+        for order in orders:
+            if not order.reduce_only:
                 continue
-            if str(item.get("reduceOnly", "")).lower() != "true":
-                continue
-            ord_id = item.get("ordId")
+            ord_id = order.order_id
             if not ord_id:
                 raise RuntimeError("reduce_only_order_identity_unknown")
-            ord_id = str(ord_id)
             if ord_id in protected_order_ids:
                 logger.info("Protected reduce-only order skipped | ordId=%s", ord_id)
                 continue

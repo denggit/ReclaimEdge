@@ -4,6 +4,15 @@ from decimal import Decimal
 
 import pytest
 
+from src.exchanges.models import (
+    BrokerOrder,
+    BrokerOrderSide,
+    BrokerOrderStatus,
+    BrokerOrderType,
+    BrokerPositionSide,
+    BrokerQuantityUnit,
+    ExchangeName,
+)
 from src.execution.trader import PositionSnapshot, Trader
 from src.risk.simple_position_sizer import PositionSize
 from src.strategies.boll_cvd_reclaim_strategy import TradeIntent
@@ -62,6 +71,36 @@ class IsolationTrader(Trader):
             {"instId": self.symbol, "reduceOnly": "true", "ordId": "sidecar-tp"},
             {"instId": self.symbol, "reduceOnly": "false", "ordId": "entry"},
         ]
+
+    async def fetch_broker_open_orders(self):
+        """Convert fetch_pending_orders data to BrokerOrder objects."""
+        pending = await self.fetch_pending_orders()
+        orders: list[BrokerOrder] = []
+        for item in pending:
+            if item.get("instId") != self.symbol:
+                continue
+            orders.append(
+                BrokerOrder(
+                    exchange=ExchangeName.OKX,
+                    symbol=item.get("instId", self.symbol),
+                    order_id=item.get("ordId"),
+                    client_order_id=item.get("clOrdId"),
+                    side=(
+                        BrokerOrderSide.BUY
+                        if str(item.get("side", "")).lower() == "buy"
+                        else BrokerOrderSide.SELL
+                    ),
+                    position_side=BrokerPositionSide.LONG,
+                    order_type=BrokerOrderType.LIMIT,
+                    status=BrokerOrderStatus.OPEN,
+                    price=Decimal(item["px"]) if item.get("px") else None,
+                    quantity=Decimal(item["sz"]) if item.get("sz") else Decimal("1"),
+                    quantity_unit=BrokerQuantityUnit.CONTRACTS,
+                    reduce_only=str(item.get("reduceOnly", "")).lower() == "true",
+                    raw=item,
+                )
+            )
+        return tuple(orders)
 
     async def request(self, method, endpoint, payload=None):  # type: ignore[no-untyped-def]
         if endpoint == "/api/v5/trade/cancel-order":
