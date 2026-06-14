@@ -56,6 +56,8 @@ from src.risk.rolling_loss_guard import RollingLossGuard  # noqa: E402
 from src.risk import rolling_loss_live as rolling_loss_live_helpers  # noqa: E402
 from src.strategies.boll_cvd_reclaim_strategy import BollCvdReclaimStrategyConfig  # noqa: E402
 from src.strategies.boll_cvd_shock_reclaim_strategy import BollCvdShockReclaimStrategy  # noqa: E402
+from src.execution.okx_trading_client import OkxTradingClient  # noqa: E402
+from src.data_feed.okx_market_data_client import OkxMarketDataClient  # noqa: E402
 from src.utils.email_sender import EmailSender  # noqa: E402
 from src.utils.log import get_logger  # noqa: E402
 
@@ -310,6 +312,15 @@ async def main() -> None:
         config=monitor_config,
         tick_handlers=[on_market_tick],
     )
+
+    trading_client_port = OkxTradingClient(trader)
+    market_data_client_port = OkxMarketDataClient(monitor)
+    logger.info(
+        "OKX_RUNTIME_PORTS_READY | trading_client=%s market_data_client=%s",
+        type(trading_client_port).__name__,
+        type(market_data_client_port).__name__,
+    )
+
     try:
         await asyncio.gather(
             account_position_sync_worker_module.account_position_sync_worker(
