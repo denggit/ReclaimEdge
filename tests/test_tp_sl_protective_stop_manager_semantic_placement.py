@@ -21,6 +21,7 @@ from src.exchanges.semantic_models import (
     BrokerSemanticOrderRole,
     BrokerSemanticResult,
 )
+from src.execution.okx_trading_client import OkxTradingClient
 from src.execution.tp_sl_protective_stop_manager import ProtectiveStopManager
 
 
@@ -163,8 +164,10 @@ class FakeTrader:
 # ---------------------------------------------------------------------------
 
 
-def make_manager(trader: FakeTrader) -> ProtectiveStopManager:
-    return ProtectiveStopManager(trader)  # type: ignore[arg-type]
+def make_manager(trader: FakeTrader, trading_client=None) -> ProtectiveStopManager:
+    if trading_client is None:
+        trading_client = OkxTradingClient(trader)
+    return ProtectiveStopManager(trader, trading_client=trading_client)  # type: ignore[arg-type]
 
 
 # ===================================================================
@@ -192,7 +195,13 @@ async def test_default_off_uses_legacy_primary(monkeypatch: pytest.MonkeyPatch) 
     assert algo_id == "legacy-algo-1"
     assert message == "protective_sl_placed"
     assert len(trader.requests) == 1
-    assert trader.requests[0][2]["legacy_primary"] is True
+    method, endpoint, body = trader.requests[0]
+    assert method == "POST"
+    assert endpoint == "/api/v5/trade/order-algo"
+    assert body["sz"] == "10"
+    assert body["slTriggerPx"] == "3400.00"
+    assert body["reduceOnly"] == "true"
+    assert body["ordType"] == "conditional"
     assert trader.semantic.calls == []
 
 
@@ -386,7 +395,11 @@ class TestEnvVarVariants:
         assert message == "protective_sl_placed"
         assert trader.semantic.calls == []
         assert len(trader.requests) == 1
-        assert trader.requests[0][2]["legacy_primary"] is True
+        method, endpoint, body = trader.requests[0]
+        assert method == "POST"
+        assert endpoint == "/api/v5/trade/order-algo"
+        assert body["ordType"] == "conditional"
+        assert body["reduceOnly"] == "true"
 
 
 # ===================================================================

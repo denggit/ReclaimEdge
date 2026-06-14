@@ -6,6 +6,7 @@ from typing import Any
 
 import pytest
 
+from src.execution.okx_trading_client import OkxTradingClient
 from src.execution.tp_sl_core_tp_manager import CoreTakeProfitManager
 from src.exchanges.models import BrokerPositionSide, BrokerQuantityUnit, ExchangeName
 from src.exchanges.semantic_models import (
@@ -113,7 +114,9 @@ def _intent(side: str = "LONG") -> SimpleNamespace:
 async def test_default_disabled_uses_legacy_request(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("BROKER_SEMANTIC_TP_PLACEMENT_ENABLED", raising=False)
     fake_trader = FakeTrader()
-    manager = CoreTakeProfitManager(fake_trader, protective_stops=None)
+    trading_client = OkxTradingClient(fake_trader)
+    manager = CoreTakeProfitManager(fake_trader, protective_stops=None,
+                                    trading_client=trading_client)
 
     order_ids = await manager._place_reduce_only_take_profit_orders(
         intent=_intent("LONG"),
@@ -121,18 +124,14 @@ async def test_default_disabled_uses_legacy_request(monkeypatch: pytest.MonkeyPa
     )
 
     assert order_ids == ["legacy-tp-1"]
-    assert fake_trader.requests == [
-        (
-            "POST",
-            "/api/v5/trade/order",
-            {
-                "legacy": True,
-                "side": "LONG",
-                "contracts": "10",
-                "price": "3500.0",
-            },
-        )
-    ]
+    assert len(fake_trader.requests) == 1
+    method, endpoint, body = fake_trader.requests[0]
+    assert method == "POST"
+    assert endpoint == "/api/v5/trade/order"
+    assert body["sz"] == "10"
+    assert body["px"] == "3500.00"
+    assert body["reduceOnly"] == "true"
+    assert body["ordType"] == "limit"
     assert fake_trader.semantic.calls == []
 
 
@@ -140,7 +139,8 @@ async def test_default_disabled_uses_legacy_request(monkeypatch: pytest.MonkeyPa
 async def test_enabled_uses_semantic_executor_not_legacy_request(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("BROKER_SEMANTIC_TP_PLACEMENT_ENABLED", "true")
     fake_trader = FakeTrader()
-    manager = CoreTakeProfitManager(fake_trader, protective_stops=None)
+    manager = CoreTakeProfitManager(fake_trader, protective_stops=None,
+                                    trading_client=OkxTradingClient(fake_trader))
 
     order_ids = await manager._place_reduce_only_take_profit_orders(
         intent=_intent("LONG"),
@@ -164,7 +164,8 @@ async def test_enabled_uses_semantic_executor_not_legacy_request(monkeypatch: py
 async def test_enabled_maps_short_side(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("BROKER_SEMANTIC_TP_PLACEMENT_ENABLED", "true")
     fake_trader = FakeTrader()
-    manager = CoreTakeProfitManager(fake_trader, protective_stops=None)
+    manager = CoreTakeProfitManager(fake_trader, protective_stops=None,
+                                    trading_client=OkxTradingClient(fake_trader))
 
     await manager._place_reduce_only_take_profit_orders(
         intent=_intent("SHORT"),
@@ -187,7 +188,8 @@ async def test_semantic_failure_does_not_fallback_legacy(monkeypatch: pytest.Mon
     fake_trader = FakeTrader()
     fake_trader.semantic.result_ok = False
     fake_trader.semantic.message = "boom"
-    manager = CoreTakeProfitManager(fake_trader, protective_stops=None)
+    manager = CoreTakeProfitManager(fake_trader, protective_stops=None,
+                                    trading_client=OkxTradingClient(fake_trader))
 
     with pytest.raises(RuntimeError, match="semantic_tp_order_failed"):
         await manager._place_reduce_only_take_profit_orders(
@@ -204,7 +206,8 @@ async def test_multiple_semantic_specs_return_order_ids_in_order(monkeypatch: py
     monkeypatch.setenv("BROKER_SEMANTIC_TP_PLACEMENT_ENABLED", "true")
     fake_trader = FakeTrader()
     fake_trader.semantic.order_ids = ["semantic-tp-1", "semantic-tp-2"]
-    manager = CoreTakeProfitManager(fake_trader, protective_stops=None)
+    manager = CoreTakeProfitManager(fake_trader, protective_stops=None,
+                                    trading_client=OkxTradingClient(fake_trader))
 
     order_ids = await manager._place_reduce_only_take_profit_orders(
         intent=_intent("LONG"),

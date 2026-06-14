@@ -4,11 +4,13 @@ from decimal import Decimal
 from typing import Any, TYPE_CHECKING
 
 from src.execution import order_specs
+from src.execution.okx_trading_client import OkxTradingClient
 from src.execution.tp_sl_core_tp_manager import CoreTakeProfitManager
 from src.execution.tp_sl_market_exit_manager import MarketExitManager
 from src.execution.tp_sl_near_tp_manager import NearTpExecutionManager
 from src.execution.tp_sl_protective_stop_manager import ProtectiveStopManager
 from src.execution.tp_sl_sidecar_manager import SidecarTpManager
+from src.execution.trading_client_port import TradingClientPort
 from src.utils.log import get_logger
 
 if TYPE_CHECKING:
@@ -21,9 +23,10 @@ logger = get_logger(__name__)
 class TpSlExecutionManager:
     def __init__(self, trader: Trader) -> None:
         self.trader = trader
-        self.protective_stops = ProtectiveStopManager(trader)
+        self.trading_client: TradingClientPort = OkxTradingClient(trader)
+        self.protective_stops = ProtectiveStopManager(trader, self.trading_client)
         self.market_exit = MarketExitManager(trader)
-        self.core_tp = CoreTakeProfitManager(trader, self.protective_stops)
+        self.core_tp = CoreTakeProfitManager(trader, self.protective_stops, self.trading_client)
         self.near_tp = NearTpExecutionManager(
             trader=trader,
             core_tp=self.core_tp,
@@ -232,14 +235,7 @@ class TpSlExecutionManager:
                 logger.info("Canceled existing reduce-only order | ordId=%s (semantic)", ord_id)
             else:
                 try:
-                    await t.request(
-                        "POST",
-                        "/api/v5/trade/cancel-order",
-                        order_specs.build_cancel_order_body(
-                            inst_id=t.symbol,
-                            order_id=ord_id,
-                        ),
-                    )
+                    await self.trading_client.cancel_order(order_id=ord_id)
                     logger.info("Canceled existing reduce-only order | ordId=%s", ord_id)
                 except Exception:
                     logger.exception("Failed to cancel existing reduce-only order | ordId=%s", ord_id)
@@ -334,6 +330,12 @@ class TpSlExecutionManager:
                 )
             return ok
 
+        # NOTE: 20C-CLEAN-PORTS-05 — intentionally NOT routed through
+        # TradingClientPort.cancel_order() here.  The caller knows this is
+        # an algo order id, so the regular-cancel → algo-cancel fallback
+        # inside cancel_order() would add unnecessary latency and a
+        # spurious API error.  The legacy direct algo cancel is the
+        # correct path for this specific call-site.
         try:
             await t.request("POST", "/api/v5/trade/cancel-algos", order_specs.build_cancel_algo_body(
                 inst_id=t.symbol,

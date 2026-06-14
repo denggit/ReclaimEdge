@@ -9,14 +9,16 @@ from src.utils.log import get_logger
 
 if TYPE_CHECKING:
     from src.execution.trader import Trader
+    from src.execution.trading_client_port import TradingClientPort
     from src.strategies.boll_cvd_reclaim_strategy import PositionSide
 
 logger = get_logger(__name__)
 
 
 class ProtectiveStopManager:
-    def __init__(self, trader: Trader) -> None:
+    def __init__(self, trader: Trader, trading_client: TradingClientPort) -> None:
         self.trader = trader
+        self.trading_client = trading_client
 
     # ------------------------------------------------------------------
     # semantic protective SL placement switch (opt-in)
@@ -85,9 +87,14 @@ class ProtectiveStopManager:
                         stop_price=stop_price,
                     )
                 else:
-                    body = t._near_tp_protective_sl_algo_body(side, contracts, stop_price)
-                    res = await t.request("POST", "/api/v5/trade/order-algo", body)
-                    algo_id = t.extract_algo_id(res)
+                    result = await self.trading_client.place_stop_market_order(
+                        side=side,
+                        qty=contracts,
+                        trigger_price=Decimal(str(stop_price)),
+                        reduce_only=True,
+                        client_order_id="",
+                    )
+                    algo_id = result.order_id
                 if await self.trader.verify_near_tp_protective_stop(algo_id, side, contracts, stop_price):
                     return True, algo_id, "protective_sl_placed"
                 await self.trader._cancel_unverified_near_tp_algo(algo_id, phase="primary")

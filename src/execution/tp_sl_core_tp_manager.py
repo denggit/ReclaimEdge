@@ -14,6 +14,7 @@ from src.utils.log import get_logger
 
 if TYPE_CHECKING:
     from src.execution.trader import Trader
+    from src.execution.trading_client_port import TradingClientPort
     from src.strategies.boll_cvd_reclaim_strategy import TradeIntent
 
 logger = get_logger(__name__)
@@ -102,9 +103,10 @@ def _classify_middle_bucket_split_actual_order_mode(
 
 
 class CoreTakeProfitManager:
-    def __init__(self, trader: Trader, protective_stops) -> None:
+    def __init__(self, trader: Trader, protective_stops, trading_client: TradingClientPort) -> None:
         self.trader = trader
         self.protective_stops = protective_stops
+        self.trading_client = trading_client
 
     def _broker_semantic_tp_placement_enabled(self) -> bool:
         value = os.getenv("BROKER_SEMANTIC_TP_PLACEMENT_ENABLED", "false").strip().lower()
@@ -677,9 +679,14 @@ class CoreTakeProfitManager:
                     price=price,
                 )
             else:
-                body = t._reduce_only_tp_order_body(intent.side, contracts, price)
-                res = await t.request("POST", "/api/v5/trade/order", body)
-                order_id = t.extract_order_id(res)
+                result = await self.trading_client.place_limit_order(
+                    side=intent.side,
+                    qty=contracts,
+                    price=Decimal(str(price)),
+                    reduce_only=True,
+                    client_order_id="",
+                )
+                order_id = result.order_id
             placed_order_ids.append(order_id)
             logger.info(
                 "TP_ORDER_PLACED | label=%s side=%s tp_contracts=%s core_contracts=%s price=%s ordId=%s",
