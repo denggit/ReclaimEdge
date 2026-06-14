@@ -26,15 +26,62 @@ from decimal import Decimal, InvalidOperation
 # ---------------------------------------------------------------------------
 
 BINANCE_LIVE_CONFIRMATION_PHRASE: str = "I_UNDERSTAND_BINANCE_LIVE_TRADING"
-BINANCE_LIVE_HARD_MAX_ORDER_NOTIONAL_USDT: Decimal = Decimal("10")
+BINANCE_LIVE_HARD_MAX_ORDER_NOTIONAL_USDT: Decimal = Decimal("25")
 BINANCE_LIVE_HARD_MAX_POSITION_NOTIONAL_USDT: Decimal = Decimal("30")
 BINANCE_LIVE_HARD_MAX_LEVERAGE: int = 20
+
+# ---------------------------------------------------------------------------
+# Exchange-neutral env var names (primary) with Binance backward-compat aliases
+# ---------------------------------------------------------------------------
+
+_ENV_PRIMARY_ALIAS_PAIRS: tuple[tuple[str, str], ...] = (
+    ("LIVE_ENABLED", "BINANCE_LIVE_ENABLED"),
+    ("LIVE_ALLOW_ORDERS", "BINANCE_LIVE_ALLOW_ORDERS"),
+    ("LIVE_CONFIRMATION", "BINANCE_LIVE_CONFIRMATION"),
+    ("LIVE_MAX_ORDER_NOTIONAL_USDT", "BINANCE_LIVE_MAX_ORDER_NOTIONAL_USDT"),
+    ("LIVE_MAX_POSITION_NOTIONAL_USDT", "BINANCE_LIVE_MAX_POSITION_NOTIONAL_USDT"),
+    ("LIVE_LEVERAGE", "BINANCE_LIVE_LEVERAGE"),
+)
 
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
 
 _TRUTHY: frozenset[str] = frozenset({"1", "true", "yes", "y", "on"})
+
+
+def _resolve_env(
+    env: Mapping[str, str],
+    primary: str,
+    alias: str,
+) -> str:
+    """Read *primary* env var, falling back to *alias*.
+
+    Returns the raw (un-stripped) value from *primary* if set,
+    otherwise the value from *alias*.
+    """
+    value = env.get(primary, "")
+    if value.strip():
+        return value
+    return env.get(alias, "")
+
+
+def _detect_env_conflicts(env: Mapping[str, str]) -> list[str]:
+    """Return a list of conflict descriptions for dual-name env pairs.
+
+    A conflict exists when both the primary (LIVE_*) and the alias
+    (BINANCE_*) names are set to different non-empty values.
+    """
+    conflicts: list[str] = []
+    for primary, alias in _ENV_PRIMARY_ALIAS_PAIRS:
+        p_val = env.get(primary, "").strip()
+        a_val = env.get(alias, "").strip()
+        if p_val and a_val and p_val != a_val:
+            conflicts.append(
+                f"{primary}={p_val!r} vs {alias}={a_val!r} — "
+                f"use only {primary}"
+            )
+    return conflicts
 
 
 def _parse_decimal(raw: str) -> Decimal | None:
@@ -127,21 +174,23 @@ def load_binance_live_preflight_config(
     signal_only_raw: str = env.get("BINANCE_SIGNAL_ONLY", "").strip().lower()
     signal_only: bool = signal_only_raw in _TRUTHY
 
-    live_enabled_raw: str = env.get("BINANCE_LIVE_ENABLED", "").strip().lower()
+    live_enabled_raw: str = _resolve_env(env, "LIVE_ENABLED", "BINANCE_LIVE_ENABLED").strip().lower()
     live_enabled: bool = live_enabled_raw in _TRUTHY
 
-    allow_orders_raw: str = env.get("BINANCE_LIVE_ALLOW_ORDERS", "").strip().lower()
+    allow_orders_raw: str = _resolve_env(env, "LIVE_ALLOW_ORDERS", "BINANCE_LIVE_ALLOW_ORDERS").strip().lower()
     allow_orders: bool = allow_orders_raw in _TRUTHY
 
-    confirmation: str = env.get("BINANCE_LIVE_CONFIRMATION", "").strip()
+    confirmation: str = _resolve_env(env, "LIVE_CONFIRMATION", "BINANCE_LIVE_CONFIRMATION").strip()
 
     max_order_notional_usdt: Decimal | None = _parse_decimal(
-        env.get("BINANCE_LIVE_MAX_ORDER_NOTIONAL_USDT", "")
+        _resolve_env(env, "LIVE_MAX_ORDER_NOTIONAL_USDT", "BINANCE_LIVE_MAX_ORDER_NOTIONAL_USDT")
     )
     max_position_notional_usdt: Decimal | None = _parse_decimal(
-        env.get("BINANCE_LIVE_MAX_POSITION_NOTIONAL_USDT", "")
+        _resolve_env(env, "LIVE_MAX_POSITION_NOTIONAL_USDT", "BINANCE_LIVE_MAX_POSITION_NOTIONAL_USDT")
     )
-    leverage: int | None = _parse_int(env.get("BINANCE_LIVE_LEVERAGE", ""))
+    leverage: int | None = _parse_int(
+        _resolve_env(env, "LIVE_LEVERAGE", "BINANCE_LIVE_LEVERAGE")
+    )
 
     return BinanceLivePreflightConfig(
         exchange=exchange,
@@ -178,6 +227,15 @@ def build_binance_live_preflight_report(
     """
     config = load_binance_live_preflight_config(env)
     blocking: list[str] = []
+
+    # ── Gate 0: no conflicting env var pairs ────────────────────────────
+    _env_conflicts = _detect_env_conflicts(env if env is not None else os.environ)
+    if _env_conflicts:
+        blocking.append("live_env_var_conflict")
+        # Print details to stderr so the user can see exactly what conflicts
+        import sys as _sys
+        for _msg in _env_conflicts:
+            print(f"ERROR: conflicting env vars — {_msg}", file=_sys.stderr)
 
     # ── Gate 1: exchange must be binance ────────────────────────────────
     if config.exchange != "binance":
@@ -250,6 +308,6 @@ def format_binance_live_blocked_message(
     reasons: str = ",".join(report.blocking_reasons)
     return (
         "Binance live trading runtime is not wired yet. "
-        "Set BINANCE_SIGNAL_ONLY=true for signal-only observation. "
+        "Set SIGNAL_ONLY=true for signal-only observation. "
         f"Binance live preflight blocking_reasons={reasons}"
     )

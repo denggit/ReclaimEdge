@@ -8,8 +8,8 @@
 
 WARNING: This script places REAL orders on Binance USD-M Futures.
 It requires TWO explicit confirmations to run:
-  1. BINANCE_LIVE_SMOKE_TEST_CONFIRM — acknowledges real order placement
-  2. BINANCE_LIVE_CONFIRMATION — Binance live preflight confirmation
+  1. LIVE_SMOKE_TEST_CONFIRM — acknowledges real order placement
+  2. LIVE_CONFIRMATION — live preflight confirmation
 
 This script reads the unified runtime config (load_unified_runtime_config)
 and validates that all platform-agnostic parameters match the supported
@@ -31,25 +31,25 @@ Unified config env (shared with OKX):
     KLINE_INTERVAL=15m
 
 Preflight env (from binance_live_preflight):
-    BINANCE_LIVE_ENABLED=true
-    BINANCE_LIVE_ALLOW_ORDERS=true
-    BINANCE_LIVE_CONFIRMATION=I_UNDERSTAND_BINANCE_LIVE_TRADING
-    BINANCE_LIVE_MAX_ORDER_NOTIONAL_USDT=<value <= 10>
-    BINANCE_LIVE_MAX_POSITION_NOTIONAL_USDT=<value <= 30>
-    BINANCE_LIVE_LEVERAGE=<value <= 20>
+    LIVE_ENABLED=true
+    LIVE_ALLOW_ORDERS=true
+    LIVE_CONFIRMATION=I_UNDERSTAND_BINANCE_LIVE_TRADING
+    LIVE_MAX_ORDER_NOTIONAL_USDT=<value <= 25>
+    LIVE_MAX_POSITION_NOTIONAL_USDT=<value <= 30>
+    LIVE_LEVERAGE=<value <= 20>
 
 Usage::
 
     EXCHANGE=binance                                    \\
     EXCHANGE_API_KEY=...                                \\
     EXCHANGE_API_SECRET=...                             \\
-    BINANCE_LIVE_SMOKE_TEST_CONFIRM=I_UNDERSTAND_THIS_PLACES_REAL_ORDERS \\
-    BINANCE_LIVE_ENABLED=true                           \\
-    BINANCE_LIVE_ALLOW_ORDERS=true                      \\
-    BINANCE_LIVE_CONFIRMATION=I_UNDERSTAND_BINANCE_LIVE_TRADING \\
-    BINANCE_LIVE_MAX_ORDER_NOTIONAL_USDT=6              \\
-    BINANCE_LIVE_MAX_POSITION_NOTIONAL_USDT=6           \\
-    BINANCE_LIVE_LEVERAGE=20                            \\
+    LIVE_SMOKE_TEST_CONFIRM=I_UNDERSTAND_THIS_PLACES_REAL_EXCHANGE_ORDERS \\
+    LIVE_ENABLED=true                                   \\
+    LIVE_ALLOW_ORDERS=true                              \\
+    LIVE_CONFIRMATION=I_UNDERSTAND_BINANCE_LIVE_TRADING \\
+    LIVE_MAX_ORDER_NOTIONAL_USDT=6                      \\
+    LIVE_MAX_POSITION_NOTIONAL_USDT=6                   \\
+    LIVE_LEVERAGE=20                                    \\
     python scripts/binance_live_smoke_test.py
 
 Trade flow (sequential, fail-fast with cleanup on error):
@@ -65,9 +65,10 @@ Trade flow (sequential, fail-fast with cleanup on error):
     7. check position == 0
     8. final cleanup (best-effort cancel + close any residual)
 
-Safety gates (hardened in 20C-4C-PREP):
+Safety gates:
     - Double confirmation: smoke + preflight
-    - Max notional hard cap at 10 USDT
+    - Max order notional hard cap at 25 USDT
+    - Max position notional hard cap at 30 USDT
     - Default no leverage change without explicit opt-in
     - No existing position check before placing orders
     - Only RE_SMOKE_ prefixed old orders are cleaned
@@ -132,22 +133,31 @@ CANONICAL_SYMBOL: str = "ETH-USDT-PERP"
 BINANCE_SYMBOL: str = "ETHUSDT"
 CLIENT_ORDER_ID_PREFIX: str = "RE_SMOKE_"
 
-CONFIRM_ENV: str = "BINANCE_LIVE_SMOKE_TEST_CONFIRM"
-CONFIRM_VALUE: str = "I_UNDERSTAND_THIS_PLACES_REAL_ORDERS"
+# Generic env var names (primary)
+CONFIRM_ENV: str = "LIVE_SMOKE_TEST_CONFIRM"
+CONFIRM_VALUE: str = "I_UNDERSTAND_THIS_PLACES_REAL_EXCHANGE_ORDERS"
 
-ALLOW_SET_LEVERAGE_ENV: str = "BINANCE_LIVE_SMOKE_TEST_ALLOW_SET_LEVERAGE"
-ALLOW_SET_LEVERAGE_VALUE: str = "I_UNDERSTAND_THIS_CHANGES_BINANCE_LEVERAGE"
+ALLOW_SET_LEVERAGE_ENV: str = "LIVE_SMOKE_TEST_ALLOW_SET_LEVERAGE"
+ALLOW_SET_LEVERAGE_VALUE: str = "I_UNDERSTAND_THIS_CHANGES_EXCHANGE_LEVERAGE"
 
-ENV_MAX_NOTIONAL: str = "BINANCE_LIVE_SMOKE_TEST_MAX_NOTIONAL_USDT"
-ENV_TP_PCT: str = "BINANCE_LIVE_SMOKE_TEST_TP_PCT"
-ENV_SL_PCT: str = "BINANCE_LIVE_SMOKE_TEST_SL_PCT"
+ENV_MAX_NOTIONAL: str = "LIVE_SMOKE_TEST_MAX_NOTIONAL_USDT"
+ENV_TP_PCT: str = "LIVE_SMOKE_TEST_TP_PCT"
+ENV_SL_PCT: str = "LIVE_SMOKE_TEST_SL_PCT"
 
-DEFAULT_MAX_NOTIONAL: Decimal = Decimal("6")
+DEFAULT_MAX_NOTIONAL: Decimal = Decimal("20")
 DEFAULT_TP_PCT: Decimal = Decimal("0.006")
 DEFAULT_SL_PCT: Decimal = Decimal("0.006")
 
-ENV_MARGIN_BUFFER_MULTIPLIER: str = "BINANCE_LIVE_SMOKE_TEST_MARGIN_BUFFER_MULTIPLIER"
+ENV_MARGIN_BUFFER_MULTIPLIER: str = "LIVE_SMOKE_TEST_MARGIN_BUFFER_MULTIPLIER"
 DEFAULT_MARGIN_BUFFER_MULTIPLIER: Decimal = Decimal("3")
+
+# Backward-compatible BINANCE_ aliases
+_CONFIRM_ENV_ALIAS: str = "BINANCE_LIVE_SMOKE_TEST_CONFIRM"
+_ALLOW_SET_LEVERAGE_ENV_ALIAS: str = "BINANCE_LIVE_SMOKE_TEST_ALLOW_SET_LEVERAGE"
+_ENV_MAX_NOTIONAL_ALIAS: str = "BINANCE_LIVE_SMOKE_TEST_MAX_NOTIONAL_USDT"
+_ENV_TP_PCT_ALIAS: str = "BINANCE_LIVE_SMOKE_TEST_TP_PCT"
+_ENV_SL_PCT_ALIAS: str = "BINANCE_LIVE_SMOKE_TEST_SL_PCT"
+_ENV_MARGIN_BUFFER_MULTIPLIER_ALIAS: str = "BINANCE_LIVE_SMOKE_TEST_MARGIN_BUFFER_MULTIPLIER"
 
 EXCHANGE_INFO_PATH: str = "/fapi/v1/exchangeInfo"
 TICKER_PRICE_PATH: str = "/fapi/v1/ticker/price"
@@ -195,9 +205,30 @@ class Preflight:
 # Safety gates (no network)
 # ---------------------------------------------------------------------------
 
+
+def _resolve_env(primary: str, alias: str, *, description: str = "") -> str:
+    """Read *primary* env var, falling back to *alias*.  Exit on conflict.
+
+    When both *primary* and *alias* are set to different non-empty values
+    the function prints an error and raises ``SystemExit(1)``.
+    """
+    p_val = os.environ.get(primary, "").strip()
+    a_val = os.environ.get(alias, "").strip()
+    if p_val and a_val and p_val != a_val:
+        label = f" ({description})" if description else ""
+        print(
+            f"ERROR: both {primary}={p_val!r} and "
+            f"{alias}={a_val!r} are set with conflicting values{label}. "
+            f"Use only {primary}.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    return p_val if p_val else a_val
+
+
 def require_live_confirmation() -> None:
     """Raise ``SystemExit`` unless the live-confirm env var is set correctly."""
-    value = os.environ.get(CONFIRM_ENV, "")
+    value = _resolve_env(CONFIRM_ENV, _CONFIRM_ENV_ALIAS, description="smoke test confirmation")
     if value != CONFIRM_VALUE:
         print(
             "ERROR: This script places REAL Binance USD-M Futures orders.\n"
@@ -211,9 +242,10 @@ def require_live_confirmation() -> None:
 def require_binance_live_preflight_for_smoke() -> None:
     """Run the Binance live preflight guard with orders globally enabled.
 
-    This requires the user to set BINANCE_LIVE_ENABLED, BINANCE_LIVE_ALLOW_ORDERS,
-    BINANCE_LIVE_CONFIRMATION, BINANCE_LIVE_MAX_ORDER_NOTIONAL_USDT,
-    BINANCE_LIVE_MAX_POSITION_NOTIONAL_USDT, and BINANCE_LIVE_LEVERAGE.
+    This requires the user to set LIVE_ENABLED, LIVE_ALLOW_ORDERS,
+    LIVE_CONFIRMATION, LIVE_MAX_ORDER_NOTIONAL_USDT,
+    LIVE_MAX_POSITION_NOTIONAL_USDT, and LIVE_LEVERAGE
+    (or their backward-compatible BINANCE_* aliases).
     """
     report = build_binance_live_preflight_report(
         os.environ,
@@ -298,13 +330,22 @@ def load_binance_credentials() -> tuple[str, str]:
     return api_key, api_secret
 
 
-def _read_positive_decimal_env(name: str, default: Decimal) -> Decimal:
+def _read_positive_decimal_env(
+    name: str, default: Decimal, *, alias: str | None = None,
+) -> Decimal:
     """Read a positive Decimal from environment, falling back to *default*.
+
+    When *alias* is provided the function reads *name* first (primary)
+    and falls back to *alias* (backward-compatible).  If both are set
+    to different values the function raises ``SystemExit``.
 
     Raises ``SystemExit`` when the value is present but invalid (non-numeric,
     zero, or negative).
     """
-    raw = os.environ.get(name, "").strip()
+    if alias is not None:
+        raw = _resolve_env(name, alias, description=f"env var {name}")
+    else:
+        raw = os.environ.get(name, "").strip()
     if not raw:
         return default
     try:
@@ -432,7 +473,11 @@ def require_calculated_notional_cap(
 
 def allow_set_leverage() -> bool:
     """Return True only when the user explicitly opts in to leverage changes."""
-    return os.environ.get(ALLOW_SET_LEVERAGE_ENV, "") == ALLOW_SET_LEVERAGE_VALUE
+    value = _resolve_env(
+        ALLOW_SET_LEVERAGE_ENV, _ALLOW_SET_LEVERAGE_ENV_ALIAS,
+        description="allow set leverage",
+    )
+    return value == ALLOW_SET_LEVERAGE_VALUE
 
 
 async def require_existing_leverage(
@@ -854,6 +899,16 @@ def calculate_safe_quantity(
             file=sys.stderr,
         )
         raise SystemExit(1)
+
+    if actual_notional > max_notional:
+        print(
+            f"[preflight] WARNING: calculated notional {actual_notional} "
+            f"is above requested target {max_notional} due to "
+            f"Binance minQty={filters.min_qty} "
+            f"minNotional={filters.min_notional} "
+            f"stepSize={filters.step_size}",
+            file=sys.stderr,
+        )
 
     print(
         f"[preflight] calculated quantity = {quantity} ETH "
@@ -1583,11 +1638,18 @@ async def main() -> int:
     binance_symbol = validate_unified_config_for_binance(rt)
 
     # --- configuration (no network) ---
-    max_notional = _read_positive_decimal_env(ENV_MAX_NOTIONAL, DEFAULT_MAX_NOTIONAL)
-    tp_pct = _read_positive_decimal_env(ENV_TP_PCT, DEFAULT_TP_PCT)
-    sl_pct = _read_positive_decimal_env(ENV_SL_PCT, DEFAULT_SL_PCT)
+    max_notional = _read_positive_decimal_env(
+        ENV_MAX_NOTIONAL, DEFAULT_MAX_NOTIONAL, alias=_ENV_MAX_NOTIONAL_ALIAS,
+    )
+    tp_pct = _read_positive_decimal_env(
+        ENV_TP_PCT, DEFAULT_TP_PCT, alias=_ENV_TP_PCT_ALIAS,
+    )
+    sl_pct = _read_positive_decimal_env(
+        ENV_SL_PCT, DEFAULT_SL_PCT, alias=_ENV_SL_PCT_ALIAS,
+    )
     margin_buffer_multiplier = _read_positive_decimal_env(
         ENV_MARGIN_BUFFER_MULTIPLIER, DEFAULT_MARGIN_BUFFER_MULTIPLIER,
+        alias=_ENV_MARGIN_BUFFER_MULTIPLIER_ALIAS,
     )
 
     # --- notional cap enforcement (no network) ---

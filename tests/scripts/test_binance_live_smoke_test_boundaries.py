@@ -356,22 +356,22 @@ def test_smoke_test_contains_preflight_import() -> None:
     assert "src.live.binance_live_preflight" in text
 
 
-def test_smoke_test_contains_binance_live_confirmation() -> None:
-    """Script must reference BINANCE_LIVE_CONFIRMATION env var."""
+def test_smoke_test_contains_live_confirmation() -> None:
+    """Script must reference LIVE_CONFIRMATION env var."""
     text = _read_smoke_test_text()
-    assert "BINANCE_LIVE_CONFIRMATION" in text
+    assert "LIVE_CONFIRMATION" in text
 
 
 def test_smoke_test_contains_allow_set_leverage_env() -> None:
-    """Script must reference BINANCE_LIVE_SMOKE_TEST_ALLOW_SET_LEVERAGE."""
+    """Script must reference LIVE_SMOKE_TEST_ALLOW_SET_LEVERAGE."""
     text = _read_smoke_test_text()
-    assert "BINANCE_LIVE_SMOKE_TEST_ALLOW_SET_LEVERAGE" in text
+    assert "LIVE_SMOKE_TEST_ALLOW_SET_LEVERAGE" in text
 
 
 def test_smoke_test_contains_allow_set_leverage_value() -> None:
-    """Script must reference I_UNDERSTAND_THIS_CHANGES_BINANCE_LEVERAGE."""
+    """Script must reference I_UNDERSTAND_THIS_CHANGES_EXCHANGE_LEVERAGE."""
     text = _read_smoke_test_text()
-    assert "I_UNDERSTAND_THIS_CHANGES_BINANCE_LEVERAGE" in text
+    assert "I_UNDERSTAND_THIS_CHANGES_EXCHANGE_LEVERAGE" in text
 
 
 def test_smoke_test_contains_require_no_existing_position() -> None:

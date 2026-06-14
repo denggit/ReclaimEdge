@@ -413,6 +413,94 @@ class TestCalculateSafeQuantity:
             )
 
 
+class TestMinNotionalScenario:
+    """Real Binance ETHUSDT: minNotional=20, mark≈1680.80."""
+
+    def test_server_scenario_quantity_and_notional(self) -> None:
+        """Reproduce the server crash: minNotional=20 forces notional > target."""
+        filters = ExchangeInfoFilters(
+            min_qty=Decimal("0.001"),
+            step_size=Decimal("0.001"),
+            min_notional=Decimal("20"),
+        )
+        quantity, actual = calculate_safe_quantity(
+            mark_price=Decimal("1680.80"),
+            max_notional=Decimal("20"),
+            filters=filters,
+        )
+        assert quantity == Decimal("0.012")
+        assert actual == Decimal("20.16960")
+
+    def test_server_scenario_passes_calculated_cap(self) -> None:
+        """calculated_notional=20.16960 should pass with order_cap=25 and position_cap=25."""
+        filters = ExchangeInfoFilters(
+            min_qty=Decimal("0.001"),
+            step_size=Decimal("0.001"),
+            min_notional=Decimal("20"),
+        )
+        quantity, actual = calculate_safe_quantity(
+            mark_price=Decimal("1680.80"),
+            max_notional=Decimal("20"),
+            filters=filters,
+        )
+        require_calculated_notional_cap(
+            calculated_notional=actual,
+            preflight_max_order_notional=Decimal("25"),
+            preflight_max_position_notional=Decimal("25"),
+        )  # does not raise
+
+    def test_server_scenario_exits_when_position_cap_too_low(self) -> None:
+        """calculated_notional=20.16960 > position_cap=20 → exit."""
+        filters = ExchangeInfoFilters(
+            min_qty=Decimal("0.001"),
+            step_size=Decimal("0.001"),
+            min_notional=Decimal("20"),
+        )
+        quantity, actual = calculate_safe_quantity(
+            mark_price=Decimal("1680.80"),
+            max_notional=Decimal("20"),
+            filters=filters,
+        )
+        with pytest.raises(SystemExit) as exc_info:
+            require_calculated_notional_cap(
+                calculated_notional=actual,
+                preflight_max_order_notional=Decimal("25"),
+                preflight_max_position_notional=Decimal("20"),
+            )
+        assert exc_info.value.code == 1
+
+    def test_server_scenario_emits_warning(self, capsys) -> None:
+        """When actual > target, stderr should contain a warning."""
+        filters = ExchangeInfoFilters(
+            min_qty=Decimal("0.001"),
+            step_size=Decimal("0.001"),
+            min_notional=Decimal("20"),
+        )
+        calculate_safe_quantity(
+            mark_price=Decimal("1680.80"),
+            max_notional=Decimal("20"),
+            filters=filters,
+        )
+        captured = capsys.readouterr()
+        assert "WARNING" in captured.err
+        assert "above requested target" in captured.err
+
+    def test_no_warning_when_notional_within_target(self, capsys) -> None:
+        """When actual notional <= target, no warning should appear."""
+        filters = ExchangeInfoFilters(
+            min_qty=Decimal("0.001"),
+            step_size=Decimal("0.001"),
+            min_notional=Decimal("5"),
+        )
+        calculate_safe_quantity(
+            mark_price=Decimal("2000"),
+            max_notional=Decimal("20"),
+            filters=filters,
+        )
+        captured = capsys.readouterr()
+        assert "above requested target" not in captured.err
+
+
 # ---------------------------------------------------------------------------
 # Tests: _generate_client_order_id
 # ---------------------------------------------------------------------------
@@ -1568,8 +1656,11 @@ class TestConstants:
     def test_default_margin_buffer_multiplier_is_3(self) -> None:
         assert DEFAULT_MARGIN_BUFFER_MULTIPLIER == Decimal("3")
 
+    def test_default_max_notional_is_20(self) -> None:
+        assert DEFAULT_MAX_NOTIONAL == Decimal("20")
+
     def test_env_margin_buffer_multiplier_key(self) -> None:
-        assert ENV_MARGIN_BUFFER_MULTIPLIER == "BINANCE_LIVE_SMOKE_TEST_MARGIN_BUFFER_MULTIPLIER"
+        assert ENV_MARGIN_BUFFER_MULTIPLIER == "LIVE_SMOKE_TEST_MARGIN_BUFFER_MULTIPLIER"
 
 
 # ---------------------------------------------------------------------------

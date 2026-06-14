@@ -343,9 +343,9 @@ class TestBlockingMaxOrderNotional:
             {
                 "EXCHANGE": "binance",
                 "BINANCE_SIGNAL_ONLY": "false",
-                "BINANCE_LIVE_ENABLED": "true",
-                "BINANCE_LIVE_ALLOW_ORDERS": "true",
-                "BINANCE_LIVE_CONFIRMATION": BINANCE_LIVE_CONFIRMATION_PHRASE,
+                "LIVE_ENABLED": "true",
+                "LIVE_ALLOW_ORDERS": "true",
+                "LIVE_CONFIRMATION": BINANCE_LIVE_CONFIRMATION_PHRASE,
             }
         )
         assert "binance_live_max_order_notional_invalid" in report.blocking_reasons
@@ -355,23 +355,40 @@ class TestBlockingMaxOrderNotional:
             {
                 "EXCHANGE": "binance",
                 "BINANCE_SIGNAL_ONLY": "false",
-                "BINANCE_LIVE_ENABLED": "true",
-                "BINANCE_LIVE_ALLOW_ORDERS": "true",
-                "BINANCE_LIVE_CONFIRMATION": BINANCE_LIVE_CONFIRMATION_PHRASE,
-                "BINANCE_LIVE_MAX_ORDER_NOTIONAL_USDT": "15",
+                "LIVE_ENABLED": "true",
+                "LIVE_ALLOW_ORDERS": "true",
+                "LIVE_CONFIRMATION": BINANCE_LIVE_CONFIRMATION_PHRASE,
+                "LIVE_MAX_ORDER_NOTIONAL_USDT": "26",
             }
         )
         assert "binance_live_max_order_notional_invalid" in report.blocking_reasons
+
+    def test_at_hard_cap_valid(self) -> None:
+        """LIVE_MAX_ORDER_NOTIONAL_USDT=25 is valid (at the hard cap)."""
+        report = build_binance_live_preflight_report(
+            {
+                "EXCHANGE": "binance",
+                "BINANCE_SIGNAL_ONLY": "false",
+                "LIVE_ENABLED": "true",
+                "LIVE_ALLOW_ORDERS": "true",
+                "LIVE_CONFIRMATION": BINANCE_LIVE_CONFIRMATION_PHRASE,
+                "LIVE_MAX_ORDER_NOTIONAL_USDT": "25",
+                "LIVE_MAX_POSITION_NOTIONAL_USDT": "25",
+                "LIVE_LEVERAGE": "10",
+            },
+            orders_globally_enabled=True,
+        )
+        assert "binance_live_max_order_notional_invalid" not in report.blocking_reasons
 
     def test_zero_blocked(self) -> None:
         report = build_binance_live_preflight_report(
             {
                 "EXCHANGE": "binance",
                 "BINANCE_SIGNAL_ONLY": "false",
-                "BINANCE_LIVE_ENABLED": "true",
-                "BINANCE_LIVE_ALLOW_ORDERS": "true",
-                "BINANCE_LIVE_CONFIRMATION": BINANCE_LIVE_CONFIRMATION_PHRASE,
-                "BINANCE_LIVE_MAX_ORDER_NOTIONAL_USDT": "0",
+                "LIVE_ENABLED": "true",
+                "LIVE_ALLOW_ORDERS": "true",
+                "LIVE_CONFIRMATION": BINANCE_LIVE_CONFIRMATION_PHRASE,
+                "LIVE_MAX_ORDER_NOTIONAL_USDT": "0",
             }
         )
         assert "binance_live_max_order_notional_invalid" in report.blocking_reasons
@@ -381,10 +398,10 @@ class TestBlockingMaxOrderNotional:
             {
                 "EXCHANGE": "binance",
                 "BINANCE_SIGNAL_ONLY": "false",
-                "BINANCE_LIVE_ENABLED": "true",
-                "BINANCE_LIVE_ALLOW_ORDERS": "true",
-                "BINANCE_LIVE_CONFIRMATION": BINANCE_LIVE_CONFIRMATION_PHRASE,
-                "BINANCE_LIVE_MAX_ORDER_NOTIONAL_USDT": "-1",
+                "LIVE_ENABLED": "true",
+                "LIVE_ALLOW_ORDERS": "true",
+                "LIVE_CONFIRMATION": BINANCE_LIVE_CONFIRMATION_PHRASE,
+                "LIVE_MAX_ORDER_NOTIONAL_USDT": "-1",
             }
         )
         assert "binance_live_max_order_notional_invalid" in report.blocking_reasons
@@ -398,10 +415,10 @@ class TestBlockingMaxPositionNotional:
             {
                 "EXCHANGE": "binance",
                 "BINANCE_SIGNAL_ONLY": "false",
-                "BINANCE_LIVE_ENABLED": "true",
-                "BINANCE_LIVE_ALLOW_ORDERS": "true",
-                "BINANCE_LIVE_CONFIRMATION": BINANCE_LIVE_CONFIRMATION_PHRASE,
-                "BINANCE_LIVE_MAX_ORDER_NOTIONAL_USDT": "5",
+                "LIVE_ENABLED": "true",
+                "LIVE_ALLOW_ORDERS": "true",
+                "LIVE_CONFIRMATION": BINANCE_LIVE_CONFIRMATION_PHRASE,
+                "LIVE_MAX_ORDER_NOTIONAL_USDT": "5",
             }
         )
         assert "binance_live_max_position_notional_invalid" in report.blocking_reasons
@@ -411,14 +428,31 @@ class TestBlockingMaxPositionNotional:
             {
                 "EXCHANGE": "binance",
                 "BINANCE_SIGNAL_ONLY": "false",
-                "BINANCE_LIVE_ENABLED": "true",
-                "BINANCE_LIVE_ALLOW_ORDERS": "true",
-                "BINANCE_LIVE_CONFIRMATION": BINANCE_LIVE_CONFIRMATION_PHRASE,
-                "BINANCE_LIVE_MAX_ORDER_NOTIONAL_USDT": "5",
-                "BINANCE_LIVE_MAX_POSITION_NOTIONAL_USDT": "35",
+                "LIVE_ENABLED": "true",
+                "LIVE_ALLOW_ORDERS": "true",
+                "LIVE_CONFIRMATION": BINANCE_LIVE_CONFIRMATION_PHRASE,
+                "LIVE_MAX_ORDER_NOTIONAL_USDT": "5",
+                "LIVE_MAX_POSITION_NOTIONAL_USDT": "31",
             }
         )
         assert "binance_live_max_position_notional_invalid" in report.blocking_reasons
+
+    def test_at_hard_cap_valid(self) -> None:
+        """LIVE_MAX_POSITION_NOTIONAL_USDT=30 is valid (at hard cap)."""
+        report = build_binance_live_preflight_report(
+            {
+                "EXCHANGE": "binance",
+                "BINANCE_SIGNAL_ONLY": "false",
+                "LIVE_ENABLED": "true",
+                "LIVE_ALLOW_ORDERS": "true",
+                "LIVE_CONFIRMATION": BINANCE_LIVE_CONFIRMATION_PHRASE,
+                "LIVE_MAX_ORDER_NOTIONAL_USDT": "25",
+                "LIVE_MAX_POSITION_NOTIONAL_USDT": "30",
+                "LIVE_LEVERAGE": "10",
+            },
+            orders_globally_enabled=True,
+        )
+        assert report.ok is True
 
 
 class TestBlockingLeverage:
@@ -429,11 +463,11 @@ class TestBlockingLeverage:
             {
                 "EXCHANGE": "binance",
                 "BINANCE_SIGNAL_ONLY": "false",
-                "BINANCE_LIVE_ENABLED": "true",
-                "BINANCE_LIVE_ALLOW_ORDERS": "true",
-                "BINANCE_LIVE_CONFIRMATION": BINANCE_LIVE_CONFIRMATION_PHRASE,
-                "BINANCE_LIVE_MAX_ORDER_NOTIONAL_USDT": "5",
-                "BINANCE_LIVE_MAX_POSITION_NOTIONAL_USDT": "20",
+                "LIVE_ENABLED": "true",
+                "LIVE_ALLOW_ORDERS": "true",
+                "LIVE_CONFIRMATION": BINANCE_LIVE_CONFIRMATION_PHRASE,
+                "LIVE_MAX_ORDER_NOTIONAL_USDT": "5",
+                "LIVE_MAX_POSITION_NOTIONAL_USDT": "20",
             }
         )
         assert "binance_live_leverage_invalid" in report.blocking_reasons
@@ -443,27 +477,44 @@ class TestBlockingLeverage:
             {
                 "EXCHANGE": "binance",
                 "BINANCE_SIGNAL_ONLY": "false",
-                "BINANCE_LIVE_ENABLED": "true",
-                "BINANCE_LIVE_ALLOW_ORDERS": "true",
-                "BINANCE_LIVE_CONFIRMATION": BINANCE_LIVE_CONFIRMATION_PHRASE,
-                "BINANCE_LIVE_MAX_ORDER_NOTIONAL_USDT": "5",
-                "BINANCE_LIVE_MAX_POSITION_NOTIONAL_USDT": "20",
-                "BINANCE_LIVE_LEVERAGE": "25",
+                "LIVE_ENABLED": "true",
+                "LIVE_ALLOW_ORDERS": "true",
+                "LIVE_CONFIRMATION": BINANCE_LIVE_CONFIRMATION_PHRASE,
+                "LIVE_MAX_ORDER_NOTIONAL_USDT": "5",
+                "LIVE_MAX_POSITION_NOTIONAL_USDT": "20",
+                "LIVE_LEVERAGE": "21",
             }
         )
         assert "binance_live_leverage_invalid" in report.blocking_reasons
+
+    def test_at_hard_cap_valid(self) -> None:
+        """LIVE_LEVERAGE=20 is valid (at hard cap)."""
+        report = build_binance_live_preflight_report(
+            {
+                "EXCHANGE": "binance",
+                "BINANCE_SIGNAL_ONLY": "false",
+                "LIVE_ENABLED": "true",
+                "LIVE_ALLOW_ORDERS": "true",
+                "LIVE_CONFIRMATION": BINANCE_LIVE_CONFIRMATION_PHRASE,
+                "LIVE_MAX_ORDER_NOTIONAL_USDT": "25",
+                "LIVE_MAX_POSITION_NOTIONAL_USDT": "25",
+                "LIVE_LEVERAGE": "20",
+            },
+            orders_globally_enabled=True,
+        )
+        assert report.ok is True
 
     def test_zero_blocked(self) -> None:
         report = build_binance_live_preflight_report(
             {
                 "EXCHANGE": "binance",
                 "BINANCE_SIGNAL_ONLY": "false",
-                "BINANCE_LIVE_ENABLED": "true",
-                "BINANCE_LIVE_ALLOW_ORDERS": "true",
-                "BINANCE_LIVE_CONFIRMATION": BINANCE_LIVE_CONFIRMATION_PHRASE,
-                "BINANCE_LIVE_MAX_ORDER_NOTIONAL_USDT": "5",
-                "BINANCE_LIVE_MAX_POSITION_NOTIONAL_USDT": "20",
-                "BINANCE_LIVE_LEVERAGE": "0",
+                "LIVE_ENABLED": "true",
+                "LIVE_ALLOW_ORDERS": "true",
+                "LIVE_CONFIRMATION": BINANCE_LIVE_CONFIRMATION_PHRASE,
+                "LIVE_MAX_ORDER_NOTIONAL_USDT": "5",
+                "LIVE_MAX_POSITION_NOTIONAL_USDT": "20",
+                "LIVE_LEVERAGE": "0",
             }
         )
         assert "binance_live_leverage_invalid" in report.blocking_reasons
@@ -473,12 +524,12 @@ class TestBlockingLeverage:
             {
                 "EXCHANGE": "binance",
                 "BINANCE_SIGNAL_ONLY": "false",
-                "BINANCE_LIVE_ENABLED": "true",
-                "BINANCE_LIVE_ALLOW_ORDERS": "true",
-                "BINANCE_LIVE_CONFIRMATION": BINANCE_LIVE_CONFIRMATION_PHRASE,
-                "BINANCE_LIVE_MAX_ORDER_NOTIONAL_USDT": "5",
-                "BINANCE_LIVE_MAX_POSITION_NOTIONAL_USDT": "20",
-                "BINANCE_LIVE_LEVERAGE": "-1",
+                "LIVE_ENABLED": "true",
+                "LIVE_ALLOW_ORDERS": "true",
+                "LIVE_CONFIRMATION": BINANCE_LIVE_CONFIRMATION_PHRASE,
+                "LIVE_MAX_ORDER_NOTIONAL_USDT": "5",
+                "LIVE_MAX_POSITION_NOTIONAL_USDT": "20",
+                "LIVE_LEVERAGE": "-1",
             }
         )
         assert "binance_live_leverage_invalid" in report.blocking_reasons
@@ -560,7 +611,7 @@ class TestMessageFormatting:
             {"EXCHANGE": "binance", "BINANCE_SIGNAL_ONLY": "false"},
         )
         msg = format_binance_live_blocked_message(report)
-        assert "BINANCE_SIGNAL_ONLY=true" in msg
+        assert "SIGNAL_ONLY=true" in msg
 
     def test_contains_blocking_reasons(self) -> None:
         report = build_binance_live_preflight_report(
@@ -602,3 +653,93 @@ class TestMessageFormatting:
         # The confirmation phrase itself should not appear verbatim in the
         # blocked message — that would leak the required secret phrase.
         assert BINANCE_LIVE_CONFIRMATION_PHRASE not in msg
+
+
+# ======================================================================
+# Exchange-neutral env var naming (20C-4C-MIN-NOTIONAL-FIX)
+# ======================================================================
+
+
+class TestEnvVarDualNames:
+    """Dual-name env var reading: LIVE_* (primary) with BINANCE_* alias."""
+
+    def test_only_generic_name_works(self) -> None:
+        """Only LIVE_* env vars set → valid."""
+        report = build_binance_live_preflight_report(
+            {
+                "EXCHANGE": "binance",
+                "BINANCE_SIGNAL_ONLY": "false",
+                "LIVE_ENABLED": "true",
+                "LIVE_ALLOW_ORDERS": "true",
+                "LIVE_CONFIRMATION": BINANCE_LIVE_CONFIRMATION_PHRASE,
+                "LIVE_MAX_ORDER_NOTIONAL_USDT": "25",
+                "LIVE_MAX_POSITION_NOTIONAL_USDT": "25",
+                "LIVE_LEVERAGE": "10",
+            },
+            orders_globally_enabled=True,
+        )
+        assert report.ok is True
+
+    def test_only_binance_alias_works(self) -> None:
+        """Only BINANCE_* env vars set (no LIVE_*) → valid (backward compat)."""
+        report = build_binance_live_preflight_report(
+            {
+                "EXCHANGE": "binance",
+                "BINANCE_SIGNAL_ONLY": "false",
+                "BINANCE_LIVE_ENABLED": "true",
+                "BINANCE_LIVE_ALLOW_ORDERS": "true",
+                "BINANCE_LIVE_CONFIRMATION": BINANCE_LIVE_CONFIRMATION_PHRASE,
+                "BINANCE_LIVE_MAX_ORDER_NOTIONAL_USDT": "25",
+                "BINANCE_LIVE_MAX_POSITION_NOTIONAL_USDT": "25",
+                "BINANCE_LIVE_LEVERAGE": "10",
+            },
+            orders_globally_enabled=True,
+        )
+        assert report.ok is True
+
+    def test_both_same_works(self) -> None:
+        """Both LIVE_* and BINANCE_* set to the same values → valid."""
+        report = build_binance_live_preflight_report(
+            {
+                "EXCHANGE": "binance",
+                "BINANCE_SIGNAL_ONLY": "false",
+                "LIVE_ENABLED": "true",
+                "BINANCE_LIVE_ENABLED": "true",
+                "LIVE_ALLOW_ORDERS": "true",
+                "BINANCE_LIVE_ALLOW_ORDERS": "true",
+                "LIVE_CONFIRMATION": BINANCE_LIVE_CONFIRMATION_PHRASE,
+                "BINANCE_LIVE_CONFIRMATION": BINANCE_LIVE_CONFIRMATION_PHRASE,
+                "LIVE_MAX_ORDER_NOTIONAL_USDT": "25",
+                "BINANCE_LIVE_MAX_ORDER_NOTIONAL_USDT": "25",
+                "LIVE_MAX_POSITION_NOTIONAL_USDT": "25",
+                "BINANCE_LIVE_MAX_POSITION_NOTIONAL_USDT": "25",
+                "LIVE_LEVERAGE": "10",
+                "BINANCE_LIVE_LEVERAGE": "10",
+            },
+            orders_globally_enabled=True,
+        )
+        assert report.ok is True
+
+    def test_conflict_blocked(self) -> None:
+        """LIVE_* and BINANCE_* set to different values → blocked."""
+        report = build_binance_live_preflight_report(
+            {
+                "EXCHANGE": "binance",
+                "BINANCE_SIGNAL_ONLY": "false",
+                "LIVE_ENABLED": "true",
+                "BINANCE_LIVE_ENABLED": "false",
+                "LIVE_ALLOW_ORDERS": "true",
+                "BINANCE_LIVE_ALLOW_ORDERS": "true",
+                "LIVE_CONFIRMATION": BINANCE_LIVE_CONFIRMATION_PHRASE,
+                "BINANCE_LIVE_CONFIRMATION": BINANCE_LIVE_CONFIRMATION_PHRASE,
+                "LIVE_MAX_ORDER_NOTIONAL_USDT": "25",
+                "BINANCE_LIVE_MAX_ORDER_NOTIONAL_USDT": "25",
+                "LIVE_MAX_POSITION_NOTIONAL_USDT": "25",
+                "BINANCE_LIVE_MAX_POSITION_NOTIONAL_USDT": "25",
+                "LIVE_LEVERAGE": "10",
+                "BINANCE_LIVE_LEVERAGE": "10",
+            },
+            orders_globally_enabled=True,
+        )
+        assert report.ok is False
+        assert "live_env_var_conflict" in report.blocking_reasons
