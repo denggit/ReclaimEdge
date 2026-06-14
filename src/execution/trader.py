@@ -118,7 +118,11 @@ class Trader:
         self.trading_client: TradingClientPort = OkxTradingClient(self)
 
         if not self.api_key or not self.secret_key or not self.passphrase:
-            raise ValueError("OKX API config is incomplete. Check OKX_API_KEY, OKX_SECRET_KEY, OKX_PASSPHASE.")
+            raise ValueError(
+                "OKX API config is incomplete. "
+                "Check EXCHANGE_API_KEY/EXCHANGE_API_SECRET/EXCHANGE_API_PASSPHRASE "
+                "or legacy OKX_API_KEY/OKX_SECRET_KEY/OKX_PASSPHASE."
+            )
         if not self.live_trading:
             raise RuntimeError("LIVE_TRADING is not true. Refusing to initialize live trader.")
 

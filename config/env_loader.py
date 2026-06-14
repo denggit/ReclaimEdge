@@ -51,6 +51,9 @@ def load_env_config() -> dict:
 
                 config[key] = value
 
+    # os.environ 覆盖 .env 文件同名 key（生产部署可能使用 shell/systemd env）
+    config.update({key: value for key, value in os.environ.items()})
+
     return config
 
 
@@ -73,14 +76,33 @@ def get_okx_config() -> dict:
     """
     获取 OKX 配置。
 
+    优先级（统一凭证 > 交易所专属 fallback）：
+        EXCHANGE_API_KEY      > OKX_API_KEY
+        EXCHANGE_API_SECRET   > OKX_SECRET_KEY   > OKX_API_SECRET
+        EXCHANGE_API_PASSPHRASE > OKX_PASSPHASE   > OKX_PASSPHRASE
+
     Returns:
         dict: 包含 API key, secret, passphrase 的字典
     """
     config = load_env_config()
     return {
-        'api_key': config.get('OKX_API_KEY', ''),
-        'secret_key': config.get('OKX_SECRET_KEY', ''),
-        'passphrase': config.get('OKX_PASSPHASE', ''),
+        "api_key": (
+            config.get("EXCHANGE_API_KEY")
+            or config.get("OKX_API_KEY")
+            or ""
+        ),
+        "secret_key": (
+            config.get("EXCHANGE_API_SECRET")
+            or config.get("OKX_SECRET_KEY")
+            or config.get("OKX_API_SECRET")
+            or ""
+        ),
+        "passphrase": (
+            config.get("EXCHANGE_API_PASSPHRASE")
+            or config.get("OKX_PASSPHASE")
+            or config.get("OKX_PASSPHRASE")
+            or ""
+        ),
     }
 
 
