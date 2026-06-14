@@ -7,7 +7,7 @@ from _pytest.logging import LogCaptureFixture
 
 from src.execution.tp_sl_market_exit_manager import MarketExitManager
 from src.execution.trader import PositionSnapshot
-from src.execution.trading_client_port import OrderResult
+from src.execution.trading_client_port import OrderResult, PositionSnapshot as PortPositionSnapshot
 
 
 class FakeTradingClient:
@@ -17,6 +17,12 @@ class FakeTradingClient:
         self.market_calls: list[dict] = []
         self.next_order_id: str | None = "fake-market-exit-1"
         self._raise_on_place: Exception | None = None
+        self.position_sequence: list[PortPositionSnapshot] = []
+
+    async def fetch_position(self) -> PortPositionSnapshot:
+        if self.position_sequence:
+            return self.position_sequence.pop(0)
+        return PortPositionSnapshot(side=None, qty=Decimal("0"), avg_entry_price=None, raw={})
 
     async def place_market_order(self, *, side, qty, reduce_only, client_order_id):
         if self._raise_on_place:
@@ -116,6 +122,9 @@ async def test_market_exit_context_in_logs(caplog: LogCaptureFixture) -> None:
     """market_exit logs should contain context and MARKET_EXIT_* prefix, not NEAR_TP_MARKET_EXIT_*."""
     trader = FakeTrader()
     trader._position_was_flat = True
+    trader.trading_client.position_sequence = [
+        PortPositionSnapshot(side=None, qty=Decimal("0"), avg_entry_price=None, raw={}),
+    ]
     mgr = MarketExitManager(trader, trader.trading_client)
 
     with caplog.at_level("WARNING"):
@@ -138,6 +147,13 @@ async def test_market_exit_with_retry_interval(caplog: LogCaptureFixture) -> Non
     """market_exit should accept retry_interval_seconds and delay between retries."""
     trader = FakeTrader()
     trader._not_flat_after_order = True
+    # Each retry needs 2 position reads (initial + refreshed); retry_count=2
+    trader.trading_client.position_sequence = [
+        PortPositionSnapshot(side="LONG", qty=Decimal("1"), avg_entry_price=Decimal("3000"), raw={}),
+        PortPositionSnapshot(side="LONG", qty=Decimal("1"), avg_entry_price=Decimal("3000"), raw={}),
+        PortPositionSnapshot(side="LONG", qty=Decimal("1"), avg_entry_price=Decimal("3000"), raw={}),
+        PortPositionSnapshot(side="LONG", qty=Decimal("1"), avg_entry_price=Decimal("3000"), raw={}),
+    ]
     mgr = MarketExitManager(trader, trader.trading_client)
 
     with caplog.at_level("ERROR"):
@@ -163,6 +179,9 @@ async def test_market_exit_default_context() -> None:
     """market_exit with no context defaults to 'generic'."""
     trader = FakeTrader()
     trader._position_was_flat = True
+    trader.trading_client.position_sequence = [
+        PortPositionSnapshot(side=None, qty=Decimal("0"), avg_entry_price=None, raw={}),
+    ]
     mgr = MarketExitManager(trader, trader.trading_client)
     ok, msg = await mgr.market_exit_remaining_position_with_retries("LONG", 1)
     assert ok is True
@@ -188,6 +207,11 @@ async def test_market_exit_request_exception_logs_context(caplog: LogCaptureFixt
     """When trading_client raises, log should contain context."""
     trader = FakeTrader()
     trader.trading_client._raise_on_place = RuntimeError("50011: Rate limit reached")
+    # Each retry needs 1 initial position read; place_market_order raises, no refresh
+    trader.trading_client.position_sequence = [
+        PortPositionSnapshot(side="LONG", qty=Decimal("1"), avg_entry_price=Decimal("3000"), raw={}),
+        PortPositionSnapshot(side="LONG", qty=Decimal("1"), avg_entry_price=Decimal("3000"), raw={}),
+    ]
     mgr = MarketExitManager(trader, trader.trading_client)
 
     with caplog.at_level("ERROR"):

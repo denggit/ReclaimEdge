@@ -19,6 +19,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from src.execution.trading_client_port import OrderResult
+from src.execution.trading_client_port import PositionSnapshot as PortPositionSnapshot
 
 # ======================================================================
 # Fake Trading Client
@@ -32,6 +33,12 @@ class FakeTradingClient:
     def __init__(self):
         self.market_calls: list[dict[str, Any]] = []
         self.next_order_id: str | None = "reduce-only-market-1"
+        self.position_sequence: list[PortPositionSnapshot] = []
+
+    async def fetch_position(self) -> PortPositionSnapshot:
+        if self.position_sequence:
+            return self.position_sequence.pop(0)
+        return PortPositionSnapshot(side=None, qty=Decimal("0"), avg_entry_price=None, raw={})
 
     async def place_market_order(self, *, side, qty, reduce_only, client_order_id):
         self.market_calls.append({
@@ -105,7 +112,6 @@ class TestMarketExitManagerRoutesThroughTradingClientPort:
     async def test_market_exit_calls_place_market_order_with_reduce_only(self):
         """Market exit non-semantic path calls place_market_order(reduce_only=True)."""
         from src.execution.tp_sl_market_exit_manager import MarketExitManager
-        from src.execution.trader import PositionSnapshot
 
         fake_tc = FakeTradingClient()
 
@@ -127,11 +133,11 @@ class TestMarketExitManagerRoutesThroughTradingClientPort:
         )
         trader.price_to_str = lambda v: f"{v:.2f}"
 
-        # Position snapshot: has position, then flat after order
-        trader.fetch_position_snapshot = AsyncMock(side_effect=[
-            PositionSnapshot("LONG", Decimal("10"), 3000.0, 1.0, Decimal("10")),
-            PositionSnapshot(None, Decimal("0"), 0.0, 0.0, Decimal("0")),
-        ])
+        # Position data through trading_client (both initial + refreshed)
+        fake_tc.position_sequence = [
+            PortPositionSnapshot(side="LONG", qty=Decimal("10"), avg_entry_price=Decimal("3000"), raw={}),
+            PortPositionSnapshot(side=None, qty=Decimal("0"), avg_entry_price=None, raw={}),
+        ]
 
         # Cleanup mocks
         trader.cancel_existing_reduce_only_orders = AsyncMock()
@@ -165,7 +171,6 @@ class TestMarketExitManagerRoutesThroughTradingClientPort:
     async def test_market_exit_no_direct_order_request(self):
         """Market exit must not call request('POST', '/api/v5/trade/order') directly."""
         from src.execution.tp_sl_market_exit_manager import MarketExitManager
-        from src.execution.trader import PositionSnapshot
 
         fake_tc = FakeTradingClient()
 
@@ -186,10 +191,10 @@ class TestMarketExitManagerRoutesThroughTradingClientPort:
         )
         trader.price_to_str = lambda v: f"{v:.2f}"
 
-        trader.fetch_position_snapshot = AsyncMock(side_effect=[
-            PositionSnapshot("LONG", Decimal("10"), 3000.0, 1.0, Decimal("10")),
-            PositionSnapshot(None, Decimal("0"), 0.0, 0.0, Decimal("0")),
-        ])
+        fake_tc.position_sequence = [
+            PortPositionSnapshot(side="LONG", qty=Decimal("10"), avg_entry_price=Decimal("3000"), raw={}),
+            PortPositionSnapshot(side=None, qty=Decimal("0"), avg_entry_price=None, raw={}),
+        ]
         trader.cancel_existing_reduce_only_orders = AsyncMock()
         trader.cancel_near_tp_protective_stop = AsyncMock()
         trader.cancel_middle_runner_protective_stop = AsyncMock()
@@ -225,7 +230,6 @@ class TestMarketExitManagerRoutesThroughTradingClientPort:
     async def test_market_exit_short_side(self):
         """Market exit for SHORT side routes with correct side arg."""
         from src.execution.tp_sl_market_exit_manager import MarketExitManager
-        from src.execution.trader import PositionSnapshot
 
         fake_tc = FakeTradingClient()
 
@@ -246,10 +250,10 @@ class TestMarketExitManagerRoutesThroughTradingClientPort:
         )
         trader.price_to_str = lambda v: f"{v:.2f}"
 
-        trader.fetch_position_snapshot = AsyncMock(side_effect=[
-            PositionSnapshot("SHORT", Decimal("5"), 3000.0, 0.5, Decimal("5")),
-            PositionSnapshot(None, Decimal("0"), 0.0, 0.0, Decimal("0")),
-        ])
+        fake_tc.position_sequence = [
+            PortPositionSnapshot(side="SHORT", qty=Decimal("5"), avg_entry_price=Decimal("3000"), raw={}),
+            PortPositionSnapshot(side=None, qty=Decimal("0"), avg_entry_price=None, raw={}),
+        ]
         trader.cancel_existing_reduce_only_orders = AsyncMock()
         trader.cancel_near_tp_protective_stop = AsyncMock()
         trader.cancel_middle_runner_protective_stop = AsyncMock()
@@ -288,7 +292,6 @@ class TestMarketExitManagerMissingOrderId:
         """When place_market_order returns order_id=None, the retry loop
         catches the RuntimeError and returns (False, error_message)."""
         from src.execution.tp_sl_market_exit_manager import MarketExitManager
-        from src.execution.trader import PositionSnapshot
 
         fake_tc = FakeTradingClient()
         fake_tc.next_order_id = None  # simulate missing ID
@@ -309,9 +312,9 @@ class TestMarketExitManagerMissingOrderId:
             Decimal(str(v)).normalize(), "f"
         )
         trader.price_to_str = lambda v: f"{v:.2f}"
-        trader.fetch_position_snapshot = AsyncMock(return_value=PositionSnapshot(
-            "LONG", Decimal("10"), 3000.0, 1.0, Decimal("10"),
-        ))
+        fake_tc.position_sequence = [
+            PortPositionSnapshot(side="LONG", qty=Decimal("10"), avg_entry_price=Decimal("3000"), raw={}),
+        ]
         trader.broker_semantic_executor = None
 
         with patch.object(MarketExitManager, "_broker_semantic_market_exit_enabled",
@@ -362,7 +365,12 @@ class TestNearTpReduceRoutesThroughTradingClientPort:
         trader.price_to_str = lambda v: f"{v:.2f}"
         trader.round_contracts_down = lambda v: v  # identity for testing
 
-        # Position snapshot: has position, then reduced after order
+        # Position for initial read through trading_client
+        fake_tc.position_sequence = [
+            PortPositionSnapshot(side="LONG", qty=Decimal("10"), avg_entry_price=Decimal("3000"), raw={}),
+        ]
+
+        # Position snapshot for refresh after order
         trader.fetch_position_snapshot = AsyncMock(return_value=PositionSnapshot(
             "LONG", Decimal("10"), 3000.0, 1.0, Decimal("10"),
         ))
@@ -431,6 +439,11 @@ class TestNearTpReduceRoutesThroughTradingClientPort:
         trader.price_to_str = lambda v: f"{v:.2f}"
         trader.round_contracts_down = lambda v: v
 
+        # Position for initial read through trading_client
+        fake_tc.position_sequence = [
+            PortPositionSnapshot(side="LONG", qty=Decimal("10"), avg_entry_price=Decimal("3000"), raw={}),
+        ]
+
         trader.fetch_position_snapshot = AsyncMock(return_value=PositionSnapshot(
             "LONG", Decimal("10"), 3000.0, 1.0, Decimal("10"),
         ))
@@ -498,6 +511,11 @@ class TestNearTpReduceRoutesThroughTradingClientPort:
         )
         trader.price_to_str = lambda v: f"{v:.2f}"
         trader.round_contracts_down = lambda v: v
+
+        # Position for initial read through trading_client
+        fake_tc.position_sequence = [
+            PortPositionSnapshot(side="SHORT", qty=Decimal("10"), avg_entry_price=Decimal("3000"), raw={}),
+        ]
 
         trader.fetch_position_snapshot = AsyncMock(return_value=PositionSnapshot(
             "SHORT", Decimal("10"), 3000.0, 1.0, Decimal("10"),
@@ -568,9 +586,10 @@ class TestNearTpReduceMissingOrderId:
         trader.price_to_str = lambda v: f"{v:.2f}"
         trader.round_contracts_down = lambda v: v
 
-        trader.fetch_position_snapshot = AsyncMock(return_value=PositionSnapshot(
-            "LONG", Decimal("10"), 3000.0, 1.0, Decimal("10"),
-        ))
+        # Position for initial read through trading_client
+        fake_tc.position_sequence = [
+            PortPositionSnapshot(side="LONG", qty=Decimal("10"), avg_entry_price=Decimal("3000"), raw={}),
+        ]
 
         intent = _make_near_tp_reduce_intent(side="LONG", near_tp_reduce_ratio=0.5)
 

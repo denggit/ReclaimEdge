@@ -15,12 +15,21 @@ from src.exchanges.semantic_models import (
 )
 
 
+from src.execution.trading_client_port import PositionSnapshot as PortPositionSnapshot
+
+
 class FakeTradingClient:
     """A fake trading client that records market order calls."""
 
     def __init__(self):
         self.market_calls: list[dict] = []
         self.next_order_id: str | None = "fake-market-exit-1"
+        self.position_sequence: list[PortPositionSnapshot] = []
+
+    async def fetch_position(self) -> PortPositionSnapshot:
+        if self.position_sequence:
+            return self.position_sequence.pop(0)
+        return PortPositionSnapshot(side=None, qty=Decimal("0"), avg_entry_price=None, raw={})
 
     async def place_market_order(self, *, side, qty, reduce_only, client_order_id):
         self.market_calls.append({
@@ -42,6 +51,8 @@ class FakePositionSnapshot:
         self.has_position = has_position
         self.side = side
         self.contracts = contracts
+        self.qty = contracts
+        self.avg_entry_price = None
 
 
 class FakeSemanticExecutor:
@@ -156,9 +167,9 @@ class FakeTrader:
 async def test_market_exit_defaults_to_legacy_market_order(monkeypatch) -> None:
     monkeypatch.delenv("BROKER_SEMANTIC_MARKET_EXIT_ENABLED", raising=False)
     trader = FakeTrader()
-    trader.snapshots = [
-        FakePositionSnapshot(has_position=True, side="LONG", contracts=Decimal("10")),
-        FakePositionSnapshot(has_position=False, side=None, contracts=Decimal("0")),
+    trader.trading_client.position_sequence = [
+        PortPositionSnapshot(side="LONG", qty=Decimal("10"), avg_entry_price=None, raw={}),
+        PortPositionSnapshot(side=None, qty=Decimal("0"), avg_entry_price=None, raw={}),
     ]
     manager = MarketExitManager(trader, trader.trading_client)
 
@@ -185,9 +196,9 @@ async def test_market_exit_defaults_to_legacy_market_order(monkeypatch) -> None:
 async def test_market_exit_uses_semantic_executor_when_enabled(monkeypatch) -> None:
     monkeypatch.setenv("BROKER_SEMANTIC_MARKET_EXIT_ENABLED", "true")
     trader = FakeTrader()
-    trader.snapshots = [
-        FakePositionSnapshot(has_position=True, side="LONG", contracts=Decimal("10")),
-        FakePositionSnapshot(has_position=False, side=None, contracts=Decimal("0")),
+    trader.trading_client.position_sequence = [
+        PortPositionSnapshot(side="LONG", qty=Decimal("10"), avg_entry_price=None, raw={}),
+        PortPositionSnapshot(side=None, qty=Decimal("0"), avg_entry_price=None, raw={}),
     ]
     manager = MarketExitManager(trader, trader.trading_client)
     context = "semantic-enabled"
@@ -216,9 +227,9 @@ async def test_market_exit_uses_semantic_executor_when_enabled(monkeypatch) -> N
 async def test_market_exit_runner_context_uses_runner_semantic_action(monkeypatch) -> None:
     monkeypatch.setenv("BROKER_SEMANTIC_MARKET_EXIT_ENABLED", "true")
     trader = FakeTrader()
-    trader.snapshots = [
-        FakePositionSnapshot(has_position=True, side="LONG", contracts=Decimal("10")),
-        FakePositionSnapshot(has_position=False, side=None, contracts=Decimal("0")),
+    trader.trading_client.position_sequence = [
+        PortPositionSnapshot(side="LONG", qty=Decimal("10"), avg_entry_price=None, raw={}),
+        PortPositionSnapshot(side=None, qty=Decimal("0"), avg_entry_price=None, raw={}),
     ]
     manager = MarketExitManager(trader, trader.trading_client)
 
@@ -244,9 +255,9 @@ async def test_market_exit_runner_context_uses_runner_semantic_action(monkeypatc
 async def test_market_exit_semantic_maps_short_side(monkeypatch) -> None:
     monkeypatch.setenv("BROKER_SEMANTIC_MARKET_EXIT_ENABLED", "true")
     trader = FakeTrader()
-    trader.snapshots = [
-        FakePositionSnapshot(has_position=True, side="SHORT", contracts=Decimal("10")),
-        FakePositionSnapshot(has_position=False, side=None, contracts=Decimal("0")),
+    trader.trading_client.position_sequence = [
+        PortPositionSnapshot(side="SHORT", qty=Decimal("10"), avg_entry_price=None, raw={}),
+        PortPositionSnapshot(side=None, qty=Decimal("0"), avg_entry_price=None, raw={}),
     ]
     manager = MarketExitManager(trader, trader.trading_client)
 
@@ -264,8 +275,8 @@ async def test_market_exit_semantic_maps_short_side(monkeypatch) -> None:
 async def test_market_exit_already_flat_does_not_place_order(monkeypatch) -> None:
     monkeypatch.setenv("BROKER_SEMANTIC_MARKET_EXIT_ENABLED", "true")
     trader = FakeTrader()
-    trader.snapshots = [
-        FakePositionSnapshot(has_position=False, side=None, contracts=Decimal("0")),
+    trader.trading_client.position_sequence = [
+        PortPositionSnapshot(side=None, qty=Decimal("0"), avg_entry_price=None, raw={}),
     ]
     manager = MarketExitManager(trader, trader.trading_client)
 
@@ -286,8 +297,8 @@ async def test_market_exit_already_flat_does_not_place_order(monkeypatch) -> Non
 async def test_market_exit_target_side_absent_does_not_place_order(monkeypatch) -> None:
     monkeypatch.setenv("BROKER_SEMANTIC_MARKET_EXIT_ENABLED", "true")
     trader = FakeTrader()
-    trader.snapshots = [
-        FakePositionSnapshot(has_position=True, side="SHORT", contracts=Decimal("10")),
+    trader.trading_client.position_sequence = [
+        PortPositionSnapshot(side="SHORT", qty=Decimal("10"), avg_entry_price=None, raw={}),
     ]
     manager = MarketExitManager(trader, trader.trading_client)
 
@@ -310,8 +321,8 @@ async def test_market_exit_semantic_failure_does_not_fallback_legacy(monkeypatch
     trader = FakeTrader()
     trader.semantic.ok = False
     trader.semantic.message = "boom"
-    trader.snapshots = [
-        FakePositionSnapshot(has_position=True, side="LONG", contracts=Decimal("10")),
+    trader.trading_client.position_sequence = [
+        PortPositionSnapshot(side="LONG", qty=Decimal("10"), avg_entry_price=None, raw={}),
     ]
     manager = MarketExitManager(trader, trader.trading_client)
 

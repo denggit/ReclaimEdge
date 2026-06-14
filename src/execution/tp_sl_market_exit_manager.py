@@ -84,8 +84,8 @@ class MarketExitManager:
             if attempt > 1 and retry_interval_seconds is not None and retry_interval_seconds > 0:
                 await asyncio.sleep(retry_interval_seconds)
             try:
-                position = await t.fetch_position_snapshot()
-                if not position.has_position or position.contracts <= 0:
+                position = await self.trading_client.fetch_position()
+                if not position.has_position or position.qty <= 0:
                     t.position_contracts = Decimal("0")
                     await self.trader._cleanup_after_market_exit()
                     logger.warning(
@@ -103,12 +103,12 @@ class MarketExitManager:
                         side,
                         side,
                         position.side,
-                        t.decimal_to_str(position.contracts),
+                        t.decimal_to_str(position.qty),
                     )
                     return True, "target_side_absent"
-                if Decimal("0") < position.contracts < t.min_contracts:
+                if Decimal("0") < position.qty < t.min_contracts:
                     last_error = (
-                        f"dust_position_below_min_contracts contracts={t.decimal_to_str(position.contracts)} "
+                        f"dust_position_below_min_contracts contracts={t.decimal_to_str(position.qty)} "
                         f"min_contracts={t.decimal_to_str(t.min_contracts)}"
                     )
                     logger.error(
@@ -122,28 +122,28 @@ class MarketExitManager:
                 if self._broker_semantic_market_exit_enabled():
                     order_id = await self._place_market_exit_order_semantic(
                         side=side,
-                        contracts=position.contracts,
+                        contracts=position.qty,
                         context=context,
                     )
                 else:
                     result = await self.trading_client.place_market_order(
                         side=side,
-                        qty=position.contracts,
+                        qty=position.qty,
                         reduce_only=True,
                         client_order_id="",
                     )
                     order_id = result.order_id
                     if order_id is None:
                         raise RuntimeError("reduce_only_market_exit_missing_order_id")
-                refreshed = await t.fetch_position_snapshot()
-                if not refreshed.has_position or refreshed.contracts <= 0:
+                refreshed = await self.trading_client.fetch_position()
+                if not refreshed.has_position or refreshed.qty <= 0:
                     t.position_contracts = Decimal("0")
                     await self.trader._cleanup_after_market_exit()
                     logger.warning(
                         "MARKET_EXIT_SUCCESS | context=%s side=%s contracts=%s ordId=%s attempt=%s/%s",
                         context,
                         side,
-                        t.decimal_to_str(position.contracts),
+                        t.decimal_to_str(position.qty),
                         order_id,
                         attempt,
                         retry_count,
@@ -162,9 +162,9 @@ class MarketExitManager:
                         retry_count,
                     )
                     return True, f"market_exit_order_id={order_id};target_side_absent_after_order"
-                if Decimal("0") < refreshed.contracts < t.min_contracts:
+                if Decimal("0") < refreshed.qty < t.min_contracts:
                     last_error = (
-                        f"dust_position_below_min_contracts_after_order contracts={t.decimal_to_str(refreshed.contracts)} "
+                        f"dust_position_below_min_contracts_after_order contracts={t.decimal_to_str(refreshed.qty)} "
                         f"min_contracts={t.decimal_to_str(t.min_contracts)}"
                     )
                     logger.error(
@@ -178,15 +178,15 @@ class MarketExitManager:
                     )
                     return False, last_error
 
-                t.position_contracts = refreshed.contracts
-                last_error = f"market_exit_not_flat_after_order contracts={t.decimal_to_str(refreshed.contracts)}"
+                t.position_contracts = refreshed.qty
+                last_error = f"market_exit_not_flat_after_order contracts={t.decimal_to_str(refreshed.qty)}"
                 logger.error(
                     "MARKET_EXIT_FAILED | context=%s side=%s reason=not_flat_after_order attempt=%s/%s remaining_contracts=%s ordId=%s",
                     context,
                     side,
                     attempt,
                     retry_count,
-                    t.decimal_to_str(refreshed.contracts),
+                    t.decimal_to_str(refreshed.qty),
                     order_id,
                 )
             except Exception as exc:

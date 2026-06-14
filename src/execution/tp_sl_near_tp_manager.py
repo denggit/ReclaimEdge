@@ -26,14 +26,14 @@ class NearTpExecutionManager:
     async def execute_near_tp_reduce(self, intent: TradeIntent) -> LiveTradeResult:
         t = self.trader
         action = "NEAR_TP_REDUCE"
-        position = await t.fetch_position_snapshot()
+        position = await self.trading_client.fetch_position()
         if not position.has_position:
             return LiveTradeResult(False, action, None, None, "0", t.price_to_str(intent.tp_price), "no position")
         if position.side != intent.side:
             return LiveTradeResult(False, action, None, None, "0", t.price_to_str(intent.tp_price),
                                    "position side mismatch")
 
-        contracts_before = position.contracts
+        contracts_before = position.qty
         reduce_ratio = Decimal(
             str(getattr(intent, "near_tp_reduce_ratio", 0.0) or os.getenv("NEAR_TP_REDUCE_RATIO", "0.5")))
         reduce_ratio = min(max(reduce_ratio, Decimal("0")), Decimal("1"))
