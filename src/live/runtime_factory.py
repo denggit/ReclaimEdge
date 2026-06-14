@@ -137,10 +137,6 @@ def _create_okx_bundle(config, values: Mapping[str, str]) -> LiveRuntimeBundle:
     )
     trader = Trader(settings=settings)
 
-    # --- bind private client for legacy broker path ---
-    trader.bind_private_client(private_client)
-    trader.bind_private_write_limiter(rate_limiter)
-
     # --- trading client (owns private client) ---
     trading_client = OkxTradingClient(
         trader,
@@ -150,7 +146,11 @@ def _create_okx_bundle(config, values: Mapping[str, str]) -> LiveRuntimeBundle:
     trader.bind_trading_client(trading_client)
 
     # --- broker semantic executor (legacy, behind feature flags) ---
-    broker_client = OkxBrokerClient(trader)
+    broker_client = OkxBrokerClient(
+        trader,
+        private_client=private_client,
+        rate_limiter=rate_limiter,
+    )
     broker_semantic_executor = OkxBrokerSemanticExecutor(broker_client)
     trader.bind_broker_semantic_executor(broker_semantic_executor)
 

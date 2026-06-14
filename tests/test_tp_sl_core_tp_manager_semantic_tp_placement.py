@@ -115,7 +115,7 @@ def _intent(side: str = "LONG") -> SimpleNamespace:
 async def test_default_disabled_uses_legacy_request(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("BROKER_SEMANTIC_TP_PLACEMENT_ENABLED", raising=False)
     fake_trader = FakeTrader()
-    trading_client = OkxTradingClient(fake_trader)
+    trading_client = OkxTradingClient(fake_trader, private_client=fake_trader._client)
     manager = CoreTakeProfitManager(fake_trader, protective_stops=None,
                                     trading_client=trading_client)
 
@@ -141,7 +141,7 @@ async def test_enabled_uses_semantic_executor_not_legacy_request(monkeypatch: py
     monkeypatch.setenv("BROKER_SEMANTIC_TP_PLACEMENT_ENABLED", "true")
     fake_trader = FakeTrader()
     manager = CoreTakeProfitManager(fake_trader, protective_stops=None,
-                                    trading_client=OkxTradingClient(fake_trader))
+                                    trading_client=OkxTradingClient(fake_trader, private_client=fake_trader._client))
 
     order_ids = await manager._place_reduce_only_take_profit_orders(
         intent=_intent("LONG"),
@@ -166,7 +166,7 @@ async def test_enabled_maps_short_side(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("BROKER_SEMANTIC_TP_PLACEMENT_ENABLED", "true")
     fake_trader = FakeTrader()
     manager = CoreTakeProfitManager(fake_trader, protective_stops=None,
-                                    trading_client=OkxTradingClient(fake_trader))
+                                    trading_client=OkxTradingClient(fake_trader, private_client=fake_trader._client))
 
     await manager._place_reduce_only_take_profit_orders(
         intent=_intent("SHORT"),
@@ -190,7 +190,7 @@ async def test_semantic_failure_does_not_fallback_legacy(monkeypatch: pytest.Mon
     fake_trader.semantic.result_ok = False
     fake_trader.semantic.message = "boom"
     manager = CoreTakeProfitManager(fake_trader, protective_stops=None,
-                                    trading_client=OkxTradingClient(fake_trader))
+                                    trading_client=OkxTradingClient(fake_trader, private_client=fake_trader._client))
 
     with pytest.raises(RuntimeError, match="semantic_tp_order_failed"):
         await manager._place_reduce_only_take_profit_orders(
@@ -208,7 +208,7 @@ async def test_multiple_semantic_specs_return_order_ids_in_order(monkeypatch: py
     fake_trader = FakeTrader()
     fake_trader.semantic.order_ids = ["semantic-tp-1", "semantic-tp-2"]
     manager = CoreTakeProfitManager(fake_trader, protective_stops=None,
-                                    trading_client=OkxTradingClient(fake_trader))
+                                    trading_client=OkxTradingClient(fake_trader, private_client=fake_trader._client))
 
     order_ids = await manager._place_reduce_only_take_profit_orders(
         intent=_intent("LONG"),

@@ -1794,7 +1794,7 @@ class RecordingTrader(Trader):
         self.trend_runner_sl_order_id = None
         self.contract_multiplier = Decimal("0.1")
         self._client = FakeOkxClient(self)
-        self.trading_client = OkxTradingClient(self)  # type: ignore[assignment]
+        self.trading_client = OkxTradingClient(self, private_client=self._client)  # type: ignore[assignment]
         self._tp_sl_manager = TpSlExecutionManager(self, trading_client=self.trading_client)  # type: ignore[arg-type]
         self.side = side
         self.placed_specs = []
@@ -1856,7 +1856,7 @@ class ThreeStageTrendRunnerTraderTest(unittest.IsolatedAsyncioTestCase):
         trader.contract_precision = Decimal("0.01")
         trader.min_contracts = Decimal("0.01")
         trader._client = FakeOkxClient(trader)
-        trader.trading_client = OkxTradingClient(trader)  # type: ignore[assignment]
+        trader.trading_client = OkxTradingClient(trader, private_client=trader._client)  # type: ignore[assignment]
         trader._tp_sl_manager = TpSlExecutionManager(trader, trading_client=trader.trading_client)  # type: ignore[arg-type]
 
         specs = trader._build_take_profit_order_specs(intent())

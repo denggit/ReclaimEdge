@@ -43,6 +43,7 @@ OKX_LEGACY_ENV_VARS = ["OKX_INST_ID", "OKX_BAR", "OKX_TD_MODE", "OKX_POS_SIDE_MO
 ALLOWED_API_V5_FILES = [
     "src/execution/okx_private_client.py",
     "src/execution/okx_trading_client.py",
+    "src/exchanges/okx/client.py",
     "src/data_feed/okx_loader.py",
     "src/data_feed/okx_stream.py",
     "src/data_feed/okx_books_stream.py",

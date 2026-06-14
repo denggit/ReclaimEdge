@@ -74,7 +74,7 @@ def make_trader(**overrides) -> Trader:
     t._managed_reduce_only_order_ids = set()
     t._allow_cancel_unmanaged_reduce_only = True
     t._client = FakeOkxClient(t)
-    t.trading_client = OkxTradingClient(t)  # type: ignore[assignment]
+    t.trading_client = OkxTradingClient(t, private_client=t._client)  # type: ignore[assignment]
     t._tp_sl_manager = TpSlExecutionManager(t, trading_client=t.trading_client)  # type: ignore[arg-type]
     for k, v in overrides.items():
         setattr(t, k, v)

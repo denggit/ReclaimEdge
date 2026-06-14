@@ -111,8 +111,9 @@ def _trader(fake_executor: FakeSemanticExecutor) -> Trader:
     trader.min_contracts = Decimal("0.01")
     trader._broker_client = None
     trader._broker_semantic_executor = fake_executor
-    trader._client = FakeOkxClient(trader)
-    trader.trading_client = OkxTradingClient(trader)
+    fake_private_client = FakeOkxClient(trader)
+    trader._client = fake_private_client
+    trader.trading_client = OkxTradingClient(trader, private_client=fake_private_client)
     return trader
 
 

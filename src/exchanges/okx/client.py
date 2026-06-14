@@ -39,12 +39,35 @@ from src.exchanges.okx.mapper import (
 class OkxBrokerClient(BrokerClient):
     """OKX adapter for the generic broker port.
 
-    The injected trader must be a trader-like object exposing ``request`` and
-    the formatting / fetch helper methods used by the current OKX live trader.
+    The injected trader provides exchange-agnostic config fields
+    (symbol, td_mode, pos_side_mode) and formatting helpers
+    (decimal_to_str, price_to_str, extract_order_id, extract_algo_id).
+
+    REST calls are issued through *private_client* directly — the
+    broker client no longer tunnels them through Trader.request().
     """
 
-    def __init__(self, trader: Any) -> None:
+    def __init__(
+        self,
+        trader: Any,
+        *,
+        private_client: Any,
+        rate_limiter: Any | None = None,
+    ) -> None:
         self._trader = trader
+        self._client = private_client
+        self._rate_limiter = rate_limiter
+
+    async def _request(
+        self,
+        method: str,
+        endpoint: str,
+        payload: Any | None = None,
+    ) -> dict[str, Any]:
+        """Rate-limited REST call through the injected private client."""
+        if method.upper() == "POST" and self._rate_limiter is not None:
+            await self._rate_limiter.acquire()
+        return await self._client.request(method, endpoint, payload)
 
     @property
     def exchange(self) -> ExchangeName:
@@ -67,7 +90,7 @@ class OkxBrokerClient(BrokerClient):
                 contracts_text=contracts_text,
                 pos_side_mode=self._pos_side_mode(),
             )
-            res = await self._trader.request("POST", "/api/v5/trade/order", body)
+            res = await self._request("POST", "/api/v5/trade/order", body)
             return self._order_result(request, res, order_id=self._extract_order_id(res))
 
         if request.order_type == BrokerOrderType.MARKET and request.reduce_only:
@@ -78,7 +101,7 @@ class OkxBrokerClient(BrokerClient):
                 contracts_text=contracts_text,
                 pos_side_mode=self._pos_side_mode(),
             )
-            res = await self._trader.request("POST", "/api/v5/trade/order", body)
+            res = await self._request("POST", "/api/v5/trade/order", body)
             return self._order_result(request, res, order_id=self._extract_order_id(res))
 
         if request.order_type == BrokerOrderType.LIMIT and request.reduce_only:
@@ -96,7 +119,7 @@ class OkxBrokerClient(BrokerClient):
                 pos_side_mode=self._pos_side_mode(),
                 client_order_id=request.client_order_id,
             )
-            res = await self._trader.request("POST", "/api/v5/trade/order", body)
+            res = await self._request("POST", "/api/v5/trade/order", body)
             return self._order_result(request, res, order_id=self._extract_order_id(res))
 
         raise _exchange_error(
@@ -128,11 +151,11 @@ class OkxBrokerClient(BrokerClient):
             stop_price_text=self._format_price(request.trigger_price),
             pos_side_mode=self._pos_side_mode(),
         )
-        res = await self._trader.request("POST", "/api/v5/trade/order-algo", body)
+        res = await self._request("POST", "/api/v5/trade/order-algo", body)
         return self._order_result(request, res, order_id=self._extract_algo_id(res))
 
     async def cancel_order(self, symbol: str, order_id: str) -> BrokerCancelResult:
-        res = await self._trader.request(
+        res = await self._request(
             "POST",
             "/api/v5/trade/cancel-order",
             order_specs.build_cancel_order_body(inst_id=symbol, order_id=order_id),
@@ -150,7 +173,7 @@ class OkxBrokerClient(BrokerClient):
         symbol: str,
         algo_id: str,
     ) -> BrokerCancelResult:
-        res = await self._trader.request(
+        res = await self._request(
             "POST",
             "/api/v5/trade/cancel-algos",
             order_specs.build_cancel_algo_body(inst_id=symbol, algo_id=algo_id),
@@ -164,7 +187,7 @@ class OkxBrokerClient(BrokerClient):
         )
 
     async def fetch_open_orders(self, symbol: str) -> Sequence[BrokerOrder]:
-        raw = await self._trader.request(
+        raw = await self._request(
             "GET",
             f"/api/v5/trade/orders-pending?instId={symbol}",
         )
@@ -177,7 +200,7 @@ class OkxBrokerClient(BrokerClient):
         )
 
     async def fetch_algo_orders(self, symbol: str) -> Sequence[BrokerOrder]:
-        raw = await self._trader.request(
+        raw = await self._request(
             "GET",
             f"/api/v5/trade/orders-algo-pending?instId={symbol}&ordType=conditional",
         )

@@ -90,8 +90,8 @@ class TestRuntimeBundleCreation:
             executor = trader.broker_semantic_executor
             assert executor is not None
 
-    def test_trader_has_private_client_bound(self) -> None:
-        """Verify _private_client is bound by the runtime factory."""
+    def test_trader_does_not_have_private_client(self) -> None:
+        """Verify Trader does NOT have _private_client — it's owned by adapters."""
         env = {
             "EXCHANGE": "okx",
             "TRADE_ASSET": "ETH",
@@ -105,8 +105,10 @@ class TestRuntimeBundleCreation:
         with mock.patch.dict(os.environ, env, clear=True):
             bundle = create_runtime_bundle(env)
             trader = bundle.trader
-            # _private_client should be bound (not None)
-            assert trader._private_client is not None
+            # Trader must NOT expose _private_client — it's owned by adapters.
+            assert not hasattr(trader, '_private_client'), (
+                "Trader must NOT have _private_client attribute"
+            )
 
 
 class TestRuntimeBundleBinanceBlocked:

@@ -513,7 +513,7 @@ class TestFallbackFinalReturnsSplitExecutedFalse:
         trader.round_contracts_down = lambda c: c
         trader._tp_price_summary = lambda specs: trader.price_to_str(specs[0][2])
         trader._client = FakeOkxClient(trader)
-        trader.trading_client = OkxTradingClient(trader)  # type: ignore[assignment]
+        trader.trading_client = OkxTradingClient(trader, private_client=trader._client)  # type: ignore[assignment]
 
         # Mock position fetch to return a valid LONG position
         async def fake_fetch():

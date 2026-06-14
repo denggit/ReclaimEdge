@@ -841,7 +841,7 @@ class SplitTakeProfitTraderTest(unittest.IsolatedAsyncioTestCase):
         trader.trend_runner_sl_order_id = None
         trader.contract_multiplier = Decimal("0.1")
         trader._client = FakeOkxClient(trader)
-        trader.trading_client = OkxTradingClient(trader)  # type: ignore[assignment]
+        trader.trading_client = OkxTradingClient(trader, private_client=trader._client)  # type: ignore[assignment]
         trader._tp_sl_manager = TpSlExecutionManager(trader, trading_client=trader.trading_client)  # type: ignore[arg-type]
         return trader
 

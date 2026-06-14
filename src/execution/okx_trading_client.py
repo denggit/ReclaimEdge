@@ -75,21 +75,11 @@ class OkxTradingClient(TradingClientPort):
         self,
         trader: Trader,
         *,
-        private_client: OkxPrivateClient | None = None,
+        private_client: OkxPrivateClient,
         rate_limiter: PrivateWriteRateLimiter | None = None,
     ) -> None:
         self._trader = trader
-        # Fall back to trader._client for backward compatibility with tests
-        # that were written before the adapter freeze.
-        if private_client is not None:
-            self._client = private_client
-        else:
-            self._client = getattr(trader, "_client", None)
-            if self._client is None:
-                raise TypeError(
-                    "OkxTradingClient requires private_client=... when "
-                    "trader._client is not available"
-                )
+        self._client = private_client
         self._limiter = rate_limiter
 
     # ------------------------------------------------------------------

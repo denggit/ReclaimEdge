@@ -100,7 +100,7 @@ def fake_trader() -> FakeTrader:
 
 @pytest.fixture
 def client(fake_trader: FakeTrader) -> OkxBrokerClient:
-    return OkxBrokerClient(trader=fake_trader)
+    return OkxBrokerClient(trader=fake_trader, private_client=fake_trader)
 
 
 @pytest.mark.asyncio

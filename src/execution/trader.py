@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import math
 import os
 from dataclasses import dataclass
@@ -119,11 +120,8 @@ class Trader:
         self.contract_precision = Decimal("0.01")
         self.min_contracts = Decimal("0.01")
 
-        # OKX private REST client and rate limiter are now owned by
-        # OkxTradingClient.  They are bound here only for backward
-        # compatibility with the legacy broker semantic path.
-        self._private_client: Any = None
-        self._private_write_limiter: Any = None
+        self._broker_client: Any = None
+        self._broker_semantic_executor: Any = None
 
         self.tp_order_id: str | None = None
         self.near_tp_protective_sl_order_id: str | None = None
@@ -136,8 +134,6 @@ class Trader:
         self._protected_reduce_only_order_ids: set[str] = set()
         self._managed_reduce_only_order_ids: set[str] = set()
         self._allow_cancel_unmanaged_reduce_only = True
-        self._broker_client = None
-        self._broker_semantic_executor = None
         self._tp_sl_manager: TpSlExecutionManager | None = None
         self.trading_client: TradingClientPort | None = None
 
@@ -157,18 +153,6 @@ class Trader:
         self.trading_client = trading_client
         from src.execution.tp_sl_execution_manager import TpSlExecutionManager
         self._tp_sl_manager = TpSlExecutionManager(self, trading_client=trading_client)
-
-    def bind_private_client(self, client: Any) -> None:
-        """Bind a private REST client for legacy broker semantic path.
-
-        The client must expose ``request(method, endpoint, payload)``
-        and ``headers(method, endpoint, body)``.
-        """
-        self._private_client = client
-
-    def bind_private_write_limiter(self, limiter: Any) -> None:
-        """Bind a private write rate limiter for legacy request() path."""
-        self._private_write_limiter = limiter
 
     def bind_broker_semantic_executor(self, executor: Any) -> None:
         """Bind a broker semantic executor for legacy broker read/cancel paths."""
@@ -252,12 +236,27 @@ class Trader:
     # ------------------------------------------------------------------
 
     async def start(self) -> None:
-        if self._private_client is not None:
-            await self._private_client.start()
+        """Start the underlying trading client session.
+
+        Delegates to the bound TradingClientPort so that the session
+        lifecycle (e.g. aiohttp session) is managed by the adapter,
+        not by Trader directly.
+        """
+        trading_client = self._require_trading_client()
+        start = getattr(trading_client, "start", None)
+        if callable(start):
+            result = start()
+            if inspect.isawaitable(result):
+                await result
 
     async def close(self) -> None:
-        if self._private_client is not None:
-            await self._private_client.close()
+        """Close the underlying trading client session."""
+        trading_client = self._require_trading_client()
+        close = getattr(trading_client, "close", None)
+        if callable(close):
+            result = close()
+            if inspect.isawaitable(result):
+                await result
 
     # ------------------------------------------------------------------
     # Initialization
@@ -670,24 +669,6 @@ class Trader:
     async def set_leverage(self) -> None:
         """Legacy wrapper — delegates to TradingClientPort.configure_instrument()."""
         await self.trading_client.configure_instrument()
-
-    async def request(self, method: str, endpoint: str, payload: Any | None = None) -> dict[str, Any]:
-        """Legacy wrapper — delegates to the bound private REST client.
-
-        Rate-limits POST operations when a rate limiter is bound.
-        Used by the legacy broker semantic path (behind feature flags).
-        """
-        if self._private_write_limiter is not None and method.upper() == "POST":
-            await self._private_write_limiter.acquire()
-        if self._private_client is None:
-            raise RuntimeError("private_client_not_bound")
-        return await self._private_client.request(method, endpoint, payload)
-
-    def headers(self, method: str, endpoint: str, body: str) -> dict[str, str]:
-        """Legacy wrapper — delegates to the bound private REST client."""
-        if self._private_client is None:
-            raise RuntimeError("private_client_not_bound")
-        return self._private_client.headers(method, endpoint, body)
 
     def eth_qty_to_contracts(self, eth_qty: Decimal) -> Decimal:
         raw_contracts = eth_qty / self.contract_multiplier

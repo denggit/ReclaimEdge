@@ -12,7 +12,6 @@ if importlib.util.find_spec("aiohttp") is None:
 
 import src.execution.okx_private_client as client_module  # noqa: E402
 from src.execution.okx_private_client import OkxPrivateClient, OkxPrivateClientConfig  # noqa: E402
-from src.execution.trader import Trader  # noqa: E402
 
 
 class FakeResponse:
@@ -48,29 +47,28 @@ class FakeSession:
 
 
 class TraderSessionTest(unittest.IsolatedAsyncioTestCase):
+    """Test OkxPrivateClient reuses aiohttp sessions.
+
+    The Trader no longer owns a private REST client or exposes a request()
+    tunnel.  Session reuse is tested directly on OkxPrivateClient.
+    """
+
     async def test_request_reuses_session(self) -> None:
         FakeSession.instances = []
-        trader = Trader.__new__(Trader)
-        trader.base_url = "https://www.okx.test"
-        trader.api_key = "key"
-        trader.secret_key = "secret"
-        trader.passphrase = "pass"
-        trader._timeout_seconds = 7.0
-        trader._private_client = OkxPrivateClient(
+        client = OkxPrivateClient(
             OkxPrivateClientConfig(
-                base_url=trader.base_url,
-                api_key=trader.api_key,
-                secret_key=trader.secret_key,
-                passphrase=trader.passphrase,
-                timeout_seconds=trader._timeout_seconds,
+                base_url="https://www.okx.test",
+                api_key="key",
+                secret_key="secret",
+                passphrase="pass",
+                timeout_seconds=7.0,
             )
         )
-        trader._private_write_limiter = None
 
         with patch.object(client_module.aiohttp, "ClientSession", FakeSession, create=True):
-            await trader.request("GET", "/api/v5/account/balance?ccy=USDT")
-            await trader.request("POST", "/api/v5/trade/order", {"instId": "ETH-USDT-SWAP"})
-            await trader.close()
+            await client.request("GET", "/api/v5/account/balance?ccy=USDT")
+            await client.request("POST", "/api/v5/trade/order", {"instId": "ETH-USDT-SWAP"})
+            await client.close()
 
         self.assertEqual(len(FakeSession.instances), 1)
         session = FakeSession.instances[0]

@@ -73,7 +73,7 @@ class IsolationTrader(Trader):
         self.cancelled_trend_runner_stops: list[str | None] = []
         self.placed = []
         # Wire adapter pattern
-        self.trading_client = OkxTradingClient(self)
+        self.trading_client = OkxTradingClient(self, private_client=self._client)
         self._tp_sl_manager = TpSlExecutionManager(self, trading_client=self.trading_client)
 
     async def fetch_position_snapshot(self) -> PositionSnapshot:

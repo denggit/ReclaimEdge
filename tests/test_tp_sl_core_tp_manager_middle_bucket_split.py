@@ -48,7 +48,7 @@ class TestSplitNormalReturnsSplitFastSlow:
         trader.round_contracts_down = lambda c: c
         trader._tp_price_summary = lambda specs: trader.price_to_str(specs[0][2])
         trader._client = FakeOkxClient(trader)
-        trader.trading_client = OkxTradingClient(trader)  # type: ignore[assignment]
+        trader.trading_client = OkxTradingClient(trader, private_client=trader._client)  # type: ignore[assignment]
 
         async def fake_fetch():
             return PositionSnapshot("LONG", Decimal("10"), 3000.0, Decimal("1"), Decimal("10"))
@@ -151,7 +151,7 @@ class TestSublegTooSmallReturnsUnsplitMiddleBucket:
         trader.round_contracts_down = lambda c: c
         trader._tp_price_summary = lambda specs: trader.price_to_str(specs[0][2])
         trader._client = FakeOkxClient(trader)
-        trader.trading_client = OkxTradingClient(trader)  # type: ignore[assignment]
+        trader.trading_client = OkxTradingClient(trader, private_client=trader._client)  # type: ignore[assignment]
 
         async def fake_fetch():
             return PositionSnapshot("LONG", Decimal("10"), 3000.0, Decimal("1"), Decimal("10"))
@@ -253,7 +253,7 @@ class TestPlacementFailedReturnsFinalFullSize:
         trader.round_contracts_down = lambda c: c
         trader._tp_price_summary = lambda specs: trader.price_to_str(specs[0][2])
         trader._client = FakeOkxClient(trader)
-        trader.trading_client = OkxTradingClient(trader)  # type: ignore[assignment]
+        trader.trading_client = OkxTradingClient(trader, private_client=trader._client)  # type: ignore[assignment]
 
         async def fake_fetch():
             return PositionSnapshot("LONG", Decimal("10"), 3000.0, Decimal("1"), Decimal("10"))
@@ -368,7 +368,7 @@ class TestNoSplitActiveReturnsNone:
         trader.round_contracts_down = lambda c: c
         trader._tp_price_summary = lambda specs: trader.price_to_str(specs[0][2])
         trader._client = FakeOkxClient(trader)
-        trader.trading_client = OkxTradingClient(trader)  # type: ignore[assignment]
+        trader.trading_client = OkxTradingClient(trader, private_client=trader._client)  # type: ignore[assignment]
 
         async def fake_fetch():
             return PositionSnapshot("LONG", Decimal("10"), 3000.0, Decimal("1"), Decimal("10"))
@@ -612,7 +612,7 @@ class TestThreeStageTp2TooSmallClassifiesFinalFullSize:
         trader.round_contracts_down = lambda c: c
         trader._tp_price_summary = lambda specs: trader.price_to_str(specs[0][2])
         trader._client = FakeOkxClient(trader)
-        trader.trading_client = OkxTradingClient(trader)  # type: ignore[assignment]
+        trader.trading_client = OkxTradingClient(trader, private_client=trader._client)  # type: ignore[assignment]
 
         async def fake_fetch():
             return PositionSnapshot("LONG", Decimal("10"), 3000.0, Decimal("1"), Decimal("10"))
@@ -714,7 +714,7 @@ class TestMiddleRunnerRunnerTooSmallClassifiesFinalFullSize:
         trader.round_contracts_down = lambda c: c
         trader._tp_price_summary = lambda specs: trader.price_to_str(specs[0][2])
         trader._client = FakeOkxClient(trader)
-        trader.trading_client = OkxTradingClient(trader)  # type: ignore[assignment]
+        trader.trading_client = OkxTradingClient(trader, private_client=trader._client)  # type: ignore[assignment]
 
         async def fake_fetch():
             return PositionSnapshot("LONG", Decimal("10"), 3000.0, Decimal("1"), Decimal("10"))
@@ -812,7 +812,7 @@ class TestMiddleRunnerSlFailurePreservesActualOrderModeFinalFullSize:
         trader.round_contracts_down = lambda c: c
         trader._tp_price_summary = lambda specs: trader.price_to_str(specs[0][2])
         trader._client = FakeOkxClient(trader)
-        trader.trading_client = OkxTradingClient(trader)  # type: ignore[assignment]
+        trader.trading_client = OkxTradingClient(trader, private_client=trader._client)  # type: ignore[assignment]
 
         async def fake_fetch():
             return PositionSnapshot("LONG", Decimal("10"), 3000.0, Decimal("1"), Decimal("10"))
@@ -921,7 +921,7 @@ class TestThreeStagePostTp1SlFailurePreservesActualOrderModeUnsplitMiddleBucket:
         trader.round_contracts_down = lambda c: c
         trader._tp_price_summary = lambda specs: trader.price_to_str(specs[0][2])
         trader._client = FakeOkxClient(trader)
-        trader.trading_client = OkxTradingClient(trader)  # type: ignore[assignment]
+        trader.trading_client = OkxTradingClient(trader, private_client=trader._client)  # type: ignore[assignment]
 
         async def fake_fetch():
             return PositionSnapshot("LONG", Decimal("10"), 3000.0, Decimal("1"), Decimal("10"))
@@ -1036,7 +1036,7 @@ class TestTrendRunnerSlFailurePreservesActualOrderModeSplitFastSlow:
         trader.round_contracts_down = lambda c: c
         trader._tp_price_summary = lambda specs: trader.price_to_str(specs[0][2])
         trader._client = FakeOkxClient(trader)
-        trader.trading_client = OkxTradingClient(trader)  # type: ignore[assignment]
+        trader.trading_client = OkxTradingClient(trader, private_client=trader._client)  # type: ignore[assignment]
 
         # _trend_runner_sl_contracts is needed by the trend runner SL path
         trader._trend_runner_sl_contracts = lambda intent, net: Decimal("5")

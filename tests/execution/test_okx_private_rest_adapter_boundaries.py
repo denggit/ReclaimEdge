@@ -149,26 +149,57 @@ class TestTraderDoesNotImportOkxPrivateClient:
         )
 
 
-class TestTraderHasBindMethods:
-    """Trader must have bind methods for private client and broker executor."""
+class TestTraderHasNoPrivateClientTunnel:
+    """Trader must NOT expose private-client fields, bind-methods, or REST tunnels."""
 
-    def test_bind_private_client_exists(self) -> None:
+    def test_trader_no_private_client_field(self) -> None:
         filepath = ROOT / "src" / "execution" / "trader.py"
-        import ast
-        tree = ast.parse(filepath.read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
-            if isinstance(node, ast.FunctionDef) and node.name == "bind_private_client":
-                return
-        pytest.fail("trader.py must have bind_private_client method")
+        text = filepath.read_text(encoding="utf-8")
+        assert "_private_client" not in text, (
+            "trader.py must NOT contain _private_client"
+        )
 
-    def test_bind_broker_semantic_executor_exists(self) -> None:
+    def test_trader_no_private_write_limiter_field(self) -> None:
         filepath = ROOT / "src" / "execution" / "trader.py"
-        import ast
-        tree = ast.parse(filepath.read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
-            if isinstance(node, ast.FunctionDef) and node.name == "bind_broker_semantic_executor":
-                return
-        pytest.fail("trader.py must have bind_broker_semantic_executor method")
+        text = filepath.read_text(encoding="utf-8")
+        assert "_private_write_limiter" not in text, (
+            "trader.py must NOT contain _private_write_limiter"
+        )
+
+    def test_trader_no_bind_private_client(self) -> None:
+        filepath = ROOT / "src" / "execution" / "trader.py"
+        text = filepath.read_text(encoding="utf-8")
+        assert "bind_private_client" not in text, (
+            "trader.py must NOT contain bind_private_client"
+        )
+
+    def test_trader_no_bind_private_write_limiter(self) -> None:
+        filepath = ROOT / "src" / "execution" / "trader.py"
+        text = filepath.read_text(encoding="utf-8")
+        assert "bind_private_write_limiter" not in text, (
+            "trader.py must NOT contain bind_private_write_limiter"
+        )
+
+    def test_trader_no_request_method(self) -> None:
+        filepath = ROOT / "src" / "execution" / "trader.py"
+        text = filepath.read_text(encoding="utf-8")
+        assert "def request(" not in text, (
+            "trader.py must NOT define a request() method"
+        )
+
+    def test_trader_no_headers_method(self) -> None:
+        filepath = ROOT / "src" / "execution" / "trader.py"
+        text = filepath.read_text(encoding="utf-8")
+        assert "def headers(" not in text, (
+            "trader.py must NOT define a headers() method"
+        )
+
+    def test_trader_no_private_client_not_bound_string(self) -> None:
+        filepath = ROOT / "src" / "execution" / "trader.py"
+        text = filepath.read_text(encoding="utf-8")
+        assert "private_client_not_bound" not in text, (
+            "trader.py must NOT contain private_client_not_bound"
+        )
 
     def test_broker_semantic_executor_raises_when_not_bound(self) -> None:
         filepath = ROOT / "src" / "execution" / "trader.py"
@@ -184,3 +215,39 @@ class TestTraderHasBindMethods:
                 )
                 return
         pytest.fail("trader.py must have broker_semantic_executor property")
+
+
+class TestOkxBrokerClientNoTraderRequest:
+    """OkxBrokerClient must NOT tunnel REST through trader.request / trader.headers."""
+
+    def test_client_py_no_trader_request(self) -> None:
+        filepath = ROOT / "src" / "exchanges" / "okx" / "client.py"
+        text = filepath.read_text(encoding="utf-8")
+        assert "_trader.request" not in text, (
+            "src/exchanges/okx/client.py must NOT contain _trader.request"
+        )
+
+    def test_client_py_no_trader_headers(self) -> None:
+        filepath = ROOT / "src" / "exchanges" / "okx" / "client.py"
+        text = filepath.read_text(encoding="utf-8")
+        assert "_trader.headers" not in text, (
+            "src/exchanges/okx/client.py must NOT contain _trader.headers"
+        )
+
+
+class TestOkxTradingClientNoTraderClient:
+    """OkxTradingClient must NOT reach into trader._client or trader.request."""
+
+    def test_trading_client_py_no_trader_request(self) -> None:
+        filepath = ROOT / "src" / "execution" / "okx_trading_client.py"
+        text = filepath.read_text(encoding="utf-8")
+        assert "_trader.request" not in text, (
+            "src/execution/okx_trading_client.py must NOT contain _trader.request"
+        )
+
+    def test_trading_client_py_no_trader_client(self) -> None:
+        filepath = ROOT / "src" / "execution" / "okx_trading_client.py"
+        text = filepath.read_text(encoding="utf-8")
+        assert "_trader._client" not in text, (
+            "src/execution/okx_trading_client.py must NOT contain _trader._client"
+        )

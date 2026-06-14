@@ -73,7 +73,7 @@ class CapturingTrader:
 
 
 def _executor(trader: CapturingTrader) -> OkxBrokerSemanticExecutor:
-    client = OkxBrokerClient(trader)
+    client = OkxBrokerClient(trader, private_client=trader)
     return OkxBrokerSemanticExecutor(client)
 
 

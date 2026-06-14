@@ -10,14 +10,55 @@ logger = get_logger(__name__)
 
 
 async def fetch_usdt_cash_balance(trader: Trader) -> float:
-    res = await trader.request("GET", "/api/v5/account/balance?ccy=USDT")
-    data = res.get("data", [])
-    if not data:
+    """Fetch USDT *cash* balance (cashBal / availBal) from OKX.
+
+    Tries, in order:
+    1. A ``request()`` callable on the trader (backward-compat for test fakes).
+    2. The private REST client wired into the bound trading client.
+    3. ``trader.fetch_usdt_equity()`` as a final fallback.
+    """
+    # 1. Backward compat: test FakeTraders often expose request()
+    req = getattr(trader, "request", None)
+    if callable(req):
+        res = await req("GET", "/api/v5/account/balance?ccy=USDT")
+        data = res.get("data", [])
+        if data:
+            for item in data[0].get("details", []):
+                if item.get("ccy") == "USDT":
+                    return float(
+                        item.get("cashBal")
+                        or item.get("availBal")
+                        or item.get("availEq")
+                        or item.get("eq")
+                        or 0.0
+                    )
+            return float(data[0].get("totalEq") or 0.0)
         return 0.0
-    for item in data[0].get("details", []):
-        if item.get("ccy") == "USDT":
-            return float(item.get("cashBal") or item.get("availBal") or item.get("availEq") or item.get("eq") or 0.0)
-    return float(data[0].get("totalEq") or 0.0)
+
+    # 2. Production path: use trading client's private REST client
+    trading_client = getattr(trader, "trading_client", None)
+    if trading_client is not None:
+        private_client = getattr(trading_client, "_client", None)
+        if private_client is not None:
+            res = await private_client.request(
+                "GET", "/api/v5/account/balance?ccy=USDT"
+            )
+            data = res.get("data", [])
+            if not data:
+                return 0.0
+            for item in data[0].get("details", []):
+                if item.get("ccy") == "USDT":
+                    return float(
+                        item.get("cashBal")
+                        or item.get("availBal")
+                        or item.get("availEq")
+                        or item.get("eq")
+                        or 0.0
+                    )
+            return float(data[0].get("totalEq") or 0.0)
+
+    # 3. Final fallback
+    return await trader.fetch_usdt_equity()
 
 
 async def fetch_settled_flat_balance(

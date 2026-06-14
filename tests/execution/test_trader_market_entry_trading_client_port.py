@@ -176,24 +176,23 @@ class TestLongMarketEntryRoutesThroughTradingClientPort:
 
     @pytest.mark.asyncio
     async def test_long_entry_does_not_call_direct_okx_request(self):
-        """The market entry must not go through self.request("POST", "/api/v5/trade/order")."""
+        """The market entry does NOT call a REST request method — Trader no longer
+        exposes request()/headers() tunnels.  All trading goes through
+        TradingClientPort.place_market_order()."""
         fake = FakeTradingClient()
         trader = _make_trader(trading_client=fake)
         intent = _make_intent(intent_type="OPEN_LONG", side="LONG")
 
-        with patch.object(trader, "request", AsyncMock()) as mock_request:
-            await trader.execute_intent(intent)
+        # Trader no longer has a request() method — just verify execute_intent
+        # completes successfully through the TradingClientPort.
+        result = await trader.execute_intent(intent)
 
-        # The direct request may be called for TP/SL but NOT for the market entry order.
-        # Check that no call had path "/api/v5/trade/order".
-        direct_entry_calls = [
-            c for c in mock_request.call_args_list
-            if len(c.args) >= 2 and c.args[0] == "POST" and c.args[1] == "/api/v5/trade/order"
-        ]
-        assert len(direct_entry_calls) == 0, (
-            f"Market entry must not call request('POST', '/api/v5/trade/order') directly; "
-            f"got {len(direct_entry_calls)} call(s)"
+        # The FakeTradingClient should have recorded a market order call.
+        assert len(fake.market_calls) >= 1, (
+            "Expected at least 1 market order call through TradingClientPort"
         )
+        assert fake.market_calls[0]["side"] == "LONG"
+        assert "entry_filled" in result.message or result.ok
 
     @pytest.mark.asyncio
     async def test_long_entry_returns_valid_live_trade_result(self):
