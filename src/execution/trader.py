@@ -197,7 +197,8 @@ class Trader:
         await self._client.close()
 
     async def initialize(self) -> None:
-        equity = await self.fetch_usdt_equity()
+        balance = await self.trading_client.fetch_balance()
+        equity = float(balance.total)
         self.account_equity_usdt = equity
         if equity > self.max_live_equity_usdt:
             raise RuntimeError(
