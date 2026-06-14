@@ -6,9 +6,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Optional
 
-from config.env_loader import OKX_CONFIG
 from src.execution import order_specs
-from src.execution.okx_private_client import OkxPrivateClient, OkxPrivateClientConfig, PrivateWriteRateLimiter
 from src.execution.trading_client_port import TradingClientPort
 from src.strategies.boll_cvd_reclaim_strategy import PositionSide, TradeIntent
 from src.utils.log import get_logger
@@ -121,9 +119,11 @@ class Trader:
         self.contract_precision = Decimal("0.01")
         self.min_contracts = Decimal("0.01")
 
-        self.api_key = OKX_CONFIG.get("api_key", "")
-        self.secret_key = OKX_CONFIG.get("secret_key", "")
-        self.passphrase = OKX_CONFIG.get("passphrase", "")
+        # OKX private REST client and rate limiter are now owned by
+        # OkxTradingClient.  They are bound here only for backward
+        # compatibility with the legacy broker semantic path.
+        self._private_client: Any = None
+        self._private_write_limiter: Any = None
 
         self.tp_order_id: str | None = None
         self.near_tp_protective_sl_order_id: str | None = None
@@ -136,30 +136,17 @@ class Trader:
         self._protected_reduce_only_order_ids: set[str] = set()
         self._managed_reduce_only_order_ids: set[str] = set()
         self._allow_cancel_unmanaged_reduce_only = True
-        self._timeout_seconds = float(os.getenv("OKX_PRIVATE_REST_TIMEOUT_SECONDS", "10"))
-        self._private_write_limiter = PrivateWriteRateLimiter()
-        self._client = OkxPrivateClient(
-            OkxPrivateClientConfig(
-                base_url=self.base_url,
-                api_key=self.api_key,
-                secret_key=self.secret_key,
-                passphrase=self.passphrase,
-                timeout_seconds=self._timeout_seconds,
-            )
-        )
         self._broker_client = None
         self._broker_semantic_executor = None
         self._tp_sl_manager: TpSlExecutionManager | None = None
         self.trading_client: TradingClientPort | None = None
 
-        if not self.api_key or not self.secret_key or not self.passphrase:
-            raise ValueError(
-                "OKX API config is incomplete. "
-                "Check EXCHANGE_API_KEY/EXCHANGE_API_SECRET/EXCHANGE_API_PASSPHRASE "
-                "or legacy OKX_API_KEY/OKX_SECRET_KEY/OKX_PASSPHASE."
-            )
         if not self.live_trading:
             raise RuntimeError("LIVE_TRADING is not true. Refusing to initialize live trader.")
+
+    # ------------------------------------------------------------------
+    # Binding methods (called by runtime_factory)
+    # ------------------------------------------------------------------
 
     def bind_trading_client(self, trading_client: TradingClientPort) -> None:
         """Bind a TradingClientPort and initialise the TP/SL execution manager.
@@ -170,6 +157,26 @@ class Trader:
         self.trading_client = trading_client
         from src.execution.tp_sl_execution_manager import TpSlExecutionManager
         self._tp_sl_manager = TpSlExecutionManager(self, trading_client=trading_client)
+
+    def bind_private_client(self, client: Any) -> None:
+        """Bind a private REST client for legacy broker semantic path.
+
+        The client must expose ``request(method, endpoint, payload)``
+        and ``headers(method, endpoint, body)``.
+        """
+        self._private_client = client
+
+    def bind_private_write_limiter(self, limiter: Any) -> None:
+        """Bind a private write rate limiter for legacy request() path."""
+        self._private_write_limiter = limiter
+
+    def bind_broker_semantic_executor(self, executor: Any) -> None:
+        """Bind a broker semantic executor for legacy broker read/cancel paths."""
+        self._broker_semantic_executor = executor
+
+    # ------------------------------------------------------------------
+    # Guards
+    # ------------------------------------------------------------------
 
     def _require_trading_client(self) -> TradingClientPort:
         if self.trading_client is None:
@@ -184,12 +191,11 @@ class Trader:
     def __getattr__(self, name: str):
         if name == '_tp_sl_manager':
             raise RuntimeError("tp_sl_manager_not_bound")
-        if name == '_private_write_limiter':
-            from src.execution.okx_private_client import PrivateWriteRateLimiter
-            limiter = PrivateWriteRateLimiter()
-            object.__setattr__(self, '_private_write_limiter', limiter)
-            return limiter
         raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
+
+    # ------------------------------------------------------------------
+    # Broker semantic access (legacy — behind feature flags)
+    # ------------------------------------------------------------------
 
     @property
     def broker_exchange_name(self) -> str:
@@ -198,13 +204,12 @@ class Trader:
     @property
     def broker_semantic_executor(self) -> Any:
         if self._broker_semantic_executor is None:
-            from src.exchanges.okx.client import OkxBrokerClient
-            from src.exchanges.okx.semantic_executor import OkxBrokerSemanticExecutor
-
-            broker_client = OkxBrokerClient(self)
-            self._broker_client = broker_client
-            self._broker_semantic_executor = OkxBrokerSemanticExecutor(broker_client)
+            raise RuntimeError("broker_semantic_executor_not_bound")
         return self._broker_semantic_executor
+
+    def _broker_semantic_reads_enabled(self) -> bool:
+        value = os.getenv("BROKER_SEMANTIC_READS_ENABLED", "false").strip().lower()
+        return value in {"1", "true", "yes", "y", "on"}
 
     async def fetch_broker_open_orders(self) -> tuple["BrokerOrder", ...]:
         result = await self.broker_semantic_executor.fetch_open_orders(symbol=self.symbol)
@@ -242,15 +247,21 @@ class Trader:
         orders = await self.recover_broker_open_orders()
         return [dict(order.raw) for order in orders]
 
-    def _broker_semantic_reads_enabled(self) -> bool:
-        value = os.getenv("BROKER_SEMANTIC_READS_ENABLED", "false").strip().lower()
-        return value in {"1", "true", "yes", "y", "on"}
+    # ------------------------------------------------------------------
+    # Lifecycle (delegates to bound private_client)
+    # ------------------------------------------------------------------
 
     async def start(self) -> None:
-        await self._client.start()
+        if self._private_client is not None:
+            await self._private_client.start()
 
     async def close(self) -> None:
-        await self._client.close()
+        if self._private_client is not None:
+            await self._private_client.close()
+
+    # ------------------------------------------------------------------
+    # Initialization
+    # ------------------------------------------------------------------
 
     async def initialize(self) -> None:
         balance = await self.trading_client.fetch_balance()
@@ -275,6 +286,10 @@ class Trader:
             self.contract_multiplier,
             self.min_contracts,
         )
+
+    # ------------------------------------------------------------------
+    # Trade execution
+    # ------------------------------------------------------------------
 
     async def execute_intent(self, intent: TradeIntent) -> LiveTradeResult:
         if intent.intent_type == "NEAR_TP_REDUCE":
@@ -657,13 +672,22 @@ class Trader:
         await self.trading_client.configure_instrument()
 
     async def request(self, method: str, endpoint: str, payload: Any | None = None) -> dict[str, Any]:
-        # Rate-limit all private write (POST) operations
-        if method.upper() == "POST":
+        """Legacy wrapper — delegates to the bound private REST client.
+
+        Rate-limits POST operations when a rate limiter is bound.
+        Used by the legacy broker semantic path (behind feature flags).
+        """
+        if self._private_write_limiter is not None and method.upper() == "POST":
             await self._private_write_limiter.acquire()
-        return await self._client.request(method, endpoint, payload)
+        if self._private_client is None:
+            raise RuntimeError("private_client_not_bound")
+        return await self._private_client.request(method, endpoint, payload)
 
     def headers(self, method: str, endpoint: str, body: str) -> dict[str, str]:
-        return self._client.headers(method, endpoint, body)
+        """Legacy wrapper — delegates to the bound private REST client."""
+        if self._private_client is None:
+            raise RuntimeError("private_client_not_bound")
+        return self._private_client.headers(method, endpoint, body)
 
     def eth_qty_to_contracts(self, eth_qty: Decimal) -> Decimal:
         raw_contracts = eth_qty / self.contract_multiplier

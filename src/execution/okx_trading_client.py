@@ -6,10 +6,9 @@
 @File       : okx_trading_client.py
 @Description: OKX implementation of TradingClientPort.
 
-This class wraps an existing Trader instance.
-It is NOT wired into production yet.
-Quantity is currently interpreted as OKX contract quantity, matching the
-existing OKX execution code path.
+This class owns an OkxPrivateClient for direct OKX REST access.
+It does NOT depend on Trader._client or Trader.request() for its
+primary execution path.
 """
 
 from __future__ import annotations
@@ -30,6 +29,7 @@ from src.execution.trading_client_port import (
 )
 
 if TYPE_CHECKING:
+    from src.execution.okx_private_client import OkxPrivateClient, PrivateWriteRateLimiter
     from src.execution.trader import Trader
 
 
@@ -57,17 +57,62 @@ def _normalise_client_order_id(client_order_id: str | None) -> str | None:
     return value or None
 
 
+def _normalise_okx_side(raw_side: str) -> str:
+    """Normalise OKX side strings to uppercase: "buy" → "BUY", "sell" → "SELL"."""
+    return raw_side.strip().upper()
+
+
 class OkxTradingClient(TradingClientPort):
     """OKX implementation of TradingClientPort.
 
-    This class wraps an existing Trader instance.
-    It is not wired into production yet.
-    Quantity is currently interpreted as OKX contract quantity, matching the
-    existing OKX execution code path.
+    Owns an OkxPrivateClient for direct OKX private REST access.
+    References Trader only for exchange-agnostic config fields
+    (symbol, td_mode, pos_side_mode, contract_multiplier, leverage)
+    and formatting helpers (decimal_to_str, price_to_str, etc.).
     """
 
-    def __init__(self, trader: Trader) -> None:
+    def __init__(
+        self,
+        trader: Trader,
+        *,
+        private_client: OkxPrivateClient | None = None,
+        rate_limiter: PrivateWriteRateLimiter | None = None,
+    ) -> None:
         self._trader = trader
+        # Fall back to trader._client for backward compatibility with tests
+        # that were written before the adapter freeze.
+        if private_client is not None:
+            self._client = private_client
+        else:
+            self._client = getattr(trader, "_client", None)
+            if self._client is None:
+                raise TypeError(
+                    "OkxTradingClient requires private_client=... when "
+                    "trader._client is not available"
+                )
+        self._limiter = rate_limiter
+
+    # ------------------------------------------------------------------
+    # Lifecycle (NOT on TradingClientPort — called by runtime_factory)
+    # ------------------------------------------------------------------
+
+    async def start(self) -> None:
+        """Start the underlying private REST session."""
+        await self._client.start()
+
+    async def close(self) -> None:
+        """Close the underlying private REST session."""
+        await self._client.close()
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    async def _post(self, endpoint: str, body: dict[str, Any]) -> dict[str, Any]:
+        """Rate-limited POST request to OKX private REST."""
+        if self._limiter is not None:
+            await self._limiter.acquire()
+        return await self._client.request("POST", endpoint, body)
 
     # ------------------------------------------------------------------
     # Query methods
@@ -79,7 +124,7 @@ class OkxTradingClient(TradingClientPort):
         Does NOT go through Trader.fetch_usdt_equity() to avoid recursion
         (Trader.fetch_usdt_equity() now delegates to this method).
         """
-        res = await self._trader._client.request(
+        res = await self._client.request(
             "GET", "/api/v5/account/balance?ccy=USDT"
         )
         data = res.get("data", [])
@@ -111,7 +156,7 @@ class OkxTradingClient(TradingClientPort):
         pos_side_mode = self._trader.pos_side_mode
         contract_multiplier = self._trader.contract_multiplier
 
-        res = await self._trader._client.request(
+        res = await self._client.request(
             "GET", f"/api/v5/account/positions?instId={symbol}"
         )
         best_side: str | None = None
@@ -152,23 +197,31 @@ class OkxTradingClient(TradingClientPort):
         )
 
     async def fetch_open_orders(self) -> list[OrderSnapshot]:
-        """Fetch broker open orders and map them to OrderSnapshot DTOs."""
-        orders = await self._trader.fetch_broker_open_orders()
-        result: list[OrderSnapshot] = []
-        for order in orders:
-            result.append(
+        """Fetch open orders directly from OKX private REST.
+
+        Does NOT go through Trader broker semantic executor.
+        """
+        symbol = self._trader.symbol
+        res = await self._client.request(
+            "GET", f"/api/v5/trade/orders-pending?instId={symbol}"
+        )
+        results: list[OrderSnapshot] = []
+        for item in res.get("data", []):
+            if item.get("instId") != symbol:
+                continue
+            results.append(
                 OrderSnapshot(
-                    order_id=order.order_id,
-                    client_order_id=order.client_order_id,
-                    side=str(order.side.value if hasattr(order.side, "value") else order.side),
-                    qty=order.quantity or Decimal("0"),
-                    price=order.price,
-                    trigger_price=order.trigger_price,
-                    reduce_only=order.reduce_only,
-                    raw=dict(order.raw),
+                    order_id=str(item.get("ordId", "")),
+                    client_order_id=str(item.get("clOrdId")) if item.get("clOrdId") else None,
+                    side=_normalise_okx_side(str(item.get("side", ""))),
+                    qty=_safe_decimal(item.get("sz")) or Decimal("0"),
+                    price=_safe_decimal(item.get("px")),
+                    trigger_price=None,
+                    reduce_only=str(item.get("reduceOnly", "")).lower() == "true",
+                    raw=item,
                 )
             )
-        return result
+        return results
 
     # ------------------------------------------------------------------
     # Order placement methods
@@ -182,7 +235,7 @@ class OkxTradingClient(TradingClientPort):
         reduce_only: bool,
         client_order_id: str,
     ) -> OrderResult:
-        """Place a market order via the wrapped Trader."""
+        """Place a market order directly via OKX private REST."""
         position_side = _normalise_position_side(side)
         contracts_text = self._trader.decimal_to_str(qty)
         normalised_cid = _normalise_client_order_id(client_order_id)
@@ -207,7 +260,7 @@ class OkxTradingClient(TradingClientPort):
         if normalised_cid is not None:
             body["clOrdId"] = normalised_cid
 
-        res = await self._trader.request("POST", "/api/v5/trade/order", body)
+        res = await self._post("/api/v5/trade/order", body)
         order_id = self._trader.extract_order_id(res)
 
         return OrderResult(ok=True, order_id=order_id, client_order_id=normalised_cid, raw=res)
@@ -245,7 +298,7 @@ class OkxTradingClient(TradingClientPort):
             client_order_id=normalised_cid,
         )
 
-        res = await self._trader.request("POST", "/api/v5/trade/order", body)
+        res = await self._post("/api/v5/trade/order", body)
         order_id = self._trader.extract_order_id(res)
 
         return OrderResult(ok=True, order_id=order_id, client_order_id=normalised_cid, raw=res)
@@ -296,7 +349,7 @@ class OkxTradingClient(TradingClientPort):
         if normalised_cid is not None:
             body["algoClOrdId"] = normalised_cid
 
-        res = await self._trader.request("POST", "/api/v5/trade/order-algo", body)
+        res = await self._post("/api/v5/trade/order-algo", body)
         order_id = self._trader.extract_algo_id(res)
 
         return OrderResult(ok=True, order_id=order_id, client_order_id=normalised_cid, raw=res)
@@ -330,7 +383,7 @@ class OkxTradingClient(TradingClientPort):
             body = {"instId": self._trader.symbol, "clOrdId": normalised_cid}
 
         try:
-            res = await self._trader.request("POST", "/api/v5/trade/cancel-order", body)
+            res = await self._post("/api/v5/trade/cancel-order", body)
         except Exception:
             if order_id is None:
                 raise
@@ -339,7 +392,7 @@ class OkxTradingClient(TradingClientPort):
                 inst_id=self._trader.symbol,
                 algo_id=order_id,
             )
-            res = await self._trader.request("POST", "/api/v5/trade/cancel-algos", algo_body)
+            res = await self._post("/api/v5/trade/cancel-algos", algo_body)
 
         return CancelResult(ok=True, order_id=order_id, client_order_id=normalised_cid, raw=res)
 
@@ -372,7 +425,7 @@ class OkxTradingClient(TradingClientPort):
                 "algoClOrdId": normalised_cid,
             }
 
-        res = await self._trader._client.request(
+        res = await self._client.request(
             "POST", "/api/v5/trade/cancel-algos", body
         )
 
@@ -397,7 +450,7 @@ class OkxTradingClient(TradingClientPort):
             pos_side_mode=self._trader.pos_side_mode,
         )
         for body in bodies:
-            await self._trader._client.request(
+            await self._client.request(
                 "POST", "/api/v5/account/set-leverage", body
             )
 
@@ -431,7 +484,7 @@ class OkxTradingClient(TradingClientPort):
             )
 
         try:
-            res = await self._trader.request("GET", endpoint)
+            res = await self._client.request("GET", endpoint)
         except Exception:
             return OrderStatusSnapshot(
                 order_id=order_id,
@@ -480,7 +533,7 @@ class OkxTradingClient(TradingClientPort):
         (Trader.fetch_pending_algo_orders() now delegates to this method).
         """
         symbol = self._trader.symbol
-        res = await self._trader._client.request(
+        res = await self._client.request(
             "GET",
             f"/api/v5/trade/orders-algo-pending?instId={symbol}&ordType=conditional",
         )

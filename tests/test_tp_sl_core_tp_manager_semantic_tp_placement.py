@@ -74,6 +74,7 @@ class FakeTrader:
     def __init__(self):
         self.requests = []
         self.semantic = FakeSemanticExecutor()
+        self._client = self  # backward compat: serve as own private_client
 
     @property
     def broker_semantic_executor(self):

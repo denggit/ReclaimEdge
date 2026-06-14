@@ -86,6 +86,10 @@ ALLOWED_DIRECT_REST: dict[tuple[str, str, str], str] = {
     # ── OkxTradingClient extended reads ──────────────────────────────────
     ("src/execution/okx_trading_client.py", "fetch_order_status", "/api/v5/trade/order"):
         "adapter bridge",
+
+    # ── OkxTradingClient fetch_open_orders (direct REST, no broker) ─────
+    ("src/execution/okx_trading_client.py", "fetch_open_orders", "/api/v5/trade/orders-pending"):
+        "adapter bridge — direct REST (no broker, no Trader recursion)",
 }
 
 # ── Allowed order body builder whitelist ─────────────────────────────────

@@ -35,16 +35,14 @@ class TestRuntimeBundleCreation:
             "LIVE_TRADING": "true",
         }
         with mock.patch.dict(os.environ, env, clear=True):
-            with mock.patch("src.execution.trader.Trader.start", new_callable=mock.AsyncMock):
-                with mock.patch("src.execution.trader.Trader._client", create=True):
-                    bundle = create_runtime_bundle(env)
-                    assert isinstance(bundle, LiveRuntimeBundle)
-                    assert bundle.runtime_config.exchange == ExchangeName.OKX
-                    assert bundle.runtime_config.okx_inst_id == "ETH-USDT-SWAP"
-                    assert bundle.runtime_config.kline_interval == "15m"
-                    assert bundle.market_data_client is not None
-                    assert bundle.trading_client is not None
-                    assert bundle.trader is not None
+            bundle = create_runtime_bundle(env)
+            assert isinstance(bundle, LiveRuntimeBundle)
+            assert bundle.runtime_config.exchange == ExchangeName.OKX
+            assert bundle.runtime_config.okx_inst_id == "ETH-USDT-SWAP"
+            assert bundle.runtime_config.kline_interval == "15m"
+            assert bundle.market_data_client is not None
+            assert bundle.trading_client is not None
+            assert bundle.trader is not None
 
     def test_okx_bundle_has_correct_config_mapping(self) -> None:
         """Verify internal OKX adapter mapping from unified config."""
@@ -62,18 +60,53 @@ class TestRuntimeBundleCreation:
             "LIVE_TRADING": "true",
         }
         with mock.patch.dict(os.environ, env, clear=True):
-            with mock.patch("src.execution.trader.Trader.start", new_callable=mock.AsyncMock):
-                with mock.patch("src.execution.trader.Trader._client", create=True):
-                    bundle = create_runtime_bundle(env)
-                    config = bundle.runtime_config
-                    # ETH + USDT + PERPETUAL -> ETH-USDT-SWAP
-                    assert config.okx_inst_id == "ETH-USDT-SWAP"
-                    # KLINE_INTERVAL=15m -> OKX bar=15m
-                    assert config.kline_interval == "15m"
-                    # MARGIN_MODE=isolated -> tdMode=isolated
-                    assert config.margin_mode == "isolated"
-                    # POSITION_MODE=net -> net mode
-                    assert config.position_mode == "net"
+            bundle = create_runtime_bundle(env)
+            config = bundle.runtime_config
+            # ETH + USDT + PERPETUAL -> ETH-USDT-SWAP
+            assert config.okx_inst_id == "ETH-USDT-SWAP"
+            # KLINE_INTERVAL=15m -> OKX bar=15m
+            assert config.kline_interval == "15m"
+            # MARGIN_MODE=isolated -> tdMode=isolated
+            assert config.margin_mode == "isolated"
+            # POSITION_MODE=net -> net mode
+            assert config.position_mode == "net"
+
+    def test_trader_has_broker_semantic_executor_bound(self) -> None:
+        """Verify broker_semantic_executor is bound by the runtime factory."""
+        env = {
+            "EXCHANGE": "okx",
+            "TRADE_ASSET": "ETH",
+            "QUOTE_ASSET": "USDT",
+            "MARKET_TYPE": "PERPETUAL",
+            "EXCHANGE_API_KEY": "test-key",
+            "EXCHANGE_API_SECRET": "test-secret",
+            "EXCHANGE_API_PASSPHRASE": "test-pass",
+            "LIVE_TRADING": "true",
+        }
+        with mock.patch.dict(os.environ, env, clear=True):
+            bundle = create_runtime_bundle(env)
+            trader = bundle.trader
+            # broker_semantic_executor should be bound (not raise)
+            executor = trader.broker_semantic_executor
+            assert executor is not None
+
+    def test_trader_has_private_client_bound(self) -> None:
+        """Verify _private_client is bound by the runtime factory."""
+        env = {
+            "EXCHANGE": "okx",
+            "TRADE_ASSET": "ETH",
+            "QUOTE_ASSET": "USDT",
+            "MARKET_TYPE": "PERPETUAL",
+            "EXCHANGE_API_KEY": "test-key",
+            "EXCHANGE_API_SECRET": "test-secret",
+            "EXCHANGE_API_PASSPHRASE": "test-pass",
+            "LIVE_TRADING": "true",
+        }
+        with mock.patch.dict(os.environ, env, clear=True):
+            bundle = create_runtime_bundle(env)
+            trader = bundle.trader
+            # _private_client should be bound (not None)
+            assert trader._private_client is not None
 
 
 class TestRuntimeBundleBinanceBlocked:

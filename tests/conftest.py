@@ -94,7 +94,41 @@ class FakeOkxClient:
                 finally:
                     self._in_fallback = False
 
+            # Open orders queries (backward compat: delegates to broker)
+            if "/api/v5/trade/orders-pending" in endpoint:
+                self._in_fallback = True
+                try:
+                    fetch_broker = getattr(self._trader, "fetch_broker_open_orders", None)
+                    if callable(fetch_broker):
+                        orders = await fetch_broker()
+                        raw_data: list[dict] = []
+                        for order in orders:
+                            raw = dict(getattr(order, "raw", {}))
+                            raw.setdefault(
+                                "instId", getattr(self._trader, "symbol", "ETH-USDT-SWAP")
+                            )
+                            raw_data.append(raw)
+                        self._in_fallback = False
+                        return {"code": "0", "msg": "", "data": raw_data}
+                except Exception:
+                    pass
+                finally:
+                    self._in_fallback = False
+                # Return empty on failure — do NOT fall through to trader.request
+                return {"code": "0", "msg": "", "data": []}
+
         # Default empty success response
+        # Fallback: delegate to trader.request() if available (backward compat for
+        # tests that mock trader.request expecting it to be called by OkxTradingClient).
+        if self._trader is not None:
+            req_method = getattr(self._trader, "request", None)
+            if callable(req_method) and not self._in_fallback:
+                self._in_fallback = True
+                try:
+                    return await req_method(method, endpoint, payload)
+                finally:
+                    self._in_fallback = False
+
         return {"code": "0", "msg": "", "data": []}
 
     async def start(self) -> None:

@@ -161,3 +161,53 @@ class TestTraderInitDoesNotDirectlyReadOkxEnv:
         assert 'os.getenv("OKX_POS_SIDE_MODE"' not in src, (
             "__init__ must NOT directly read OKX_POS_SIDE_MODE"
         )
+
+
+class TestTraderDoesNotImportOkxDependencies:
+    """Trader must NOT import any OKX-specific classes."""
+
+    def test_no_okx_config_import(self) -> None:
+        text = _read_source()
+        assert "from config.env_loader import OKX_CONFIG" not in text, (
+            "trader.py must NOT import OKX_CONFIG"
+        )
+
+    def test_no_okx_private_client_import(self) -> None:
+        text = _read_source()
+        assert "from src.execution.okx_private_client import" not in text, (
+            "trader.py must NOT import from okx_private_client"
+        )
+
+    def test_no_okx_broker_client_import(self) -> None:
+        text = _read_source()
+        assert "from src.exchanges.okx.client import OkxBrokerClient" not in text, (
+            "trader.py must NOT import OkxBrokerClient"
+        )
+
+    def test_no_okx_broker_semantic_executor_import(self) -> None:
+        text = _read_source()
+        assert "from src.exchanges.okx.semantic_executor import OkxBrokerSemanticExecutor" not in text, (
+            "trader.py must NOT import OkxBrokerSemanticExecutor"
+        )
+
+    def test_no_self_dot_client_field(self) -> None:
+        """Trader must NOT have self._client = OkxPrivateClient(...)."""
+        src = _method_source("__init__")
+        assert src is not None
+        assert "self._client = " not in src, (
+            "Trader.__init__ must NOT set self._client"
+        )
+
+    def test_no_okx_credential_check_in_init(self) -> None:
+        """Credential check must NOT be in Trader.__init__ — moved to runtime_factory."""
+        src = _method_source("__init__")
+        assert src is not None
+        assert "api_key" not in src, (
+            "Trader.__init__ must NOT reference api_key"
+        )
+        assert "secret_key" not in src, (
+            "Trader.__init__ must NOT reference secret_key"
+        )
+        assert "passphrase" not in src, (
+            "Trader.__init__ must NOT reference passphrase"
+        )

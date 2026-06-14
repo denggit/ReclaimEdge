@@ -113,8 +113,32 @@ class TestNoForbiddenImports:
         assert "load_dotenv" not in text
 
     def test_no_okx_private_client_import(self) -> None:
+        """okx_private_client may only be imported under TYPE_CHECKING."""
         text = _read_source()
-        assert "okx_private_client" not in text
+        # Collect lines outside TYPE_CHECKING
+        lines = text.split("\n")
+        in_type_checking = False
+        runtime_lines: list[str] = []
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("if TYPE_CHECKING:"):
+                in_type_checking = True
+                continue
+            if in_type_checking:
+                if stripped == "" or stripped.startswith("#"):
+                    continue
+                # Check ORIGINAL line (before strip) for indentation
+                if not line.startswith(" ") and not line.startswith("\t"):
+                    in_type_checking = False
+                    runtime_lines.append(stripped)
+                    continue
+                # Inside TYPE_CHECKING — skip
+                continue
+            runtime_lines.append(stripped)
+        runtime_text = "\n".join(runtime_lines)
+        assert "okx_private_client" not in runtime_text, (
+            "okx_private_client must only be imported under TYPE_CHECKING"
+        )
 
     def test_no_live_module_import(self) -> None:
         text = _read_source()
@@ -155,7 +179,8 @@ class TestNoTraderConstruction:
                 if stripped == "" or stripped.startswith("#"):
                     continue
                 # After TYPE_CHECKING block ends (unindented), we're out
-                if not stripped.startswith(" ") and not stripped.startswith("\t"):
+                # Check ORIGINAL line for indentation
+                if not line.startswith(" ") and not line.startswith("\t"):
                     in_type_checking = False
                     continue
             if not in_type_checking:

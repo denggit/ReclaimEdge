@@ -59,6 +59,7 @@ class FakeTrader:
     """A fake Trader that records calls and returns canned responses.
 
     Does NOT call any real API.  Does NOT read env.
+    Can be passed as ``private_client`` to OkxTradingClient.
     """
 
     symbol = "ETH-USDT-SWAP"
@@ -81,7 +82,6 @@ class FakeTrader:
         self._request_responses: list[dict[str, Any]] = []
         self._request_calls: list[tuple[str, str, Any]] = []
         self._execute_intent_called: bool = False
-        self._client = self  # OkxTradingClient uses self._trader._client.request()
 
     # -- canned response setters ----------------------------------------
 
@@ -134,6 +134,10 @@ class FakeTrader:
                         "avgPx": str(self._position.avg_entry_price),
                     }],
                 }
+            return {"code": "0", "msg": "", "data": []}
+
+        # Handle open orders queries
+        if "/api/v5/trade/orders-pending" in endpoint:
             return {"code": "0", "msg": "", "data": []}
 
         # Handle algo orders queries
@@ -210,6 +214,11 @@ def _make_broker_order(
     )
 
 
+def _make_client(trader: FakeTrader) -> OkxTradingClient:
+    """Create an OkxTradingClient with the FakeTrader acting as private_client."""
+    return OkxTradingClient(trader, private_client=trader)
+
+
 # ======================================================================
 # Tests: _normalise_position_side
 # ======================================================================
@@ -250,7 +259,7 @@ class TestFetchBalance:
     async def test_maps_equity_to_balance_snapshot(self) -> None:
         trader = FakeTrader()
         trader.set_equity(999.88)
-        client = OkxTradingClient(trader)
+        client = _make_client(trader)
 
         result = await client.fetch_balance()
 
@@ -264,7 +273,7 @@ class TestFetchBalance:
     async def test_zero_equity(self) -> None:
         trader = FakeTrader()
         trader.set_equity(0.0)
-        client = OkxTradingClient(trader)
+        client = _make_client(trader)
 
         result = await client.fetch_balance()
 
@@ -288,7 +297,7 @@ class TestFetchPosition:
             eth_qty=0.15,
             raw_pos=Decimal("1.5"),
         ))
-        client = OkxTradingClient(trader)
+        client = _make_client(trader)
 
         result = await client.fetch_position()
 
@@ -310,7 +319,7 @@ class TestFetchPosition:
             eth_qty=0.0,
             raw_pos=Decimal("0"),
         ))
-        client = OkxTradingClient(trader)
+        client = _make_client(trader)
 
         result = await client.fetch_position()
 
@@ -329,7 +338,7 @@ class TestFetchPosition:
             eth_qty=0.2,
             raw_pos=Decimal("-2.0"),
         ))
-        client = OkxTradingClient(trader)
+        client = _make_client(trader)
 
         result = await client.fetch_position()
 
@@ -346,7 +355,7 @@ class TestFetchPosition:
             eth_qty=0.05,
             raw_pos=Decimal("0.5"),
         ))
-        client = OkxTradingClient(trader)
+        client = _make_client(trader)
 
         result = await client.fetch_position()
 
@@ -355,26 +364,40 @@ class TestFetchPosition:
 
 
 # ======================================================================
-# Tests: fetch_open_orders
+# Tests: fetch_open_orders (now calls OKX REST directly)
 # ======================================================================
 
 
 class TestFetchOpenOrders:
     @pytest.mark.asyncio
-    async def test_maps_broker_orders_to_snapshots(self) -> None:
+    async def test_maps_raw_orders_to_snapshots(self) -> None:
         trader = FakeTrader()
-        trader.set_open_orders((
-            _make_broker_order(order_id="ord-1", side=BrokerOrderSide.BUY, quantity=Decimal("0.5")),
-            _make_broker_order(
-                order_id="ord-2",
-                client_order_id="cid-2",
-                side=BrokerOrderSide.SELL,
-                quantity=Decimal("1.0"),
-                price=Decimal("3200.00"),
-                reduce_only=True,
-            ),
-        ))
-        client = OkxTradingClient(trader)
+        trader.set_request_responses([
+            {
+                "code": "0",
+                "msg": "",
+                "data": [
+                    {
+                        "instId": "ETH-USDT-SWAP",
+                        "ordId": "ord-1",
+                        "clOrdId": "cid-1",
+                        "side": "buy",
+                        "sz": "0.5",
+                        "reduceOnly": "false",
+                    },
+                    {
+                        "instId": "ETH-USDT-SWAP",
+                        "ordId": "ord-2",
+                        "clOrdId": "cid-2",
+                        "side": "sell",
+                        "sz": "1",
+                        "px": "3200.00",
+                        "reduceOnly": "true",
+                    },
+                ],
+            },
+        ])
+        client = _make_client(trader)
 
         results = await client.fetch_open_orders()
 
@@ -394,55 +417,67 @@ class TestFetchOpenOrders:
     @pytest.mark.asyncio
     async def test_empty_orders(self) -> None:
         trader = FakeTrader()
-        client = OkxTradingClient(trader)
+        trader.set_request_responses([
+            {"code": "0", "msg": "", "data": []},
+        ])
+        client = _make_client(trader)
 
         results = await client.fetch_open_orders()
 
         assert results == []
 
     @pytest.mark.asyncio
-    async def test_order_with_trigger_price(self) -> None:
+    async def test_filters_by_inst_id(self) -> None:
+        """Orders with a different instId are filtered out."""
         trader = FakeTrader()
-        trader.set_open_orders((
-            _make_broker_order(
-                order_id="sl-1",
-                side=BrokerOrderSide.SELL,
-                quantity=Decimal("0.5"),
-                trigger_price=Decimal("2900.00"),
-                reduce_only=True,
-            ),
-        ))
-        client = OkxTradingClient(trader)
+        trader.set_request_responses([
+            {
+                "code": "0",
+                "msg": "",
+                "data": [
+                    {
+                        "instId": "BTC-USDT-SWAP",
+                        "ordId": "btc-ord",
+                        "side": "buy",
+                        "sz": "1",
+                        "reduceOnly": "false",
+                    },
+                    {
+                        "instId": "ETH-USDT-SWAP",
+                        "ordId": "eth-ord",
+                        "side": "sell",
+                        "sz": "0.5",
+                        "reduceOnly": "true",
+                    },
+                ],
+            },
+        ])
+        client = _make_client(trader)
 
         results = await client.fetch_open_orders()
 
         assert len(results) == 1
-        assert results[0].trigger_price == Decimal("2900.00")
+        assert results[0].order_id == "eth-ord"
 
     @pytest.mark.asyncio
-    async def test_order_quantity_none_defaults_to_zero(self) -> None:
+    async def test_order_quantity_empty_returns_zero(self) -> None:
         trader = FakeTrader()
-        trader.set_open_orders((
-            _make_broker_order(order_id="ord-1", quantity=Decimal("0")),
-        ))
-        # Override to test None quantity
-        order_with_none_qty = BrokerOrder(
-            exchange=ExchangeName.OKX,
-            symbol="ETH-USDT-SWAP",
-            order_id="ord-x",
-            client_order_id=None,
-            side=BrokerOrderSide.BUY,
-            position_side=BrokerPositionSide.LONG,
-            order_type=BrokerOrderType.LIMIT,
-            status=BrokerOrderStatus.OPEN,
-            price=None,
-            quantity=None,
-            quantity_unit=None,
-            reduce_only=False,
-            raw={},
-        )
-        trader.set_open_orders((order_with_none_qty,))
-        client = OkxTradingClient(trader)
+        trader.set_request_responses([
+            {
+                "code": "0",
+                "msg": "",
+                "data": [
+                    {
+                        "instId": "ETH-USDT-SWAP",
+                        "ordId": "ord-x",
+                        "side": "buy",
+                        "sz": "",
+                        "reduceOnly": "false",
+                    },
+                ],
+            },
+        ])
+        client = _make_client(trader)
 
         results = await client.fetch_open_orders()
 
@@ -461,7 +496,7 @@ class TestPlaceMarketOrder:
         trader.set_request_responses([
             {"code": "0", "msg": "", "data": [{"ordId": "entry-001"}]},
         ])
-        client = OkxTradingClient(trader)
+        client = _make_client(trader)
 
         result = await client.place_market_order(
             side="LONG",
@@ -490,7 +525,7 @@ class TestPlaceMarketOrder:
         trader.set_request_responses([
             {"code": "0", "msg": "", "data": [{"ordId": "short-001"}]},
         ])
-        client = OkxTradingClient(trader)
+        client = _make_client(trader)
 
         result = await client.place_market_order(
             side="SHORT",
@@ -512,7 +547,7 @@ class TestPlaceMarketOrder:
         trader.set_request_responses([
             {"code": "0", "msg": "", "data": [{"ordId": "reduce-001"}]},
         ])
-        client = OkxTradingClient(trader)
+        client = _make_client(trader)
 
         result = await client.place_market_order(
             side="LONG",
@@ -534,7 +569,7 @@ class TestPlaceMarketOrder:
         trader.set_request_responses([
             {"code": "0", "msg": "", "data": [{"ordId": "reduce-s-001"}]},
         ])
-        client = OkxTradingClient(trader)
+        client = _make_client(trader)
 
         result = await client.place_market_order(
             side="SHORT",
@@ -552,7 +587,7 @@ class TestPlaceMarketOrder:
     @pytest.mark.asyncio
     async def test_invalid_side_raises(self) -> None:
         trader = FakeTrader()
-        client = OkxTradingClient(trader)
+        client = _make_client(trader)
 
         with pytest.raises(ValueError, match="Unsupported position side"):
             await client.place_market_order(
@@ -568,7 +603,7 @@ class TestPlaceMarketOrder:
         trader.set_request_responses([
             {"code": "0", "msg": "", "data": [{"ordId": "no-intent-1"}]},
         ])
-        client = OkxTradingClient(trader)
+        client = _make_client(trader)
 
         await client.place_market_order(
             side="LONG",
@@ -592,7 +627,7 @@ class TestPlaceLimitOrder:
         trader.set_request_responses([
             {"code": "0", "msg": "", "data": [{"ordId": "tp-001"}]},
         ])
-        client = OkxTradingClient(trader)
+        client = _make_client(trader)
 
         result = await client.place_limit_order(
             side="LONG",
@@ -617,7 +652,7 @@ class TestPlaceLimitOrder:
     @pytest.mark.asyncio
     async def test_reduce_only_false_raises(self) -> None:
         trader = FakeTrader()
-        client = OkxTradingClient(trader)
+        client = _make_client(trader)
 
         with pytest.raises(ValueError, match="reduce_only=True only"):
             await client.place_limit_order(
@@ -634,7 +669,7 @@ class TestPlaceLimitOrder:
         trader.set_request_responses([
             {"code": "0", "msg": "", "data": [{"ordId": "tp-short"}]},
         ])
-        client = OkxTradingClient(trader)
+        client = _make_client(trader)
 
         await client.place_limit_order(
             side="SHORT",
@@ -660,7 +695,7 @@ class TestPlaceStopMarketOrder:
         trader.set_request_responses([
             {"code": "0", "msg": "", "data": [{"algoId": "sl-algo-001"}]},
         ])
-        client = OkxTradingClient(trader)
+        client = _make_client(trader)
 
         result = await client.place_stop_market_order(
             side="LONG",
@@ -700,7 +735,7 @@ class TestPlaceStopMarketOrder:
             ]},
             {"code": "0", "msg": "", "data": [{"algoId": "sl-pos-qty"}]},
         ])
-        client = OkxTradingClient(trader)
+        client = _make_client(trader)
 
         result = await client.place_stop_market_order(
             side="LONG",
@@ -726,7 +761,7 @@ class TestPlaceStopMarketOrder:
             eth_qty=0.0,
             raw_pos=Decimal("0"),
         ))
-        client = OkxTradingClient(trader)
+        client = _make_client(trader)
 
         with pytest.raises(RuntimeError, match="qty > 0"):
             await client.place_stop_market_order(
@@ -740,7 +775,7 @@ class TestPlaceStopMarketOrder:
     @pytest.mark.asyncio
     async def test_reduce_only_false_raises(self) -> None:
         trader = FakeTrader()
-        client = OkxTradingClient(trader)
+        client = _make_client(trader)
 
         with pytest.raises(ValueError, match="reduce_only=True only"):
             await client.place_stop_market_order(
@@ -757,7 +792,7 @@ class TestPlaceStopMarketOrder:
         trader.set_request_responses([
             {"code": "0", "msg": "", "data": [{"algoId": "sl-short"}]},
         ])
-        client = OkxTradingClient(trader)
+        client = _make_client(trader)
 
         await client.place_stop_market_order(
             side="SHORT",
@@ -784,7 +819,7 @@ class TestCancelOrder:
         trader.set_request_responses([
             {"code": "0", "msg": "", "data": [{"ordId": "cancel-me", "sCode": "0"}]},
         ])
-        client = OkxTradingClient(trader)
+        client = _make_client(trader)
 
         result = await client.cancel_order(order_id="cancel-me")
 
@@ -802,7 +837,7 @@ class TestCancelOrder:
         trader.set_request_responses([
             {"code": "0", "msg": "", "data": [{"ordId": "by-cid", "sCode": "0"}]},
         ])
-        client = OkxTradingClient(trader)
+        client = _make_client(trader)
 
         result = await client.cancel_order(client_order_id="my-clord")
 
@@ -820,7 +855,7 @@ class TestCancelOrder:
         trader.set_request_responses([
             {"code": "0", "msg": "", "data": [{"ordId": "by-ord", "sCode": "0"}]},
         ])
-        client = OkxTradingClient(trader)
+        client = _make_client(trader)
 
         result = await client.cancel_order(order_id="by-ord", client_order_id="also-cid")
 
@@ -833,7 +868,7 @@ class TestCancelOrder:
     @pytest.mark.asyncio
     async def test_cancel_no_id_raises(self) -> None:
         trader = FakeTrader()
-        client = OkxTradingClient(trader)
+        client = _make_client(trader)
 
         with pytest.raises(ValueError, match="at least one of order_id or client_order_id"):
             await client.cancel_order()
@@ -853,7 +888,7 @@ class TestCancelOrder:
             return {"code": "0", "msg": "", "data": [{"algoId": "algo-x", "sCode": "0"}]}
 
         trader.request = request_mock  # type: ignore[method-assign]
-        client = OkxTradingClient(trader)
+        client = _make_client(trader)
 
         result = await client.cancel_order(order_id="algo-x")
 
@@ -869,7 +904,7 @@ class TestCancelOrder:
             raise RuntimeError("regular cancel failed")
 
         trader.request = request_mock  # type: ignore[method-assign]
-        client = OkxTradingClient(trader)
+        client = _make_client(trader)
 
         with pytest.raises(RuntimeError, match="regular cancel failed"):
             await client.cancel_order(client_order_id="only-cid")
@@ -914,7 +949,7 @@ class TestEmptyClientOrderIdOmittedFromBody:
         trader.set_request_responses([
             {"code": "0", "msg": "", "data": [{"ordId": "entry-001"}]},
         ])
-        client = OkxTradingClient(trader)
+        client = _make_client(trader)
 
         result = await client.place_market_order(
             side="LONG",
@@ -936,7 +971,7 @@ class TestEmptyClientOrderIdOmittedFromBody:
         trader.set_request_responses([
             {"code": "0", "msg": "", "data": [{"ordId": "entry-002"}]},
         ])
-        client = OkxTradingClient(trader)
+        client = _make_client(trader)
 
         result = await client.place_market_order(
             side="SHORT",
@@ -957,7 +992,7 @@ class TestEmptyClientOrderIdOmittedFromBody:
         trader.set_request_responses([
             {"code": "0", "msg": "", "data": [{"ordId": "tp-001"}]},
         ])
-        client = OkxTradingClient(trader)
+        client = _make_client(trader)
 
         result = await client.place_limit_order(
             side="LONG",
@@ -980,7 +1015,7 @@ class TestEmptyClientOrderIdOmittedFromBody:
         trader.set_request_responses([
             {"code": "0", "msg": "", "data": [{"ordId": "tp-002"}]},
         ])
-        client = OkxTradingClient(trader)
+        client = _make_client(trader)
 
         result = await client.place_limit_order(
             side="SHORT",
@@ -1002,7 +1037,7 @@ class TestEmptyClientOrderIdOmittedFromBody:
         trader.set_request_responses([
             {"code": "0", "msg": "", "data": [{"algoId": "sl-001"}]},
         ])
-        client = OkxTradingClient(trader)
+        client = _make_client(trader)
 
         result = await client.place_stop_market_order(
             side="LONG",
@@ -1025,7 +1060,7 @@ class TestEmptyClientOrderIdOmittedFromBody:
         trader.set_request_responses([
             {"code": "0", "msg": "", "data": [{"algoId": "sl-002"}]},
         ])
-        client = OkxTradingClient(trader)
+        client = _make_client(trader)
 
         result = await client.place_stop_market_order(
             side="SHORT",
@@ -1053,7 +1088,7 @@ class TestCancelOrderEmptyClientOrderId:
         """cancel_order(client_order_id="") with no order_id raises ValueError
         because the empty string normalises to None → no identifier provided."""
         trader = FakeTrader()
-        client = OkxTradingClient(trader)
+        client = _make_client(trader)
 
         with pytest.raises(ValueError, match="at least one of order_id or client_order_id"):
             await client.cancel_order(client_order_id="")
@@ -1061,7 +1096,7 @@ class TestCancelOrderEmptyClientOrderId:
     @pytest.mark.asyncio
     async def test_cancel_whitespace_cid_no_order_id_raises(self) -> None:
         trader = FakeTrader()
-        client = OkxTradingClient(trader)
+        client = _make_client(trader)
 
         with pytest.raises(ValueError, match="at least one of order_id or client_order_id"):
             await client.cancel_order(client_order_id="   ")
@@ -1074,7 +1109,7 @@ class TestCancelOrderEmptyClientOrderId:
         trader.set_request_responses([
             {"code": "0", "msg": "", "data": [{"ordId": "by-ord", "sCode": "0"}]},
         ])
-        client = OkxTradingClient(trader)
+        client = _make_client(trader)
 
         result = await client.cancel_order(order_id="by-ord", client_order_id="")
 
@@ -1093,7 +1128,7 @@ class TestCancelOrderEmptyClientOrderId:
         trader.set_request_responses([
             {"code": "0", "msg": "", "data": [{"ordId": "by-cid", "sCode": "0"}]},
         ])
-        client = OkxTradingClient(trader)
+        client = _make_client(trader)
 
         result = await client.cancel_order(client_order_id="my-clord")
 

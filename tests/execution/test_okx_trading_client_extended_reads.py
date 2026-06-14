@@ -60,7 +60,6 @@ class FakeTrader:
         self._request_responses: list[dict[str, Any]] = []
         self._request_calls: list[tuple[str, str, Any]] = []
         self._set_leverage_called = False
-        self._client = self  # OkxTradingClient uses self._trader._client.request()
 
     def set_request_responses(self, responses: list[dict[str, Any]]) -> None:
         self._request_responses = list(responses)
@@ -117,6 +116,11 @@ class FakeTrader:
         return f"{price:.2f}"
 
 
+def _make_client(trader: FakeTrader) -> OkxTradingClient:
+    """Create an OkxTradingClient with the FakeTrader acting as private_client."""
+    return OkxTradingClient(trader, private_client=trader)
+
+
 # ======================================================================
 # Tests: configure_instrument
 # ======================================================================
@@ -131,7 +135,7 @@ class TestConfigureInstrument:
             {"code": "0", "msg": "", "data": []},
             {"code": "0", "msg": "", "data": []},
         ])
-        client = OkxTradingClient(trader)
+        client = _make_client(trader)
 
         await client.configure_instrument()
 
@@ -164,7 +168,7 @@ class TestFetchOrderStatus:
                 }],
             },
         ])
-        client = OkxTradingClient(trader)
+        client = _make_client(trader)
 
         result = await client.fetch_order_status(order_id="ord-open-1")
 
@@ -190,7 +194,7 @@ class TestFetchOrderStatus:
                 }],
             },
         ])
-        client = OkxTradingClient(trader)
+        client = _make_client(trader)
 
         result = await client.fetch_order_status(order_id="ord-partial")
 
@@ -211,7 +215,7 @@ class TestFetchOrderStatus:
                 }],
             },
         ])
-        client = OkxTradingClient(trader)
+        client = _make_client(trader)
 
         result = await client.fetch_order_status(order_id="ord-filled")
 
@@ -234,7 +238,7 @@ class TestFetchOrderStatus:
                 }],
             },
         ])
-        client = OkxTradingClient(trader)
+        client = _make_client(trader)
 
         result = await client.fetch_order_status(order_id="ord-cancel")
 
@@ -256,7 +260,7 @@ class TestFetchOrderStatus:
                 }],
             },
         ])
-        client = OkxTradingClient(trader)
+        client = _make_client(trader)
 
         result = await client.fetch_order_status(order_id="ord-cancelled")
 
@@ -268,7 +272,7 @@ class TestFetchOrderStatus:
         trader.set_request_responses([
             {"code": "0", "msg": "", "data": []},
         ])
-        client = OkxTradingClient(trader)
+        client = _make_client(trader)
 
         result = await client.fetch_order_status(order_id="ord-missing")
 
@@ -284,7 +288,7 @@ class TestFetchOrderStatus:
             raise RuntimeError("network failure")
 
         trader.request = failing_request  # type: ignore[method-assign]
-        client = OkxTradingClient(trader)
+        client = _make_client(trader)
 
         result = await client.fetch_order_status(order_id="ord-err")
 
@@ -306,7 +310,7 @@ class TestFetchOrderStatus:
                 }],
             },
         ])
-        client = OkxTradingClient(trader)
+        client = _make_client(trader)
 
         result = await client.fetch_order_status(order_id="ord-weird")
 
@@ -328,7 +332,7 @@ class TestFetchOrderStatus:
                 }],
             },
         ])
-        client = OkxTradingClient(trader)
+        client = _make_client(trader)
 
         result = await client.fetch_order_status(client_order_id="my-cid")
 
@@ -341,7 +345,7 @@ class TestFetchOrderStatus:
     @pytest.mark.asyncio
     async def test_no_identifier_raises(self) -> None:
         trader = FakeTrader()
-        client = OkxTradingClient(trader)
+        client = _make_client(trader)
 
         with pytest.raises(ValueError, match="at least one of order_id or client_order_id"):
             await client.fetch_order_status()
@@ -372,7 +376,7 @@ class TestFetchOpenAlgoOrders:
                 ],
             },
         ])
-        client = OkxTradingClient(trader)
+        client = _make_client(trader)
 
         results = await client.fetch_open_algo_orders()
 
@@ -404,7 +408,7 @@ class TestFetchOpenAlgoOrders:
                 ],
             },
         ])
-        client = OkxTradingClient(trader)
+        client = _make_client(trader)
 
         results = await client.fetch_open_algo_orders()
 
@@ -441,7 +445,7 @@ class TestFetchOpenAlgoOrders:
                 ],
             },
         ])
-        client = OkxTradingClient(trader)
+        client = _make_client(trader)
 
         results = await client.fetch_open_algo_orders()
 
@@ -457,7 +461,7 @@ class TestFetchOpenAlgoOrders:
         trader.set_request_responses([
             {"code": "0", "msg": "", "data": []},
         ])
-        client = OkxTradingClient(trader)
+        client = _make_client(trader)
 
         results = await client.fetch_open_algo_orders()
 
@@ -481,7 +485,7 @@ class TestFetchOpenAlgoOrders:
                 ],
             },
         ])
-        client = OkxTradingClient(trader)
+        client = _make_client(trader)
 
         results = await client.fetch_open_algo_orders()
 
@@ -508,7 +512,7 @@ class TestFetchOpenAlgoOrders:
                 ],
             },
         ])
-        client = OkxTradingClient(trader)
+        client = _make_client(trader)
 
         results = await client.fetch_open_algo_orders()
 

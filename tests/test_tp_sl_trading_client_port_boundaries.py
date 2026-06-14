@@ -278,10 +278,11 @@ class TestTradingClientAttribute:
         from unittest import mock
         from src.execution.okx_trading_client import OkxTradingClient
 
-        trader.trading_client = OkxTradingClient(trader)  # type: ignore[assignment]
+        fake_private_client = mock.MagicMock()
+        fake_private_client.request = mock.AsyncMock(return_value={"data": []})
+        trader.trading_client = OkxTradingClient(trader, private_client=fake_private_client)  # type: ignore[assignment]
 
-        with mock.patch.object(trader, "request", return_value={"data": []}):
-            manager = TpSlExecutionManager(trader, trading_client=trader.trading_client)
+        manager = TpSlExecutionManager(trader, trading_client=trader.trading_client)
         trader._tp_sl_manager = manager  # type: ignore[assignment]
 
         from src.execution.trading_client_port import TradingClientPort
@@ -308,8 +309,11 @@ class TestTradingClientAttribute:
         trader.contract_precision = Decimal("0.01")
         trader.min_contracts = Decimal("0.01")
 
+        from unittest import mock
         from src.execution.okx_trading_client import OkxTradingClient
-        tc = OkxTradingClient(trader)
+        fake_private_client = mock.MagicMock()
+        fake_private_client.request = mock.AsyncMock(return_value={"data": []})
+        tc = OkxTradingClient(trader, private_client=fake_private_client)
 
         manager = CoreTakeProfitManager(trader, protective_stops=None,
                                         trading_client=tc)
@@ -328,8 +332,11 @@ class TestTradingClientAttribute:
         trader.contract_precision = Decimal("0.01")
         trader.min_contracts = Decimal("0.01")
 
+        from unittest import mock
         from src.execution.okx_trading_client import OkxTradingClient
-        tc = OkxTradingClient(trader)
+        fake_private_client = mock.MagicMock()
+        fake_private_client.request = mock.AsyncMock(return_value={"data": []})
+        tc = OkxTradingClient(trader, private_client=fake_private_client)
 
         manager = ProtectiveStopManager(trader, trading_client=tc)
         assert manager.trading_client is tc

@@ -5,3 +5,4 @@
 /.pytest_cache/
 /.env.okx
 /.env.binance
+/.env

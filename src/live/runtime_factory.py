@@ -53,7 +53,7 @@ def create_runtime_bundle(
     config = load_unified_runtime_config(values)
 
     if config.exchange == ExchangeName.OKX:
-        return _create_okx_bundle(config)
+        return _create_okx_bundle(config, values)
 
     if config.exchange == ExchangeName.BINANCE:
         from src.live.binance_live_preflight import (
@@ -75,35 +75,86 @@ def create_runtime_bundle(
 # ======================================================================
 
 
-def _create_okx_bundle(config) -> LiveRuntimeBundle:
+def _create_okx_bundle(config, values: Mapping[str, str]) -> LiveRuntimeBundle:
     """Wire the OKX live runtime bundle.
 
     Creates:
+    - OkxPrivateClient (private REST client with signing)
+    - PrivateWriteRateLimiter (rate limiter for private writes)
     - Trader (execution facade) with injected runtime settings
-    - OkxTradingClient (trading adapter, wraps Trader)
+    - OkxTradingClient (trading adapter, owns OkxPrivateClient)
+    - OkxBrokerClient + OkxBrokerSemanticExecutor (legacy broker path)
     - OkxMarketDataClient (market data adapter, standalone)
-    - Calls trader.bind_trading_client() to wire TP/SL manager
+    - Calls trader.bind_*() to wire all adapters
     """
+    from config.env_loader import OKX_CONFIG
     from src.data_feed.okx_market_data_client import (
         OkxMarketDataClient,
         OkxMarketDataClientConfig,
     )
+    from src.execution.okx_private_client import (
+        OkxPrivateClient,
+        OkxPrivateClientConfig,
+        PrivateWriteRateLimiter,
+    )
     from src.execution.okx_trading_client import OkxTradingClient
     from src.execution.trader import Trader, TraderRuntimeSettings
+    from src.exchanges.okx.client import OkxBrokerClient
+    from src.exchanges.okx.semantic_executor import OkxBrokerSemanticExecutor
 
+    # --- credential validation (moved from Trader.__init__) ---
+    api_key = OKX_CONFIG.get("api_key", "")
+    secret_key = OKX_CONFIG.get("secret_key", "")
+    passphrase = OKX_CONFIG.get("passphrase", "")
+    if not api_key or not secret_key or not passphrase:
+        raise ValueError(
+            "OKX API config is incomplete. "
+            "Check EXCHANGE_API_KEY/EXCHANGE_API_SECRET/EXCHANGE_API_PASSPHRASE "
+            "or legacy OKX_API_KEY/OKX_SECRET_KEY/OKX_PASSPHASE."
+        )
+
+    # --- private REST client (owned by OkxTradingClient) ---
+    private_client = OkxPrivateClient(
+        OkxPrivateClientConfig(
+            base_url=values.get("OKX_BASE_URL", "https://www.okx.com"),
+            api_key=api_key,
+            secret_key=secret_key,
+            passphrase=passphrase,
+            timeout_seconds=float(values.get("OKX_PRIVATE_REST_TIMEOUT_SECONDS", "10")),
+        )
+    )
+    rate_limiter = PrivateWriteRateLimiter()
+
+    # --- trader (execution facade) ---
     settings = TraderRuntimeSettings(
         symbol=config.okx_inst_id,
-        base_url=os.getenv("OKX_BASE_URL", "https://www.okx.com"),
+        base_url=values.get("OKX_BASE_URL", "https://www.okx.com"),
         td_mode=config.margin_mode,
         pos_side_mode=config.position_mode,
-        leverage=os.getenv("LEVERAGE", "50"),
+        leverage=values.get("LEVERAGE", "50"),
         live_trading=True,
-        max_live_equity_usdt=float(os.getenv("MAX_LIVE_EQUITY_USDT", "30")),
+        max_live_equity_usdt=float(values.get("MAX_LIVE_EQUITY_USDT", "30")),
     )
     trader = Trader(settings=settings)
-    trading_client = OkxTradingClient(trader)
+
+    # --- bind private client for legacy broker path ---
+    trader.bind_private_client(private_client)
+    trader.bind_private_write_limiter(rate_limiter)
+
+    # --- trading client (owns private client) ---
+    trading_client = OkxTradingClient(
+        trader,
+        private_client=private_client,
+        rate_limiter=rate_limiter,
+    )
     trader.bind_trading_client(trading_client)
 
+    # --- broker semantic executor (legacy, behind feature flags) ---
+    broker_client = OkxBrokerClient(trader)
+    broker_semantic_executor = OkxBrokerSemanticExecutor(broker_client)
+    trader.bind_broker_semantic_executor(broker_semantic_executor)
+
+    # --- market data client (standalone) ---
     market_data_config = OkxMarketDataClientConfig(
         inst_id=config.okx_inst_id,
         bar=config.kline_interval,

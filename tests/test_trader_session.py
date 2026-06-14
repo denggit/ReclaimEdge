@@ -56,7 +56,7 @@ class TraderSessionTest(unittest.IsolatedAsyncioTestCase):
         trader.secret_key = "secret"
         trader.passphrase = "pass"
         trader._timeout_seconds = 7.0
-        trader._client = OkxPrivateClient(
+        trader._private_client = OkxPrivateClient(
             OkxPrivateClientConfig(
                 base_url=trader.base_url,
                 api_key=trader.api_key,
@@ -65,6 +65,7 @@ class TraderSessionTest(unittest.IsolatedAsyncioTestCase):
                 timeout_seconds=trader._timeout_seconds,
             )
         )
+        trader._private_write_limiter = None
 
         with patch.object(client_module.aiohttp, "ClientSession", FakeSession, create=True):
             await trader.request("GET", "/api/v5/account/balance?ccy=USDT")

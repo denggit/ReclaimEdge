@@ -6,6 +6,7 @@
 @File       : test_okx_private_rest_adapter_boundaries.py
 @Description: Boundary tests verifying that OKX private REST calls are only
               in the OKX adapter/client layer (OkxPrivateClient, OkxTradingClient).
+              Also verifies Trader no longer imports OKX-specific classes.
 """
 
 from __future__ import annotations
@@ -92,3 +93,94 @@ class TestOkxPrivateRestOnlyInAdapterLayer:
         assert "/api/v5" not in text, (
             "tp_sl_execution_manager.py must NOT contain /api/v5"
         )
+
+
+class TestTraderDoesNotImportOkxPrivateClient:
+    """Trader must NOT import OKX private client classes."""
+
+    def test_no_okx_config_import(self) -> None:
+        filepath = ROOT / "src" / "execution" / "trader.py"
+        text = filepath.read_text(encoding="utf-8")
+        assert "from config.env_loader import OKX_CONFIG" not in text, (
+            "trader.py must NOT import OKX_CONFIG"
+        )
+
+    def test_no_okx_private_client_import(self) -> None:
+        filepath = ROOT / "src" / "execution" / "trader.py"
+        text = filepath.read_text(encoding="utf-8")
+        assert "from src.execution.okx_private_client import OkxPrivateClient" not in text, (
+            "trader.py must NOT import OkxPrivateClient"
+        )
+
+    def test_no_okx_private_client_config_import(self) -> None:
+        filepath = ROOT / "src" / "execution" / "trader.py"
+        text = filepath.read_text(encoding="utf-8")
+        assert "OkxPrivateClientConfig" not in text, (
+            "trader.py must NOT import OkxPrivateClientConfig"
+        )
+
+    def test_no_private_write_rate_limiter_import(self) -> None:
+        filepath = ROOT / "src" / "execution" / "trader.py"
+        text = filepath.read_text(encoding="utf-8")
+        assert "PrivateWriteRateLimiter" not in text, (
+            "trader.py must NOT import PrivateWriteRateLimiter"
+        )
+
+    def test_no_self_dot_client_instantiation(self) -> None:
+        """Trader must NOT have self._client = OkxPrivateClient(...)."""
+        filepath = ROOT / "src" / "execution" / "trader.py"
+        text = filepath.read_text(encoding="utf-8")
+        assert "self._client = OkxPrivateClient(" not in text, (
+            "trader.py must NOT create self._client = OkxPrivateClient(...)"
+        )
+
+    def test_no_okx_broker_client_import(self) -> None:
+        filepath = ROOT / "src" / "execution" / "trader.py"
+        text = filepath.read_text(encoding="utf-8")
+        assert "from src.exchanges.okx.client import OkxBrokerClient" not in text, (
+            "trader.py must NOT import OkxBrokerClient"
+        )
+
+    def test_no_okx_broker_semantic_executor_import(self) -> None:
+        filepath = ROOT / "src" / "execution" / "trader.py"
+        text = filepath.read_text(encoding="utf-8")
+        assert "from src.exchanges.okx.semantic_executor import OkxBrokerSemanticExecutor" not in text, (
+            "trader.py must NOT import OkxBrokerSemanticExecutor"
+        )
+
+
+class TestTraderHasBindMethods:
+    """Trader must have bind methods for private client and broker executor."""
+
+    def test_bind_private_client_exists(self) -> None:
+        filepath = ROOT / "src" / "execution" / "trader.py"
+        import ast
+        tree = ast.parse(filepath.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == "bind_private_client":
+                return
+        pytest.fail("trader.py must have bind_private_client method")
+
+    def test_bind_broker_semantic_executor_exists(self) -> None:
+        filepath = ROOT / "src" / "execution" / "trader.py"
+        import ast
+        tree = ast.parse(filepath.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == "bind_broker_semantic_executor":
+                return
+        pytest.fail("trader.py must have bind_broker_semantic_executor method")
+
+    def test_broker_semantic_executor_raises_when_not_bound(self) -> None:
+        filepath = ROOT / "src" / "execution" / "trader.py"
+        import ast
+        text = filepath.read_text(encoding="utf-8")
+        tree = ast.parse(text)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == "broker_semantic_executor":
+                src = ast.get_source_segment(text, node)
+                assert src is not None
+                assert "broker_semantic_executor_not_bound" in src, (
+                    "broker_semantic_executor property must raise when not bound"
+                )
+                return
+        pytest.fail("trader.py must have broker_semantic_executor property")

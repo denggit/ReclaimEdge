@@ -1,12 +1,12 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-Tests confirming that Trader correctly loads OKX credentials from unified
-EXCHANGE_API_* env vars (with legacy OKX_* fallback).
+Tests confirming that the OKX runtime factory correctly loads OKX credentials
+from unified EXCHANGE_API_* env vars (with legacy OKX_* fallback).
 
-Strategy: Trader imports OKX_CONFIG at module level, so direct instantiation
-is avoided.  Instead we verify the credential loading layer and audit the
-error message in trader.py source.
+The credential validation was moved from Trader.__init__ to
+runtime_factory._create_okx_bundle().  This test verifies the credential
+loading layer and audits the error message in runtime_factory.py source.
 """
 
 from __future__ import annotations
@@ -21,45 +21,45 @@ import config.env_loader
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Source-level boundary checks — trader.py error message
+# Source-level boundary checks — runtime_factory.py error message
 # ══════════════════════════════════════════════════════════════════════════════
 
 
-TRADER_PATH = Path(__file__).resolve().parents[2] / "src" / "execution" / "trader.py"
-TRADER_SOURCE = TRADER_PATH.read_text(encoding="utf-8")
+RUNTIME_FACTORY_PATH = Path(__file__).resolve().parents[2] / "src" / "live" / "runtime_factory.py"
+RUNTIME_FACTORY_SOURCE = RUNTIME_FACTORY_PATH.read_text(encoding="utf-8")
 
 
 class TestTraderErrorMessageContainsUnifiedVarNames:
-    """The Trader ValueError message must mention both unified and legacy vars."""
+    """The runtime_factory ValueError message must mention both unified and legacy vars."""
 
     def test_error_message_contains_exchange_api_key(self) -> None:
-        assert "EXCHANGE_API_KEY" in TRADER_SOURCE, (
-            "Trader error message must mention EXCHANGE_API_KEY"
+        assert "EXCHANGE_API_KEY" in RUNTIME_FACTORY_SOURCE, (
+            "runtime_factory error message must mention EXCHANGE_API_KEY"
         )
 
     def test_error_message_contains_exchange_api_secret(self) -> None:
-        assert "EXCHANGE_API_SECRET" in TRADER_SOURCE, (
-            "Trader error message must mention EXCHANGE_API_SECRET"
+        assert "EXCHANGE_API_SECRET" in RUNTIME_FACTORY_SOURCE, (
+            "runtime_factory error message must mention EXCHANGE_API_SECRET"
         )
 
     def test_error_message_contains_exchange_api_passphrase(self) -> None:
-        assert "EXCHANGE_API_PASSPHRASE" in TRADER_SOURCE, (
-            "Trader error message must mention EXCHANGE_API_PASSPHRASE"
+        assert "EXCHANGE_API_PASSPHRASE" in RUNTIME_FACTORY_SOURCE, (
+            "runtime_factory error message must mention EXCHANGE_API_PASSPHRASE"
         )
 
     def test_error_message_contains_legacy_okx_api_key(self) -> None:
-        assert "OKX_API_KEY" in TRADER_SOURCE, (
-            "Trader error message must mention legacy OKX_API_KEY"
+        assert "OKX_API_KEY" in RUNTIME_FACTORY_SOURCE, (
+            "runtime_factory error message must mention legacy OKX_API_KEY"
         )
 
     def test_error_message_contains_legacy_okx_secret_key(self) -> None:
-        assert "OKX_SECRET_KEY" in TRADER_SOURCE, (
-            "Trader error message must mention legacy OKX_SECRET_KEY"
+        assert "OKX_SECRET_KEY" in RUNTIME_FACTORY_SOURCE, (
+            "runtime_factory error message must mention legacy OKX_SECRET_KEY"
         )
 
     def test_error_message_contains_legacy_okx_passphase(self) -> None:
-        assert "OKX_PASSPHASE" in TRADER_SOURCE, (
-            "Trader error message must mention legacy OKX_PASSPHASE"
+        assert "OKX_PASSPHASE" in RUNTIME_FACTORY_SOURCE, (
+            "runtime_factory error message must mention legacy OKX_PASSPHASE"
         )
 
 
