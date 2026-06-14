@@ -17,7 +17,7 @@ from typing import Any, Optional
 
 import pytest
 
-from src.execution.okx_trading_client import OkxTradingClient, _normalise_position_side
+from src.execution.okx_trading_client import OkxTradingClient, _normalise_client_order_id, _normalise_position_side
 from src.execution.trading_client_port import (
     BalanceSnapshot,
     CancelResult,
@@ -835,3 +835,232 @@ class TestCancelOrder:
 
         with pytest.raises(RuntimeError, match="regular cancel failed"):
             await client.cancel_order(client_order_id="only-cid")
+
+
+# ======================================================================
+# Tests: _normalise_client_order_id
+# ======================================================================
+
+
+class TestNormaliseClientOrderId:
+    def test_none_returns_none(self) -> None:
+        assert _normalise_client_order_id(None) is None
+
+    def test_empty_string_returns_none(self) -> None:
+        assert _normalise_client_order_id("") is None
+
+    def test_whitespace_only_returns_none(self) -> None:
+        assert _normalise_client_order_id("   ") is None
+        assert _normalise_client_order_id("\t") is None
+        assert _normalise_client_order_id("\n") is None
+
+    def test_non_empty_preserved(self) -> None:
+        assert _normalise_client_order_id("my-id") == "my-id"
+
+    def test_padded_stripped(self) -> None:
+        assert _normalise_client_order_id("  my-id  ") == "my-id"
+
+
+# ======================================================================
+# Tests: empty client_order_id does NOT write body key
+# ======================================================================
+
+
+class TestEmptyClientOrderIdOmittedFromBody:
+    """Ensure empty/whitespace client_order_id is NOT written to the OKX
+    request body — preventing ``clOrdId=""`` or ``algoClOrdId=""``."""
+
+    @pytest.mark.asyncio
+    async def test_market_order_empty_cid_no_cl_ord_id(self) -> None:
+        trader = FakeTrader()
+        trader.set_request_responses([
+            {"code": "0", "msg": "", "data": [{"ordId": "entry-001"}]},
+        ])
+        client = OkxTradingClient(trader)
+
+        result = await client.place_market_order(
+            side="LONG",
+            qty=Decimal("0.5"),
+            reduce_only=False,
+            client_order_id="",
+        )
+
+        assert result.ok is True
+        assert result.order_id == "entry-001"
+        assert result.client_order_id is None
+
+        _method, _endpoint, body = trader._request_calls[0]
+        assert "clOrdId" not in body
+
+    @pytest.mark.asyncio
+    async def test_market_order_whitespace_cid_no_cl_ord_id(self) -> None:
+        trader = FakeTrader()
+        trader.set_request_responses([
+            {"code": "0", "msg": "", "data": [{"ordId": "entry-002"}]},
+        ])
+        client = OkxTradingClient(trader)
+
+        result = await client.place_market_order(
+            side="SHORT",
+            qty=Decimal("1.0"),
+            reduce_only=True,
+            client_order_id="   ",
+        )
+
+        assert result.ok is True
+        assert result.client_order_id is None
+
+        _method, _endpoint, body = trader._request_calls[0]
+        assert "clOrdId" not in body
+
+    @pytest.mark.asyncio
+    async def test_limit_order_empty_cid_no_cl_ord_id(self) -> None:
+        trader = FakeTrader()
+        trader.set_request_responses([
+            {"code": "0", "msg": "", "data": [{"ordId": "tp-001"}]},
+        ])
+        client = OkxTradingClient(trader)
+
+        result = await client.place_limit_order(
+            side="LONG",
+            qty=Decimal("0.5"),
+            price=Decimal("3200.50"),
+            reduce_only=True,
+            client_order_id="",
+        )
+
+        assert result.ok is True
+        assert result.order_id == "tp-001"
+        assert result.client_order_id is None
+
+        _method, _endpoint, body = trader._request_calls[0]
+        assert "clOrdId" not in body
+
+    @pytest.mark.asyncio
+    async def test_limit_order_whitespace_cid_no_cl_ord_id(self) -> None:
+        trader = FakeTrader()
+        trader.set_request_responses([
+            {"code": "0", "msg": "", "data": [{"ordId": "tp-002"}]},
+        ])
+        client = OkxTradingClient(trader)
+
+        result = await client.place_limit_order(
+            side="SHORT",
+            qty=Decimal("1.0"),
+            price=Decimal("2900.00"),
+            reduce_only=True,
+            client_order_id="\t",
+        )
+
+        assert result.ok is True
+        assert result.client_order_id is None
+
+        _method, _endpoint, body = trader._request_calls[0]
+        assert "clOrdId" not in body
+
+    @pytest.mark.asyncio
+    async def test_stop_market_order_empty_cid_no_algo_cl_ord_id(self) -> None:
+        trader = FakeTrader()
+        trader.set_request_responses([
+            {"code": "0", "msg": "", "data": [{"algoId": "sl-001"}]},
+        ])
+        client = OkxTradingClient(trader)
+
+        result = await client.place_stop_market_order(
+            side="LONG",
+            qty=Decimal("0.5"),
+            trigger_price=Decimal("2900.00"),
+            reduce_only=True,
+            client_order_id="",
+        )
+
+        assert result.ok is True
+        assert result.order_id == "sl-001"
+        assert result.client_order_id is None
+
+        _method, _endpoint, body = trader._request_calls[0]
+        assert "algoClOrdId" not in body
+
+    @pytest.mark.asyncio
+    async def test_stop_market_order_whitespace_cid_no_algo_cl_ord_id(self) -> None:
+        trader = FakeTrader()
+        trader.set_request_responses([
+            {"code": "0", "msg": "", "data": [{"algoId": "sl-002"}]},
+        ])
+        client = OkxTradingClient(trader)
+
+        result = await client.place_stop_market_order(
+            side="SHORT",
+            qty=Decimal("1.0"),
+            trigger_price=Decimal("3200.00"),
+            reduce_only=True,
+            client_order_id="   ",
+        )
+
+        assert result.ok is True
+        assert result.client_order_id is None
+
+        _method, _endpoint, body = trader._request_calls[0]
+        assert "algoClOrdId" not in body
+
+
+# ======================================================================
+# Tests: cancellation with empty/whitespace client_order_id
+# ======================================================================
+
+
+class TestCancelOrderEmptyClientOrderId:
+    @pytest.mark.asyncio
+    async def test_cancel_empty_cid_no_order_id_raises(self) -> None:
+        """cancel_order(client_order_id="") with no order_id raises ValueError
+        because the empty string normalises to None → no identifier provided."""
+        trader = FakeTrader()
+        client = OkxTradingClient(trader)
+
+        with pytest.raises(ValueError, match="at least one of order_id or client_order_id"):
+            await client.cancel_order(client_order_id="")
+
+    @pytest.mark.asyncio
+    async def test_cancel_whitespace_cid_no_order_id_raises(self) -> None:
+        trader = FakeTrader()
+        client = OkxTradingClient(trader)
+
+        with pytest.raises(ValueError, match="at least one of order_id or client_order_id"):
+            await client.cancel_order(client_order_id="   ")
+
+    @pytest.mark.asyncio
+    async def test_cancel_empty_cid_with_order_id_uses_order_id(self) -> None:
+        """When order_id is provided, empty client_order_id is harmlessly
+        normalised to None — the cancel proceeds by order_id."""
+        trader = FakeTrader()
+        trader.set_request_responses([
+            {"code": "0", "msg": "", "data": [{"ordId": "by-ord", "sCode": "0"}]},
+        ])
+        client = OkxTradingClient(trader)
+
+        result = await client.cancel_order(order_id="by-ord", client_order_id="")
+
+        assert result.ok is True
+        assert result.order_id == "by-ord"
+        assert result.client_order_id is None
+
+        _method, _endpoint, body = trader._request_calls[0]
+        assert body["ordId"] == "by-ord"
+
+    @pytest.mark.asyncio
+    async def test_cancel_non_empty_cid_still_works(self) -> None:
+        """Non-empty client_order_id with no order_id still works — the
+        existing behavior is preserved."""
+        trader = FakeTrader()
+        trader.set_request_responses([
+            {"code": "0", "msg": "", "data": [{"ordId": "by-cid", "sCode": "0"}]},
+        ])
+        client = OkxTradingClient(trader)
+
+        result = await client.cancel_order(client_order_id="my-clord")
+
+        assert result.ok is True
+        assert result.client_order_id == "my-clord"
+
+        _method, _endpoint, body = trader._request_calls[0]
+        assert body["clOrdId"] == "my-clord"

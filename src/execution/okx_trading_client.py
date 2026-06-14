@@ -42,6 +42,19 @@ def _normalise_position_side(side: str) -> order_specs.PositionSide:
     return value  # type: ignore[return-value]
 
 
+def _normalise_client_order_id(client_order_id: str | None) -> str | None:
+    """Return *client_order_id* stripped, or ``None`` when it is empty.
+
+    An empty or whitespace-only client-order id is treated as "not
+    provided" so the corresponding body key (``clOrdId`` /
+    ``algoClOrdId``) is omitted from the request entirely.
+    """
+    if client_order_id is None:
+        return None
+    value = client_order_id.strip()
+    return value or None
+
+
 class OkxTradingClient(TradingClientPort):
     """OKX implementation of TradingClientPort.
 
@@ -119,6 +132,7 @@ class OkxTradingClient(TradingClientPort):
         """Place a market order via the wrapped Trader."""
         position_side = _normalise_position_side(side)
         contracts_text = self._trader.decimal_to_str(qty)
+        normalised_cid = _normalise_client_order_id(client_order_id)
 
         if reduce_only:
             body = order_specs.build_reduce_only_market_order_body(
@@ -137,12 +151,13 @@ class OkxTradingClient(TradingClientPort):
                 pos_side_mode=self._trader.pos_side_mode,
             )
 
-        body["clOrdId"] = client_order_id
+        if normalised_cid is not None:
+            body["clOrdId"] = normalised_cid
 
         res = await self._trader.request("POST", "/api/v5/trade/order", body)
         order_id = self._trader.extract_order_id(res)
 
-        return OrderResult(ok=True, order_id=order_id, client_order_id=client_order_id, raw=res)
+        return OrderResult(ok=True, order_id=order_id, client_order_id=normalised_cid, raw=res)
 
     async def place_limit_order(
         self,
@@ -165,6 +180,7 @@ class OkxTradingClient(TradingClientPort):
         position_side = _normalise_position_side(side)
         contracts_text = self._trader.decimal_to_str(qty)
         price_text = self._trader.price_to_str(float(price))
+        normalised_cid = _normalise_client_order_id(client_order_id)
 
         body = order_specs.build_reduce_only_tp_order_body(
             inst_id=self._trader.symbol,
@@ -173,13 +189,13 @@ class OkxTradingClient(TradingClientPort):
             contracts_text=contracts_text,
             price_text=price_text,
             pos_side_mode=self._trader.pos_side_mode,
-            client_order_id=client_order_id,
+            client_order_id=normalised_cid,
         )
 
         res = await self._trader.request("POST", "/api/v5/trade/order", body)
         order_id = self._trader.extract_order_id(res)
 
-        return OrderResult(ok=True, order_id=order_id, client_order_id=client_order_id, raw=res)
+        return OrderResult(ok=True, order_id=order_id, client_order_id=normalised_cid, raw=res)
 
     async def place_stop_market_order(
         self,
@@ -214,6 +230,7 @@ class OkxTradingClient(TradingClientPort):
         position_side = _normalise_position_side(side)
         contracts_text = self._trader.decimal_to_str(effective_qty)
         stop_price_text = self._trader.price_to_str(float(trigger_price))
+        normalised_cid = _normalise_client_order_id(client_order_id)
 
         body = order_specs.build_conditional_protective_sl_algo_body(
             inst_id=self._trader.symbol,
@@ -223,12 +240,13 @@ class OkxTradingClient(TradingClientPort):
             stop_price_text=stop_price_text,
             pos_side_mode=self._trader.pos_side_mode,
         )
-        body["algoClOrdId"] = client_order_id
+        if normalised_cid is not None:
+            body["algoClOrdId"] = normalised_cid
 
         res = await self._trader.request("POST", "/api/v5/trade/order-algo", body)
         order_id = self._trader.extract_algo_id(res)
 
-        return OrderResult(ok=True, order_id=order_id, client_order_id=client_order_id, raw=res)
+        return OrderResult(ok=True, order_id=order_id, client_order_id=normalised_cid, raw=res)
 
     # ------------------------------------------------------------------
     # Cancel method
@@ -245,7 +263,8 @@ class OkxTradingClient(TradingClientPort):
         Tries regular cancel first.  If that fails and *order_id* is
         available, falls back to algo cancel.  Fails fast on errors.
         """
-        if order_id is None and client_order_id is None:
+        normalised_cid = _normalise_client_order_id(client_order_id)
+        if order_id is None and normalised_cid is None:
             raise ValueError("cancel_order requires at least one of order_id or client_order_id")
 
         # Build the regular cancel body
@@ -255,7 +274,7 @@ class OkxTradingClient(TradingClientPort):
                 order_id=order_id,
             )
         else:
-            body = {"instId": self._trader.symbol, "clOrdId": client_order_id}
+            body = {"instId": self._trader.symbol, "clOrdId": normalised_cid}
 
         try:
             res = await self._trader.request("POST", "/api/v5/trade/cancel-order", body)
@@ -269,4 +288,4 @@ class OkxTradingClient(TradingClientPort):
             )
             res = await self._trader.request("POST", "/api/v5/trade/cancel-algos", algo_body)
 
-        return CancelResult(ok=True, order_id=order_id, client_order_id=client_order_id, raw=res)
+        return CancelResult(ok=True, order_id=order_id, client_order_id=normalised_cid, raw=res)

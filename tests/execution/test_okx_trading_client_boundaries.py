@@ -47,6 +47,10 @@ def test_normalise_helper_importable() -> None:
     from src.execution.okx_trading_client import _normalise_position_side  # noqa: F401
 
 
+def test_normalise_client_order_id_importable() -> None:
+    from src.execution.okx_trading_client import _normalise_client_order_id  # noqa: F401
+
+
 # ======================================================================
 # Implements TradingClientPort
 # ======================================================================
@@ -229,3 +233,68 @@ class TestHasRequiredMethods:
         }
         missing = required - actual
         assert not missing, f"OkxTradingClient is missing methods: {missing}"
+
+
+# ======================================================================
+# Empty client_order_id guard rails
+# ======================================================================
+
+
+class TestNoUnconditionalEmptyClientOrderId:
+    """The source must NOT unconditionally assign a client_order_id that
+    could be empty to clOrdId / algoClOrdId."""
+
+    def test_has_normalise_client_order_id_helper(self) -> None:
+        text = _read_source()
+        assert "def _normalise_client_order_id" in text
+
+    def test_no_unconditional_cl_ord_id_assignment_in_market_order(self) -> None:
+        """place_market_order must guard clOrdId assignment with a
+        None-check (normalised cid)."""
+        text = _read_source()
+        # The unconditional pattern: body["clOrdId"] = client_order_id
+        # must not appear in place_market_order.
+        lines = text.splitlines()
+        in_method = False
+        for line in lines:
+            if "def place_market_order" in line:
+                in_method = True
+                continue
+            if in_method and line.startswith("    def "):
+                in_method = False
+            if in_method:
+                stripped = line.strip()
+                # Must NOT have an unconditional: body["clOrdId"] = client_order_id
+                if 'body["clOrdId"] = client_order_id' in stripped:
+                    raise AssertionError(
+                        "place_market_order must not unconditionally assign "
+                        "body['clOrdId'] = client_order_id"
+                    )
+
+    def test_no_unconditional_algo_cl_ord_id_assignment_in_stop_order(self) -> None:
+        """place_stop_market_order must guard algoClOrdId assignment."""
+        text = _read_source()
+        lines = text.splitlines()
+        in_method = False
+        for line in lines:
+            if "def place_stop_market_order" in line:
+                in_method = True
+                continue
+            if in_method and line.startswith("    def "):
+                in_method = False
+            if in_method:
+                stripped = line.strip()
+                if 'body["algoClOrdId"] = client_order_id' in stripped:
+                    raise AssertionError(
+                        "place_stop_market_order must not unconditionally assign "
+                        "body['algoClOrdId'] = client_order_id"
+                    )
+
+    def test_normalise_called_in_all_order_methods(self) -> None:
+        text = _read_source()
+        # Every order-placement method should call _normalise_client_order_id
+        for method in ("place_market_order", "place_limit_order",
+                       "place_stop_market_order", "cancel_order"):
+            assert f"_normalise_client_order_id" in text, (
+                f"_normalise_client_order_id helper is referenced in source"
+            )
