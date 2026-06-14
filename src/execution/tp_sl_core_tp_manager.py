@@ -139,8 +139,8 @@ class CoreTakeProfitManager:
         t = self.trader
         managed_core_contracts = t._managed_core_contracts_from_intent(intent)
         try:
-            position = await t.fetch_position_snapshot()
-            net_contracts_for_sl = position.contracts if position.has_position and position.side == intent.side else Decimal(
+            position = await self.trading_client.fetch_position()
+            net_contracts_for_sl = position.qty if position.has_position and position.side == intent.side else Decimal(
                 "0")
             if managed_core_contracts is not None:
                 core_contracts_for_tp = managed_core_contracts
