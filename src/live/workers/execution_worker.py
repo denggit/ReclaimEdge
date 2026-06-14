@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import time
 
-from src.execution.trader import Trader
+from src.execution.live_trader_protocol import LiveTraderProtocol
 from src.live import queue_helpers as live_queue_helpers
 from src.live import runtime_types as live_runtime_types
 from src.live.workers import execution_failure as execution_failure_handler
@@ -23,7 +23,7 @@ async def execution_worker(
     state_lock: asyncio.Lock,
     execution_state: live_runtime_types.ExecutionState,
     account_snapshot: live_runtime_types.AccountSnapshot,
-    trader: Trader,
+    trader: LiveTraderProtocol,
     strategy: BollCvdShockReclaimStrategy,
     journal: LiveTradeJournal,
     state_store: LiveStateStore,

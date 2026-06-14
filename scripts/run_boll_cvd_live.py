@@ -15,6 +15,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(SRC))
 
 from src.execution.trader import Trader  # noqa: E402
+from src.execution.live_trader_factory import create_live_trader  # noqa: E402
 from src.indicators.cvd_tracker import CvdTracker, CvdTrackerConfig  # noqa: E402
 from src.live import config_helpers as live_config_helpers  # noqa: E402
 from src.live import queue_helpers as live_queue_helpers  # noqa: E402
@@ -98,7 +99,7 @@ async def main() -> None:
     rolling_loss_guard = RollingLossGuard.from_env()
     state_store = LiveStateStore()
     reporter = DailyTradeReporter(journal, email_sender)
-    trader = Trader()
+    trader = create_live_trader(os.environ)
     await trader.start()
     try:
         await trader.initialize()

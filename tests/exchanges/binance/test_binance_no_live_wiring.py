@@ -90,6 +90,12 @@ def test_binance_adapter_shell_not_wired_into_runtime() -> None:
         "scripts/binance_read_only_smoke_test.py",
         "tests/scripts/test_binance_read_only_smoke_test.py",
         "tests/scripts/test_binance_read_only_smoke_test_boundaries.py",
+        # Live trader protocol test references BinanceBrokerClient
+        # only in a "must not import" safety assertion.
+        "tests/execution/test_live_trader_protocol.py",
+        # Live trader factory test references BinanceBrokerClient
+        # only in a "must not import" safety assertion.
+        "tests/execution/test_live_trader_factory.py",
     }
 
     for path in Path(".").rglob("*.py"):

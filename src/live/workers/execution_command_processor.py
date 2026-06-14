@@ -8,7 +8,8 @@ from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from typing import Any
 
-from src.execution.trader import LiveTradeResult, PositionSnapshot, Trader
+from src.execution.live_trader_protocol import LiveTraderProtocol
+from src.execution.trader import LiveTradeResult, PositionSnapshot
 from src.live import config_helpers as live_config_helpers
 from src.live import runtime_types as live_runtime_types
 from src.live.account_sync import flat_balance as live_flat_balance
@@ -60,7 +61,7 @@ class ExecutionCommandProcessor:
     state_lock: asyncio.Lock
     execution_state: live_runtime_types.ExecutionState
     account_snapshot: live_runtime_types.AccountSnapshot
-    trader: Trader
+    trader: LiveTraderProtocol
     strategy: BollCvdShockReclaimStrategy
     journal: LiveTradeJournal
     state_store: LiveStateStore

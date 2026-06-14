@@ -54,6 +54,9 @@ def test_binance_semantic_executor_not_wired_into_runtime() -> None:
         # Boundary test for Binance live preflight — references
         # BinanceBrokerSemanticExecutor only in a "must not import" assertion.
         "tests/live/test_binance_live_preflight_boundaries.py",
+        # Live trader factory test references BinanceBrokerSemanticExecutor
+        # only in a "must not import" safety assertion.
+        "tests/execution/test_live_trader_factory.py",
     }
 
     for path in Path(".").rglob("*.py"):
