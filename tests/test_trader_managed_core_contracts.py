@@ -10,6 +10,7 @@ if importlib.util.find_spec("aiohttp") is None:
     aiohttp = types.ModuleType("aiohttp")
     sys.modules.setdefault("aiohttp", aiohttp)
 
+from tests.conftest import FakeOkxClient
 import src.execution.trader as trader_module  # noqa: E402
 from src.execution.trader import Trader  # noqa: E402
 from src.risk.simple_position_sizer import PositionSize  # noqa: E402
@@ -67,6 +68,7 @@ def make_trader(**overrides) -> Trader:
     t._protected_reduce_only_order_ids = set()
     t._managed_reduce_only_order_ids = set()
     t._allow_cancel_unmanaged_reduce_only = True
+    t._client = FakeOkxClient(t)
     for k, v in overrides.items():
         setattr(t, k, v)
     return t

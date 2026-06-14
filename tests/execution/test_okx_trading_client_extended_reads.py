@@ -45,6 +45,7 @@ class FakeTrader:
     symbol = "ETH-USDT-SWAP"
     td_mode = "isolated"
     pos_side_mode = "net"
+    leverage = "50"
 
     def __init__(self) -> None:
         self._equity: float = 1234.56
@@ -59,6 +60,7 @@ class FakeTrader:
         self._request_responses: list[dict[str, Any]] = []
         self._request_calls: list[tuple[str, str, Any]] = []
         self._set_leverage_called = False
+        self._client = self  # OkxTradingClient uses self._trader._client.request()
 
     def set_request_responses(self, responses: list[dict[str, Any]]) -> None:
         self._request_responses = list(responses)
@@ -122,13 +124,22 @@ class FakeTrader:
 
 class TestConfigureInstrument:
     @pytest.mark.asyncio
-    async def test_calls_trader_set_leverage(self) -> None:
+    async def test_calls_okx_set_leverage_rest(self) -> None:
+        """configure_instrument() now calls OKX REST directly via _client."""
         trader = FakeTrader()
+        trader.set_request_responses([
+            {"code": "0", "msg": "", "data": []},
+            {"code": "0", "msg": "", "data": []},
+        ])
         client = OkxTradingClient(trader)
 
         await client.configure_instrument()
 
-        assert trader._set_leverage_called is True
+        # Verify REST calls were made (2 calls: 1 per posSide mode)
+        assert len(trader._request_calls) >= 1
+        method, endpoint, body = trader._request_calls[0]
+        assert method == "POST"
+        assert endpoint == "/api/v5/account/set-leverage"
 
 
 # ======================================================================
@@ -345,14 +356,20 @@ class TestFetchOpenAlgoOrders:
     @pytest.mark.asyncio
     async def test_parses_algo_order_basic(self) -> None:
         trader = FakeTrader()
-        trader.set_algo_orders([
+        trader.set_request_responses([
             {
-                "algoId": "algo-001",
-                "clOrdId": "cid-algo-001",
-                "side": "sell",
-                "sz": "1.5",
-                "slTriggerPx": "2900.00",
-                "state": "live",
+                "code": "0",
+                "msg": "",
+                "data": [
+                    {
+                        "algoId": "algo-001",
+                        "clOrdId": "cid-algo-001",
+                        "side": "sell",
+                        "sz": "1.5",
+                        "slTriggerPx": "2900.00",
+                        "state": "live",
+                    },
+                ],
             },
         ])
         client = OkxTradingClient(trader)
@@ -373,12 +390,18 @@ class TestFetchOpenAlgoOrders:
     @pytest.mark.asyncio
     async def test_parses_algo_order_with_ord_id_fallback(self) -> None:
         trader = FakeTrader()
-        trader.set_algo_orders([
+        trader.set_request_responses([
             {
-                "ordId": "ord-fallback",
-                "side": "buy",
-                "sz": "2.0",
-                "triggerPx": "3200.00",
+                "code": "0",
+                "msg": "",
+                "data": [
+                    {
+                        "ordId": "ord-fallback",
+                        "side": "buy",
+                        "sz": "2.0",
+                        "triggerPx": "3200.00",
+                    },
+                ],
             },
         ])
         client = OkxTradingClient(trader)
@@ -396,20 +419,26 @@ class TestFetchOpenAlgoOrders:
     @pytest.mark.asyncio
     async def test_parses_multiple_algo_orders(self) -> None:
         trader = FakeTrader()
-        trader.set_algo_orders([
+        trader.set_request_responses([
             {
-                "algoId": "algo-001",
-                "side": "sell",
-                "sz": "1.0",
-                "slTriggerPx": "2900.00",
-                "state": "live",
-            },
-            {
-                "algoId": "algo-002",
-                "side": "buy",
-                "sz": "2.0",
-                "slTriggerPx": "3100.00",
-                "state": "live",
+                "code": "0",
+                "msg": "",
+                "data": [
+                    {
+                        "algoId": "algo-001",
+                        "side": "sell",
+                        "sz": "1.0",
+                        "slTriggerPx": "2900.00",
+                        "state": "live",
+                    },
+                    {
+                        "algoId": "algo-002",
+                        "side": "buy",
+                        "sz": "2.0",
+                        "slTriggerPx": "3100.00",
+                        "state": "live",
+                    },
+                ],
             },
         ])
         client = OkxTradingClient(trader)
@@ -425,7 +454,9 @@ class TestFetchOpenAlgoOrders:
     @pytest.mark.asyncio
     async def test_empty_algo_orders(self) -> None:
         trader = FakeTrader()
-        trader.set_algo_orders([])
+        trader.set_request_responses([
+            {"code": "0", "msg": "", "data": []},
+        ])
         client = OkxTradingClient(trader)
 
         results = await client.fetch_open_algo_orders()
@@ -435,13 +466,19 @@ class TestFetchOpenAlgoOrders:
     @pytest.mark.asyncio
     async def test_missing_optional_fields(self) -> None:
         trader = FakeTrader()
-        trader.set_algo_orders([
+        trader.set_request_responses([
             {
-                "algoId": "",
-                "side": "",
-                "sz": "",
-                "slTriggerPx": None,
-                "triggerPx": None,
+                "code": "0",
+                "msg": "",
+                "data": [
+                    {
+                        "algoId": "",
+                        "side": "",
+                        "sz": "",
+                        "slTriggerPx": None,
+                        "triggerPx": None,
+                    },
+                ],
             },
         ])
         client = OkxTradingClient(trader)
@@ -458,11 +495,17 @@ class TestFetchOpenAlgoOrders:
     @pytest.mark.asyncio
     async def test_invalid_sz_returns_none(self) -> None:
         trader = FakeTrader()
-        trader.set_algo_orders([
+        trader.set_request_responses([
             {
-                "algoId": "algo-bad-sz",
-                "side": "sell",
-                "sz": "not_a_number",
+                "code": "0",
+                "msg": "",
+                "data": [
+                    {
+                        "algoId": "algo-bad-sz",
+                        "side": "sell",
+                        "sz": "not_a_number",
+                    },
+                ],
             },
         ])
         client = OkxTradingClient(trader)

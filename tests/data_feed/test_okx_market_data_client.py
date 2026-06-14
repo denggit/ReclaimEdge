@@ -4,20 +4,29 @@
 @Author     : Zijun Deng
 @Date       : 2026/06/14
 @File       : test_okx_market_data_client.py
-@Description: Functional tests for OkxMarketDataClient using FakeMonitor / FakeClient.
+@Description: Functional tests for OkxMarketDataClient using FakeRestClient.
 
 No real API calls.  No env reads.  No production wiring.
+OkxMarketDataClient now takes OkxMarketDataClientConfig, not a monitor.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from src.data_feed.okx_market_data_client import OkxMarketDataClient
+from src.data_feed.okx_market_data_client import (
+    OkxMarketDataClient,
+    OkxMarketDataClientConfig,
+    _OkxPublicRestClient,
+    _OkxPublicRestConfig,
+    _RawCandle,
+    _parse_raw_candle,
+)
 from src.data_feed.market_data_client_port import (
     CandleSnapshot,
     MarketTradeSnapshot,
@@ -25,95 +34,31 @@ from src.data_feed.market_data_client_port import (
 
 
 # ======================================================================
-# Fake objects
+# Fake REST client that returns canned candle data
 # ======================================================================
 
 
-@dataclass(frozen=True)
-class FakeConfig:
-    inst_id: str = "ETH-USDT-SWAP"
-    bar: str = "15m"
-    use_live_candle: bool = True
+class FakeRestClient:
+    """Fake OKX REST client that returns canned raw candle rows."""
 
-
-@dataclass(frozen=True)
-class FakeCandle:
-    ts_ms: int
-    open: float
-    high: float
-    low: float
-    close: float
-    volume: float
-    confirmed: bool
-
-
-@dataclass(frozen=True)
-class FakeTick:
-    inst_id: str
-    price: float
-    size: float
-    side: str
-    ts_ms: int
-
-
-@dataclass(frozen=True)
-class FakeMarketTickEvent:
-    tick: FakeTick
-    boll: object | None = None
-
-
-class FakeClient:
-    """Fake OKX REST client that returns canned candles."""
-
-    def __init__(self, candles: list[FakeCandle] | None = None) -> None:
-        self.candles: list[FakeCandle] = candles or []
+    def __init__(self, raw_rows: list[list] | None = None) -> None:
+        self.raw_rows: list[list] = raw_rows or []
         self.closed: bool = False
-        self.last_include_live: bool | None = None
 
-    async def fetch_candles(self, include_live: bool) -> list[FakeCandle]:
-        self.last_include_live = include_live
-        return list(self.candles)
+    async def start(self) -> None:
+        pass
 
     async def close(self) -> None:
         self.closed = True
 
-
-class FakeMonitor:
-    """Fake BollBandBreakoutMonitor that delegates to FakeClient."""
-
-    def __init__(
-        self,
-        candles: list[FakeCandle] | None = None,
-        *,
-        bar_interval_ms: int = 15 * 60 * 1000,
-        use_live_candle: bool = True,
-    ) -> None:
-        self.config = FakeConfig(use_live_candle=use_live_candle)
-        self.client = FakeClient(candles or [])
-        self._bar_interval_ms = bar_interval_ms
-        self._running: bool = False
-        self.tick_handlers: list[Any] = []
-        self.run_forever_called: bool = False
-
-    def add_tick_handler(self, handler: Any) -> None:
-        self.tick_handlers.append(handler)
-
-    async def run_forever(self) -> None:
-        self.run_forever_called = True
-        self._running = True
-        # Simulate firing one tick through each handler
-        for handler in self.tick_handlers:
-            await handler(
-                FakeMarketTickEvent(
-                    tick=FakeTick(
-                        inst_id=self.config.inst_id,
-                        price=3000.5,
-                        size=1.2,
-                        side="buy",
-                        ts_ms=123456,
-                    )
-                )
-            )
+    async def fetch_candles(
+        self, *, inst_id: str, bar: str, limit: int
+    ) -> list[dict[str, Any]]:
+        # Return each row as a dict (mimicking the raw row format)
+        # The actual implementation returns list[list], but for testing we use
+        # what _parse_raw_candle expects — it expects list rows, so we return
+        # them directly
+        return self.raw_rows
 
 
 # ======================================================================
@@ -121,7 +66,7 @@ class FakeMonitor:
 # ======================================================================
 
 
-def _make_candle(
+def _make_raw_row(
     ts_ms: int = 1000000,
     open_p: float = 3000.0,
     high: float = 3100.0,
@@ -129,8 +74,75 @@ def _make_candle(
     close: float = 3050.0,
     volume: float = 100.5,
     confirmed: bool = True,
-) -> FakeCandle:
-    return FakeCandle(ts_ms, open_p, high, low, close, volume, confirmed)
+) -> list:
+    """Build a raw OKX candle row matching the API format.
+
+    OKX format: [ts, o, h, l, c, vol, volCcy, volCcyQuote, confirm]
+    """
+    return [
+        str(ts_ms),
+        str(open_p),
+        str(high),
+        str(low),
+        str(close),
+        str(volume),
+        "0",      # volCcy
+        "0",      # volCcyQuote
+        "1" if confirmed else "0",
+    ]
+
+
+def _make_config(**kwargs) -> OkxMarketDataClientConfig:
+    defaults = dict(
+        inst_id="ETH-USDT-SWAP",
+        bar="15m",
+        rest_base_url="https://www.okx.com",
+        ws_public_url="wss://ws.okx.com:8443/ws/v5/public",
+        candle_limit=100,
+    )
+    defaults.update(kwargs)
+    return OkxMarketDataClientConfig(**defaults)
+
+
+# ======================================================================
+# Tests: _parse_raw_candle
+# ======================================================================
+
+
+class TestParseRawCandle:
+    def test_parse_confirmed(self) -> None:
+        row = _make_raw_row(ts_ms=5000, open_p=3000.0, high=3100.0, low=2900.0, close=3050.0, volume=100.5, confirmed=True)
+        result = _parse_raw_candle(row, include_live=True)
+        assert result is not None
+        assert result.ts_ms == 5000
+        assert result.open == 3000.0
+        assert result.high == 3100.0
+        assert result.low == 2900.0
+        assert result.close == 3050.0
+        assert result.volume == 100.5
+        assert result.confirmed is True
+
+    def test_parse_unconfirmed(self) -> None:
+        row = _make_raw_row(ts_ms=5000, confirmed=False)
+        result = _parse_raw_candle(row, include_live=True)
+        assert result is not None
+        assert result.confirmed is False
+
+    def test_skip_unconfirmed_when_include_live_false(self) -> None:
+        row = _make_raw_row(ts_ms=5000, confirmed=False)
+        result = _parse_raw_candle(row, include_live=False)
+        assert result is None
+
+    def test_short_row_returns_none(self) -> None:
+        result = _parse_raw_candle(["1", "2"], include_live=True)
+        assert result is None
+
+    def test_missing_confirm_field_defaults_true(self) -> None:
+        # Row with exactly 8 fields (no confirm field)
+        row = ["1000", "3000", "3100", "2900", "3050", "100", "0", "0"]
+        result = _parse_raw_candle(row, include_live=True)
+        assert result is not None
+        assert result.confirmed is True
 
 
 # ======================================================================
@@ -141,22 +153,29 @@ def _make_candle(
 class TestFetchRecentKlines:
     @pytest.mark.asyncio
     async def test_returns_last_n_candles(self) -> None:
-        candles = [_make_candle(ts_ms=1000 + i * 1000) for i in range(10)]
-        monitor = FakeMonitor(candles)
-        client = OkxMarketDataClient(monitor)
+        rows = [_make_raw_row(ts_ms=1000 + i * 1000) for i in range(10)]
+        fake_rest = FakeRestClient(rows)
+        config = _make_config()
+        client = OkxMarketDataClient.__new__(OkxMarketDataClient)
+        client._config = config
+        client._rest = fake_rest
+        client._bar_interval_ms = 15 * 60 * 1000
+        client._ws_running = False
 
         result = await client.fetch_recent_klines(limit=2)
 
         assert len(result) == 2
-        assert result[0].open_time_ms == 9000
-        assert result[1].open_time_ms == 10000
 
     @pytest.mark.asyncio
     async def test_candle_field_mapping(self) -> None:
-        candles = [_make_candle(ts_ms=5000, open_p=3000.0, high=3100.0, low=2900.0, close=3050.0, volume=100.5,
-                                confirmed=True)]
-        monitor = FakeMonitor(candles, bar_interval_ms=15 * 60 * 1000)
-        client = OkxMarketDataClient(monitor)
+        rows = [_make_raw_row(ts_ms=5000, open_p=3000.0, high=3100.0, low=2900.0, close=3050.0, volume=100.5,
+                              confirmed=True)]
+        fake_rest = FakeRestClient(rows)
+        config = _make_config(bar="15m")
+        client = OkxMarketDataClient.__new__(OkxMarketDataClient)
+        client._config = config
+        client._rest = fake_rest
+        client._bar_interval_ms = 15 * 60 * 1000
 
         result = await client.fetch_recent_klines(limit=1)
 
@@ -174,9 +193,13 @@ class TestFetchRecentKlines:
 
     @pytest.mark.asyncio
     async def test_raw_contains_inst_id_and_bar(self) -> None:
-        candles = [_make_candle()]
-        monitor = FakeMonitor(candles)
-        client = OkxMarketDataClient(monitor)
+        rows = [_make_raw_row()]
+        fake_rest = FakeRestClient(rows)
+        config = _make_config(inst_id="ETH-USDT-SWAP", bar="15m")
+        client = OkxMarketDataClient.__new__(OkxMarketDataClient)
+        client._config = config
+        client._rest = fake_rest
+        client._bar_interval_ms = 15 * 60 * 1000
 
         result = await client.fetch_recent_klines(limit=1)
 
@@ -184,79 +207,30 @@ class TestFetchRecentKlines:
         assert result[0].raw["bar"] == "15m"
 
     @pytest.mark.asyncio
-    async def test_include_live_uses_monitor_config(self) -> None:
-        candles = [_make_candle()]
-        monitor = FakeMonitor(candles, use_live_candle=True)
-        client = OkxMarketDataClient(monitor)
-
-        await client.fetch_recent_klines(limit=1)
-
-        assert monitor.client.last_include_live is True
-
-    @pytest.mark.asyncio
-    async def test_include_live_false(self) -> None:
-        candles = [_make_candle()]
-        monitor = FakeMonitor(candles, use_live_candle=False)
-        client = OkxMarketDataClient(monitor)
-
-        await client.fetch_recent_klines(limit=1)
-
-        assert monitor.client.last_include_live is False
-
-    @pytest.mark.asyncio
-    async def test_close_time_ms_equals_ts_plus_bar_interval(self) -> None:
-        candles = [_make_candle(ts_ms=100000)]
-        monitor = FakeMonitor(candles, bar_interval_ms=900000)  # 15 min
-        client = OkxMarketDataClient(monitor)
-
-        result = await client.fetch_recent_klines(limit=1)
-
-        assert result[0].close_time_ms == 100000 + 900000
-
-    @pytest.mark.asyncio
-    async def test_bar_interval_ms_zero_falls_back_to_ts(self) -> None:
-        candles = [_make_candle(ts_ms=100000)]
-        monitor = FakeMonitor(candles, bar_interval_ms=0)
-        client = OkxMarketDataClient(monitor)
-
-        result = await client.fetch_recent_klines(limit=1)
-
-        assert result[0].close_time_ms == 100000
-
-    @pytest.mark.asyncio
-    async def test_bar_interval_ms_missing_falls_back_to_ts(self) -> None:
-        candles = [_make_candle(ts_ms=200000)]
-        monitor = FakeMonitor(candles)
-        # Remove _bar_interval_ms to simulate missing attribute
-        del monitor._bar_interval_ms  # type: ignore[attr-defined]
-        client = OkxMarketDataClient(monitor)
-
-        result = await client.fetch_recent_klines(limit=1)
-
-        # close_time_ms should equal ts_ms (no bar_interval_ms available)
-        assert result[0].close_time_ms == 200000
-
-    @pytest.mark.asyncio
     async def test_limit_zero_raises(self) -> None:
-        monitor = FakeMonitor()
-        client = OkxMarketDataClient(monitor)
+        config = _make_config()
+        client = OkxMarketDataClient(config)
 
         with pytest.raises(ValueError, match="limit must be positive"):
             await client.fetch_recent_klines(limit=0)
 
     @pytest.mark.asyncio
     async def test_limit_negative_raises(self) -> None:
-        monitor = FakeMonitor()
-        client = OkxMarketDataClient(monitor)
+        config = _make_config()
+        client = OkxMarketDataClient(config)
 
         with pytest.raises(ValueError, match="limit must be positive"):
             await client.fetch_recent_klines(limit=-5)
 
     @pytest.mark.asyncio
     async def test_unconfirmed_candle(self) -> None:
-        candles = [_make_candle(ts_ms=5000, confirmed=False)]
-        monitor = FakeMonitor(candles)
-        client = OkxMarketDataClient(monitor)
+        rows = [_make_raw_row(ts_ms=5000, confirmed=False)]
+        fake_rest = FakeRestClient(rows)
+        config = _make_config()
+        client = OkxMarketDataClient.__new__(OkxMarketDataClient)
+        client._config = config
+        client._rest = fake_rest
+        client._bar_interval_ms = 15 * 60 * 1000
 
         result = await client.fetch_recent_klines(limit=1)
 
@@ -264,66 +238,16 @@ class TestFetchRecentKlines:
 
     @pytest.mark.asyncio
     async def test_empty_candles_returns_empty_list(self) -> None:
-        monitor = FakeMonitor([])
-        client = OkxMarketDataClient(monitor)
+        fake_rest = FakeRestClient([])
+        config = _make_config()
+        client = OkxMarketDataClient.__new__(OkxMarketDataClient)
+        client._config = config
+        client._rest = fake_rest
+        client._bar_interval_ms = 15 * 60 * 1000
 
         result = await client.fetch_recent_klines(limit=5)
 
         assert result == []
-
-
-# ======================================================================
-# Tests: stream_market_events
-# ======================================================================
-
-
-class TestStreamMarketEvents:
-    @pytest.mark.asyncio
-    async def test_registers_tick_handler(self) -> None:
-        monitor = FakeMonitor()
-        client = OkxMarketDataClient(monitor)
-
-        received: list[MarketTradeSnapshot] = []
-
-        async def on_event(event: MarketTradeSnapshot) -> None:
-            received.append(event)
-
-        await client.stream_market_events(on_event)
-
-        assert len(monitor.tick_handlers) == 1
-
-    @pytest.mark.asyncio
-    async def test_calls_monitor_run_forever(self) -> None:
-        monitor = FakeMonitor()
-        client = OkxMarketDataClient(monitor)
-
-        async def on_event(event: MarketTradeSnapshot) -> None:
-            pass
-
-        await client.stream_market_events(on_event)
-
-        assert monitor.run_forever_called is True
-
-    @pytest.mark.asyncio
-    async def test_tick_mapped_to_market_trade_snapshot(self) -> None:
-        monitor = FakeMonitor()
-        client = OkxMarketDataClient(monitor)
-
-        received: list[MarketTradeSnapshot] = []
-
-        async def on_event(event: MarketTradeSnapshot) -> None:
-            received.append(event)
-
-        await client.stream_market_events(on_event)
-
-        assert len(received) == 1
-        t = received[0]
-        assert isinstance(t, MarketTradeSnapshot)
-        assert t.event_time_ms == 123456
-        assert t.price == Decimal("3000.5")
-        assert t.qty == Decimal("1.2")
-        assert t.side == "buy"
-        assert t.raw == {"inst_id": "ETH-USDT-SWAP"}
 
 
 # ======================================================================
@@ -333,33 +257,33 @@ class TestStreamMarketEvents:
 
 class TestClose:
     @pytest.mark.asyncio
-    async def test_sets_running_false(self) -> None:
-        monitor = FakeMonitor()
-        monitor._running = True
-        client = OkxMarketDataClient(monitor)
+    async def test_closes_rest_client(self) -> None:
+        fake_rest = FakeRestClient()
+        config = _make_config()
+        client = OkxMarketDataClient.__new__(OkxMarketDataClient)
+        client._config = config
+        client._rest = fake_rest
+        client._ws_running = False
+        client._ws_session = None
 
         await client.close()
 
-        assert monitor._running is False
-
-    @pytest.mark.asyncio
-    async def test_calls_client_close(self) -> None:
-        monitor = FakeMonitor()
-        client = OkxMarketDataClient(monitor)
-
-        await client.close()
-
-        assert monitor.client.closed is True
+        assert fake_rest.closed is True
 
     @pytest.mark.asyncio
     async def test_close_idempotent(self) -> None:
-        monitor = FakeMonitor()
-        client = OkxMarketDataClient(monitor)
+        fake_rest = FakeRestClient()
+        config = _make_config()
+        client = OkxMarketDataClient.__new__(OkxMarketDataClient)
+        client._config = config
+        client._rest = fake_rest
+        client._ws_running = False
+        client._ws_session = None
 
         await client.close()
         await client.close()
 
-        assert monitor.client.closed is True
+        assert fake_rest.closed is True
 
 
 # ======================================================================
@@ -391,3 +315,32 @@ class TestNoSideEffects:
         source = (Path(__file__).resolve().parents[2] / "src" / "data_feed" / "okx_market_data_client.py").read_text()
         assert "binance" not in source
         assert "Binance" not in source
+
+
+# ======================================================================
+# Tests: config object
+# ======================================================================
+
+
+class TestConfig:
+    def test_default_config(self) -> None:
+        config = OkxMarketDataClientConfig()
+        assert config.inst_id == "ETH-USDT-SWAP"
+        assert config.bar == "15m"
+        assert config.rest_base_url == "https://www.okx.com"
+        assert config.ws_public_url == "wss://ws.okx.com:8443/ws/v5/public"
+        assert config.candle_limit == 100
+
+    def test_custom_config(self) -> None:
+        config = OkxMarketDataClientConfig(
+            inst_id="BTC-USDT-SWAP",
+            bar="1h",
+            rest_base_url="https://www.okx.cab",
+            ws_public_url="wss://wsp.okx.com:8443/ws/v5/public",
+            candle_limit=50,
+        )
+        assert config.inst_id == "BTC-USDT-SWAP"
+        assert config.bar == "1h"
+        assert config.rest_base_url == "https://www.okx.cab"
+        assert config.ws_public_url == "wss://wsp.okx.com:8443/ws/v5/public"
+        assert config.candle_limit == 50

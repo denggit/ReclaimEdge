@@ -10,6 +10,8 @@ import unittest
 from decimal import Decimal
 from unittest.mock import patch
 
+from tests.conftest import FakeOkxClient
+
 if importlib.util.find_spec("dotenv") is None:
     dotenv = types.ModuleType("dotenv")
     dotenv.load_dotenv = lambda *args, **kwargs: None
@@ -315,6 +317,8 @@ class RecordingTrader(Trader):
         self.middle_runner_protective_sl_order_id = None
         self.three_stage_post_tp1_protective_sl_order_id = None
         self.trend_runner_sl_order_id = None
+        self.contract_multiplier = Decimal("0.1")
+        self._client = FakeOkxClient(self)
         self.positions: list[PositionSnapshot] = [
             PositionSnapshot("LONG", Decimal("1"), 100.0, 0.1, Decimal("1")),
             PositionSnapshot("LONG", Decimal("0.5"), 100.0, 0.05, Decimal("0.5")),

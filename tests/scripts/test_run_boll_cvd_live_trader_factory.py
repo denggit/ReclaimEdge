@@ -4,8 +4,8 @@
 @Author     : Zijun Deng
 @Date       : 2026/06/14
 @File       : test_run_boll_cvd_live_trader_factory.py
-@Description: Tests verifying that run_boll_cvd_live.py uses the trader factory
-              for OKX path and keeps Binance paths unchanged.
+@Description: Tests verifying that run_boll_cvd_live.py uses the runtime bundle
+              factory for OKX path and keeps Binance paths unchanged.
 """
 
 from __future__ import annotations
@@ -18,15 +18,15 @@ import pytest
 
 
 # ======================================================================
-# OKX path uses create_live_trader
+# OKX path uses create_runtime_bundle
 # ======================================================================
 
 
-class TestOkxPathUsesFactory:
-    """The OKX default path calls create_live_trader instead of Trader()."""
+class TestOkxPathUsesBundle:
+    """The OKX default path calls create_runtime_bundle instead of Trader()."""
 
-    def test_okx_path_calls_create_live_trader(self) -> None:
-        """EXCHANGE=okx path should call create_live_trader."""
+    def test_okx_path_calls_create_runtime_bundle(self) -> None:
+        """EXCHANGE=okx path should call create_runtime_bundle."""
         env = {
             "EXCHANGE": "okx",
             "LIVE_TRADING": "true",
@@ -40,7 +40,7 @@ class TestOkxPathUsesFactory:
              mock.patch("scripts.run_boll_cvd_live.LiveStateStore"), \
              mock.patch("scripts.run_boll_cvd_live.DailyTradeReporter"):
             with mock.patch(
-                "scripts.run_boll_cvd_live.create_live_trader"
+                "scripts.run_boll_cvd_live.create_runtime_bundle"
             ) as mock_factory:
                 # The factory is called after initialisation guards.
                 # Raise here to stop execution before real Trader construction.
@@ -66,8 +66,8 @@ class TestOkxPathUsesFactory:
                 # Trader class should never be called directly
                 mock_trader.assert_not_called()
 
-    def test_okx_default_no_exchange_uses_factory(self) -> None:
-        """Default (no EXCHANGE) should also use create_live_trader."""
+    def test_okx_default_no_exchange_uses_bundle(self) -> None:
+        """Default (no EXCHANGE) should also use create_runtime_bundle."""
         env = {
             "LIVE_TRADING": "true",
         }
@@ -80,7 +80,7 @@ class TestOkxPathUsesFactory:
              mock.patch("scripts.run_boll_cvd_live.LiveStateStore"), \
              mock.patch("scripts.run_boll_cvd_live.DailyTradeReporter"):
             with mock.patch(
-                "scripts.run_boll_cvd_live.create_live_trader"
+                "scripts.run_boll_cvd_live.create_runtime_bundle"
             ) as mock_factory:
                 mock_factory.side_effect = RuntimeError("STOP_AFTER_FACTORY")
                 from scripts.run_boll_cvd_live import main
@@ -90,15 +90,15 @@ class TestOkxPathUsesFactory:
 
 
 # ======================================================================
-# Binance live blocked does not create trader
+# Binance live blocked does not create bundle
 # ======================================================================
 
 
 class TestBinanceLiveBlockedNoTrader:
-    """Binance live blocked path must not create a Trader via factory or directly."""
+    """Binance live blocked path must not create a bundle or Trader."""
 
-    def test_blocked_does_not_call_factory(self) -> None:
-        """Binance blocked path should not call create_live_trader."""
+    def test_blocked_does_not_call_bundle_factory(self) -> None:
+        """Binance blocked path should not call create_runtime_bundle."""
         env = {
             "EXCHANGE": "binance",
             "SIGNAL_ONLY": "false",
@@ -107,7 +107,7 @@ class TestBinanceLiveBlockedNoTrader:
         with mock.patch.dict(os.environ, env, clear=True), \
              mock.patch("scripts.run_boll_cvd_live.load_dotenv", return_value=False):
             with mock.patch(
-                "scripts.run_boll_cvd_live.create_live_trader"
+                "scripts.run_boll_cvd_live.create_runtime_bundle"
             ) as mock_factory:
                 from scripts.run_boll_cvd_live import main
                 with pytest.raises(RuntimeError):

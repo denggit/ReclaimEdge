@@ -6,6 +6,10 @@
 @File       : test_okx_market_data_client_boundaries.py
 @Description: Boundary tests for OkxMarketDataClient — the source must NOT
               contain forbidden imports, patterns, or references.
+
+              OkxMarketDataClient IS the OKX market data adapter layer,
+              so aiohttp and /api/v5 references are ALLOWED.
+              Strategy, execution, risk, reporting, Binance imports are FORBIDDEN.
 """
 
 from __future__ import annotations
@@ -82,7 +86,7 @@ class TestNoBinanceReferences:
 
 
 # ======================================================================
-# Forbidden imports
+# Forbidden imports — strategy / execution / risk / reporting
 # ======================================================================
 
 
@@ -101,14 +105,6 @@ class TestNoForbiddenImports:
         assert "os.getenv" not in text
         assert "load_dotenv" not in text
 
-    def test_no_aiohttp_import(self) -> None:
-        text = _read_source()
-        assert "import aiohttp" not in text
-
-    def test_no_websockets_import(self) -> None:
-        text = _read_source()
-        assert "import websockets" not in text
-
     def test_no_execution_import(self) -> None:
         text = _read_source()
         assert "src.execution" not in text
@@ -125,15 +121,19 @@ class TestNoForbiddenImports:
         text = _read_source()
         assert "src.reporting" not in text
 
+    def test_no_live_import(self) -> None:
+        text = _read_source()
+        assert "src.live" not in text
+
 
 # ======================================================================
-# Forbidden patterns — no monitor construction
+# Forbidden patterns — no monitor dependency
 # ======================================================================
 
 
-class TestNoMonitorConstruction:
+class TestNoMonitorDependency:
     def test_no_monitor_instantiation(self) -> None:
-        """The source must NOT create a BollBandBreakoutMonitor — only accept one via __init__."""
+        """The source must NOT create a BollBandBreakoutMonitor."""
         text = _read_source()
         assert "BollBandBreakoutMonitor(" not in text
 
@@ -142,36 +142,41 @@ class TestNoMonitorConstruction:
         assert "BollBandBreakoutMonitorConfig" not in text
         assert ".from_env()" not in text
 
-    def test_monitor_import_only_in_type_checking(self) -> None:
-        """BollBandBreakoutMonitor must only be imported under TYPE_CHECKING."""
+    def test_no_monitor_import_at_all(self) -> None:
+        """The source must NOT import BollBandBreakoutMonitor at all
+        (not even under TYPE_CHECKING)."""
         text = _read_source()
-        lines = text.split("\n")
-        in_type_checking = False
-        for line in lines:
-            stripped = line.strip()
-            if stripped.startswith("if TYPE_CHECKING:"):
-                in_type_checking = True
-                continue
-            if in_type_checking:
-                if stripped == "" or stripped.startswith("#"):
-                    continue
-                # After TYPE_CHECKING block ends (unindented non-empty), we're out
-                if stripped and not stripped.startswith(" ") and not stripped.startswith("\t"):
-                    in_type_checking = False
-                    continue
-            if not in_type_checking:
-                if "BollBandBreakoutMonitor" in stripped and ("import" in stripped or "from" in stripped):
-                    raise AssertionError(
-                        f"Runtime import of BollBandBreakoutMonitor found: {stripped!r}"
-                    )
+        assert "BollBandBreakoutMonitor" not in text
+
+    def test_no_run_forever(self) -> None:
+        """The source must NOT contain run_forever — it was the monitor pattern."""
+        text = _read_source()
+        assert "run_forever" not in text
 
 
 # ======================================================================
-# Forbidden patterns — no adapters
+# ALLOWED patterns — aiohttp and /api/v5 are OK at the adapter layer
 # ======================================================================
 
 
-class TestNoAdapterPatterns:
+class TestAllowedAdapterPatterns:
+    def test_aiohttp_is_allowed(self) -> None:
+        """aiohttp is allowed in the OKX market data adapter."""
+        text = _read_source()
+        assert "import aiohttp" in text
+
+    def test_api_v5_is_allowed(self) -> None:
+        """/api/v5 is allowed in the OKX market data adapter."""
+        text = _read_source()
+        assert "/api/v5" in text
+
+
+# ======================================================================
+# Forbidden patterns — no adapters / business
+# ======================================================================
+
+
+class TestNoBusinessPatterns:
     def test_no_three_stage_adapter(self) -> None:
         text = _read_source()
         assert "ThreeStageAdapter" not in text

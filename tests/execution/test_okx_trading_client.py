@@ -64,6 +64,8 @@ class FakeTrader:
     symbol = "ETH-USDT-SWAP"
     td_mode = "isolated"
     pos_side_mode = "net"
+    leverage = "50"
+    contract_multiplier = Decimal("0.1")
 
     def __init__(self) -> None:
         self._equity: float = 1234.56
@@ -75,9 +77,11 @@ class FakeTrader:
             raw_pos=Decimal("0.5"),
         )
         self._open_orders: tuple[BrokerOrder, ...] = ()
+        self._algo_orders: list[dict[str, Any]] = []
         self._request_responses: list[dict[str, Any]] = []
         self._request_calls: list[tuple[str, str, Any]] = []
         self._execute_intent_called: bool = False
+        self._client = self  # OkxTradingClient uses self._trader._client.request()
 
     # -- canned response setters ----------------------------------------
 
@@ -108,6 +112,34 @@ class FakeTrader:
         self._request_calls.append((method, endpoint, payload))
         if self._request_responses:
             return self._request_responses.pop(0)
+
+        # Handle balance queries with canned equity
+        if "/api/v5/account/balance" in endpoint:
+            return {
+                "code": "0",
+                "msg": "",
+                "data": [{"totalEq": str(self._equity), "details": [
+                    {"ccy": "USDT", "eq": str(self._equity)}]}],
+            }
+
+        # Handle position queries with canned position
+        if "/api/v5/account/positions" in endpoint:
+            if self._position.side is not None and self._position.contracts > 0:
+                return {
+                    "code": "0",
+                    "msg": "",
+                    "data": [{
+                        "instId": self.symbol,
+                        "pos": str(self._position.raw_pos),
+                        "avgPx": str(self._position.avg_entry_price),
+                    }],
+                }
+            return {"code": "0", "msg": "", "data": []}
+
+        # Handle algo orders queries
+        if "/api/v5/trade/orders-algo-pending" in endpoint:
+            return {"code": "0", "msg": "", "data": self._algo_orders}
+
         # Default success response
         return {
             "code": "0",
@@ -660,7 +692,12 @@ class TestPlaceStopMarketOrder:
             eth_qty=0.25,
             raw_pos=Decimal("2.5"),
         ))
+        # First response: position fetch (triggered by qty=None)
+        # Second response: algo order placement
         trader.set_request_responses([
+            {"code": "0", "msg": "", "data": [
+                {"instId": "ETH-USDT-SWAP", "pos": "2.5", "avgPx": "3100.0"}
+            ]},
             {"code": "0", "msg": "", "data": [{"algoId": "sl-pos-qty"}]},
         ])
         client = OkxTradingClient(trader)
@@ -675,7 +712,8 @@ class TestPlaceStopMarketOrder:
 
         assert result.ok is True
 
-        _method, _endpoint, body = trader._request_calls[0]
+        # The second call is the algo order (first was position fetch)
+        _method, _endpoint, body = trader._request_calls[1]
         assert body["sz"] == "2.5"
 
     @pytest.mark.asyncio

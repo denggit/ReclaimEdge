@@ -30,6 +30,7 @@ def _binance_blocked_env() -> dict[str, str]:
     """Minimal env that triggers BINANCE_LIVE_BLOCKED."""
     return {
         "EXCHANGE": "binance",
+        "LIVE_TRADING": "true",
         "SIGNAL_ONLY": "false",
     }
 
@@ -38,6 +39,7 @@ def _binance_all_confirmations_env() -> dict[str, str]:
     """Every preflight env set to valid values."""
     return {
         "EXCHANGE": "binance",
+        "LIVE_TRADING": "true",
         "SIGNAL_ONLY": "false",
         "LIVE_ENABLED": "true",
         "LIVE_ALLOW_ORDERS": "true",
@@ -146,7 +148,11 @@ class TestAllConfirmationsStillBlocked:
                 mock_ew.execution_worker.assert_not_called()
 
     def test_all_confirmations_does_not_enter_okx_path(self) -> None:
-        """All confirmations + EXCHANGE=binance does NOT enter OKX path."""
+        """All confirmations + EXCHANGE=binance does NOT enter OKX path.
+
+        live_trading_enabled() is called before create_runtime_bundle(),
+        which then handles the Binance block internally.
+        """
         env = _binance_all_confirmations_env()
 
         with mock.patch.dict(os.environ, env, clear=True), \
@@ -154,11 +160,12 @@ class TestAllConfirmationsStillBlocked:
             with mock.patch(
                 "scripts.run_boll_cvd_live.live_config_helpers"
             ) as mock_lch:
+                mock_lch.live_trading_enabled.return_value = True
                 from scripts.run_boll_cvd_live import main
                 with pytest.raises(RuntimeError):
                     asyncio.run(main())
-                # live_trading_enabled() should never be called (it's OKX-path only)
-                mock_lch.live_trading_enabled.assert_not_called()
+                # live_trading_enabled() IS called (it gates before bundle creation)
+                mock_lch.live_trading_enabled.assert_called()
 
 # ======================================================================
 # OKX path does not call preflight

@@ -515,6 +515,10 @@ class Trader:
         return await self._tp_sl_manager.fetch_sidecar_order_status(order_id)
 
     async def fetch_pending_orders(self) -> list[dict[str, Any]]:
+        """Legacy wrapper — delegates to TradingClientPort.fetch_open_orders().
+
+        Broker semantic reads are still attempted first when enabled.
+        """
         if self._broker_semantic_reads_enabled():
             try:
                 return await self.fetch_broker_open_order_raws()
@@ -525,10 +529,14 @@ class Trader:
                     exc,
                 )
 
-        res = await self.request("GET", f"/api/v5/trade/orders-pending?instId={self.symbol}")
-        return list(res.get("data", []))
+        orders = await self.trading_client.fetch_open_orders()
+        return [dict(o.raw) for o in orders]
 
     async def fetch_pending_algo_orders(self) -> list[dict[str, Any]]:
+        """Legacy wrapper — delegates to TradingClientPort.fetch_open_algo_orders().
+
+        Broker semantic reads are still attempted first when enabled.
+        """
         if self._broker_semantic_reads_enabled():
             try:
                 return await self.fetch_broker_algo_order_raws()
@@ -539,8 +547,8 @@ class Trader:
                     exc,
                 )
 
-        res = await self.request("GET", f"/api/v5/trade/orders-algo-pending?instId={self.symbol}&ordType=conditional")
-        return list(res.get("data", []))
+        algo_orders = await self.trading_client.fetch_open_algo_orders()
+        return [dict(o.raw) for o in algo_orders]
 
     async def cancel_near_tp_protective_stop(self, order_id: str | None) -> bool:
         return await self._tp_sl_manager.cancel_near_tp_protective_stop(order_id)
@@ -558,46 +566,30 @@ class Trader:
         return await self._tp_sl_manager.cancel_three_stage_post_tp1_protective_stop(order_id)
 
     async def fetch_usdt_equity(self) -> float:
-        res = await self.request("GET", "/api/v5/account/balance?ccy=USDT")
-        data = res.get("data", [])
-        if not data:
-            return 0.0
-        details = data[0].get("details", [])
-        for item in details:
-            if item.get("ccy") == "USDT":
-                return float(item.get("eq") or item.get("availEq") or item.get("availBal") or 0.0)
-        return float(data[0].get("totalEq") or 0.0)
+        """Legacy wrapper — delegates to TradingClientPort.fetch_balance()."""
+        balance = await self.trading_client.fetch_balance()
+        return float(balance.total)
 
     async def fetch_position_contracts(self) -> Decimal:
         return (await self.fetch_position_snapshot()).contracts
 
     async def fetch_position_snapshot(self) -> PositionSnapshot:
-        res = await self.request("GET", f"/api/v5/account/positions?instId={self.symbol}")
-        best: PositionSnapshot | None = None
-        for item in res.get("data", []):
-            if item.get("instId") != self.symbol:
-                continue
-            raw_pos = Decimal(str(item.get("pos", "0")))
-            if raw_pos == 0:
-                continue
-            contracts = abs(raw_pos)
-            avg_entry = float(item.get("avgPx") or item.get("avgPxUsd") or 0.0)
-            if self.pos_side_mode == "long_short":
-                pos_side = str(item.get("posSide", "")).lower()
-                side: PositionSide | None = "LONG" if pos_side == "long" else "SHORT" if pos_side == "short" else None
-            else:
-                side = "LONG" if raw_pos > 0 else "SHORT"
-            best = PositionSnapshot(
+        """Legacy wrapper — delegates to TradingClientPort.fetch_position()."""
+        pos = await self.trading_client.fetch_position()
+        raw_pos = Decimal(str(pos.raw.get("raw_pos", pos.qty)))
+        if pos.has_position and pos.side is not None:
+            contracts = pos.qty if pos.qty > Decimal("0") else Decimal("0")
+            avg_entry = float(pos.avg_entry_price) if pos.avg_entry_price is not None else 0.0
+            eth_qty = float(contracts * self.contract_multiplier)
+            side: PositionSide | None = pos.side  # type: ignore[assignment]
+            return PositionSnapshot(
                 side=side,
                 contracts=contracts,
                 avg_entry_price=avg_entry,
-                eth_qty=float(contracts * self.contract_multiplier),
+                eth_qty=eth_qty,
                 raw_pos=raw_pos,
             )
-            break
-        if best is None:
-            return PositionSnapshot(None, Decimal("0"), 0.0, 0.0, Decimal("0"))
-        return best
+        return PositionSnapshot(None, Decimal("0"), 0.0, 0.0, Decimal("0"))
 
     def mark_flat(self) -> None:
         self.position_contracts = Decimal("0")
@@ -609,14 +601,8 @@ class Trader:
         self.middle_bucket_fast_sl_order_id = None
 
     async def set_leverage(self) -> None:
-        bodies = order_specs.build_set_leverage_bodies(
-            inst_id=self.symbol,
-            td_mode=self.td_mode,
-            leverage=self.leverage,
-            pos_side_mode=self.pos_side_mode,
-        )
-        for body in bodies:
-            await self.request("POST", "/api/v5/account/set-leverage", body)
+        """Legacy wrapper — delegates to TradingClientPort.configure_instrument()."""
+        await self.trading_client.configure_instrument()
 
     async def request(self, method: str, endpoint: str, payload: Any | None = None) -> dict[str, Any]:
         # Rate-limit all private write (POST) operations

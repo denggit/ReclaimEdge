@@ -9,6 +9,7 @@ from types import MethodType
 from unittest.mock import patch
 
 from src.execution.trader import PositionSnapshot, Trader
+from tests.conftest import FakeOkxClient
 from src.indicators.cvd_tracker import CvdSnapshot
 from src.monitors.boll_band_breakout_monitor import BollSnapshot
 from src.position_management.runner_live_helpers import middle_runner_size_mismatch_needs_degraded_protection
@@ -836,6 +837,8 @@ class SplitTakeProfitTraderTest(unittest.IsolatedAsyncioTestCase):
         trader.middle_runner_protective_sl_order_id = None
         trader.three_stage_post_tp1_protective_sl_order_id = None
         trader.trend_runner_sl_order_id = None
+        trader.contract_multiplier = Decimal("0.1")
+        trader._client = FakeOkxClient(trader)
         return trader
 
     def test_build_split_order_specs_rounds_half_position(self) -> None:

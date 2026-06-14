@@ -13,6 +13,7 @@ from src.exchanges.models import (
     BrokerQuantityUnit,
     ExchangeName,
 )
+from tests.conftest import FakeOkxClient
 from src.execution.trader import PositionSnapshot, Trader
 from src.risk.simple_position_sizer import PositionSize
 from src.strategies.boll_cvd_reclaim_strategy import TradeIntent
@@ -56,6 +57,8 @@ class IsolationTrader(Trader):
         self.middle_runner_protective_sl_order_id = None
         self.three_stage_post_tp1_protective_sl_order_id = None
         self.trend_runner_sl_order_id = None
+        self.contract_multiplier = Decimal("0.1")
+        self._client = FakeOkxClient(self)
         self.cancelled: list[str] = []
         self.cancelled_middle_runner_stops: list[str | None] = []
         self.cancelled_post_tp1_stops: list[str | None] = []

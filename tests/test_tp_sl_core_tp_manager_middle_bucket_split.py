@@ -12,6 +12,8 @@ from unittest import mock
 
 import pytest
 
+from tests.conftest import FakeOkxClient
+
 
 class TestSplitNormalReturnsSplitFastSlow:
     """When split succeeds, actual_order_mode == SPLIT_FAST_SLOW."""
@@ -44,6 +46,7 @@ class TestSplitNormalReturnsSplitFastSlow:
         trader.price_to_str = lambda p: f"{p:.1f}"
         trader.round_contracts_down = lambda c: c
         trader._tp_price_summary = lambda specs: trader.price_to_str(specs[0][2])
+        trader._client = FakeOkxClient(trader)
 
         async def fake_fetch():
             return PositionSnapshot("LONG", Decimal("10"), 3000.0, Decimal("1"), Decimal("10"))
@@ -144,6 +147,7 @@ class TestSublegTooSmallReturnsUnsplitMiddleBucket:
         trader.price_to_str = lambda p: f"{p:.1f}"
         trader.round_contracts_down = lambda c: c
         trader._tp_price_summary = lambda specs: trader.price_to_str(specs[0][2])
+        trader._client = FakeOkxClient(trader)
 
         async def fake_fetch():
             return PositionSnapshot("LONG", Decimal("10"), 3000.0, Decimal("1"), Decimal("10"))
@@ -243,6 +247,7 @@ class TestPlacementFailedReturnsFinalFullSize:
         trader.price_to_str = lambda p: f"{p:.1f}"
         trader.round_contracts_down = lambda c: c
         trader._tp_price_summary = lambda specs: trader.price_to_str(specs[0][2])
+        trader._client = FakeOkxClient(trader)
 
         async def fake_fetch():
             return PositionSnapshot("LONG", Decimal("10"), 3000.0, Decimal("1"), Decimal("10"))
@@ -355,6 +360,7 @@ class TestNoSplitActiveReturnsNone:
         trader.price_to_str = lambda p: f"{p:.1f}"
         trader.round_contracts_down = lambda c: c
         trader._tp_price_summary = lambda specs: trader.price_to_str(specs[0][2])
+        trader._client = FakeOkxClient(trader)
 
         async def fake_fetch():
             return PositionSnapshot("LONG", Decimal("10"), 3000.0, Decimal("1"), Decimal("10"))
@@ -596,6 +602,7 @@ class TestThreeStageTp2TooSmallClassifiesFinalFullSize:
         trader.price_to_str = lambda p: f"{p:.1f}"
         trader.round_contracts_down = lambda c: c
         trader._tp_price_summary = lambda specs: trader.price_to_str(specs[0][2])
+        trader._client = FakeOkxClient(trader)
 
         async def fake_fetch():
             return PositionSnapshot("LONG", Decimal("10"), 3000.0, Decimal("1"), Decimal("10"))
@@ -695,6 +702,7 @@ class TestMiddleRunnerRunnerTooSmallClassifiesFinalFullSize:
         trader.price_to_str = lambda p: f"{p:.1f}"
         trader.round_contracts_down = lambda c: c
         trader._tp_price_summary = lambda specs: trader.price_to_str(specs[0][2])
+        trader._client = FakeOkxClient(trader)
 
         async def fake_fetch():
             return PositionSnapshot("LONG", Decimal("10"), 3000.0, Decimal("1"), Decimal("10"))
@@ -790,6 +798,7 @@ class TestMiddleRunnerSlFailurePreservesActualOrderModeFinalFullSize:
         trader.price_to_str = lambda p: f"{p:.1f}"
         trader.round_contracts_down = lambda c: c
         trader._tp_price_summary = lambda specs: trader.price_to_str(specs[0][2])
+        trader._client = FakeOkxClient(trader)
 
         async def fake_fetch():
             return PositionSnapshot("LONG", Decimal("10"), 3000.0, Decimal("1"), Decimal("10"))
@@ -896,6 +905,7 @@ class TestThreeStagePostTp1SlFailurePreservesActualOrderModeUnsplitMiddleBucket:
         trader.price_to_str = lambda p: f"{p:.1f}"
         trader.round_contracts_down = lambda c: c
         trader._tp_price_summary = lambda specs: trader.price_to_str(specs[0][2])
+        trader._client = FakeOkxClient(trader)
 
         async def fake_fetch():
             return PositionSnapshot("LONG", Decimal("10"), 3000.0, Decimal("1"), Decimal("10"))
@@ -1008,6 +1018,7 @@ class TestTrendRunnerSlFailurePreservesActualOrderModeSplitFastSlow:
         trader.price_to_str = lambda p: f"{p:.1f}"
         trader.round_contracts_down = lambda c: c
         trader._tp_price_summary = lambda specs: trader.price_to_str(specs[0][2])
+        trader._client = FakeOkxClient(trader)
 
         # _trend_runner_sl_contracts is needed by the trend runner SL path
         trader._trend_runner_sl_contracts = lambda intent, net: Decimal("5")

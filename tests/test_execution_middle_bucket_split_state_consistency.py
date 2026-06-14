@@ -11,6 +11,8 @@ from unittest import mock
 
 import pytest
 
+from tests.conftest import FakeOkxClient
+
 from src.execution.middle_bucket_split_size import (
     MiddleBucketSplitSizeCheck,
     check_middle_runner_bucket_split_size,
@@ -509,6 +511,7 @@ class TestFallbackFinalReturnsSplitExecutedFalse:
         trader.price_to_str = lambda p: f"{p:.1f}"
         trader.round_contracts_down = lambda c: c
         trader._tp_price_summary = lambda specs: trader.price_to_str(specs[0][2])
+        trader._client = FakeOkxClient(trader)
 
         # Mock position fetch to return a valid LONG position
         async def fake_fetch():

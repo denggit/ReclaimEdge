@@ -72,18 +72,18 @@ ALLOWED_DIRECT_REST: dict[tuple[str, str, str], str] = {
         "adapter bridge",
     ("src/execution/okx_trading_client.py", "cancel_order", "/api/v5/trade/cancel-algos"):
         "adapter bridge (fallback)",
+    ("src/execution/okx_trading_client.py", "fetch_balance", "/api/v5/account/balance"):
+        "adapter bridge — direct REST (no recursion via Trader)",
+    ("src/execution/okx_trading_client.py", "fetch_position", "/api/v5/account/positions"):
+        "adapter bridge — direct REST (no recursion via Trader)",
+    ("src/execution/okx_trading_client.py", "fetch_open_algo_orders", "/api/v5/trade/orders-algo-pending"):
+        "adapter bridge — direct REST (no recursion via Trader)",
+    ("src/execution/okx_trading_client.py", "configure_instrument", "/api/v5/account/set-leverage"):
+        "adapter bridge — direct REST (no recursion via Trader)",
 
-    # ── Trader legacy primitives (used by OKX adapter bridge) ───────────
-    ("src/execution/trader.py", "fetch_usdt_equity", "/api/v5/account/balance"):
-        "legacy primitive used by OKX adapter bridge",
-    ("src/execution/trader.py", "fetch_position_snapshot", "/api/v5/account/positions"):
-        "legacy primitive used by OKX adapter bridge",
-    ("src/execution/trader.py", "fetch_pending_orders", "/api/v5/trade/orders-pending"):
-        "legacy primitive used by OKX adapter bridge",
-    ("src/execution/trader.py", "fetch_pending_algo_orders", "/api/v5/trade/orders-algo-pending"):
-        "legacy primitive used by OKX adapter bridge",
-    ("src/execution/trader.py", "set_leverage", "/api/v5/account/set-leverage"):
-        "legacy primitive used by OKX adapter bridge",
+    # ── Trader legacy wrappers → delegates to TradingClientPort (NO direct /api/v5) ─
+    # All former direct REST calls in Trader have been migrated to delegate
+    # through self.trading_client.  No entries needed here.
 
     # ── Known algo-id direct cancel (avoids regular cancel fallback noise)
     ("src/execution/tp_sl_execution_manager.py", "cancel_near_tp_protective_stop", "/api/v5/trade/cancel-algos"):

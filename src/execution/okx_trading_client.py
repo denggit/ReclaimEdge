@@ -74,8 +74,26 @@ class OkxTradingClient(TradingClientPort):
     # ------------------------------------------------------------------
 
     async def fetch_balance(self) -> BalanceSnapshot:
-        """Fetch USDT equity from the wrapped Trader."""
-        equity = await self._trader.fetch_usdt_equity()
+        """Fetch USDT equity directly from OKX private REST.
+
+        Does NOT go through Trader.fetch_usdt_equity() to avoid recursion
+        (Trader.fetch_usdt_equity() now delegates to this method).
+        """
+        res = await self._trader._client.request(
+            "GET", "/api/v5/account/balance?ccy=USDT"
+        )
+        data = res.get("data", [])
+        equity = 0.0
+        if data:
+            details = data[0].get("details", [])
+            for item in details:
+                if item.get("ccy") == "USDT":
+                    equity = float(
+                        item.get("eq") or item.get("availEq") or item.get("availBal") or 0.0
+                    )
+                    break
+            if equity == 0.0:
+                equity = float(data[0].get("totalEq") or 0.0)
         return BalanceSnapshot(
             asset="USDT",
             total=Decimal(str(equity)),
@@ -84,19 +102,52 @@ class OkxTradingClient(TradingClientPort):
         )
 
     async def fetch_position(self) -> PositionSnapshot:
-        """Fetch current position snapshot from the wrapped Trader.
+        """Fetch current position directly from OKX private REST.
 
-        Maps the Trader's internal ``PositionSnapshot`` to the port DTO.
+        Does NOT go through Trader.fetch_position_snapshot() to avoid recursion
+        (Trader.fetch_position_snapshot() now delegates to this method).
         """
-        snapshot = await self._trader.fetch_position_snapshot()
+        symbol = self._trader.symbol
+        pos_side_mode = self._trader.pos_side_mode
+        contract_multiplier = self._trader.contract_multiplier
+
+        res = await self._trader._client.request(
+            "GET", f"/api/v5/account/positions?instId={symbol}"
+        )
+        best_side: str | None = None
+        best_qty: Decimal = Decimal("0")
+        best_avg: Decimal | None = None
+        best_raw_pos: str = "0"
+        for item in res.get("data", []):
+            if item.get("instId") != symbol:
+                continue
+            raw_pos = Decimal(str(item.get("pos", "0")))
+            if raw_pos == 0:
+                continue
+            contracts = abs(raw_pos)
+            avg_entry = float(item.get("avgPx") or item.get("avgPxUsd") or 0.0)
+            if pos_side_mode == "long_short":
+                pos_side = str(item.get("posSide", "")).lower()
+                side = "LONG" if pos_side == "long" else "SHORT" if pos_side == "short" else None
+            else:
+                side = "LONG" if raw_pos > 0 else "SHORT"
+            best_side = side
+            best_qty = contracts
+            best_avg = Decimal(str(avg_entry)) if avg_entry else None
+            best_raw_pos = str(raw_pos)
+            break
+
+        if best_side is None:
+            return PositionSnapshot(side=None, qty=Decimal("0"))
+
         return PositionSnapshot(
-            side=snapshot.side,
-            qty=snapshot.contracts,
-            avg_entry_price=Decimal(str(snapshot.avg_entry_price)) if snapshot.avg_entry_price else None,
+            side=best_side,
+            qty=best_qty,
+            avg_entry_price=best_avg,
             raw={
-                "contracts": str(snapshot.contracts),
-                "eth_qty": snapshot.eth_qty,
-                "raw_pos": str(snapshot.raw_pos),
+                "contracts": str(best_qty),
+                "eth_qty": float(best_qty * contract_multiplier),
+                "raw_pos": best_raw_pos,
             },
         )
 
@@ -299,10 +350,19 @@ class OkxTradingClient(TradingClientPort):
     async def configure_instrument(self) -> None:
         """Configure instrument-level settings (leverage / margin mode).
 
-        Current phase delegates to Trader.set_leverage() as a legacy
-        bridge.  Future phases may inline the REST call here.
+        Calls OKX private REST directly — does NOT go through
+        Trader.set_leverage() to avoid recursion.
         """
-        await self._trader.set_leverage()
+        bodies = order_specs.build_set_leverage_bodies(
+            inst_id=self._trader.symbol,
+            td_mode=self._trader.td_mode,
+            leverage=self._trader.leverage,
+            pos_side_mode=self._trader.pos_side_mode,
+        )
+        for body in bodies:
+            await self._trader._client.request(
+                "POST", "/api/v5/account/set-leverage", body
+            )
 
     # ------------------------------------------------------------------
     # Order status query
@@ -377,13 +437,17 @@ class OkxTradingClient(TradingClientPort):
     # ------------------------------------------------------------------
 
     async def fetch_open_algo_orders(self) -> tuple[AlgoOrderSnapshot, ...]:
-        """Fetch all open algo (conditional) orders.
+        """Fetch all open algo (conditional) orders directly from OKX private REST.
 
-        Current phase delegates to Trader.fetch_pending_algo_orders()
-        as a legacy bridge, then parses each raw item into an
-        AlgoOrderSnapshot DTO.
+        Does NOT go through Trader.fetch_pending_algo_orders() to avoid recursion
+        (Trader.fetch_pending_algo_orders() now delegates to this method).
         """
-        raws = await self._trader.fetch_pending_algo_orders()
+        symbol = self._trader.symbol
+        res = await self._trader._client.request(
+            "GET",
+            f"/api/v5/trade/orders-algo-pending?instId={symbol}&ordType=conditional",
+        )
+        raws = list(res.get("data", []))
         results: list[AlgoOrderSnapshot] = []
         for item in raws:
             order_id = str(item.get("algoId") or item.get("ordId") or "")

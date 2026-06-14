@@ -4,9 +4,8 @@
 @Author     : Zijun Deng
 @Date       : 2026/06/14
 @File       : test_run_boll_cvd_live_okx_ports_wiring.py
-@Description: Tests verifying that run_boll_cvd_live.py instantiates
-              OkxTradingClient / OkxMarketDataClient ports in the OKX
-              legacy path without calling any port methods.
+@Description: Tests verifying that run_boll_cvd_live.py uses
+              create_runtime_bundle for adapter wiring.
 
 All tests are source-level — no network, no API keys, no live runtime.
 """
@@ -24,50 +23,76 @@ _SOURCE_TEXT = RUN_BOLL_SOURCE.read_text(encoding="utf-8")
 
 
 # ======================================================================
-# Helpers
-# ======================================================================
-
-
-def _okx_path_lines() -> list[str]:
-    """Return source lines from the OKX legacy path marker onwards."""
-    lines = _SOURCE_TEXT.split("\n")
-    for i, line in enumerate(lines):
-        if "# ── OKX legacy path continues below" in line:
-            return lines[i:]
-    return []
-
-
-# ======================================================================
 # Import tests
 # ======================================================================
 
 
-class TestOkxPortsImports:
-    """Verify that Okx client classes are imported."""
+class TestRuntimeBundleImports:
+    """Verify that create_runtime_bundle is imported."""
 
-    def test_imports_okx_trading_client(self) -> None:
-        assert "from src.execution.okx_trading_client import OkxTradingClient" in _SOURCE_TEXT
+    def test_imports_create_runtime_bundle(self) -> None:
+        assert "from src.live.runtime_factory import create_runtime_bundle" in _SOURCE_TEXT
 
-    def test_imports_okx_market_data_client(self) -> None:
-        assert "from src.data_feed.okx_market_data_client import OkxMarketDataClient" in _SOURCE_TEXT
+    def test_no_direct_okx_trading_client_import(self) -> None:
+        """OkxTradingClient should NOT be directly imported — it comes from the bundle."""
+        assert "from src.execution.okx_trading_client import OkxTradingClient" not in _SOURCE_TEXT
+
+    def test_no_direct_okx_market_data_client_import(self) -> None:
+        """OkxMarketDataClient should NOT be directly imported — it comes from the bundle."""
+        assert "from src.data_feed.okx_market_data_client import OkxMarketDataClient" not in _SOURCE_TEXT
+
+    def test_no_create_live_trader_import(self) -> None:
+        """create_live_trader should NOT be imported — replaced by create_runtime_bundle."""
+        assert "from src.execution.live_trader_factory import create_live_trader" not in _SOURCE_TEXT
 
 
 # ======================================================================
-# Instantiation tests
+# Bundle usage tests
 # ======================================================================
 
 
-class TestOkxPortsInstantiation:
-    """Verify that Okx ports are instantiated with existing objects."""
+class TestBundleUsage:
+    """Verify that the runtime bundle is used correctly."""
 
-    def test_creates_okx_trading_client_with_trader(self) -> None:
-        assert "OkxTradingClient(trader)" in _SOURCE_TEXT
+    def test_calls_create_runtime_bundle(self) -> None:
+        assert "create_runtime_bundle(os.environ)" in _SOURCE_TEXT
 
-    def test_creates_okx_market_data_client_with_monitor(self) -> None:
-        assert "OkxMarketDataClient(monitor)" in _SOURCE_TEXT
+    def test_uses_bundle_trader(self) -> None:
+        assert "bundle.trader" in _SOURCE_TEXT
+
+    def test_uses_bundle_trading_client(self) -> None:
+        assert "bundle.trading_client" in _SOURCE_TEXT
+
+    def test_uses_bundle_market_data_client(self) -> None:
+        assert "bundle.market_data_client" in _SOURCE_TEXT
+
+    def test_uses_bundle_runtime_config(self) -> None:
+        assert "bundle.runtime_config" in _SOURCE_TEXT
 
     def test_ports_ready_log_message(self) -> None:
         assert "OKX_RUNTIME_PORTS_READY" in _SOURCE_TEXT
+
+
+# ======================================================================
+# No legacy OKX env reads for monitor config
+# ======================================================================
+
+
+class TestNoLegacyOkxEnvForMonitor:
+    """Monitor config must NOT use OKX_INST_ID / OKX_BAR from env."""
+
+    def test_no_okx_inst_id_in_monitor_config(self) -> None:
+        """monitor_config should use rt_config.okx_inst_id, not OKX_INST_ID env."""
+        # Check that BollBandBreakoutMonitorConfig is NOT created via from_env()
+        assert "BollBandBreakoutMonitorConfig.from_env()" not in _SOURCE_TEXT
+
+    def test_monitor_config_uses_runtime_config(self) -> None:
+        """monitor_config inst_id should come from rt_config."""
+        assert "rt_config.okx_inst_id" in _SOURCE_TEXT
+
+    def test_monitor_config_bar_uses_runtime_config(self) -> None:
+        """monitor_config bar should come from rt_config."""
+        assert "rt_config.kline_interval" in _SOURCE_TEXT
 
 
 # ======================================================================
@@ -128,33 +153,21 @@ class TestNoForbiddenAbstractions:
 
 
 # ======================================================================
-# Binance blocked branch safety
+# No OKX legacy path
 # ======================================================================
 
 
-class TestBinanceBlockedBranchNoPorts:
-    """Verify that ports are NOT created in the Binance blocked branch."""
+class TestNoOkxLegacyPath:
+    """Verify the old OKX legacy path comment is gone."""
 
-    def test_okx_ports_not_in_source_before_okx_path_comment(self) -> None:
-        """Ports creation must appear after the OKX legacy path comment."""
-        okx_lines = _okx_path_lines()
-        okx_text = "\n".join(okx_lines)
-        assert "OkxTradingClient(trader)" in okx_text
-        assert "OkxMarketDataClient(monitor)" in okx_text
+    def test_no_okx_legacy_path_comment(self) -> None:
+        assert "# ── OKX legacy path continues below" not in _SOURCE_TEXT
 
-    def test_binance_blocked_branch_does_not_instantiate_ports(self) -> None:
-        """The Binance blocked branch (before OKX path comment) must not contain port instantiation."""
-        lines = _SOURCE_TEXT.split("\n")
-        okx_path_start: int | None = None
-        for i, line in enumerate(lines):
-            if "# ── OKX legacy path continues below" in line:
-                okx_path_start = i
-                break
+    def test_no_okx_legacy_path(self) -> None:
+        assert "# ── OKX legacy path" not in _SOURCE_TEXT
 
-        assert okx_path_start is not None, "OKX legacy path comment not found"
-
-        pre_okx_text = "\n".join(lines[:okx_path_start])
-        # Module-level imports are fine — they don't create objects.
-        # Only instantiation must be after the OKX path comment.
-        assert "OkxTradingClient(trader)" not in pre_okx_text
-        assert "OkxMarketDataClient(monitor)" not in pre_okx_text
+    def test_no_direct_trader_instantiation_in_okx_path(self) -> None:
+        """Trader() should come from the bundle, not instantiated directly."""
+        # The only Trader() instantiation happens inside create_runtime_bundle
+        assert "from src.execution.trader import Trader" in _SOURCE_TEXT
+        assert "Trader()" not in _SOURCE_TEXT

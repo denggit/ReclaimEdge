@@ -15,12 +15,12 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(SRC))
 
 from src.execution.trader import Trader  # noqa: E402
-from src.execution.live_trader_factory import create_live_trader  # noqa: E402
 from src.indicators.cvd_tracker import CvdTracker, CvdTrackerConfig  # noqa: E402
 from src.live import config_helpers as live_config_helpers  # noqa: E402
 from src.live import queue_helpers as live_queue_helpers  # noqa: E402
 from src.live import runtime_types as live_runtime_types  # noqa: E402
 from src.live import time_utils as live_time_utils  # noqa: E402
+from src.live.runtime_factory import create_runtime_bundle  # noqa: E402
 from src.live.workers import account_position_sync_worker as account_position_sync_worker_module  # noqa: E402
 from src.live.workers import execution_worker as execution_worker_module  # noqa: E402
 from src.live.workers import strategy_tick_worker as strategy_tick_worker_module  # noqa: E402
@@ -34,6 +34,7 @@ from src.monitors.boll_band_breakout_monitor import (  # noqa: E402
     BollBandBreakoutMonitor,
     BollBandBreakoutMonitorConfig,
     MarketTickEvent,
+    env_bool,
 )
 
 from src.position_management.sidecar import runtime_state as sidecar_runtime_state  # noqa: E402
@@ -56,8 +57,6 @@ from src.risk.rolling_loss_guard import RollingLossGuard  # noqa: E402
 from src.risk import rolling_loss_live as rolling_loss_live_helpers  # noqa: E402
 from src.strategies.boll_cvd_reclaim_strategy import BollCvdReclaimStrategyConfig  # noqa: E402
 from src.strategies.boll_cvd_shock_reclaim_strategy import BollCvdShockReclaimStrategy  # noqa: E402
-from src.execution.okx_trading_client import OkxTradingClient  # noqa: E402
-from src.data_feed.okx_market_data_client import OkxMarketDataClient  # noqa: E402
 from src.utils.email_sender import EmailSender  # noqa: E402
 from src.utils.log import get_logger  # noqa: E402
 
@@ -67,35 +66,38 @@ logger = get_logger(__name__)
 async def main() -> None:
     load_dotenv()
 
-    from src.live.live_runtime_selector import LiveRuntimeKind, select_live_runtime
-
-    selection = select_live_runtime(os.environ)
-
-    if selection.kind == LiveRuntimeKind.BINANCE_LIVE_BLOCKED:
-        from src.live.binance_live_preflight import (
-            build_binance_live_preflight_report,
-            format_binance_live_blocked_message,
-        )
-
-        report = build_binance_live_preflight_report(
-            os.environ,
-            orders_globally_enabled=False,
-        )
-        raise RuntimeError(format_binance_live_blocked_message(report))
-
-    # ── OKX legacy path continues below ─────────────────────────────────
-
     if not live_config_helpers.live_trading_enabled():
         raise RuntimeError("LIVE_TRADING is not true. Refusing to start live runner.")
 
-    monitor_config = BollBandBreakoutMonitorConfig.from_env()
+    # ── Create runtime bundle via exchange adapter ──────────────────────
+    bundle = create_runtime_bundle(os.environ)
+    rt_config = bundle.runtime_config
+    trader = bundle.trader
+    trading_client = bundle.trading_client
+    market_data_client = bundle.market_data_client
+
+    # ── Build monitor config from unified runtime config + business env ─
+    monitor_config = BollBandBreakoutMonitorConfig(
+        inst_id=rt_config.okx_inst_id,
+        bar=rt_config.kline_interval,
+        boll_window=int(os.getenv("BOLL_WINDOW", "20")),
+        boll_std_multiplier=float(os.getenv("BOLL_STD_MULTIPLIER", "2.0")),
+        band_distance_threshold_pct=float(os.getenv("BOLL_DISTANCE_THRESHOLD_PCT", "0.005")),
+        alert_freeze_seconds=int(os.getenv("ALERT_FREEZE_SECONDS", "3600")),
+        use_live_candle=env_bool("BOLL_USE_LIVE_CANDLE", True),
+        boll_recalc_seconds=float(os.getenv("BOLL_RECALC_SECONDS", "1")),
+        candle_poll_seconds=int(os.getenv("CANDLE_POLL_SECONDS", "30")),
+        candle_limit=int(os.getenv("CANDLE_LIMIT", "100")),
+        tp_boll_enabled=env_bool("TP_BOLL_ENABLED", True),
+        tp_boll_window=int(os.getenv("TP_BOLL_WINDOW", "15")),
+    )
+
     cvd_config = CvdTrackerConfig.from_env()
     email_sender = EmailSender()
     journal = LiveTradeJournal()
     rolling_loss_guard = RollingLossGuard.from_env()
     state_store = LiveStateStore()
     reporter = DailyTradeReporter(journal, email_sender)
-    trader = create_live_trader(os.environ)
     await trader.start()
     try:
         await trader.initialize()
@@ -308,13 +310,16 @@ async def main() -> None:
     async def on_market_tick(event: MarketTickEvent) -> None:
         await live_queue_helpers.enqueue_strategy_tick(event, strategy_tick_queue, state_lock, execution_state)
 
+    trader = bundle.trader
+    trading_client = bundle.trading_client
+
     monitor = BollBandBreakoutMonitor(
         config=monitor_config,
         tick_handlers=[on_market_tick],
     )
 
-    trading_client_port = OkxTradingClient(trader)
-    market_data_client_port = OkxMarketDataClient(monitor)
+    trading_client_port = trading_client
+    market_data_client_port = market_data_client
     logger.info(
         "OKX_RUNTIME_PORTS_READY | trading_client=%s market_data_client=%s",
         type(trading_client_port).__name__,

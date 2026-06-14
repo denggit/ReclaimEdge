@@ -4,6 +4,7 @@ import unittest
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from tests.conftest import FakeOkxClient
 import src.execution.trader as trader_module
 from src.execution.tp_sl_execution_manager import TpSlExecutionManager
 from src.execution.trader import LiveTradeResult, PositionSnapshot, Trader
@@ -39,6 +40,7 @@ def make_trader(**overrides) -> Trader:
     t._protected_reduce_only_order_ids = set()
     t._managed_reduce_only_order_ids = set()
     t._allow_cancel_unmanaged_reduce_only = True
+    t._client = FakeOkxClient(t)
     for k, v in overrides.items():
         setattr(t, k, v)
     return t

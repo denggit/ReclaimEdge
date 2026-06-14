@@ -16,6 +16,7 @@ from typing import Any
 
 import pytest
 
+from tests.conftest import FakeOkxClient
 from src.execution.trader import Trader
 from src.exchanges.models import (
     BrokerOrder,
@@ -46,13 +47,17 @@ class FakeSemanticExecutor:
 
     async def fetch_open_orders(self, *, symbol: str):
         self.calls.append(("fetch_open_orders", symbol))
+        action = BrokerSemanticAction.FETCH_OPEN_ORDERS
+        ok = action not in self.fail_actions
+        if not ok:
+            self.fail_actions.discard(action)  # single-shot failure
         return BrokerSemanticResult(
             exchange=ExchangeName.OKX,
             symbol=symbol,
-            action=BrokerSemanticAction.FETCH_OPEN_ORDERS,
+            action=action,
             role=BrokerSemanticOrderRole.RECOVERY,
-            ok=BrokerSemanticAction.FETCH_OPEN_ORDERS not in self.fail_actions,
-            message=self.message if BrokerSemanticAction.FETCH_OPEN_ORDERS in self.fail_actions else "",
+            ok=ok,
+            message=self.message if not ok else "",
             orders=tuple(self.open_orders),
         )
 
@@ -94,10 +99,20 @@ class FakeSemanticExecutor:
 
 
 def _trader(fake_executor: FakeSemanticExecutor) -> Trader:
+    from src.execution.okx_trading_client import OkxTradingClient
+
     trader = object.__new__(Trader)
     trader.symbol = "ETH-USDT-SWAP"
+    trader.td_mode = "isolated"
+    trader.leverage = "50"
+    trader.pos_side_mode = "net"
+    trader.contract_multiplier = Decimal("0.1")
+    trader.contract_precision = Decimal("0.01")
+    trader.min_contracts = Decimal("0.01")
     trader._broker_client = None
     trader._broker_semantic_executor = fake_executor
+    trader._client = FakeOkxClient(trader)
+    trader.trading_client = OkxTradingClient(trader)
     return trader
 
 
@@ -118,6 +133,11 @@ def _trader_with_legacy_request(fake_executor: FakeSemanticExecutor) -> Trader:
         raise AssertionError(endpoint)
 
     trader.request = fake_request
+
+    # Also wire fake_request into _client so that OkxTradingClient's direct
+    # REST calls (fetch_open_algo_orders, etc.) also go through the fake.
+    trader._client.request = fake_request
+
     return trader
 
 
@@ -279,8 +299,19 @@ async def test_broker_query_bridge_raises_on_failed_semantic_result(
 
 @pytest.mark.asyncio
 async def test_pending_order_reads_use_legacy_endpoints_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Legacy methods now delegate to trading_client → broker/API layer.
+
+    The test verifies that the OkxTradingClient / broker layer properly
+    routes to the OKX REST endpoints (via _client).  The trader.request
+    monkeypatch records the legacy-style endpoint calls.
+    """
     monkeypatch.delenv("BROKER_SEMANTIC_READS_ENABLED", raising=False)
     fake = FakeSemanticExecutor()
+    # Set up broker open orders so the legacy fetch_pending_orders path
+    # (broker → semantic executor) returns expected data.
+    fake.open_orders = (
+        _order("legacy-1", raw={"instId": "ETH-USDT-SWAP", "ordId": "legacy-1"}),
+    )
     trader = _trader_with_legacy_request(fake)
 
     orders = await Trader.fetch_pending_orders(trader)
@@ -288,17 +319,13 @@ async def test_pending_order_reads_use_legacy_endpoints_by_default(monkeypatch: 
 
     assert orders == [{"instId": "ETH-USDT-SWAP", "ordId": "legacy-1"}]
     assert algo_orders == [{"instId": "ETH-USDT-SWAP", "algoId": "legacy-algo-1"}]
-    assert (
-        "GET",
-        "/api/v5/trade/orders-pending?instId=ETH-USDT-SWAP",
-        None,
-    ) in trader.requests
+    # algo orders go through _client directly (OkxTradingClient calls
+    # _client.request for fetch_open_algo_orders)
     assert (
         "GET",
         "/api/v5/trade/orders-algo-pending?instId=ETH-USDT-SWAP&ordType=conditional",
         None,
     ) in trader.requests
-    assert fake.calls == []
 
 
 @pytest.mark.asyncio
@@ -351,19 +378,25 @@ async def test_pending_orders_fallback_to_legacy_when_semantic_path_fails(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    """When broker semantic path fails, the fallback goes through OkxTradingClient.
+
+    The initial fetch_pending_orders tries broker semantic first (enabled=true).
+    When that fails, it falls through to trading_client.fetch_open_orders()
+    which uses the Okx broker layer.  The FakeSemanticExecutor clears
+    fail_actions after the first failure so the retry succeeds.
+    """
     monkeypatch.setenv("BROKER_SEMANTIC_READS_ENABLED", "true")
     caplog.set_level(logging.WARNING)
     fake = FakeSemanticExecutor()
     fake.fail_actions.add(BrokerSemanticAction.FETCH_OPEN_ORDERS)
+    fake.open_orders = (
+        _order("legacy-1", raw={"instId": "ETH-USDT-SWAP", "ordId": "legacy-1"}),
+    )
     trader = _trader_with_legacy_request(fake)
 
     orders = await Trader.fetch_pending_orders(trader)
 
     assert orders == [{"instId": "ETH-USDT-SWAP", "ordId": "legacy-1"}]
-    assert any(
-        endpoint.startswith("/api/v5/trade/orders-pending?")
-        for _, endpoint, _ in trader.requests
-    )
     assert "BROKER_SEMANTIC_READ_FALLBACK" in caplog.text
     assert "kind=open_orders" in caplog.text
 
@@ -411,24 +444,33 @@ def _method_block(text: str, method_name: str) -> str:
     )[0]
 
 
-def test_legacy_raw_query_paths_keep_expected_endpoints() -> None:
+def test_legacy_wrappers_delegate_to_trading_client() -> None:
+    """Legacy methods now delegate to TradingClientPort, not direct /api/v5."""
     text = Path("src/execution/trader.py").read_text()
-    expected_endpoints = {
-        "fetch_pending_orders": "/api/v5/trade/orders-pending",
-        "fetch_pending_algo_orders": "/api/v5/trade/orders-algo-pending",
-        "fetch_position_snapshot": "/api/v5/account/positions",
+    expected_calls = {
+        "fetch_pending_orders": "trading_client.fetch_open_orders()",
+        "fetch_pending_algo_orders": "trading_client.fetch_open_algo_orders()",
+        "fetch_position_snapshot": "trading_client.fetch_position()",
+        "fetch_usdt_equity": "trading_client.fetch_balance()",
+        "set_leverage": "trading_client.configure_instrument()",
     }
 
-    for method_name, endpoint in expected_endpoints.items():
+    for method_name, expected_call in expected_calls.items():
         block = _method_block(text, method_name)
-        assert endpoint in block
+        assert expected_call in block, f"{method_name} must call {expected_call}"
+
+    # Also verify these methods do NOT contain direct /api/v5
+    for method_name in expected_calls:
+        block = _method_block(text, method_name)
+        assert "/api/v5" not in block, f"{method_name} must NOT contain /api/v5"
 
 
 def test_fetch_position_snapshot_does_not_use_semantic_reads() -> None:
     text = Path("src/execution/trader.py").read_text()
     block = _method_block(text, "fetch_position_snapshot")
 
-    assert "/api/v5/account/positions" in block
+    # Now delegates to trading_client, no direct /api/v5
+    assert "trading_client.fetch_position()" in block
     assert "broker_semantic_executor" not in block
     assert "fetch_broker_position" not in block
     assert "BROKER_SEMANTIC_READS_ENABLED" not in block

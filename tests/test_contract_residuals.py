@@ -4,6 +4,7 @@ from decimal import Decimal
 
 import pytest
 
+from tests.conftest import FakeOkxClient
 from src.execution.trader import PositionSnapshot, Trader
 from src.risk.simple_position_sizer import PositionSize
 from src.strategies.boll_cvd_reclaim_strategy import TradeIntent
@@ -64,6 +65,7 @@ def make_trader(**overrides) -> Trader:
     t._protected_reduce_only_order_ids = set()
     t._managed_reduce_only_order_ids = set()
     t._allow_cancel_unmanaged_reduce_only = True
+    t._client = FakeOkxClient(t)
     for k, v in overrides.items():
         setattr(t, k, v)
     return t
@@ -299,14 +301,15 @@ async def test_managed_core_exceeds_net_position_raises_runtime_error() -> None:
 # ============================================================
 @pytest.mark.asyncio
 async def test_replace_tp_fetch_fails_raises_runtime_error() -> None:
-    """When fetch_position_snapshot raises and managed_core_contracts is set,
+    """When fetch_position raises (via _client) and managed_core_contracts is set,
     replace_take_profit must raise RuntimeError ('failed_to_fetch_net_position_for_global_sl'),
     not fallback to net=managed_core_contracts. No TP/SL orders submitted."""
     trader = make_trader()
     tp_place_called = False
-    sl_place_called = False
 
-    async def mock_fetch_snapshot():
+    # Simulate a failed REST call by making _client.request raise
+    async def mock_failing_request(method, endpoint, payload=None):
+        trader._client.request_calls.append((method, endpoint, payload))
         raise RuntimeError("OKX API timeout")
 
     async def mock_fetch_pending():
@@ -320,7 +323,7 @@ async def test_replace_tp_fetch_fails_raises_runtime_error() -> None:
     async def mock_cancel_existing():
         return None
 
-    trader.fetch_position_snapshot = mock_fetch_snapshot
+    trader._client.request = mock_failing_request
     trader.fetch_pending_orders = mock_fetch_pending
     trader._place_reduce_only_take_profit_orders = mock_place_tp
     trader.cancel_existing_reduce_only_orders = mock_cancel_existing

@@ -45,6 +45,8 @@ def make_intent(**overrides) -> TradeIntent:
 
 
 def make_trader(**overrides) -> Trader:
+    from tests.conftest import FakeOkxClient
+
     t = Trader.__new__(Trader)
     t.base_url = "https://www.okx.test"
     t.api_key = "key"
@@ -70,6 +72,7 @@ def make_trader(**overrides) -> Trader:
     t._protected_reduce_only_order_ids = set()
     t._managed_reduce_only_order_ids = set()
     t._allow_cancel_unmanaged_reduce_only = True
+    t._client = FakeOkxClient(t)
     for k, v in overrides.items():
         setattr(t, k, v)
     return t
@@ -412,20 +415,20 @@ class TpSlExecutionManagerTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_market_exit_normal_close_success(self) -> None:
         trader = make_trader(min_contracts=Decimal("0.01"))
-        call_count = [0]
 
-        async def fake_fetch_snapshot():  # type: ignore[no-untyped-def]
-            call_count[0] += 1
-            if call_count[0] == 1:
-                return trader_module.PositionSnapshot("LONG", Decimal("10"), 3000.0, 1.0, Decimal("10"))
-            # After order, position is flat
-            return trader_module.PositionSnapshot(None, Decimal("0"), 0.0, 0.0, Decimal("0"))
-
-        async def fake_request(method, path, body):  # type: ignore[no-untyped-def]
-            return {"code": "0", "data": [{"ordId": "exit-1"}]}
-
-        trader.fetch_position_snapshot = fake_fetch_snapshot
-        trader.request = fake_request  # type: ignore[method-assign]
+        # Queue responses: position(2x), market order(3 retries), position again
+        trader._client.request_responses = [
+            # First position check: has position
+            {"code": "0", "msg": "", "data": [
+                {"instId": "ETH-USDT-SWAP", "pos": "10", "avgPx": "3000.0"}
+            ]},
+            # Market order retries
+            {"code": "0", "msg": "", "data": [{"ordId": "exit-1"}]},
+            {"code": "0", "msg": "", "data": [{"ordId": "exit-2"}]},
+            {"code": "0", "msg": "", "data": [{"ordId": "exit-3"}]},
+            # Second position check (after order): flat
+            {"code": "0", "msg": "", "data": []},
+        ]
         trader.cancel_existing_reduce_only_orders = (  # type: ignore[method-assign]
             lambda: None
         )
@@ -439,15 +442,23 @@ class TpSlExecutionManagerTest(unittest.IsolatedAsyncioTestCase):
     async def test_market_exit_not_flat_after_order_retries(self) -> None:
         trader = make_trader(min_contracts=Decimal("0.01"))
 
-        async def fake_fetch_snapshot():  # type: ignore[no-untyped-def]
-            # Position never goes flat
-            return trader_module.PositionSnapshot("LONG", Decimal("10"), 3000.0, 1.0, Decimal("10"))
-
-        async def fake_request(method, path, body):  # type: ignore[no-untyped-def]
-            return {"code": "0", "data": [{"ordId": "exit-1"}]}
-
-        trader.fetch_position_snapshot = fake_fetch_snapshot
-        trader.request = fake_request  # type: ignore[method-assign]
+        # Each attempt: fetch_position → place_market_order → fetch_position (3 calls)
+        # 2 attempts = 6 calls.  Position never goes flat.
+        pos_has = {"code": "0", "msg": "", "data": [
+            {"instId": "ETH-USDT-SWAP", "pos": "10", "avgPx": "3000.0"}
+        ]}
+        order_ok = {"code": "0", "msg": "", "data": [{"ordId": "exit-1"}]}
+        trader._client.request_responses = [
+            pos_has,   # attempt 1: position
+            order_ok,  # attempt 1: order
+            pos_has,   # attempt 1: refresh → still has position
+            pos_has,   # attempt 2: position
+            order_ok,  # attempt 2: order
+            pos_has,   # attempt 2: refresh → still has position
+        ]
+        trader.cancel_existing_reduce_only_orders = (  # type: ignore[method-assign]
+            lambda: None
+        )
 
         manager = TpSlExecutionManager(trader)
         ok, message = await manager.market_exit_remaining_position_with_retries("LONG", 2)
