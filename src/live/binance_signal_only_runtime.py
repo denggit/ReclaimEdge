@@ -273,18 +273,24 @@ def _compute_seed_limit(
     return value
 
 
-def load_binance_signal_only_config(
+def load_binance_market_runtime_config(
     env: Mapping[str, str] | None = None,
+    *,
+    require_signal_only: bool = False,
 ) -> BinanceSignalOnlyConfig:
     """Load a validated :class:`BinanceSignalOnlyConfig` from environment.
 
-    Only non-sensitive public env keys are forwarded to the unified runtime
-    config loader.  API credentials are explicitly excluded.
+    Shared by both the signal-only observation runtime and the main live
+    trading runtime.  Only non-sensitive public env keys are forwarded to
+    the unified runtime config loader.  API credentials are NOT read.
 
     Parameters
     ----------
     env:
         Optional env mapping.  Uses ``os.environ`` when omitted.
+    require_signal_only:
+        When ``True`` (signal-only path), ``SIGNAL_ONLY`` must be truthy.
+        When ``False`` (main live path), ``SIGNAL_ONLY`` may be ``false``.
 
     Returns
     -------
@@ -293,9 +299,9 @@ def load_binance_signal_only_config(
     Raises
     ------
     ValueError
-        If EXCHANGE is not ``binance``.
+        If EXCHANGE is not ``binance`` or symbol / interval are unsupported.
     RuntimeError
-        If ``BINANCE_SIGNAL_ONLY`` is not truthy.
+        If *require_signal_only* is ``True`` but ``SIGNAL_ONLY`` is not truthy.
     """
     values = os.environ if env is None else env
 
@@ -313,14 +319,14 @@ def load_binance_signal_only_config(
     # --- Guard: exchange must be binance ---
     if runtime_config.exchange != ExchangeName.BINANCE:
         raise ValueError(
-            f"Binance signal-only runtime requires EXCHANGE=binance, "
+            f"Binance market runtime requires EXCHANGE=binance, "
             f"got {runtime_config.exchange.value!r}"
         )
 
     # --- Guard: only ETH-USDT-PERP / ETHUSDT / 15m ---
     if runtime_config.canonical_symbol != SUPPORTED_CANONICAL_SYMBOL:
         raise ValueError(
-            f"Binance signal-only runtime only supports "
+            f"Binance market runtime only supports "
             f"{SUPPORTED_CANONICAL_SYMBOL!r}, got "
             f"{runtime_config.canonical_symbol!r}"
         )
@@ -328,26 +334,46 @@ def load_binance_signal_only_config(
     binance_symbol = runtime_config.binance_symbol
     if binance_symbol != SUPPORTED_BINANCE_RAW_SYMBOL:
         raise ValueError(
-            f"Binance signal-only runtime only supports "
+            f"Binance market runtime only supports "
             f"{SUPPORTED_BINANCE_RAW_SYMBOL!r}, got {binance_symbol!r}"
         )
 
     if runtime_config.kline_interval != SUPPORTED_KLINE_INTERVAL:
         raise ValueError(
-            f"Binance signal-only runtime only supports "
+            f"Binance market runtime only supports "
             f"{SUPPORTED_KLINE_INTERVAL!r}, got "
             f"{runtime_config.kline_interval!r}"
         )
 
-    # --- Guard: signal-only must be enabled ---
-    signal_only = _resolve_env_bool(values, "SIGNAL_ONLY", "BINANCE_SIGNAL_ONLY", False)
-    if not signal_only:
-        raise RuntimeError(
-            "Binance main live trading is not wired yet. "
-            "Set SIGNAL_ONLY=true for signal-only observation."
-        )
+    # --- Guard: signal-only (only when required) ---
+    if require_signal_only:
+        signal_only = _resolve_env_bool(values, "SIGNAL_ONLY", "BINANCE_SIGNAL_ONLY", False)
+        if not signal_only:
+            raise RuntimeError(
+                "Binance signal-only runtime requires SIGNAL_ONLY=true"
+            )
 
-    # --- Build config from env ---
+    # ── Build config from env ────────────────────────────────────────────
+    return _build_binance_signal_only_config_from_values(values, runtime_config, binance_symbol)
+
+
+def load_binance_signal_only_config(
+    env: Mapping[str, str] | None = None,
+) -> BinanceSignalOnlyConfig:
+    """Load a validated :class:`BinanceSignalOnlyConfig` for signal-only runtime.
+
+    Convenience wrapper around :func:`load_binance_market_runtime_config`
+    with ``require_signal_only=True``.
+    """
+    return load_binance_market_runtime_config(env, require_signal_only=True)
+
+
+def _build_binance_signal_only_config_from_values(
+    values: Mapping[str, str],
+    runtime_config: Any,
+    binance_symbol: str,
+) -> BinanceSignalOnlyConfig:
+    """Build the dataclass from already-validated env values."""
     return BinanceSignalOnlyConfig(
         canonical_symbol=runtime_config.canonical_symbol,
         raw_symbol=binance_symbol,

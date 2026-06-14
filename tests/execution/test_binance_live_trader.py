@@ -533,3 +533,133 @@ class TestBoundaries:
         assert t.tp_order_id is None
         assert len(t._managed_tp_order_ids) == 0
         assert len(t._managed_sl_client_algo_ids) == 0
+
+
+# ======================================================================
+# Fix 3: Flat leverage verification
+# ======================================================================
+
+
+class TestVerifyLeverageFromRisk:
+    """_verify_leverage_from_risk checks leverage even when flat."""
+
+    def _make_trader_with_leverage(self, leverage: int) -> BinanceLiveTrader:
+        t = _make_trader()
+        t.leverage = leverage
+        return t
+
+    def test_leverage_20_matches(self) -> None:
+        t = self._make_trader_with_leverage(20)
+        t._verify_leverage_from_risk({"leverage": 20})  # Should not raise
+
+    def test_leverage_mismatch_raises(self) -> None:
+        t = self._make_trader_with_leverage(20)
+        with pytest.raises(RuntimeError, match="leverage mismatch"):
+            t._verify_leverage_from_risk({"leverage": 10})
+
+    def test_leverage_missing_raises(self) -> None:
+        t = self._make_trader_with_leverage(20)
+        with pytest.raises(RuntimeError, match="missing.*leverage"):
+            t._verify_leverage_from_risk({})
+
+    def test_leverage_flat_position_still_checked(self) -> None:
+        """Leverage must be verified even when positionAmt is 0."""
+        t = self._make_trader_with_leverage(20)
+        # Flat position risk item
+        t._verify_leverage_from_risk({"leverage": 20, "positionAmt": "0"})
+
+    def test_leverage_int_cast(self) -> None:
+        """String leverage values are cast to int."""
+        t = self._make_trader_with_leverage(20)
+        t._verify_leverage_from_risk({"leverage": "20"})
+
+
+# ======================================================================
+# Fix 3: Margin mode verification
+# ======================================================================
+
+
+class TestVerifyMarginModeFromRisk:
+    """_verify_margin_mode_from_risk checks margin type."""
+
+    def test_isolated_passes(self) -> None:
+        t = _make_trader()
+        t._verify_margin_mode_from_risk({"marginType": "isolated"})
+
+    def test_cross_raises(self) -> None:
+        t = _make_trader()
+        with pytest.raises(RuntimeError, match="CROSS"):
+            t._verify_margin_mode_from_risk({"marginType": "cross"})
+
+    def test_unknown_margin_raises(self) -> None:
+        t = _make_trader()
+        with pytest.raises(RuntimeError, match="unrecognized"):
+            t._verify_margin_mode_from_risk({"marginType": "unknown_mode"})
+
+
+# ======================================================================
+# Fix 4: Position mode fail-fast
+# ======================================================================
+
+
+class FakeTransportForVerify:
+    """Fake transport that returns a contrived response for position mode checks."""
+
+    def __init__(self, payload, status_code=200):
+        self.payload = payload
+        self.status_code = status_code
+        self._requests = []
+
+    async def send(self, request):
+        self._requests.append(request)
+        from src.exchanges.binance.transport import BinanceTransportResponse
+        return BinanceTransportResponse(
+            status_code=self.status_code,
+            payload=self.payload,
+        )
+
+
+class TestVerifyPositionModeFailFast:
+    """_verify_position_mode fails fast on errors."""
+
+    def _make_trader_with_transport(self, transport) -> BinanceLiveTrader:
+        t = _make_trader()
+        t._transport = transport
+        fake_client = FakeBrokerClient()
+        t._broker_client = fake_client
+        t._env = {"EXCHANGE_API_KEY": "fake", "EXCHANGE_API_SECRET": "fake"}
+        return t
+
+    @pytest.mark.asyncio
+    async def test_dual_side_false_passes(self) -> None:
+        transport = FakeTransportForVerify({"dualSidePosition": False})
+        t = self._make_trader_with_transport(transport)
+        await t._verify_position_mode()  # Should not raise
+
+    @pytest.mark.asyncio
+    async def test_dual_side_true_raises(self) -> None:
+        transport = FakeTransportForVerify({"dualSidePosition": True})
+        t = self._make_trader_with_transport(transport)
+        with pytest.raises(RuntimeError, match="HEDGE"):
+            await t._verify_position_mode()
+
+    @pytest.mark.asyncio
+    async def test_http_error_raises(self) -> None:
+        transport = FakeTransportForVerify({}, status_code=401)
+        t = self._make_trader_with_transport(transport)
+        with pytest.raises(RuntimeError, match="HTTP 401"):
+            await t._verify_position_mode()
+
+    @pytest.mark.asyncio
+    async def test_payload_list_raises(self) -> None:
+        transport = FakeTransportForVerify([{"dualSidePosition": False}])
+        t = self._make_trader_with_transport(transport)
+        with pytest.raises(RuntimeError, match="not a dict"):
+            await t._verify_position_mode()
+
+    @pytest.mark.asyncio
+    async def test_missing_key_raises(self) -> None:
+        transport = FakeTransportForVerify({"otherKey": True})
+        t = self._make_trader_with_transport(transport)
+        with pytest.raises(RuntimeError, match="dualSidePosition"):
+            await t._verify_position_mode()

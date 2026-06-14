@@ -48,7 +48,7 @@ from src.live.binance_market_data_bridge import (
 )
 from src.live.binance_signal_only_runtime import (
     BinanceSignalOnlyConfig,
-    load_binance_signal_only_config,
+    load_binance_market_runtime_config,
     _seed_historical_klines,
     _try_recompute_boll,
     _upsert_candle_entry,
@@ -90,9 +90,8 @@ async def run_binance_main_live(
         await trader.close()
         raise
 
-    # ── 2. Load config ─────────────────────────────────────────────────
-    # Reuse signal-only config infrastructure for market data params
-    config = load_binance_signal_only_config(values)
+    # ── 2. Load config (does NOT require SIGNAL_ONLY=true) ─────────────
+    config = load_binance_market_runtime_config(values, require_signal_only=False)
 
     logger.warning(
         "BINANCE_MAIN_LIVE_START | exchange=binance "
@@ -350,6 +349,19 @@ async def _handle_trade(
     )
 
     for intent in intents:
+        # ── Pending guard: skip duplicate OPEN/ADD when queue non-empty ──
+        if intent.intent_type in {"OPEN_LONG", "OPEN_SHORT", "ADD_LONG", "ADD_SHORT"}:
+            if execution_queue.qsize() > 0:
+                logger.warning(
+                    "BINANCE_MAIN_INTENT_SKIPPED | reason=pending_execution "
+                    "type=%s side=%s price=%.4f queue_size=%s",
+                    intent.intent_type,
+                    intent.side,
+                    intent.price,
+                    execution_queue.qsize(),
+                )
+                continue
+
         logger.warning(
             "BINANCE_MAIN_INTENT | type=%s side=%s price=%.4f "
             "layer=%s reason=%s",

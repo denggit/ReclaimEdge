@@ -256,72 +256,47 @@ class BinanceLiveTrader:
                 "Cannot verify Binance config without transport and broker client"
             )
 
-        # ── 1. Fetch position to verify leverage ─────────────────────────
-        pos = await self._broker_client.fetch_position(self.symbol)
-        if pos is not None:
-            raw = dict(pos.raw) if hasattr(pos, "raw") else {}
-            actual_leverage = raw.get("leverage")
-            if actual_leverage is not None and int(actual_leverage) != self.leverage:
-                raise RuntimeError(
-                    f"Binance leverage mismatch for {self.symbol}: "
-                    f"actual={actual_leverage} expected={self.leverage}"
-                )
-
-        # ── 2. Verify position mode (one-way / net) ──────────────────────
-        # Fetch position config via REST
+        # ── 1. Verify position mode (one-way / net) ──────────────────────
         await self._verify_position_mode()
 
-        # ── 3. Verify margin mode (isolated) ─────────────────────────────
-        await self._verify_margin_mode()
+        # ── 2. Fetch positionRisk item (used for margin + leverage) ──────
+        risk = await self._fetch_position_risk_item()
+
+        # ── 3. Verify margin mode ────────────────────────────────────────
+        self._verify_margin_mode_from_risk(risk)
+
+        # ── 4. Verify leverage (even when position is flat) ──────────────
+        self._verify_leverage_from_risk(risk)
 
         logger.warning(
             "Binance config verified | position_mode=net margin_mode=isolated leverage=%s",
             self.leverage,
         )
 
-    async def _verify_position_mode(self) -> None:
-        """Verify position mode is one-way / net via Binance REST."""
+    def _api_credentials(self) -> tuple[str, str]:
+        """Return (api_key, api_secret) from env or broker client."""
+        api_key = self._env.get("EXCHANGE_API_KEY", "").strip()
+        api_secret = self._env.get("EXCHANGE_API_SECRET", "").strip()
+        if (not api_key or not api_secret) and self._broker_client is not None:
+            api_key = getattr(self._broker_client, "_api_key", "") or ""
+            api_secret = getattr(self._broker_client, "_api_secret", "") or ""
+        return api_key, api_secret
+
+    async def _fetch_position_risk_item(self) -> dict[str, Any]:
+        """Fetch the ETHUSDT item from ``GET /fapi/v2/positionRisk``.
+
+        Returns the raw dict for the ETHUSDT symbol.  Raises RuntimeError
+        on failure or if the item cannot be found.
+        """
         if self._transport is None:
-            return
+            raise RuntimeError("transport not configured for positionRisk fetch")
 
         from src.exchanges.binance.signing import (
             BINANCE_USDM_BASE_URL,
             build_signed_request,
         )
 
-        api_key = self._env.get("EXCHANGE_API_KEY", "").strip()
-        api_secret = self._env.get("EXCHANGE_API_SECRET", "").strip()
-
-        signed = build_signed_request(
-            method="GET",
-            path="/fapi/v1/positionSide/dual",
-            params={},
-            api_key=api_key,
-            api_secret=api_secret,
-            base_url=BINANCE_USDM_BASE_URL,
-        )
-        response = await self._transport.send(signed)
-
-        if isinstance(response.payload, dict):
-            dual = response.payload.get("dualSidePosition")
-            if dual is True:
-                raise RuntimeError(
-                    "Binance position mode is HEDGE (dualSidePosition=true). "
-                    "Only one-way / net mode is supported."
-                )
-
-    async def _verify_margin_mode(self) -> None:
-        """Verify margin mode is isolated for ETHUSDT."""
-        if self._transport is None:
-            return
-
-        from src.exchanges.binance.signing import (
-            BINANCE_USDM_BASE_URL,
-            build_signed_request,
-        )
-
-        api_key = self._env.get("EXCHANGE_API_KEY", "").strip()
-        api_secret = self._env.get("EXCHANGE_API_SECRET", "").strip()
+        api_key, api_secret = self._api_credentials()
 
         signed = build_signed_request(
             method="GET",
@@ -333,20 +308,108 @@ class BinanceLiveTrader:
         )
         response = await self._transport.send(signed)
 
-        if isinstance(response.payload, list):
-            for item in response.payload:
-                if isinstance(item, dict) and item.get("symbol") == self.symbol:
-                    margin_type = str(item.get("marginType") or "").lower()
-                    if margin_type == "cross":
-                        raise RuntimeError(
-                            f"Binance margin mode is CROSS for {self.symbol}. "
-                            f"Only isolated mode is supported."
-                        )
-                    return
+        if response.status_code >= 400:
+            raise RuntimeError(
+                f"Binance positionRisk HTTP {response.status_code}: "
+                f"{response.payload}"
+            )
+
+        if not isinstance(response.payload, list):
+            raise RuntimeError(
+                f"Binance positionRisk payload is not a list: "
+                f"{type(response.payload)}"
+            )
+
+        for item in response.payload:
+            if isinstance(item, dict) and item.get("symbol") == self.symbol:
+                return item
 
         raise RuntimeError(
-            f"Could not determine margin mode for {self.symbol}"
+            f"No {self.symbol} item found in Binance positionRisk response"
         )
+
+    def _verify_margin_mode_from_risk(self, risk: dict[str, Any]) -> None:
+        """Verify margin mode is isolated from a positionRisk item."""
+        margin_type = str(risk.get("marginType") or "").lower()
+        if margin_type == "cross":
+            raise RuntimeError(
+                f"Binance margin mode is CROSS for {self.symbol}. "
+                f"Only isolated mode is supported."
+            )
+        if margin_type != "isolated":
+            raise RuntimeError(
+                f"Binance margin mode is unrecognized for {self.symbol}: "
+                f"{margin_type!r}. Only isolated mode is supported."
+            )
+
+    def _verify_leverage_from_risk(self, risk: dict[str, Any]) -> None:
+        """Verify leverage matches ``LIVE_LEVERAGE``, even when flat."""
+        actual_leverage = risk.get("leverage")
+        if actual_leverage is None:
+            raise RuntimeError(
+                f"Binance positionRisk item missing 'leverage' for {self.symbol}"
+            )
+        if int(actual_leverage) != self.leverage:
+            raise RuntimeError(
+                f"Binance leverage mismatch for {self.symbol}: "
+                f"actual={actual_leverage} expected={self.leverage}"
+            )
+
+    async def _verify_position_mode(self) -> None:
+        """Verify position mode is one-way / net via Binance REST.
+
+        Raises RuntimeError on HTTP errors, malformed payloads,
+        missing keys, or hedge mode.
+        """
+        if self._transport is None:
+            raise RuntimeError("transport not configured for position mode check")
+
+        from src.exchanges.binance.signing import (
+            BINANCE_USDM_BASE_URL,
+            build_signed_request,
+        )
+
+        api_key, api_secret = self._api_credentials()
+
+        signed = build_signed_request(
+            method="GET",
+            path="/fapi/v1/positionSide/dual",
+            params={},
+            api_key=api_key,
+            api_secret=api_secret,
+            base_url=BINANCE_USDM_BASE_URL,
+        )
+        response = await self._transport.send(signed)
+
+        # ── HTTP error check ────────────────────────────────────────────
+        if response.status_code >= 400:
+            raise RuntimeError(
+                f"Binance positionSide/dual HTTP {response.status_code}: "
+                f"{response.payload}"
+            )
+
+        # ── Payload type check ──────────────────────────────────────────
+        if not isinstance(response.payload, dict):
+            raise RuntimeError(
+                f"Binance positionSide/dual payload is not a dict: "
+                f"{type(response.payload)}"
+            )
+
+        # ── Key existence check ─────────────────────────────────────────
+        if "dualSidePosition" not in response.payload:
+            raise RuntimeError(
+                f"Binance positionSide/dual response missing 'dualSidePosition' key"
+            )
+
+        # ── Value check ─────────────────────────────────────────────────
+        dual = response.payload.get("dualSidePosition")
+        if dual is True:
+            raise RuntimeError(
+                "Binance position mode is HEDGE (dualSidePosition=true). "
+                "Only one-way / net mode is supported."
+            )
+
+        # If dual is False or falsy (not True), net mode is active — OK.
 
     # ==================================================================
     # Fix 3 & 4: Position snapshot (fail-fast, enum mapping)
