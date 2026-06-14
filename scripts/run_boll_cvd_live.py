@@ -76,10 +76,16 @@ async def main() -> None:
         return
 
     if selection.kind == LiveRuntimeKind.BINANCE_LIVE_BLOCKED:
-        from src.live.binance_main_live_runtime import run_binance_main_live
+        from src.live.binance_live_preflight import (
+            build_binance_live_preflight_report,
+            format_binance_live_blocked_message,
+        )
 
-        await run_binance_main_live()
-        return
+        report = build_binance_live_preflight_report(
+            os.environ,
+            orders_globally_enabled=False,
+        )
+        raise RuntimeError(format_binance_live_blocked_message(report))
 
     # ── OKX legacy path continues below ─────────────────────────────────
 

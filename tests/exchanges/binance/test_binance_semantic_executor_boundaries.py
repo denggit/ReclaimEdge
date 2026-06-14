@@ -44,7 +44,6 @@ def test_binance_semantic_executor_not_wired_into_runtime() -> None:
         "tests/exchanges/binance/test_binance_semantic_executor.py",
         "tests/exchanges/binance/test_binance_semantic_executor_boundaries.py",
         "tests/exchanges/binance/test_binance_semantic_signed_request_parity.py",
-        "tests/exchanges/binance/test_binance_semantic_executor_algo_sl.py",
         # The factory module legitimately imports BinanceBrokerSemanticExecutor
         # to build it — this is the expected selector wiring, not live wiring.
         "src/exchanges/factory.py",
@@ -58,9 +57,6 @@ def test_binance_semantic_executor_not_wired_into_runtime() -> None:
         # Live trader factory test references BinanceBrokerSemanticExecutor
         # only in a "must not import" safety assertion.
         "tests/execution/test_live_trader_factory.py",
-        # BinanceLiveTrader legitimately uses BinanceBrokerSemanticExecutor.
-        "src/execution/binance_live_trader.py",
-        "tests/execution/test_binance_live_trader.py",
     }
 
     for path in Path(".").rglob("*.py"):

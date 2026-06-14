@@ -5,11 +5,7 @@
 @Date       : 2026/06/14
 @File       : test_run_boll_cvd_live_binance_live_blocked.py
 @Description: Tests for the Binance live blocked branch in run_boll_cvd_live.py
-              after BinanceLiveTrader wiring.
-
-Binance main live path is now wired — BINANCE_LIVE_BLOCKED no longer raises.
-It falls through to the main path where create_live_trader produces a
-BinanceLiveTrader.  Preflight is done by BinanceLiveTrader.initialize().
+              after the preflight guard integration.
 
 All tests monkeypatch — no network, no API keys.
 """
@@ -53,53 +49,134 @@ def _binance_all_confirmations_env() -> dict[str, str]:
 
 
 # ======================================================================
-# Binance live blocked now falls through to main path
+# Binance live blocked uses preflight message
 # ======================================================================
 
 
-class TestBinanceLiveBlockedFallsThrough:
-    """BINANCE_LIVE_BLOCKED no longer raises — it passes through
-    to the main path where create_live_trader handles it."""
+class TestBinanceLiveBlockedUsesPreflight:
+    """The BINANCE_LIVE_BLOCKED branch now uses the preflight guard."""
 
-    def test_blocked_now_calls_main_live_runtime(self) -> None:
-        """BINANCE_LIVE_BLOCKED now calls run_binance_main_live."""
+    def test_blocked_raises_with_preflight_message(self) -> None:
+        """Basic blocked env raises RuntimeError with preflight details."""
         env = _binance_blocked_env()
-        env["LIVE_TRADING"] = "true"
+
+        with mock.patch.dict(os.environ, env, clear=True), \
+             mock.patch("scripts.run_boll_cvd_live.load_dotenv", return_value=False):
+            from scripts.run_boll_cvd_live import main
+            with pytest.raises(RuntimeError) as exc_info:
+                asyncio.run(main())
+
+            msg = str(exc_info.value)
+            assert "Binance live trading runtime is not wired yet" in msg
+            assert "blocking_reasons=" in msg
+            assert "binance_live_orders_disabled_by_build" in msg
+
+    def test_blocked_does_not_instantiate_trader(self) -> None:
+        """BINANCE_LIVE_BLOCKED must NOT instantiate Trader."""
+        env = _binance_blocked_env()
+
+        with mock.patch.dict(os.environ, env, clear=True), \
+             mock.patch("scripts.run_boll_cvd_live.load_dotenv", return_value=False):
+            with mock.patch("scripts.run_boll_cvd_live.Trader") as mock_trader:
+                from scripts.run_boll_cvd_live import main
+                with pytest.raises(RuntimeError):
+                    asyncio.run(main())
+                mock_trader.assert_not_called()
+
+    def test_blocked_does_not_call_execution_worker(self) -> None:
+        """BINANCE_LIVE_BLOCKED must NOT call execution_worker."""
+        env = _binance_blocked_env()
 
         with mock.patch.dict(os.environ, env, clear=True), \
              mock.patch("scripts.run_boll_cvd_live.load_dotenv", return_value=False):
             with mock.patch(
-                "src.live.binance_main_live_runtime.run_binance_main_live"
-            ) as mock_runtime:
-                async def fake_main_live(env=None):
-                    raise RuntimeError("STOP_AFTER_RUNTIME")
-                mock_runtime.side_effect = fake_main_live
+                "scripts.run_boll_cvd_live.execution_worker_module"
+            ) as mock_ew:
                 from scripts.run_boll_cvd_live import main
-                with pytest.raises(RuntimeError, match="STOP_AFTER_RUNTIME"):
+                with pytest.raises(RuntimeError):
                     asyncio.run(main())
-                mock_runtime.assert_called_once()
-
-    def test_blocked_with_confirmations_calls_runtime(self) -> None:
-        """All confirmations set → Binance main live runtime called."""
-        env = _binance_all_confirmations_env()
-        env["LIVE_TRADING"] = "true"
-
-        with mock.patch.dict(os.environ, env, clear=True), \
-             mock.patch("scripts.run_boll_cvd_live.load_dotenv", return_value=False):
-            with mock.patch(
-                "src.live.binance_main_live_runtime.run_binance_main_live"
-            ) as mock_runtime:
-                async def fake_main_live(env=None):
-                    raise RuntimeError("STOP_AFTER_RUNTIME")
-                mock_runtime.side_effect = fake_main_live
-                from scripts.run_boll_cvd_live import main
-                with pytest.raises(RuntimeError, match="STOP_AFTER_RUNTIME"):
-                    asyncio.run(main())
-                mock_runtime.assert_called_once()
+                mock_ew.execution_worker.assert_not_called()
 
 
 # ======================================================================
-# Binance signal-only does not call preflight or factory
+# All confirmations set still blocked
+# ======================================================================
+
+
+class TestAllConfirmationsStillBlocked:
+    """Even with all env confirmations, Binance live remains blocked."""
+
+    def test_all_confirmations_still_raises(self) -> None:
+        """All env set correctly but orders_globally_enabled=False still blocks."""
+        env = _binance_all_confirmations_env()
+
+        with mock.patch.dict(os.environ, env, clear=True), \
+             mock.patch("scripts.run_boll_cvd_live.load_dotenv", return_value=False):
+            from scripts.run_boll_cvd_live import main
+            with pytest.raises(RuntimeError) as exc_info:
+                asyncio.run(main())
+
+            msg = str(exc_info.value)
+            assert "binance_live_orders_disabled_by_build" in msg
+
+    def test_all_confirmations_no_trader(self) -> None:
+        """All env confirmations still do NOT instantiate Trader."""
+        env = _binance_all_confirmations_env()
+
+        with mock.patch.dict(os.environ, env, clear=True), \
+             mock.patch("scripts.run_boll_cvd_live.load_dotenv", return_value=False):
+            with mock.patch("scripts.run_boll_cvd_live.Trader") as mock_trader:
+                from scripts.run_boll_cvd_live import main
+                with pytest.raises(RuntimeError):
+                    asyncio.run(main())
+                mock_trader.assert_not_called()
+
+    def test_all_confirmations_no_execution_worker(self) -> None:
+        """All env confirmations still do NOT call execution_worker."""
+        env = _binance_all_confirmations_env()
+
+        with mock.patch.dict(os.environ, env, clear=True), \
+             mock.patch("scripts.run_boll_cvd_live.load_dotenv", return_value=False):
+            with mock.patch(
+                "scripts.run_boll_cvd_live.execution_worker_module"
+            ) as mock_ew:
+                from scripts.run_boll_cvd_live import main
+                with pytest.raises(RuntimeError):
+                    asyncio.run(main())
+                mock_ew.execution_worker.assert_not_called()
+
+    def test_all_confirmations_does_not_enter_okx_path(self) -> None:
+        """All confirmations + EXCHANGE=binance does NOT enter OKX path."""
+        env = _binance_all_confirmations_env()
+
+        with mock.patch.dict(os.environ, env, clear=True), \
+             mock.patch("scripts.run_boll_cvd_live.load_dotenv", return_value=False):
+            with mock.patch(
+                "scripts.run_boll_cvd_live.live_config_helpers"
+            ) as mock_lch:
+                from scripts.run_boll_cvd_live import main
+                with pytest.raises(RuntimeError):
+                    asyncio.run(main())
+                # live_trading_enabled() should never be called (it's OKX-path only)
+                mock_lch.live_trading_enabled.assert_not_called()
+
+    def test_all_confirmations_does_not_enter_signal_only_path(self) -> None:
+        """All confirmations + signal_only=false does NOT enter signal-only path."""
+        env = _binance_all_confirmations_env()
+
+        with mock.patch.dict(os.environ, env, clear=True), \
+             mock.patch("scripts.run_boll_cvd_live.load_dotenv", return_value=False):
+            with mock.patch(
+                "src.live.binance_signal_only_runtime.run_binance_signal_only"
+            ) as mock_signal:
+                from scripts.run_boll_cvd_live import main
+                with pytest.raises(RuntimeError):
+                    asyncio.run(main())
+                mock_signal.assert_not_called()
+
+
+# ======================================================================
+# Binance signal-only does not call preflight
 # ======================================================================
 
 

@@ -148,48 +148,36 @@ class TestBinanceSignalOnlySkipsFactory:
 
 
 class TestBinanceLiveBlockedNoTrader:
-    """Binance live blocked path now falls through to factory.
-    It no longer raises from the blocked branch.  Factory creates BinanceLiveTrader."""
+    """Binance live blocked path must not create a Trader via factory or directly."""
 
-    def test_blocked_now_calls_runtime(self) -> None:
-        """Binance blocked path now calls run_binance_main_live."""
+    def test_blocked_does_not_call_factory(self) -> None:
+        """Binance blocked path should not call create_live_trader."""
         env = {
             "EXCHANGE": "binance",
             "SIGNAL_ONLY": "false",
-            "LIVE_TRADING": "true",
         }
 
         with mock.patch.dict(os.environ, env, clear=True), \
              mock.patch("scripts.run_boll_cvd_live.load_dotenv", return_value=False):
             with mock.patch(
-                "src.live.binance_main_live_runtime.run_binance_main_live"
-            ) as mock_runtime:
-                async def fake_main_live(env=None):
-                    raise RuntimeError("STOP_AFTER_RUNTIME")
-                mock_runtime.side_effect = fake_main_live
+                "scripts.run_boll_cvd_live.create_live_trader"
+            ) as mock_factory:
                 from scripts.run_boll_cvd_live import main
-                with pytest.raises(RuntimeError, match="STOP_AFTER_RUNTIME"):
+                with pytest.raises(RuntimeError):
                     asyncio.run(main())
-                mock_runtime.assert_called_once()
+                mock_factory.assert_not_called()
 
     def test_blocked_does_not_call_trader_directly(self) -> None:
-        """Binance path must not call OKX Trader() directly."""
+        """Binance blocked path must not call Trader() directly."""
         env = {
             "EXCHANGE": "binance",
             "SIGNAL_ONLY": "false",
-            "LIVE_TRADING": "true",
         }
 
         with mock.patch.dict(os.environ, env, clear=True), \
              mock.patch("scripts.run_boll_cvd_live.load_dotenv", return_value=False):
             with mock.patch("scripts.run_boll_cvd_live.Trader") as mock_trader:
-                with mock.patch(
-                    "src.live.binance_main_live_runtime.run_binance_main_live"
-                ) as mock_runtime:
-                    async def fake_main_live(env=None):
-                        raise RuntimeError("STOP_AFTER_RUNTIME")
-                    mock_runtime.side_effect = fake_main_live
-                    from scripts.run_boll_cvd_live import main
-                    with pytest.raises(RuntimeError, match="STOP_AFTER_RUNTIME"):
-                        asyncio.run(main())
-                    mock_trader.assert_not_called()
+                from scripts.run_boll_cvd_live import main
+                with pytest.raises(RuntimeError):
+                    asyncio.run(main())
+                mock_trader.assert_not_called()

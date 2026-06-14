@@ -38,10 +38,8 @@ def test_aiohttp_transport_is_not_wired_into_factory_or_live() -> None:
     allowed = {
         "src/exchanges/binance/__init__.py",
         "src/exchanges/binance/aiohttp_transport.py",
-        "src/exchanges/binance/algo_orders.py",
         "tests/exchanges/binance/test_binance_aiohttp_transport.py",
         "tests/exchanges/binance/test_binance_aiohttp_transport_boundaries.py",
-        "tests/exchanges/binance/test_binance_algo_orders.py",
         # Broker runtime factory boundary test uses the token in its
         # forbidden-import assertion list — not a real wiring.
         "tests/exchanges/test_broker_runtime_factory_boundaries.py",
@@ -58,9 +56,6 @@ def test_aiohttp_transport_is_not_wired_into_factory_or_live() -> None:
         "scripts/binance_read_only_smoke_test.py",
         "tests/scripts/test_binance_read_only_smoke_test.py",
         "tests/scripts/test_binance_read_only_smoke_test_boundaries.py",
-        # BinanceLiveTrader legitimately uses AiohttpBinanceTransport.
-        "src/execution/binance_live_trader.py",
-        "tests/execution/test_binance_live_trader.py",
     }
 
     for path in Path(".").rglob("*.py"):

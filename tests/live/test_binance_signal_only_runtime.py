@@ -173,20 +173,20 @@ class TestConfigLoading:
     def test_signal_only_false_raises(self) -> None:
         env = {**_base_binance_env(), "SIGNAL_ONLY": "false"}
         with mock.patch.dict(os.environ, env, clear=True):
-            with pytest.raises(RuntimeError, match="Binance signal-only runtime requires SIGNAL_ONLY=true"):
+            with pytest.raises(RuntimeError, match="Binance main live trading is not wired"):
                 load_binance_signal_only_config()
 
     def test_signal_only_missing_raises(self) -> None:
         env = _base_binance_env()
         del env["SIGNAL_ONLY"]
         with mock.patch.dict(os.environ, env, clear=True):
-            with pytest.raises(RuntimeError, match="Binance signal-only runtime requires SIGNAL_ONLY=true"):
+            with pytest.raises(RuntimeError, match="Binance main live trading is not wired"):
                 load_binance_signal_only_config()
 
     def test_exchange_okx_rejected(self) -> None:
         env = {**_base_binance_env(), "EXCHANGE": "okx"}
         with mock.patch.dict(os.environ, env, clear=True):
-            with pytest.raises(ValueError, match="Binance market runtime requires EXCHANGE=binance"):
+            with pytest.raises(ValueError, match="Binance signal-only runtime requires EXCHANGE=binance"):
                 load_binance_signal_only_config()
 
     def test_btc_rejected(self) -> None:

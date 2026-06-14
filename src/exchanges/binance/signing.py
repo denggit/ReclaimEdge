@@ -31,8 +31,6 @@ BINANCE_USDM_TESTNET_BASE_URL = "https://demo-fapi.binance.com"
 BINANCE_USDM_ORDER_PATH = "/fapi/v1/order"
 BINANCE_USDM_OPEN_ORDERS_PATH = "/fapi/v1/openOrders"
 BINANCE_USDM_POSITION_RISK_PATH = "/fapi/v2/positionRisk"
-BINANCE_USDM_ALGO_ORDER_PATH = "/fapi/v1/algoOrder"
-BINANCE_USDM_OPEN_ALGO_ORDERS_PATH = "/fapi/v1/openAlgoOrders"
 
 
 # ---------------------------------------------------------------------------
@@ -172,8 +170,6 @@ def build_signed_request(
 __all__ = [
     "BINANCE_USDM_BASE_URL",
     "BINANCE_USDM_TESTNET_BASE_URL",
-    "BINANCE_USDM_ALGO_ORDER_PATH",
-    "BINANCE_USDM_OPEN_ALGO_ORDERS_PATH",
     "BINANCE_USDM_ORDER_PATH",
     "BINANCE_USDM_OPEN_ORDERS_PATH",
     "BINANCE_USDM_POSITION_RISK_PATH",
