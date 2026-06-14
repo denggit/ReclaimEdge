@@ -7,7 +7,9 @@
 @Description: Binance ETHUSDT live smoke test — places REAL USD-M Futures orders.
 
 WARNING: This script places REAL orders on Binance USD-M Futures.
-It requires an explicit environment variable to confirm intent.
+It requires TWO explicit confirmations to run:
+  1. BINANCE_LIVE_SMOKE_TEST_CONFIRM — acknowledges real order placement
+  2. BINANCE_LIVE_CONFIRMATION — Binance live preflight confirmation
 
 This script reads the unified runtime config (load_unified_runtime_config)
 and validates that all platform-agnostic parameters match the supported
@@ -28,24 +30,47 @@ Unified config env (shared with OKX):
     LEVERAGE=20
     KLINE_INTERVAL=15m
 
+Preflight env (from binance_live_preflight):
+    BINANCE_LIVE_ENABLED=true
+    BINANCE_LIVE_ALLOW_ORDERS=true
+    BINANCE_LIVE_CONFIRMATION=I_UNDERSTAND_BINANCE_LIVE_TRADING
+    BINANCE_LIVE_MAX_ORDER_NOTIONAL_USDT=<value <= 10>
+    BINANCE_LIVE_MAX_POSITION_NOTIONAL_USDT=<value <= 30>
+    BINANCE_LIVE_LEVERAGE=<value <= 20>
+
 Usage::
 
     EXCHANGE=binance                                    \\
     EXCHANGE_API_KEY=...                                \\
     EXCHANGE_API_SECRET=...                             \\
     BINANCE_LIVE_SMOKE_TEST_CONFIRM=I_UNDERSTAND_THIS_PLACES_REAL_ORDERS \\
+    BINANCE_LIVE_ENABLED=true                           \\
+    BINANCE_LIVE_ALLOW_ORDERS=true                      \\
+    BINANCE_LIVE_CONFIRMATION=I_UNDERSTAND_BINANCE_LIVE_TRADING \\
+    BINANCE_LIVE_MAX_ORDER_NOTIONAL_USDT=6              \\
+    BINANCE_LIVE_MAX_POSITION_NOTIONAL_USDT=6           \\
+    BINANCE_LIVE_LEVERAGE=20                            \\
     python scripts/binance_live_smoke_test.py
 
 Trade flow (sequential, fail-fast with cleanup on error):
-    0. preflight — unified config, position mode, exchangeInfo, mark price, balance, qty
+    0. preflight — both confirmations, unified config, preflight guard,
+       notional caps, position mode, leverage (conditional),
+       exchangeInfo, mark price, balance, qty
     1. open ETHUSDT LONG (MARKET)
     2. place TP (LIMIT SELL)
-    3. place SL (STOP_MARKET SELL)
+    3. place SL (STOP_MARKET SELL) via Algo Order API
     4. fetch open orders → confirm TP + SL visible
     5. cancel TP / SL
     6. market close (MARKET SELL)
     7. check position == 0
     8. final cleanup (best-effort cancel + close any residual)
+
+Safety gates (hardened in 20C-4C-PREP):
+    - Double confirmation: smoke + preflight
+    - Max notional hard cap at 10 USDT
+    - Default no leverage change without explicit opt-in
+    - No existing position check before placing orders
+    - Only RE_SMOKE_ prefixed old orders are cleaned
 
 No strategy imports.  No CVD.  No live main loop.
 Does NOT read OKX_INST_ID, OKX_BAR, OKX_TD_MODE, or OKX_POS_SIDE_MODE.
@@ -91,6 +116,13 @@ from src.exchanges.models import (
     BrokerQuantityUnit,
     ExchangeName,
 )
+from src.live.binance_live_preflight import (
+    BINANCE_LIVE_HARD_MAX_ORDER_NOTIONAL_USDT,
+    BINANCE_LIVE_HARD_MAX_POSITION_NOTIONAL_USDT,
+    BINANCE_LIVE_HARD_MAX_LEVERAGE,
+    build_binance_live_preflight_report,
+    format_binance_live_blocked_message,
+)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -102,6 +134,9 @@ CLIENT_ORDER_ID_PREFIX: str = "RE_SMOKE_"
 
 CONFIRM_ENV: str = "BINANCE_LIVE_SMOKE_TEST_CONFIRM"
 CONFIRM_VALUE: str = "I_UNDERSTAND_THIS_PLACES_REAL_ORDERS"
+
+ALLOW_SET_LEVERAGE_ENV: str = "BINANCE_LIVE_SMOKE_TEST_ALLOW_SET_LEVERAGE"
+ALLOW_SET_LEVERAGE_VALUE: str = "I_UNDERSTAND_THIS_CHANGES_BINANCE_LEVERAGE"
 
 ENV_MAX_NOTIONAL: str = "BINANCE_LIVE_SMOKE_TEST_MAX_NOTIONAL_USDT"
 ENV_TP_PCT: str = "BINANCE_LIVE_SMOKE_TEST_TP_PCT"
@@ -120,6 +155,8 @@ BALANCE_PATH: str = "/fapi/v2/balance"
 CHANGE_LEVERAGE_PATH: str = "/fapi/v1/leverage"
 ALGO_ORDER_PATH: str = "/fapi/v1/algoOrder"
 ALGO_OPEN_ORDERS_PATH: str = "/fapi/v1/openAlgoOrders"
+POSITION_RISK_PATH: str = "/fapi/v2/positionRisk"
+
 # ---------------------------------------------------------------------------
 # Preflight state (populated before any order is placed)
 # ---------------------------------------------------------------------------
@@ -158,7 +195,6 @@ class Preflight:
 # Safety gates (no network)
 # ---------------------------------------------------------------------------
 
-
 def require_live_confirmation() -> None:
     """Raise ``SystemExit`` unless the live-confirm env var is set correctly."""
     value = os.environ.get(CONFIRM_ENV, "")
@@ -170,6 +206,23 @@ def require_live_confirmation() -> None:
         )
         raise SystemExit(1)
     print("[preflight] live confirmation OK")
+
+
+def require_binance_live_preflight_for_smoke() -> None:
+    """Run the Binance live preflight guard with orders globally enabled.
+
+    This requires the user to set BINANCE_LIVE_ENABLED, BINANCE_LIVE_ALLOW_ORDERS,
+    BINANCE_LIVE_CONFIRMATION, BINANCE_LIVE_MAX_ORDER_NOTIONAL_USDT,
+    BINANCE_LIVE_MAX_POSITION_NOTIONAL_USDT, and BINANCE_LIVE_LEVERAGE.
+    """
+    report = build_binance_live_preflight_report(
+        os.environ,
+        orders_globally_enabled=True,
+    )
+    if not report.ok:
+        print(format_binance_live_blocked_message(report), file=sys.stderr)
+        raise SystemExit(1)
+    print("[preflight] Binance live preflight OK")
 
 
 def validate_unified_config_for_binance(rt: ExchangeRuntimeConfig) -> str:
@@ -271,6 +324,172 @@ def _read_positive_decimal_env(name: str, default: Decimal) -> Decimal:
     return value
 
 
+# ---------------------------------------------------------------------------
+# Notional cap enforcement
+# ---------------------------------------------------------------------------
+
+
+def require_requested_notional_cap(
+    *,
+    smoke_max_notional: Decimal,
+    preflight_max_order_notional: Decimal,
+) -> None:
+    """Ensure the smoke max notional does not exceed any limit.
+
+    Checks:
+    1. smoke_max_notional <= BINANCE_LIVE_HARD_MAX_ORDER_NOTIONAL_USDT (hard cap)
+    2. smoke_max_notional <= preflight_max_order_notional (user-set cap)
+    """
+    if smoke_max_notional > BINANCE_LIVE_HARD_MAX_ORDER_NOTIONAL_USDT:
+        print(
+            f"ERROR: max notional {smoke_max_notional} exceeds "
+            f"hard cap {BINANCE_LIVE_HARD_MAX_ORDER_NOTIONAL_USDT}",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    if smoke_max_notional > preflight_max_order_notional:
+        print(
+            f"ERROR: max notional {smoke_max_notional} exceeds "
+            f"preflight max order notional {preflight_max_order_notional}",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    print(
+        f"[preflight] notional cap OK | "
+        f"smoke_max={smoke_max_notional} <= "
+        f"preflight_max={preflight_max_order_notional} <= "
+        f"hard_cap={BINANCE_LIVE_HARD_MAX_ORDER_NOTIONAL_USDT}"
+    )
+
+
+def require_calculated_notional_cap(
+    *,
+    calculated_notional: Decimal,
+    preflight_max_order_notional: Decimal,
+) -> None:
+    """Ensure the calculated notional (after step rounding) does not exceed caps."""
+    if calculated_notional > preflight_max_order_notional:
+        print(
+            f"ERROR: calculated notional {calculated_notional} exceeds "
+            f"allowed cap {preflight_max_order_notional}",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    if calculated_notional > BINANCE_LIVE_HARD_MAX_ORDER_NOTIONAL_USDT:
+        print(
+            f"ERROR: calculated notional {calculated_notional} exceeds "
+            f"hard cap {BINANCE_LIVE_HARD_MAX_ORDER_NOTIONAL_USDT}",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
+
+# ---------------------------------------------------------------------------
+# Leverage control
+# ---------------------------------------------------------------------------
+
+
+def allow_set_leverage() -> bool:
+    """Return True only when the user explicitly opts in to leverage changes."""
+    return os.environ.get(ALLOW_SET_LEVERAGE_ENV, "") == ALLOW_SET_LEVERAGE_VALUE
+
+
+async def require_existing_leverage(
+    api_key: str,
+    api_secret: str,
+    expected_leverage: int,
+) -> None:
+    """Check that the current ETHUSDT leverage matches *expected_leverage*.
+
+    Calls GET /fapi/v2/positionRisk?symbol=ETHUSDT (signed) and reads the
+    ``leverage`` field.  Exits if the leverage does not match.
+    """
+    signed = build_signed_request(
+        method="GET",
+        path=POSITION_RISK_PATH,
+        params={"symbol": BINANCE_SYMBOL},
+        api_key=api_key,
+        api_secret=api_secret,
+        base_url=BINANCE_USDM_BASE_URL,
+    )
+    transport = AiohttpBinanceTransport()
+    response: BinanceTransportResponse = await transport.send(signed)
+
+    if response.status_code >= 400:
+        payload = response.payload if isinstance(response.payload, dict) else {}
+        print(
+            f"ERROR: positionRisk request failed (HTTP {response.status_code}): {payload}",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
+    if not isinstance(response.payload, list) or len(response.payload) == 0:
+        print("ERROR: positionRisk returned no entries for ETHUSDT", file=sys.stderr)
+        raise SystemExit(1)
+
+    current_leverage_raw = response.payload[0].get("leverage")
+    try:
+        current_leverage = int(current_leverage_raw) if current_leverage_raw is not None else None
+    except (ValueError, TypeError):
+        print(
+            f"ERROR: cannot parse leverage from positionRisk: {current_leverage_raw}",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
+    if current_leverage != expected_leverage:
+        print(
+            f"ERROR: Current ETHUSDT leverage is {current_leverage}, "
+            f"expected {expected_leverage}.\n"
+            f"Set Binance manually, or explicitly set "
+            f"{ALLOW_SET_LEVERAGE_ENV}={ALLOW_SET_LEVERAGE_VALUE}.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
+    print(f"[preflight] existing leverage = {current_leverage}x OK")
+
+
+# ---------------------------------------------------------------------------
+# Existing position guard
+# ---------------------------------------------------------------------------
+
+
+async def require_no_existing_position(client: BinanceBrokerClient) -> None:
+    """Raise ``SystemExit`` if ETHUSDT position already exists.
+
+    This prevents the smoke test from accidentally touching a non-smoke position.
+    """
+    pos = await client.fetch_position(BINANCE_SYMBOL)
+    if pos is not None and pos.quantity != 0:
+        print(
+            f"ERROR: existing ETHUSDT position detected before smoke test: "
+            f"qty={pos.quantity}. "
+            "Refusing to run tiny order smoke to avoid touching non-smoke position.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    print("[preflight] no existing ETHUSDT position OK")
+
+
+# ---------------------------------------------------------------------------
+# Public market data helpers
+# ---------------------------------------------------------------------------
+
+
+async def _public_get(path: str, params: dict[str, str] | None = None) -> Any:
+    """Perform a public (unsigned) GET against Binance USD-M Futures."""
+    url = f"{BINANCE_USDM_BASE_URL}{path}"
+    timeout = aiohttp.ClientTimeout(total=10.0)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.get(url, params=params) as resp:
+            data = await resp.json()
+            if resp.status >= 400:
+                msg = data if isinstance(data, dict) else {"message": str(data)}
+                raise RuntimeError(f"Public GET {path} failed (HTTP {resp.status}): {msg}")
+            return data
+
+
 async def require_one_way_position_mode(api_key: str, api_secret: str) -> None:
     """Raise ``SystemExit`` unless the account is in One-way / Net Position Mode.
 
@@ -309,24 +528,6 @@ async def require_one_way_position_mode(api_key: str, api_secret: str) -> None:
     print("[preflight] position mode = one-way/net OK")
 
 
-# ---------------------------------------------------------------------------
-# Public market data helpers
-# ---------------------------------------------------------------------------
-
-
-async def _public_get(path: str, params: dict[str, str] | None = None) -> Any:
-    """Perform a public (unsigned) GET against Binance USD-M Futures."""
-    url = f"{BINANCE_USDM_BASE_URL}{path}"
-    timeout = aiohttp.ClientTimeout(total=10.0)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.get(url, params=params) as resp:
-            data = await resp.json()
-            if resp.status >= 400:
-                msg = data if isinstance(data, dict) else {"message": str(data)}
-                raise RuntimeError(f"Public GET {path} failed (HTTP {resp.status}): {msg}")
-            return data
-
-
 async def require_isolated_margin(
     api_key: str,
     api_secret: str,
@@ -338,7 +539,7 @@ async def require_isolated_margin(
     """
     signed = build_signed_request(
         method="GET",
-        path="/fapi/v2/positionRisk",
+        path=POSITION_RISK_PATH,
         params={"symbol": BINANCE_SYMBOL},
         api_key=api_key,
         api_secret=api_secret,
@@ -1058,6 +1259,10 @@ async def cleanup(
 ) -> None:
     """Best-effort cleanup: cancel smoke orders (regular + algo), then close any residual LONG.
 
+    cleanup is only called after preflight confirmed there was no initial
+    position, so any residual LONG is assumed to be smoke-opened and safe
+    to close.
+
     When the primary close (with clientOrderId) fails the function falls back
     to a close without clientOrderId — this is the safety net for when the
     clientOrderId is too long or otherwise rejected by the exchange.
@@ -1329,6 +1534,7 @@ async def main() -> int:
     """Entry point — runs the smoke test, always attempts cleanup."""
     # --- safety gates (no network) ---
     require_live_confirmation()
+    require_binance_live_preflight_for_smoke()
     api_key, api_secret = load_binance_credentials()
 
     # --- unified runtime config ---
@@ -1343,6 +1549,19 @@ async def main() -> int:
         ENV_MARGIN_BUFFER_MULTIPLIER, DEFAULT_MARGIN_BUFFER_MULTIPLIER,
     )
 
+    # --- notional cap enforcement (no network) ---
+    from src.live.binance_live_preflight import load_binance_live_preflight_config
+    preflight_cfg = load_binance_live_preflight_config(os.environ)
+    preflight_max_order = (
+        preflight_cfg.max_order_notional_usdt
+        if preflight_cfg.max_order_notional_usdt is not None
+        else BINANCE_LIVE_HARD_MAX_ORDER_NOTIONAL_USDT
+    )
+    require_requested_notional_cap(
+        smoke_max_notional=max_notional,
+        preflight_max_order_notional=preflight_max_order,
+    )
+
     # --- preflight (network) ---
     print("[preflight] checking position mode...")
     await require_one_way_position_mode(api_key, api_secret)
@@ -1350,8 +1569,13 @@ async def main() -> int:
     print("[preflight] checking margin mode...")
     await require_isolated_margin(api_key, api_secret)
 
-    print(f"[preflight] setting initial leverage to {rt.leverage}x...")
-    await set_initial_leverage(api_key, api_secret, rt.leverage)
+    # --- leverage (conditional) ---
+    if allow_set_leverage():
+        print(f"[preflight] setting initial leverage to {rt.leverage}x...")
+        await set_initial_leverage(api_key, api_secret, rt.leverage)
+    else:
+        print("[preflight] set leverage skipped; validating existing leverage...")
+        await require_existing_leverage(api_key, api_secret, rt.leverage)
 
     print("[preflight] fetching exchangeInfo...")
     filters = await fetch_exchange_info_filters()
@@ -1367,6 +1591,12 @@ async def main() -> int:
         mark_price=mark_price,
         max_notional=max_notional,
         filters=filters,
+    )
+
+    # --- calculated notional cap ---
+    require_calculated_notional_cap(
+        calculated_notional=calculated_notional,
+        preflight_max_order_notional=preflight_max_order,
     )
 
     # --- leverage-aware margin check ---
@@ -1434,6 +1664,19 @@ async def main() -> int:
         api_key=api_key,
         api_secret=api_secret,
         transport=transport,
+    )
+
+    # --- pre-trade gates (require client) ---
+    await require_no_existing_position(client)
+
+    print("[preflight] cleaning old RE_SMOKE_ orders...")
+    regular_cancelled = await cancel_smoke_orders(client)
+    algo_cancelled = await cancel_smoke_algo_orders(
+        api_key=api_key, api_secret=api_secret,
+    )
+    print(
+        f"[preflight] old smoke cleanup OK | "
+        f"regular={regular_cancelled} algo={algo_cancelled}"
     )
 
     success = False

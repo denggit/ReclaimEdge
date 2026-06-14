@@ -19,6 +19,8 @@ from unittest import mock
 import pytest
 
 from scripts.binance_live_smoke_test import (
+    ALLOW_SET_LEVERAGE_ENV,
+    ALLOW_SET_LEVERAGE_VALUE,
     ALGO_ORDER_PATH,
     BINANCE_SYMBOL,
     CANONICAL_SYMBOL,
@@ -32,11 +34,13 @@ from scripts.binance_live_smoke_test import (
     DEFAULT_TP_PCT,
     ENV_MARGIN_BUFFER_MULTIPLIER,
     ExchangeInfoFilters,
+    POSITION_RISK_PATH,
     Preflight,
     _generate_client_order_id,
     _make_order_request,
     _read_positive_decimal_env,
     _round_up_to_step,
+    allow_set_leverage,
     calculate_required_margin_with_buffer,
     calculate_safe_quantity,
     cancel_algo_order_by_client_id,
@@ -55,11 +59,16 @@ from scripts.binance_live_smoke_test import (
     place_sl,
     place_stop_loss_algo_order,
     place_tp,
-    set_initial_leverage,
-    validate_unified_config_for_binance,
-    require_one_way_position_mode,
+    require_binance_live_preflight_for_smoke,
+    require_calculated_notional_cap,
+    require_existing_leverage,
     require_isolated_margin,
     require_live_confirmation,
+    require_no_existing_position,
+    require_one_way_position_mode,
+    require_requested_notional_cap,
+    set_initial_leverage,
+    validate_unified_config_for_binance,
 )
 from src.exchanges.binance.client import BinanceBrokerClient
 from src.exchanges.binance.signing import (
@@ -1806,3 +1815,655 @@ class TestReadPositiveDecimalEnv:
             _read_positive_decimal_env(
                 ENV_MARGIN_BUFFER_MULTIPLIER, DEFAULT_MARGIN_BUFFER_MULTIPLIER,
             )
+
+
+# ---------------------------------------------------------------------------
+# Tests: preflight guard (20C-4C-PREP)
+# ---------------------------------------------------------------------------
+
+
+class TestRequireBinanceLivePreflightForSmoke:
+    """Tests for ``require_binance_live_preflight_for_smoke()``."""
+
+    def _set_preflight_envs(self, monkeypatch, **overrides):
+        monkeypatch.setenv("EXCHANGE", "binance")
+        monkeypatch.setenv("BINANCE_SIGNAL_ONLY", "false")
+        monkeypatch.setenv("BINANCE_LIVE_ENABLED", "true")
+        monkeypatch.setenv("BINANCE_LIVE_ALLOW_ORDERS", "true")
+        monkeypatch.setenv(
+            "BINANCE_LIVE_CONFIRMATION", "I_UNDERSTAND_BINANCE_LIVE_TRADING"
+        )
+        monkeypatch.setenv("BINANCE_LIVE_MAX_ORDER_NOTIONAL_USDT", "6")
+        monkeypatch.setenv("BINANCE_LIVE_MAX_POSITION_NOTIONAL_USDT", "6")
+        monkeypatch.setenv("BINANCE_LIVE_LEVERAGE", "20")
+        for k, v in overrides.items():
+            if v is None:
+                monkeypatch.delenv(k, raising=False)
+            else:
+                monkeypatch.setenv(k, v)
+
+    def test_missing_live_confirmation_exits(self, monkeypatch) -> None:
+        self._set_preflight_envs(monkeypatch, BINANCE_LIVE_CONFIRMATION=None)
+        monkeypatch.delenv("BINANCE_LIVE_CONFIRMATION", raising=False)
+        with pytest.raises(SystemExit) as exc_info:
+            require_binance_live_preflight_for_smoke()
+        assert exc_info.value.code == 1
+
+    def test_missing_live_enabled_exits(self, monkeypatch) -> None:
+        self._set_preflight_envs(monkeypatch, BINANCE_LIVE_ENABLED="false")
+        with pytest.raises(SystemExit) as exc_info:
+            require_binance_live_preflight_for_smoke()
+        assert exc_info.value.code == 1
+
+    def test_missing_allow_orders_exits(self, monkeypatch) -> None:
+        self._set_preflight_envs(monkeypatch, BINANCE_LIVE_ALLOW_ORDERS="false")
+        with pytest.raises(SystemExit) as exc_info:
+            require_binance_live_preflight_for_smoke()
+        assert exc_info.value.code == 1
+
+    def test_all_preflight_env_ok_passes(self, monkeypatch) -> None:
+        self._set_preflight_envs(monkeypatch)
+        require_binance_live_preflight_for_smoke()  # does not raise
+
+
+class TestDoubleConfirmation:
+    """Tests for double confirmation (smoke + preflight)."""
+
+    def test_only_smoke_confirm_exits_in_main(self, monkeypatch) -> None:
+        """Only BINANCE_LIVE_SMOKE_TEST_CONFIRM, missing preflight env → exit."""
+        monkeypatch.setenv(CONFIRM_ENV, CONFIRM_VALUE)
+        # Preflight envs NOT set — should fail
+        monkeypatch.delenv("BINANCE_LIVE_ENABLED", raising=False)
+        with pytest.raises(SystemExit) as exc_info:
+            require_binance_live_preflight_for_smoke()
+        assert exc_info.value.code == 1
+
+    def test_only_preflight_confirm_still_requires_smoke_confirm(self, monkeypatch) -> None:
+        """Only preflight confirm, missing smoke confirm → smoke gate exits."""
+        # Set preflight OK
+        monkeypatch.setenv("EXCHANGE", "binance")
+        monkeypatch.setenv("BINANCE_LIVE_ENABLED", "true")
+        monkeypatch.setenv("BINANCE_LIVE_ALLOW_ORDERS", "true")
+        monkeypatch.setenv(
+            "BINANCE_LIVE_CONFIRMATION", "I_UNDERSTAND_BINANCE_LIVE_TRADING"
+        )
+        monkeypatch.setenv("BINANCE_LIVE_MAX_ORDER_NOTIONAL_USDT", "6")
+        monkeypatch.setenv("BINANCE_LIVE_MAX_POSITION_NOTIONAL_USDT", "6")
+        monkeypatch.setenv("BINANCE_LIVE_LEVERAGE", "20")
+        # Preflight passes
+        require_binance_live_preflight_for_smoke()
+        # But smoke gate should still fail without its own confirmation
+        monkeypatch.delenv(CONFIRM_ENV, raising=False)
+        with pytest.raises(SystemExit) as exc_info:
+            require_live_confirmation()
+        assert exc_info.value.code == 1
+
+    def test_both_confirmations_present_passes(self, monkeypatch) -> None:
+        monkeypatch.setenv(CONFIRM_ENV, CONFIRM_VALUE)
+        monkeypatch.setenv("EXCHANGE", "binance")
+        monkeypatch.setenv("BINANCE_LIVE_ENABLED", "true")
+        monkeypatch.setenv("BINANCE_LIVE_ALLOW_ORDERS", "true")
+        monkeypatch.setenv(
+            "BINANCE_LIVE_CONFIRMATION", "I_UNDERSTAND_BINANCE_LIVE_TRADING"
+        )
+        monkeypatch.setenv("BINANCE_LIVE_MAX_ORDER_NOTIONAL_USDT", "6")
+        monkeypatch.setenv("BINANCE_LIVE_MAX_POSITION_NOTIONAL_USDT", "6")
+        monkeypatch.setenv("BINANCE_LIVE_LEVERAGE", "20")
+        require_live_confirmation()  # does not raise
+        require_binance_live_preflight_for_smoke()  # does not raise
+
+
+# ---------------------------------------------------------------------------
+# Tests: max notional cap (20C-4C-PREP)
+# ---------------------------------------------------------------------------
+
+
+class TestRequireRequestedNotionalCap:
+    """Tests for ``require_requested_notional_cap()``."""
+
+    def test_smoke_max_above_hard_cap_exits(self) -> None:
+        with pytest.raises(SystemExit) as exc_info:
+            require_requested_notional_cap(
+                smoke_max_notional=Decimal("11"),
+                preflight_max_order_notional=Decimal("5"),
+            )
+        assert exc_info.value.code == 1
+
+    def test_smoke_max_above_preflight_max_exits(self) -> None:
+        with pytest.raises(SystemExit) as exc_info:
+            require_requested_notional_cap(
+                smoke_max_notional=Decimal("6"),
+                preflight_max_order_notional=Decimal("5"),
+            )
+        assert exc_info.value.code == 1
+
+    def test_both_within_caps_passes(self) -> None:
+        require_requested_notional_cap(
+            smoke_max_notional=Decimal("5"),
+            preflight_max_order_notional=Decimal("6"),
+        )  # does not raise
+
+    def test_equal_values_passes(self) -> None:
+        require_requested_notional_cap(
+            smoke_max_notional=Decimal("6"),
+            preflight_max_order_notional=Decimal("6"),
+        )  # does not raise
+
+
+class TestRequireCalculatedNotionalCap:
+    """Tests for ``require_calculated_notional_cap()``."""
+
+    def test_above_preflight_max_exits(self) -> None:
+        with pytest.raises(SystemExit) as exc_info:
+            require_calculated_notional_cap(
+                calculated_notional=Decimal("7"),
+                preflight_max_order_notional=Decimal("6"),
+            )
+        assert exc_info.value.code == 1
+
+    def test_above_hard_cap_exits(self) -> None:
+        with pytest.raises(SystemExit) as exc_info:
+            require_calculated_notional_cap(
+                calculated_notional=Decimal("11"),
+                preflight_max_order_notional=Decimal("10"),
+            )
+        assert exc_info.value.code == 1
+
+    def test_within_caps_passes(self) -> None:
+        require_calculated_notional_cap(
+            calculated_notional=Decimal("5"),
+            preflight_max_order_notional=Decimal("6"),
+        )  # does not raise
+
+
+# ---------------------------------------------------------------------------
+# Tests: leverage behavior (20C-4C-PREP)
+# ---------------------------------------------------------------------------
+
+
+class TestAllowSetLeverage:
+    """Tests for ``allow_set_leverage()``."""
+
+    def test_returns_false_when_env_not_set(self, monkeypatch) -> None:
+        monkeypatch.delenv(ALLOW_SET_LEVERAGE_ENV, raising=False)
+        assert allow_set_leverage() is False
+
+    def test_returns_false_for_wrong_value(self, monkeypatch) -> None:
+        monkeypatch.setenv(ALLOW_SET_LEVERAGE_ENV, "YES")
+        assert allow_set_leverage() is False
+
+    def test_returns_true_for_correct_value(self, monkeypatch) -> None:
+        monkeypatch.setenv(ALLOW_SET_LEVERAGE_ENV, ALLOW_SET_LEVERAGE_VALUE)
+        assert allow_set_leverage() is True
+
+    def test_returns_false_for_empty_value(self, monkeypatch) -> None:
+        monkeypatch.setenv(ALLOW_SET_LEVERAGE_ENV, "")
+        assert allow_set_leverage() is False
+
+
+class TestRequireExistingLeverage:
+    """Tests for ``require_existing_leverage()``."""
+
+    @pytest.mark.asyncio
+    async def test_matching_leverage_passes(self) -> None:
+        from src.exchanges.binance.aiohttp_transport import AiohttpBinanceTransport
+        from unittest import mock
+
+        class FakeTransport:
+            async def send(self, request):
+                return BinanceTransportResponse(
+                    status_code=200,
+                    payload=[{
+                        "symbol": "ETHUSDT",
+                        "marginType": "isolated",
+                        "positionAmt": "0",
+                        "leverage": 20,
+                    }],
+                    headers={},
+                )
+
+        with mock.patch.object(AiohttpBinanceTransport, "send", FakeTransport.send):
+            await require_existing_leverage("test-key", "test-secret", 20)
+            # does not raise
+
+    @pytest.mark.asyncio
+    async def test_mismatched_leverage_exits(self) -> None:
+        from src.exchanges.binance.aiohttp_transport import AiohttpBinanceTransport
+        from unittest import mock
+
+        class FakeTransport:
+            async def send(self, request):
+                return BinanceTransportResponse(
+                    status_code=200,
+                    payload=[{
+                        "symbol": "ETHUSDT",
+                        "marginType": "isolated",
+                        "positionAmt": "0",
+                        "leverage": 5,
+                    }],
+                    headers={},
+                )
+
+        with mock.patch.object(AiohttpBinanceTransport, "send", FakeTransport.send):
+            with pytest.raises(SystemExit) as exc_info:
+                await require_existing_leverage("test-key", "test-secret", 20)
+            assert exc_info.value.code == 1
+
+    @pytest.mark.asyncio
+    async def test_empty_response_exits(self) -> None:
+        from src.exchanges.binance.aiohttp_transport import AiohttpBinanceTransport
+        from unittest import mock
+
+        class FakeTransport:
+            async def send(self, request):
+                return BinanceTransportResponse(
+                    status_code=200,
+                    payload=[],
+                    headers={},
+                )
+
+        with mock.patch.object(AiohttpBinanceTransport, "send", FakeTransport.send):
+            with pytest.raises(SystemExit) as exc_info:
+                await require_existing_leverage("test-key", "test-secret", 20)
+            assert exc_info.value.code == 1
+
+    @pytest.mark.asyncio
+    async def test_http_error_exits(self) -> None:
+        from src.exchanges.binance.aiohttp_transport import AiohttpBinanceTransport
+        from unittest import mock
+
+        class FakeTransport:
+            async def send(self, request):
+                return BinanceTransportResponse(
+                    status_code=403,
+                    payload={"code": -2015, "msg": "Invalid API-key"},
+                    headers={},
+                )
+
+        with mock.patch.object(AiohttpBinanceTransport, "send", FakeTransport.send):
+            with pytest.raises(SystemExit) as exc_info:
+                await require_existing_leverage("bad-key", "bad-secret", 20)
+            assert exc_info.value.code == 1
+
+
+class TestLeverageDefaultBehavior:
+    """Tests for the default don't-set-leverage behavior."""
+
+    @pytest.mark.asyncio
+    async def test_default_does_not_call_set_initial_leverage(self, monkeypatch) -> None:
+        """By default, allow_set_leverage returns False."""
+        monkeypatch.delenv(ALLOW_SET_LEVERAGE_ENV, raising=False)
+        assert allow_set_leverage() is False
+
+    @pytest.mark.asyncio
+    async def test_wrong_allow_value_does_not_enable_set_leverage(self, monkeypatch) -> None:
+        """Wrong value in allow env does not enable set_leverage."""
+        monkeypatch.setenv(ALLOW_SET_LEVERAGE_ENV, "YES_PLEASE")
+        assert allow_set_leverage() is False
+
+    @pytest.mark.asyncio
+    async def test_correct_allow_value_enables_set_leverage(self, monkeypatch) -> None:
+        """Correct value returns True."""
+        monkeypatch.setenv(ALLOW_SET_LEVERAGE_ENV, ALLOW_SET_LEVERAGE_VALUE)
+        assert allow_set_leverage() is True
+
+
+# ---------------------------------------------------------------------------
+# Tests: no existing position (20C-4C-PREP)
+# ---------------------------------------------------------------------------
+
+
+class TestRequireNoExistingPosition:
+    """Tests for ``require_no_existing_position()``."""
+
+    @pytest.mark.asyncio
+    async def test_no_position_passes(self) -> None:
+        """fetch_position returns None → passes."""
+        client = _make_client(
+            [_minimal_position_payload(positionAmt="0")],
+        )
+        await require_no_existing_position(client)  # does not raise
+
+    @pytest.mark.asyncio
+    async def test_zero_quantity_passes(self) -> None:
+        """fetch_position returns quantity 0 → passes."""
+        client = _make_client(
+            [_minimal_position_payload(positionAmt="0", positionSide="LONG")],
+        )
+        await require_no_existing_position(client)  # does not raise
+
+    @pytest.mark.asyncio
+    async def test_positive_quantity_exits(self) -> None:
+        """fetch_position returns positive quantity → exit."""
+        client = _make_client(
+            [_minimal_position_payload(positionAmt="0.5")],
+        )
+        with pytest.raises(SystemExit) as exc_info:
+            await require_no_existing_position(client)
+        assert exc_info.value.code == 1
+
+    @pytest.mark.asyncio
+    async def test_existing_position_exit_does_not_call_open_long(self) -> None:
+        """When existing position causes exit, open_long should NOT be called."""
+        client = _make_client(
+            [_minimal_position_payload(positionAmt="0.3")],
+        )
+        with pytest.raises(SystemExit):
+            await require_no_existing_position(client)
+        # If we get here, exit was raised. Now check that transport
+        # only received the fetch_position request (1 call).
+        transport = client._transport
+        assert len(transport.requests) == 1
+        assert transport.requests[0].path == "/fapi/v2/positionRisk"
+
+
+# ---------------------------------------------------------------------------
+# Tests: old smoke order cleanup (20C-4C-PREP)
+# ---------------------------------------------------------------------------
+
+
+class TestOldSmokeCleanupSafety:
+    """Tests for old RE_SMOKE_ order cleanup behavior."""
+
+    def test_cancel_smoke_orders_only_removes_re_smoke_prefix(self) -> None:
+        """cancel_smoke_orders only targets CLIENT_ORDER_ID_PREFIX."""
+        assert CLIENT_ORDER_ID_PREFIX == "RE_SMOKE_"
+
+    @pytest.mark.asyncio
+    async def test_non_smoke_regular_orders_not_cancelled(self) -> None:
+        """Non-RE_SMOKE_ orders must not be cancelled."""
+        client = _make_client(
+            [
+                _fake_open_order_response(
+                    order_id=1, client_order_id="RE_SMOKE_tp_1",
+                ),
+                _fake_open_order_response(
+                    order_id=2, client_order_id="MY_ORDER",
+                ),
+                _fake_open_order_response(
+                    order_id=3, client_order_id="RE_SMOKE_sl_1",
+                    order_type="STOP_MARKET", price="0", trigger_price="2900",
+                ),
+            ],
+            _cancel_payload(order_id=1),
+            _cancel_payload(order_id=3),
+        )
+        result = await cancel_smoke_orders(client)
+        assert result == 2  # Only the RE_SMOKE_ orders cancelled
+
+    @pytest.mark.asyncio
+    async def test_non_smoke_algo_orders_not_cancelled(self) -> None:
+        """Non-RE_SMOKE_ algo orders must not be cancelled."""
+        from unittest import mock
+
+        fake_orders = [
+            {"algoId": 1, "clientAlgoId": "RE_SMOKE_sl_1"},
+            {"algoId": 2, "clientAlgoId": "MY_ALGO"},
+        ]
+
+        cancelled_ids = []
+
+        async def fake_fetch(*, api_key, api_secret):
+            return fake_orders
+
+        async def fake_cancel(*, api_key, api_secret, client_order_id):
+            cancelled_ids.append(client_order_id)
+            return BrokerCancelResult(
+                exchange=ExchangeName.BINANCE,
+                symbol="ETHUSDT",
+                ok=True,
+                order_id=None,
+                client_order_id=client_order_id,
+            )
+
+        with mock.patch(
+            "scripts.binance_live_smoke_test.fetch_algo_open_orders",
+            side_effect=fake_fetch,
+        ), mock.patch(
+            "scripts.binance_live_smoke_test.cancel_algo_order_by_client_id",
+            side_effect=fake_cancel,
+        ):
+            count = await cancel_smoke_algo_orders(
+                api_key="test-key",
+                api_secret="test-secret",
+            )
+            assert count == 1  # Only RE_SMOKE_sl_1 cancelled
+            assert "RE_SMOKE_sl_1" in cancelled_ids
+            assert "MY_ALGO" not in cancelled_ids
+
+
+# ---------------------------------------------------------------------------
+# Tests: TP / Close safety (20C-4C-PREP)
+# ---------------------------------------------------------------------------
+
+
+class TestTPSafety:
+    """TP order must be reduce_only and RE_SMOKE_ prefixed."""
+
+    @pytest.mark.asyncio
+    async def test_tp_is_reduce_only(self) -> None:
+        client = _make_client(
+            _minimal_order_payload(side="SELL", type="LIMIT", price="3200.00"),
+        )
+        transport = client._transport
+        result = await place_tp(
+            client, Decimal("0.1"), Decimal("3200"), "RE_SMOKE_tp_123"
+        )
+        assert result.ok is True
+        assert len(transport.requests) == 1
+        req = transport.requests[0]
+        assert req.params.get("reduceOnly") == "true"
+
+    def test_tp_client_order_id_has_smoke_prefix(self) -> None:
+        cid = _generate_client_order_id("tp")
+        assert cid.startswith("RE_SMOKE_")
+
+    @pytest.mark.asyncio
+    async def test_open_is_not_reduce_only(self) -> None:
+        client = _make_client(_minimal_order_payload())
+        transport = client._transport
+        result = await open_long(client, Decimal("0.1"), "RE_SMOKE_open_123")
+        assert result.ok is True
+        req = transport.requests[0]
+        assert req.params.get("reduceOnly") is None or req.params.get("reduceOnly") == "false"
+
+    def test_open_client_order_id_has_smoke_prefix(self) -> None:
+        cid = _generate_client_order_id("open")
+        assert cid.startswith("RE_SMOKE_")
+
+
+class TestCloseSafety:
+    """Close order must be reduce_only."""
+
+    @pytest.mark.asyncio
+    async def test_close_is_reduce_only(self) -> None:
+        client = _make_client(
+            _minimal_order_payload(side="SELL", type="MARKET"),
+        )
+        transport = client._transport
+        result = await close_long_position(
+            client, Decimal("0.1"), "RE_SMOKE_close_123"
+        )
+        assert result.ok is True
+        req = transport.requests[0]
+        assert req.params.get("reduceOnly") == "true"
+
+    def test_close_client_order_id_has_smoke_prefix(self) -> None:
+        cid = _generate_client_order_id("close")
+        assert cid.startswith("RE_SMOKE_")
+
+
+# ---------------------------------------------------------------------------
+# Tests: SL algo safety (20C-4C-PREP)
+# ---------------------------------------------------------------------------
+
+
+class TestSLAlgoSafety:
+    """SL via Algo Order API must have reduceOnly, no positionSide."""
+
+    @pytest.mark.asyncio
+    async def test_sl_uses_algo_order_helper(self) -> None:
+        """place_sl delegates to place_stop_loss_algo_order."""
+        from unittest import mock
+
+        fake_result = BrokerOrderResult(
+            exchange=ExchangeName.BINANCE,
+            symbol="ETHUSDT",
+            ok=True,
+            order_id="99999",
+            client_order_id="RE_SMOKE_sl_123",
+        )
+
+        async def fake_algo(*, api_key, api_secret, quantity, sl_price, client_order_id):
+            return fake_result
+
+        with mock.patch(
+            "scripts.binance_live_smoke_test.place_stop_loss_algo_order",
+            side_effect=fake_algo,
+        ) as mock_algo:
+            result = await place_sl(
+                api_key="test-key",
+                api_secret="test-secret",
+                quantity=Decimal("0.1"),
+                sl_price=Decimal("2900"),
+                client_order_id="RE_SMOKE_sl_123",
+            )
+            assert result is fake_result
+            mock_algo.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_algo_params_has_reduce_only(self) -> None:
+        """Algo SL params must include reduceOnly=true."""
+        from unittest import mock
+
+        captured_params = {}
+
+        async def fake_send(request):
+            captured_params.update(request.params)
+            return BinanceTransportResponse(
+                status_code=200,
+                payload={"algoId": 1, "clientAlgoId": "RE_SMOKE_sl_1", "code": 200},
+                headers={},
+            )
+
+        with mock.patch(
+            "scripts.binance_live_smoke_test.AiohttpBinanceTransport.send",
+            side_effect=fake_send,
+        ):
+            await place_stop_loss_algo_order(
+                api_key="test-key",
+                api_secret="test-secret",
+                quantity=Decimal("0.1"),
+                sl_price=Decimal("2900"),
+                client_order_id="RE_SMOKE_sl_1",
+            )
+
+        assert captured_params.get("reduceOnly") == "true"
+
+    @pytest.mark.asyncio
+    async def test_algo_params_has_no_position_side(self) -> None:
+        """Algo SL params must NOT include positionSide."""
+        from unittest import mock
+
+        captured_params = {}
+
+        async def fake_send(request):
+            captured_params.update(request.params)
+            return BinanceTransportResponse(
+                status_code=200,
+                payload={"algoId": 2, "clientAlgoId": "RE_SMOKE_sl_2", "code": 200},
+                headers={},
+            )
+
+        with mock.patch(
+            "scripts.binance_live_smoke_test.AiohttpBinanceTransport.send",
+            side_effect=fake_send,
+        ):
+            await place_stop_loss_algo_order(
+                api_key="test-key",
+                api_secret="test-secret",
+                quantity=Decimal("0.1"),
+                sl_price=Decimal("2900"),
+                client_order_id="RE_SMOKE_sl_2",
+            )
+
+        assert "positionSide" not in captured_params
+
+    @pytest.mark.asyncio
+    async def test_algo_params_has_client_algo_id(self) -> None:
+        """Algo SL params must include clientAlgoId."""
+        from unittest import mock
+
+        captured_params = {}
+
+        async def fake_send(request):
+            captured_params.update(request.params)
+            return BinanceTransportResponse(
+                status_code=200,
+                payload={"algoId": 3, "clientAlgoId": "cid", "code": 200},
+                headers={},
+            )
+
+        with mock.patch(
+            "scripts.binance_live_smoke_test.AiohttpBinanceTransport.send",
+            side_effect=fake_send,
+        ):
+            await place_stop_loss_algo_order(
+                api_key="test-key",
+                api_secret="test-secret",
+                quantity=Decimal("0.1"),
+                sl_price=Decimal("2900"),
+                client_order_id="RE_SMOKE_sl_789",
+            )
+
+        assert "clientAlgoId" in captured_params
+
+
+# ---------------------------------------------------------------------------
+# Tests: POSITION_RISK_PATH constant
+# ---------------------------------------------------------------------------
+
+
+class TestPositionRiskPath:
+    """Tests for the POSITION_RISK_PATH constant (used by leverage / margin checks)."""
+
+    def test_position_risk_path_is_correct(self) -> None:
+        assert POSITION_RISK_PATH == "/fapi/v2/positionRisk"
+
+
+# ---------------------------------------------------------------------------
+# Tests: main wiring updated for preflight
+# ---------------------------------------------------------------------------
+
+
+class TestMainWithPreflight:
+    """Main must call the new preflight guard and handle pre-trade checks."""
+
+    @pytest.mark.asyncio
+    async def test_main_exits_when_preflight_fails(self, monkeypatch) -> None:
+        """Main exits when preflight guard fails (missing BINANCE_LIVE_ENABLED)."""
+        monkeypatch.setenv(CONFIRM_ENV, CONFIRM_VALUE)
+        monkeypatch.delenv("BINANCE_LIVE_ENABLED", raising=False)
+        monkeypatch.setenv("EXCHANGE", "binance")
+        with pytest.raises(SystemExit) as exc_info:
+            await main()
+        assert exc_info.value.code == 1
+
+    @pytest.mark.asyncio
+    async def test_main_requires_both_confirmations(self, monkeypatch) -> None:
+        """main() calls require_live_confirmation first, then preflight."""
+        # Missing smoke confirm
+        monkeypatch.delenv(CONFIRM_ENV, raising=False)
+        # But preflight envs are OK
+        monkeypatch.setenv("EXCHANGE", "binance")
+        monkeypatch.setenv("BINANCE_LIVE_ENABLED", "true")
+        monkeypatch.setenv("BINANCE_LIVE_ALLOW_ORDERS", "true")
+        monkeypatch.setenv(
+            "BINANCE_LIVE_CONFIRMATION", "I_UNDERSTAND_BINANCE_LIVE_TRADING"
+        )
+        monkeypatch.setenv("BINANCE_LIVE_MAX_ORDER_NOTIONAL_USDT", "6")
+        monkeypatch.setenv("BINANCE_LIVE_MAX_POSITION_NOTIONAL_USDT", "6")
+        monkeypatch.setenv("BINANCE_LIVE_LEVERAGE", "20")
+        with pytest.raises(SystemExit) as exc_info:
+            await main()
+        assert exc_info.value.code == 1
