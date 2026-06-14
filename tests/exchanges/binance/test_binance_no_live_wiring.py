@@ -85,6 +85,11 @@ def test_binance_adapter_shell_not_wired_into_runtime() -> None:
         # Boundary test for Binance live preflight — references
         # BinanceBrokerClient only in a "must not import" assertion.
         "tests/live/test_binance_live_preflight_boundaries.py",
+        # Read-only smoke test script and its tests legitimately use
+        # BinanceBrokerClient for read-only signed REST calls.
+        "scripts/binance_read_only_smoke_test.py",
+        "tests/scripts/test_binance_read_only_smoke_test.py",
+        "tests/scripts/test_binance_read_only_smoke_test_boundaries.py",
     }
 
     for path in Path(".").rglob("*.py"):
