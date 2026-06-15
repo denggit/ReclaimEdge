@@ -826,6 +826,37 @@ class ExecutionCommandProcessor:
 
     # ── result application helpers ───────────────────────────────────────
 
+    def _maybe_apply_entry_protective_sl_state(
+        self,
+        command: live_runtime_types.TradeCommand,
+        result: Any,
+    ) -> bool:
+        """Apply entry protective SL state from result only when the intent carries an entry protective SL price.
+
+        IMPORTANT: Only entry intents (OPEN/ADD) carry ``entry_protective_sl_price``.
+        Non-entry intents (UPDATE_TP, NEAR_TP_REDUCE, MARKET_EXIT_RUNNER) do NOT
+        carry this field, so their ``protective_sl_order_id`` (which belongs to
+        a middle-runner / near-TP / three-stage runner protective SL) will never
+        be written into ``entry_protective_sl_order_id``.
+
+        Returns True if state was written, False otherwise.
+        Must be called inside ``state_lock``.
+        """
+        entry_sl_price = getattr(command.intent, "entry_protective_sl_price", None)
+        if entry_sl_price is None:
+            return False
+
+        order_id = getattr(result, "protective_sl_order_id", None)
+        if not order_id:
+            return False
+
+        self.strategy.state.entry_protective_sl_order_id = order_id
+        self.strategy.state.entry_protective_sl_price = entry_sl_price
+        self.strategy.state.entry_protective_sl_protected = bool(
+            getattr(result, "protective_sl_ok", False)
+        )
+        return True
+
     def _maybe_clear_middle_bucket_split_after_execution_result(
         self,
         *,
@@ -985,10 +1016,7 @@ class ExecutionCommandProcessor:
             )
             self.strategy.state.tp_order_id = result.tp_order_id
             self.strategy.state.tp_order_ids = list(getattr(result, "tp_order_ids", ()) or [])
-            if getattr(result, "protective_sl_order_id", None):
-                self.strategy.state.entry_protective_sl_order_id = result.protective_sl_order_id
-                self.strategy.state.entry_protective_sl_price = getattr(command.intent, "entry_protective_sl_price", None)
-                self.strategy.state.entry_protective_sl_protected = bool(getattr(result, "protective_sl_ok", False))
+            self._maybe_apply_entry_protective_sl_state(command, result)
             if (
                 getattr(command.intent, "three_stage_post_tp1_protective_sl_price", None) is not None
                 and getattr(command.intent, "three_stage_tp1_consumed", False)
@@ -1131,10 +1159,7 @@ class ExecutionCommandProcessor:
             self.execution_state.last_order_ts_ms = command.intent.ts_ms
             self.strategy.state.tp_order_id = result.tp_order_id
             self.strategy.state.tp_order_ids = list(getattr(result, "tp_order_ids", ()) or [])
-            if getattr(result, "protective_sl_order_id", None):
-                self.strategy.state.entry_protective_sl_order_id = result.protective_sl_order_id
-                self.strategy.state.entry_protective_sl_price = getattr(command.intent, "entry_protective_sl_price", None)
-                self.strategy.state.entry_protective_sl_protected = bool(getattr(result, "protective_sl_ok", False))
+            self._maybe_apply_entry_protective_sl_state(command, result)
             near_tp_state_synced = False
             if getattr(result, "near_tp_exit_all", False):
                 self.execution_state.trading_halted = True
@@ -1379,10 +1404,7 @@ class ExecutionCommandProcessor:
             self.execution_state.last_order_ts_ms = command.intent.ts_ms
             self.strategy.state.tp_order_id = result.tp_order_id
             self.strategy.state.tp_order_ids = list(getattr(result, "tp_order_ids", ()) or [])
-            if getattr(result, "protective_sl_order_id", None):
-                self.strategy.state.entry_protective_sl_order_id = result.protective_sl_order_id
-                self.strategy.state.entry_protective_sl_price = getattr(command.intent, "entry_protective_sl_price", None)
-                self.strategy.state.entry_protective_sl_protected = bool(getattr(result, "protective_sl_ok", False))
+            self._maybe_apply_entry_protective_sl_state(command, result)
             # ── Middle Bucket Split state consistency ──────────────────
             # Entry paths (OPEN/ADD) also carry split execution status from
             # replace_take_profit.  Clear state if split was disabled.
