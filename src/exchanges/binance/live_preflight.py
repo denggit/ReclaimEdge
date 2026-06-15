@@ -75,6 +75,32 @@ def _resolve_env(
     return env.get(alias, "")
 
 
+def _resolve_env_3(
+    env: Mapping[str, str],
+    primary: str,
+    alias: str,
+    fallback: str,
+) -> tuple[str, str]:
+    """Resolve env var with primary → alias → fallback priority.
+
+    Returns ``(raw_value, source_key)`` where *source_key* is the
+    env-var name that supplied the value (empty string if none matched).
+    """
+    value = env.get(primary, "")
+    if value.strip():
+        return value, primary
+
+    value = env.get(alias, "")
+    if value.strip():
+        return value, alias
+
+    value = env.get(fallback, "")
+    if value.strip():
+        return value, fallback
+
+    return "", ""
+
+
 def _detect_env_conflicts(env: Mapping[str, str]) -> list[str]:
     """Return a list of conflict descriptions for dual-name env pairs.
 
@@ -135,6 +161,13 @@ class BinanceLivePreflightConfig:
     max_order_notional_usdt: Decimal | None
     max_position_notional_usdt: Decimal | None
     leverage: int | None
+    # Source tracking for legacy / derived values
+    live_enabled_source: str = ""
+    allow_orders_source: str = ""
+    confirmation_source: str = ""
+    max_order_notional_source: str = ""
+    max_position_notional_source: str = ""
+    leverage_source: str = ""
 
 
 @dataclass(frozen=True)
@@ -145,11 +178,13 @@ class BinanceLivePreflightReport:
         ok: ``True`` when there are zero blocking reasons.
         config: The parsed preflight configuration.
         blocking_reasons: Tuple of reason codes that prevent launch.
+        warnings: Tuple of warning codes (non-blocking).
     """
 
     ok: bool
     config: BinanceLivePreflightConfig
     blocking_reasons: tuple[str, ...]
+    warnings: tuple[str, ...] = ()
 
 
 # ---------------------------------------------------------------------------
@@ -162,6 +197,20 @@ def load_binance_live_preflight_config(
 ) -> BinanceLivePreflightConfig:
     """Parse Binance live preflight configuration from environment variables.
 
+    Resolution priority per field (highest to lowest):
+
+    * ``live_enabled``: LIVE_ENABLED → BINANCE_LIVE_ENABLED → LIVE_TRADING
+    * ``allow_orders``: LIVE_ALLOW_ORDERS → BINANCE_LIVE_ALLOW_ORDERS → LIVE_TRADING
+    * ``confirmation``: LIVE_CONFIRMATION → BINANCE_LIVE_CONFIRMATION
+      → ``LEGACY_LIVE_TRADING_CONFIRMED`` (when LIVE_TRADING is truthy)
+    * ``max_order_notional_usdt``: LIVE_MAX_ORDER_NOTIONAL_USDT
+      → BINANCE_LIVE_MAX_ORDER_NOTIONAL_USDT
+      → derived from MAX_LIVE_EQUITY_USDT × LAYER_MARGIN_PCT × LEVERAGE
+    * ``max_position_notional_usdt``: LIVE_MAX_POSITION_NOTIONAL_USDT
+      → BINANCE_LIVE_MAX_POSITION_NOTIONAL_USDT
+      → derived from max_order_notional × MAX_LAYERS
+    * ``leverage``: LIVE_LEVERAGE → BINANCE_LIVE_LEVERAGE → LEVERAGE
+
     Parameters
     ----------
     env:
@@ -171,7 +220,8 @@ def load_binance_live_preflight_config(
     Returns
     -------
     BinanceLivePreflightConfig
-        A frozen configuration object with all parsed values.
+        A frozen configuration object with all parsed values and source
+        annotations.
     """
     if env is None:
         env = os.environ
@@ -183,23 +233,115 @@ def load_binance_live_preflight_config(
     signal_only_raw: str = _resolve_env(env, "SIGNAL_ONLY", "BINANCE_SIGNAL_ONLY").strip().lower()
     signal_only: bool = signal_only_raw in _TRUTHY
 
-    live_enabled_raw: str = _resolve_env(env, "LIVE_ENABLED", "BINANCE_LIVE_ENABLED").strip().lower()
-    live_enabled: bool = live_enabled_raw in _TRUTHY
-
-    allow_orders_raw: str = _resolve_env(env, "LIVE_ALLOW_ORDERS", "BINANCE_LIVE_ALLOW_ORDERS").strip().lower()
-    allow_orders: bool = allow_orders_raw in _TRUTHY
-
-    confirmation: str = _resolve_env(env, "LIVE_CONFIRMATION", "BINANCE_LIVE_CONFIRMATION").strip()
-
-    max_order_notional_usdt: Decimal | None = _parse_decimal(
-        _resolve_env(env, "LIVE_MAX_ORDER_NOTIONAL_USDT", "BINANCE_LIVE_MAX_ORDER_NOTIONAL_USDT")
+    # ── live_enabled: LIVE_ENABLED → BINANCE_LIVE_ENABLED → LIVE_TRADING ──
+    live_enabled_raw, live_enabled_source = _resolve_env_3(
+        env, "LIVE_ENABLED", "BINANCE_LIVE_ENABLED", "LIVE_TRADING"
     )
-    max_position_notional_usdt: Decimal | None = _parse_decimal(
-        _resolve_env(env, "LIVE_MAX_POSITION_NOTIONAL_USDT", "BINANCE_LIVE_MAX_POSITION_NOTIONAL_USDT")
+    live_enabled: bool = live_enabled_raw.strip().lower() in _TRUTHY
+
+    # ── allow_orders: LIVE_ALLOW_ORDERS → BINANCE_LIVE_ALLOW_ORDERS → LIVE_TRADING ──
+    allow_orders_raw, allow_orders_source = _resolve_env_3(
+        env, "LIVE_ALLOW_ORDERS", "BINANCE_LIVE_ALLOW_ORDERS", "LIVE_TRADING"
     )
-    leverage: int | None = _parse_int(
-        _resolve_env(env, "LIVE_LEVERAGE", "BINANCE_LIVE_LEVERAGE")
+    allow_orders: bool = allow_orders_raw.strip().lower() in _TRUTHY
+
+    # ── confirmation: LIVE_CONFIRMATION → BINANCE_LIVE_CONFIRMATION
+    #     → LEGACY_LIVE_TRADING_CONFIRMED (when LIVE_TRADING is truthy) ──
+    confirmation: str
+    confirmation_source: str
+    conf_raw: str = _resolve_env(env, "LIVE_CONFIRMATION", "BINANCE_LIVE_CONFIRMATION")
+    if conf_raw.strip():
+        confirmation = conf_raw.strip()
+        if env.get("LIVE_CONFIRMATION", "").strip():
+            confirmation_source = "LIVE_CONFIRMATION"
+        else:
+            confirmation_source = "BINANCE_LIVE_CONFIRMATION"
+    else:
+        # Legacy: LIVE_TRADING=true implies confirmation for backward compat
+        live_trading_raw: str = env.get("LIVE_TRADING", "").strip().lower()
+        if live_trading_raw in _TRUTHY:
+            confirmation = "LEGACY_LIVE_TRADING_CONFIRMED"
+            confirmation_source = "LEGACY_LIVE_TRADING"
+        else:
+            confirmation = ""
+            confirmation_source = ""
+
+    # ── leverage: LIVE_LEVERAGE → BINANCE_LIVE_LEVERAGE → LEVERAGE ──
+    leverage: int | None
+    leverage_source: str
+    lev_raw, lev_source = _resolve_env_3(
+        env, "LIVE_LEVERAGE", "BINANCE_LIVE_LEVERAGE", "LEVERAGE"
     )
+    if lev_raw.strip():
+        leverage = _parse_int(lev_raw)
+        leverage_source = lev_source
+    else:
+        leverage = None
+        leverage_source = ""
+
+    # ── max_order_notional: LIVE_MAX_ORDER_NOTIONAL_USDT
+    #     → BINANCE_LIVE_MAX_ORDER_NOTIONAL_USDT
+    #     → derive from MAX_LIVE_EQUITY_USDT × LAYER_MARGIN_PCT × LEVERAGE ──
+    max_order_notional_usdt: Decimal | None
+    max_order_notional_source: str
+    order_raw: str = _resolve_env(
+        env, "LIVE_MAX_ORDER_NOTIONAL_USDT", "BINANCE_LIVE_MAX_ORDER_NOTIONAL_USDT"
+    )
+    if order_raw.strip():
+        max_order_notional_usdt = _parse_decimal(order_raw)
+        if env.get("LIVE_MAX_ORDER_NOTIONAL_USDT", "").strip():
+            max_order_notional_source = "LIVE_MAX_ORDER_NOTIONAL_USDT"
+        else:
+            max_order_notional_source = "BINANCE_LIVE_MAX_ORDER_NOTIONAL_USDT"
+    else:
+        # Derive from legacy OKX config: MAX_LIVE_EQUITY_USDT × LAYER_MARGIN_PCT × LEVERAGE
+        max_equity: Decimal | None = _parse_decimal(
+            env.get("MAX_LIVE_EQUITY_USDT", "")
+        )
+        layer_margin: Decimal | None = _parse_decimal(
+            env.get("LAYER_MARGIN_PCT", "")
+        )
+        if (
+            max_equity is not None
+            and layer_margin is not None
+            and leverage is not None
+        ):
+            max_order_notional_usdt = (
+                max_equity * layer_margin * Decimal(str(leverage))
+            )
+            max_order_notional_source = "DERIVED_FROM_MAX_LIVE_EQUITY"
+        else:
+            max_order_notional_usdt = None
+            max_order_notional_source = ""
+
+    # ── max_position_notional: LIVE_MAX_POSITION_NOTIONAL_USDT
+    #     → BINANCE_LIVE_MAX_POSITION_NOTIONAL_USDT
+    #     → derive from max_order_notional × MAX_LAYERS ──
+    max_position_notional_usdt: Decimal | None
+    max_position_notional_source: str
+    pos_raw: str = _resolve_env(
+        env, "LIVE_MAX_POSITION_NOTIONAL_USDT", "BINANCE_LIVE_MAX_POSITION_NOTIONAL_USDT"
+    )
+    if pos_raw.strip():
+        max_position_notional_usdt = _parse_decimal(pos_raw)
+        if env.get("LIVE_MAX_POSITION_NOTIONAL_USDT", "").strip():
+            max_position_notional_source = "LIVE_MAX_POSITION_NOTIONAL_USDT"
+        else:
+            max_position_notional_source = "BINANCE_LIVE_MAX_POSITION_NOTIONAL_USDT"
+    else:
+        # Derive from max_order_notional × MAX_LAYERS
+        max_layers_raw: str = env.get("MAX_LAYERS", "")
+        max_layers: int | None = _parse_int(max_layers_raw)
+        if max_order_notional_usdt is not None and max_layers is not None:
+            max_position_notional_usdt = (
+                max_order_notional_usdt * Decimal(str(max_layers))
+            )
+            max_position_notional_source = (
+                "DERIVED_FROM_MAX_LIVE_EQUITY_AND_MAX_LAYERS"
+            )
+        else:
+            max_position_notional_usdt = None
+            max_position_notional_source = ""
 
     return BinanceLivePreflightConfig(
         exchange=exchange,
@@ -210,6 +352,12 @@ def load_binance_live_preflight_config(
         max_order_notional_usdt=max_order_notional_usdt,
         max_position_notional_usdt=max_position_notional_usdt,
         leverage=leverage,
+        live_enabled_source=live_enabled_source,
+        allow_orders_source=allow_orders_source,
+        confirmation_source=confirmation_source,
+        max_order_notional_source=max_order_notional_source,
+        max_position_notional_source=max_position_notional_source,
+        leverage_source=leverage_source,
     )
 
 
@@ -236,6 +384,7 @@ def build_binance_live_preflight_report(
     """
     config = load_binance_live_preflight_config(env)
     blocking: list[str] = []
+    warnings: list[str] = []
 
     # ── Gate 0: no conflicting env var pairs ────────────────────────────
     _env_conflicts = _detect_env_conflicts(env if env is not None else os.environ)
@@ -253,6 +402,7 @@ def build_binance_live_preflight_report(
             ok=False,
             config=config,
             blocking_reasons=tuple(blocking),
+            warnings=tuple(warnings),
         )
 
     # ── Gate 2: must NOT be signal-only ─────────────────────────────────
@@ -262,6 +412,7 @@ def build_binance_live_preflight_report(
             ok=False,
             config=config,
             blocking_reasons=tuple(blocking),
+            warnings=tuple(warnings),
         )
 
     # ── Gate 3: BINANCE_LIVE_ENABLED must be truthy ─────────────────────
@@ -273,7 +424,11 @@ def build_binance_live_preflight_report(
         blocking.append("binance_live_allow_orders_not_true")
 
     # ── Gate 5: LIVE_CONFIRMATION must match an accepted phrase ─────────
-    if config.confirmation not in _ACCEPTED_CONFIRMATION_PHRASES:
+    if config.confirmation == "LEGACY_LIVE_TRADING_CONFIRMED":
+        # Legacy OKX config compat: LIVE_TRADING=true without explicit
+        # confirmation — allow through with a warning.
+        warnings.append("WARNING_LEGACY_LIVE_TRADING_CONFIRMATION_USED")
+    elif config.confirmation not in _ACCEPTED_CONFIRMATION_PHRASES:
         blocking.append("binance_live_confirmation_missing_or_invalid")
 
     # ── Gate 6: LIVE_MAX_ORDER_NOTIONAL_USDT — must exist and be > 0 ─────
@@ -298,6 +453,7 @@ def build_binance_live_preflight_report(
         ok=len(blocking) == 0,
         config=config,
         blocking_reasons=tuple(blocking),
+        warnings=tuple(warnings),
     )
 
 

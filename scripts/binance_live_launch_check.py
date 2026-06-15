@@ -319,6 +319,7 @@ def _emit_ready(
     sizing_blocking: list[str],
     sizing_runtime: dict[str, str],
     warnings: list[str],
+    preflight_report: Any | None = None,
 ) -> None:
     """Emit ready output (text or JSON)."""
     exchange: str = config.exchange.value
@@ -342,21 +343,34 @@ def _emit_ready(
         "websocket_started": False,
     }
 
+    # ── Build sources dict from preflight config ────────────────────────
+    sources: dict[str, str] = {
+        "live_enabled": preflight_config.live_enabled_source,
+        "allow_orders": preflight_config.allow_orders_source,
+        "confirmation": preflight_config.confirmation_source,
+        "max_order_notional": preflight_config.max_order_notional_source,
+        "max_position_notional": preflight_config.max_position_notional_source,
+        "leverage": preflight_config.leverage_source,
+    }
+
     if args.json:
-        print(
-            json.dumps(
-                {
-                    "status": "ready",
-                    "exchange": exchange,
-                    "symbol": symbol,
-                    "preflight_ok": True,
-                    "checks": checks,
-                    "runtime": sizing_runtime,
-                    "side_effects": side_effects,
-                    "warnings": warnings,
-                }
-            )
-        )
+        output: dict = {
+            "status": "ready",
+            "exchange": exchange,
+            "symbol": symbol,
+            "preflight_ok": True,
+            "checks": checks,
+            "runtime": sizing_runtime,
+            "side_effects": side_effects,
+            "warnings": warnings,
+            "sources": sources,
+        }
+        # Include preflight report warnings if available
+        if preflight_report is not None:
+            pf_warnings = list(getattr(preflight_report, "warnings", ()))
+            all_warnings = list(warnings) + pf_warnings
+            output["warnings"] = all_warnings
+        print(json.dumps(output))
     else:
         print("BINANCE_LIVE_LAUNCH_READY")
         print(f"exchange={exchange}")
@@ -379,8 +393,18 @@ def _emit_ready(
         print(f"local_state_status={display_state}")
         print("orders_executed=false")
         print("websocket_started=false")
+        # ── Source info ─────────────────────────────────────────────────
+        print(f"live_enabled_source={sources['live_enabled']}")
+        print(f"live_allow_orders_source={sources['allow_orders']}")
+        print(f"max_order_notional_source={sources['max_order_notional']}")
+        print(f"max_position_notional_source={sources['max_position_notional']}")
+        print(f"live_leverage_source={sources['leverage']}")
         for w in warnings:
             print(w)
+        # ── Preflight warnings (e.g. legacy confirmation) ───────────────
+        if preflight_report is not None:
+            for pw in getattr(preflight_report, "warnings", ()):
+                print(pw)
 
 
 # ---------------------------------------------------------------------------
@@ -545,6 +569,7 @@ def main(argv: list[str] | None = None) -> int:
         sizing_blocking,
         sizing_runtime,
         warnings,
+        preflight_report=preflight,
     )
 
     return 0

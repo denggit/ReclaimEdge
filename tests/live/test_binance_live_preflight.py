@@ -799,3 +799,359 @@ class TestEnvVarDualNames:
         )
         assert report.ok is False
         assert "live_env_var_conflict" in report.blocking_reasons
+
+
+# ======================================================================
+# Legacy OKX live config compatibility
+# ======================================================================
+
+
+LEGACY_OKX_ENV: dict[str, str] = {
+    "EXCHANGE": "binance",
+    "LIVE_TRADING": "true",
+    "MAX_LIVE_EQUITY_USDT": "40000",
+    "LAYER_MARGIN_PCT": "0.04",
+    "LEVERAGE": "10",
+    "MAX_LAYERS": "12",
+}
+
+
+class TestLegacyOkxConfig:
+    """Legacy OKX live config (LIVE_TRADING=true, MAX_LIVE_EQUITY_USDT, etc.)
+    passes Binance live preflight without requiring new Binance-only env vars.
+    """
+
+    def test_legacy_okx_config_passes(self) -> None:
+        """LIVE_TRADING=true + legacy sizing → report.ok is True."""
+        report = build_binance_live_preflight_report(
+            LEGACY_OKX_ENV, orders_globally_enabled=True
+        )
+        assert report.ok is True
+        assert report.config.live_enabled is True
+        assert report.config.allow_orders is True
+        assert report.config.max_order_notional_usdt == Decimal("16000")
+        assert report.config.max_position_notional_usdt == Decimal("192000")
+        assert report.config.leverage == 10
+
+    def test_legacy_okx_config_sources(self) -> None:
+        """Legacy config correctly annotates source for each field."""
+        report = build_binance_live_preflight_report(
+            LEGACY_OKX_ENV, orders_globally_enabled=True
+        )
+        cfg = report.config
+        assert cfg.live_enabled_source == "LIVE_TRADING"
+        assert cfg.allow_orders_source == "LIVE_TRADING"
+        assert cfg.confirmation_source == "LEGACY_LIVE_TRADING"
+        assert cfg.max_order_notional_source == "DERIVED_FROM_MAX_LIVE_EQUITY"
+        assert (
+            cfg.max_position_notional_source
+            == "DERIVED_FROM_MAX_LIVE_EQUITY_AND_MAX_LAYERS"
+        )
+        assert cfg.leverage_source == "LEVERAGE"
+
+    def test_legacy_okx_config_warns_on_confirmation(self) -> None:
+        """Legacy LIVE_TRADING=true without explicit confirmation emits warning."""
+        report = build_binance_live_preflight_report(
+            LEGACY_OKX_ENV, orders_globally_enabled=True
+        )
+        assert "WARNING_LEGACY_LIVE_TRADING_CONFIRMATION_USED" in report.warnings
+
+    def test_legacy_okx_config_live_trading_1(self) -> None:
+        """LIVE_TRADING=1 also enables live mode."""
+        env = dict(LEGACY_OKX_ENV)
+        env["LIVE_TRADING"] = "1"
+        report = build_binance_live_preflight_report(
+            env, orders_globally_enabled=True
+        )
+        assert report.ok is True
+        assert report.config.live_enabled is True
+        assert report.config.allow_orders is True
+
+    def test_legacy_okx_config_live_trading_yes(self) -> None:
+        """LIVE_TRADING=yes also enables live mode."""
+        env = dict(LEGACY_OKX_ENV)
+        env["LIVE_TRADING"] = "yes"
+        report = build_binance_live_preflight_report(
+            env, orders_globally_enabled=True
+        )
+        assert report.ok is True
+        assert report.config.live_enabled is True
+
+
+class TestExplicitLiveOverridesLegacy:
+    """Explicit LIVE_* env vars take priority over legacy OKX config."""
+
+    def test_explicit_overrides_legacy(self) -> None:
+        """LIVE_ENABLED=false overrides LIVE_TRADING=true."""
+        env = {
+            "EXCHANGE": "binance",
+            "LIVE_TRADING": "true",
+            "LIVE_ENABLED": "false",
+            "LIVE_ALLOW_ORDERS": "false",
+            "LIVE_MAX_ORDER_NOTIONAL_USDT": "123",
+            "LIVE_MAX_POSITION_NOTIONAL_USDT": "456",
+            "LIVE_LEVERAGE": "7",
+            "MAX_LIVE_EQUITY_USDT": "40000",
+            "LAYER_MARGIN_PCT": "0.04",
+            "LEVERAGE": "10",
+            "MAX_LAYERS": "12",
+        }
+        report = build_binance_live_preflight_report(
+            env, orders_globally_enabled=True
+        )
+        cfg = report.config
+        assert cfg.live_enabled is False
+        assert cfg.allow_orders is False
+        assert cfg.max_order_notional_usdt == Decimal("123")
+        assert cfg.max_position_notional_usdt == Decimal("456")
+        assert cfg.leverage == 7
+        assert cfg.live_enabled_source == "LIVE_ENABLED"
+        assert cfg.allow_orders_source == "LIVE_ALLOW_ORDERS"
+        assert cfg.max_order_notional_source == "LIVE_MAX_ORDER_NOTIONAL_USDT"
+        assert cfg.max_position_notional_source == "LIVE_MAX_POSITION_NOTIONAL_USDT"
+        assert cfg.leverage_source == "LIVE_LEVERAGE"
+        # live_enabled=false and allow_orders=false → blocked
+        assert report.ok is False
+        assert "binance_live_enabled_not_true" in report.blocking_reasons
+        assert "binance_live_allow_orders_not_true" in report.blocking_reasons
+
+    def test_explicit_order_notional_overrides_derived(self) -> None:
+        """LIVE_MAX_ORDER_NOTIONAL_USDT=20000 overrides derived 16000."""
+        env = dict(LEGACY_OKX_ENV)
+        env["LIVE_MAX_ORDER_NOTIONAL_USDT"] = "20000"
+        report = build_binance_live_preflight_report(
+            env, orders_globally_enabled=True
+        )
+        assert report.ok is True
+        assert report.config.max_order_notional_usdt == Decimal("20000")
+        assert report.config.max_order_notional_source == "LIVE_MAX_ORDER_NOTIONAL_USDT"
+        # position still derived: 20000 * 12 = 240000
+        assert report.config.max_position_notional_usdt == Decimal("240000")
+        assert (
+            report.config.max_position_notional_source
+            == "DERIVED_FROM_MAX_LIVE_EQUITY_AND_MAX_LAYERS"
+        )
+
+    def test_explicit_position_notional_overrides_derived(self) -> None:
+        """LIVE_MAX_POSITION_NOTIONAL_USDT=50000 overrides derived value."""
+        env = dict(LEGACY_OKX_ENV)
+        env["LIVE_MAX_POSITION_NOTIONAL_USDT"] = "50000"
+        report = build_binance_live_preflight_report(
+            env, orders_globally_enabled=True
+        )
+        assert report.ok is True
+        assert report.config.max_position_notional_usdt == Decimal("50000")
+        assert (
+            report.config.max_position_notional_source
+            == "LIVE_MAX_POSITION_NOTIONAL_USDT"
+        )
+
+    def test_explicit_confirmation_overrides_legacy(self) -> None:
+        """Explicit LIVE_CONFIRMATION removes legacy warning."""
+        env = dict(LEGACY_OKX_ENV)
+        env["LIVE_CONFIRMATION"] = LIVE_CONFIRMATION_PHRASE
+        report = build_binance_live_preflight_report(
+            env, orders_globally_enabled=True
+        )
+        assert report.ok is True
+        assert (
+            "WARNING_LEGACY_LIVE_TRADING_CONFIRMATION_USED"
+            not in report.warnings
+        )
+        assert report.config.confirmation_source == "LIVE_CONFIRMATION"
+
+    def test_explicit_allow_orders_false_respected(self) -> None:
+        """LIVE_ALLOW_ORDERS=false must be respected even with LIVE_TRADING=true."""
+        env = dict(LEGACY_OKX_ENV)
+        env["LIVE_ALLOW_ORDERS"] = "false"
+        report = build_binance_live_preflight_report(
+            env, orders_globally_enabled=True
+        )
+        assert report.config.allow_orders is False
+        assert report.config.allow_orders_source == "LIVE_ALLOW_ORDERS"
+        assert "binance_live_allow_orders_not_true" in report.blocking_reasons
+
+
+class TestMissingMaxLiveEquityStillBlocks:
+    """When neither explicit notional env vars nor MAX_LIVE_EQUITY_USDT
+    are provided, the preflight must still block."""
+
+    def test_missing_max_equity_blocks(self) -> None:
+        env = {
+            "EXCHANGE": "binance",
+            "LIVE_TRADING": "true",
+        }
+        report = build_binance_live_preflight_report(
+            env, orders_globally_enabled=True
+        )
+        assert "binance_live_max_order_notional_invalid" in report.blocking_reasons
+        assert "binance_live_max_position_notional_invalid" in report.blocking_reasons
+
+    def test_max_equity_without_layer_margin_blocks(self) -> None:
+        """MAX_LIVE_EQUITY_USDT without LAYER_MARGIN_PCT cannot derive."""
+        env = {
+            "EXCHANGE": "binance",
+            "LIVE_TRADING": "true",
+            "MAX_LIVE_EQUITY_USDT": "40000",
+            "LEVERAGE": "10",
+            "MAX_LAYERS": "12",
+        }
+        report = build_binance_live_preflight_report(
+            env, orders_globally_enabled=True
+        )
+        assert "binance_live_max_order_notional_invalid" in report.blocking_reasons
+
+    def test_max_equity_without_leverage_blocks(self) -> None:
+        """MAX_LIVE_EQUITY_USDT without LEVERAGE cannot derive."""
+        env = {
+            "EXCHANGE": "binance",
+            "LIVE_TRADING": "true",
+            "MAX_LIVE_EQUITY_USDT": "40000",
+            "LAYER_MARGIN_PCT": "0.04",
+            "MAX_LAYERS": "12",
+        }
+        report = build_binance_live_preflight_report(
+            env, orders_globally_enabled=True
+        )
+        assert "binance_live_max_order_notional_invalid" in report.blocking_reasons
+
+
+class TestInvalidLegacyDerivedValuesBlock:
+    """Invalid legacy OKX sizing values must still block."""
+
+    def test_invalid_max_live_equity_blocks(self) -> None:
+        """MAX_LIVE_EQUITY_USDT=abc → cannot derive → blocked."""
+        env = dict(LEGACY_OKX_ENV)
+        env["MAX_LIVE_EQUITY_USDT"] = "abc"
+        report = build_binance_live_preflight_report(
+            env, orders_globally_enabled=True
+        )
+        assert "binance_live_max_order_notional_invalid" in report.blocking_reasons
+
+    def test_invalid_layer_margin_blocks(self) -> None:
+        """LAYER_MARGIN_PCT=abc → cannot derive → blocked."""
+        env = dict(LEGACY_OKX_ENV)
+        env["LAYER_MARGIN_PCT"] = "abc"
+        report = build_binance_live_preflight_report(
+            env, orders_globally_enabled=True
+        )
+        assert "binance_live_max_order_notional_invalid" in report.blocking_reasons
+
+    def test_invalid_leverage_in_legacy_blocks(self) -> None:
+        """LEVERAGE=abc → cannot derive notional and leverage is invalid."""
+        env = dict(LEGACY_OKX_ENV)
+        env["LEVERAGE"] = "abc"
+        report = build_binance_live_preflight_report(
+            env, orders_globally_enabled=True
+        )
+        assert "binance_live_leverage_invalid" in report.blocking_reasons
+
+    def test_zero_max_live_equity_derives_zero_order_notional(self) -> None:
+        """MAX_LIVE_EQUITY_USDT=0 → derives 0 → blocked as invalid."""
+        env = dict(LEGACY_OKX_ENV)
+        env["MAX_LIVE_EQUITY_USDT"] = "0"
+        report = build_binance_live_preflight_report(
+            env, orders_globally_enabled=True
+        )
+        # order = 0 * 0.04 * 10 = 0 → not > 0 → invalid
+        assert "binance_live_max_order_notional_invalid" in report.blocking_reasons
+
+
+class TestLeverageFallback:
+    """LEVERAGE env var acts as fallback for LIVE_LEVERAGE."""
+
+    def test_leverage_fallback_works(self) -> None:
+        """LEVERAGE=10 → live leverage=10."""
+        env = dict(LEGACY_OKX_ENV)
+        # LEGACY_OKX_ENV already has LEVERAGE=10 and no LIVE_LEVERAGE
+        cfg = load_binance_live_preflight_config(env)
+        assert cfg.leverage == 10
+        assert cfg.leverage_source == "LEVERAGE"
+
+    def test_leverage_fallback_5(self) -> None:
+        """LEVERAGE=5 → live leverage=5."""
+        env = {"EXCHANGE": "binance", "LEVERAGE": "5"}
+        cfg = load_binance_live_preflight_config(env)
+        assert cfg.leverage == 5
+        assert cfg.leverage_source == "LEVERAGE"
+
+    def test_no_leverage_anywhere_is_none(self) -> None:
+        """Without LIVE_LEVERAGE, BINANCE_LIVE_LEVERAGE, or LEVERAGE → None."""
+        cfg = load_binance_live_preflight_config({"EXCHANGE": "binance"})
+        assert cfg.leverage is None
+        assert cfg.leverage_source == ""
+
+
+class TestLiveLeverageOverridesLeverage:
+    """LIVE_LEVERAGE explicit takes priority over LEVERAGE fallback."""
+
+    def test_live_leverage_overrides_leverage(self) -> None:
+        """LIVE_LEVERAGE=5 overrides LEVERAGE=10."""
+        env = {"EXCHANGE": "binance", "LIVE_LEVERAGE": "5", "LEVERAGE": "10"}
+        cfg = load_binance_live_preflight_config(env)
+        assert cfg.leverage == 5
+        assert cfg.leverage_source == "LIVE_LEVERAGE"
+
+    def test_binance_live_leverage_overrides_leverage(self) -> None:
+        """BINANCE_LIVE_LEVERAGE=15 overrides LEVERAGE=10."""
+        env = {
+            "EXCHANGE": "binance",
+            "BINANCE_LIVE_LEVERAGE": "15",
+            "LEVERAGE": "10",
+        }
+        cfg = load_binance_live_preflight_config(env)
+        assert cfg.leverage == 15
+        assert cfg.leverage_source == "BINANCE_LIVE_LEVERAGE"
+
+
+class TestLegacyConfigDerivationMath:
+    """Verify the derivation math for notional values."""
+
+    def test_derivation_formula(self) -> None:
+        """order = equity × margin_pct × leverage; position = order × layers."""
+        cfg = load_binance_live_preflight_config(LEGACY_OKX_ENV)
+        # 40000 * 0.04 * 10 = 16000
+        assert cfg.max_order_notional_usdt == Decimal("16000")
+        # 16000 * 12 = 192000
+        assert cfg.max_position_notional_usdt == Decimal("192000")
+
+    def test_different_equity_values(self) -> None:
+        """50000 * 0.04 * 10 = 20000; 20000 * 12 = 240000."""
+        env = {
+            "EXCHANGE": "binance",
+            "LIVE_TRADING": "true",
+            "MAX_LIVE_EQUITY_USDT": "50000",
+            "LAYER_MARGIN_PCT": "0.04",
+            "LEVERAGE": "10",
+            "MAX_LAYERS": "12",
+        }
+        cfg = load_binance_live_preflight_config(env)
+        assert cfg.max_order_notional_usdt == Decimal("20000")
+        assert cfg.max_position_notional_usdt == Decimal("240000")
+
+    def test_different_margin_pct(self) -> None:
+        """40000 * 0.05 * 10 = 20000."""
+        env = {
+            "EXCHANGE": "binance",
+            "LIVE_TRADING": "true",
+            "MAX_LIVE_EQUITY_USDT": "40000",
+            "LAYER_MARGIN_PCT": "0.05",
+            "LEVERAGE": "10",
+            "MAX_LAYERS": "12",
+        }
+        cfg = load_binance_live_preflight_config(env)
+        assert cfg.max_order_notional_usdt == Decimal("20000")
+
+    def test_different_leverage_affects_derivation(self) -> None:
+        """40000 * 0.04 * 5 = 8000."""
+        env = {
+            "EXCHANGE": "binance",
+            "LIVE_TRADING": "true",
+            "MAX_LIVE_EQUITY_USDT": "40000",
+            "LAYER_MARGIN_PCT": "0.04",
+            "LEVERAGE": "5",
+            "MAX_LAYERS": "12",
+        }
+        cfg = load_binance_live_preflight_config(env)
+        assert cfg.max_order_notional_usdt == Decimal("8000")
+        assert cfg.max_position_notional_usdt == Decimal("96000")

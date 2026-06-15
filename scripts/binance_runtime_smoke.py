@@ -129,9 +129,11 @@ def _format_ready_text(
     contract_precision: str,
     min_contracts: str,
     qty_check: str,
+    sources: dict[str, str] | None = None,
+    warnings: tuple[str, ...] = (),
 ) -> str:
     """Format a human-readable ready message."""
-    return "\n".join([
+    lines: list[str] = [
         "BINANCE_RUNTIME_SMOKE_READY",
         "exchange=binance",
         f"symbol={symbol}",
@@ -144,7 +146,16 @@ def _format_ready_text(
         f"qty_check_0_05_eth={qty_check}",
         "orders_executed=false",
         "websocket_started=false",
-    ])
+    ]
+    if sources:
+        lines.append(f"live_enabled_source={sources.get('live_enabled', '')}")
+        lines.append(f"live_allow_orders_source={sources.get('allow_orders', '')}")
+        lines.append(f"max_order_notional_source={sources.get('max_order_notional', '')}")
+        lines.append(f"max_position_notional_source={sources.get('max_position_notional', '')}")
+        lines.append(f"live_leverage_source={sources.get('leverage', '')}")
+    for w in warnings:
+        lines.append(w)
+    return "\n".join(lines)
 
 
 def _build_blocked_json(report: BinanceLivePreflightReport, symbol: str) -> dict:
@@ -167,9 +178,11 @@ def _build_ready_json(
     contract_precision: str,
     min_contracts: str,
     qty_check: str,
+    sources: dict[str, str] | None = None,
+    warnings: tuple[str, ...] = (),
 ) -> dict:
     """Build JSON dict for ready status."""
-    return {
+    result: dict = {
         "status": "ready",
         "exchange": "binance",
         "symbol": symbol,
@@ -191,6 +204,11 @@ def _build_ready_json(
             "websocket_started": False,
         },
     }
+    if sources:
+        result["sources"] = sources
+    if warnings:
+        result["warnings"] = list(warnings)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -348,6 +366,18 @@ def main(argv: list[str] | None = None) -> int:
     qty_check: str = str(qty_contracts)
 
     # --- 8. Output ---
+    # Build sources from preflight config
+    pf_cfg = report.config
+    sources: dict[str, str] = {
+        "live_enabled": pf_cfg.live_enabled_source,
+        "allow_orders": pf_cfg.allow_orders_source,
+        "confirmation": pf_cfg.confirmation_source,
+        "max_order_notional": pf_cfg.max_order_notional_source,
+        "max_position_notional": pf_cfg.max_position_notional_source,
+        "leverage": pf_cfg.leverage_source,
+    }
+    pf_warnings: tuple[str, ...] = report.warnings
+
     if args.json_output:
         print(json.dumps(_build_ready_json(
             symbol=symbol,
@@ -358,6 +388,8 @@ def main(argv: list[str] | None = None) -> int:
             contract_precision=contract_precision,
             min_contracts=min_contracts,
             qty_check=qty_check,
+            sources=sources,
+            warnings=pf_warnings,
         )))
     else:
         print(_format_ready_text(
@@ -369,6 +401,8 @@ def main(argv: list[str] | None = None) -> int:
             contract_precision=contract_precision,
             min_contracts=min_contracts,
             qty_check=qty_check,
+            sources=sources,
+            warnings=pf_warnings,
         ))
 
     return 0

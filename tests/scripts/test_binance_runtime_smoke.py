@@ -760,3 +760,86 @@ class TestSourceLevelNoSideEffects:
                         f"scripts/binance_runtime_smoke.py:{i}: "
                         f"must not import {token}: {stripped}"
                     )
+
+
+# ======================================================================
+# Legacy OKX live config compatibility
+# ======================================================================
+
+
+LEGACY_OKX_RUNTIME_ENV: dict[str, str] = {
+    "EXCHANGE": "binance",
+    "EXCHANGE_API_KEY": "test-key",
+    "EXCHANGE_API_SECRET": "test-secret",
+    "LIVE_TRADING": "true",
+    "MAX_LIVE_EQUITY_USDT": "40000",
+    "LAYER_MARGIN_PCT": "0.04",
+    "LEVERAGE": "10",
+    "MAX_LAYERS": "12",
+}
+
+
+class TestLegacyOkxConfigReady:
+    """Legacy OKX live config (LIVE_TRADING=true + sizing) passes runtime smoke."""
+
+    def test_legacy_okx_config_ready_returns_0(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _set_env(monkeypatch, dict(LEGACY_OKX_RUNTIME_ENV))
+        rc = main(argv=["--expect-ready"])
+        captured = capsys.readouterr()
+        assert rc == 0, f"Expected exit 0, got {rc}. stdout={captured.out}"
+        assert "BINANCE_RUNTIME_SMOKE_READY" in captured.out
+
+    def test_legacy_okx_config_includes_sources(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _set_env(monkeypatch, dict(LEGACY_OKX_RUNTIME_ENV))
+        rc = main(argv=["--expect-ready"])
+        captured = capsys.readouterr()
+        assert rc == 0
+        assert "live_enabled_source=LIVE_TRADING" in captured.out
+        assert "live_allow_orders_source=LIVE_TRADING" in captured.out
+        assert "max_order_notional_source=DERIVED_FROM_MAX_LIVE_EQUITY" in captured.out
+        assert (
+            "max_position_notional_source=DERIVED_FROM_MAX_LIVE_EQUITY_AND_MAX_LAYERS"
+            in captured.out
+        )
+        assert "live_leverage_source=LEVERAGE" in captured.out
+
+    def test_legacy_okx_config_warns_on_confirmation(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _set_env(monkeypatch, dict(LEGACY_OKX_RUNTIME_ENV))
+        rc = main(argv=["--expect-ready"])
+        captured = capsys.readouterr()
+        assert rc == 0
+        assert "WARNING_LEGACY_LIVE_TRADING_CONFIRMATION_USED" in captured.out
+
+    def test_legacy_okx_config_includes_sizing(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _set_env(monkeypatch, dict(LEGACY_OKX_RUNTIME_ENV))
+        rc = main(argv=["--expect-ready"])
+        captured = capsys.readouterr()
+        assert rc == 0
+        assert "qty_check_0_05_eth=0.05" in captured.out
+        assert "orders_executed=false" in captured.out
+        assert "websocket_started=false" in captured.out
+
+    def test_legacy_okx_config_json_ready(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _set_env(monkeypatch, dict(LEGACY_OKX_RUNTIME_ENV))
+        rc = main(argv=["--json", "--expect-ready"])
+        captured = capsys.readouterr()
+        assert rc == 0
+        data = json.loads(captured.out)
+        assert data["status"] == "ready"
+        assert data["preflight_ok"] is True
+        sources = data.get("sources", {})
+        assert sources.get("live_enabled") == "LIVE_TRADING"
+        assert sources.get("allow_orders") == "LIVE_TRADING"
+        assert sources.get("leverage") == "LEVERAGE"
+        warnings_list = data.get("warnings", [])
+        assert "WARNING_LEGACY_LIVE_TRADING_CONFIRMATION_USED" in warnings_list

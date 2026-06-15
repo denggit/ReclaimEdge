@@ -928,3 +928,129 @@ class TestSourceLevelNoSideEffects:
                     f"scripts/binance_live_launch_check.py:{i}: "
                     f"must not reference run_boll_cvd_live: {stripped}"
                 )
+
+
+# ======================================================================
+# Legacy OKX live config compatibility
+# ======================================================================
+
+
+LEGACY_OKX_LAUNCH_ENV: dict[str, str] = {
+    "EXCHANGE": "binance",
+    "EXCHANGE_API_KEY": "test-key",
+    "EXCHANGE_API_SECRET": "test-secret",
+    "LIVE_TRADING": "true",
+    "MAX_LIVE_EQUITY_USDT": "40000",
+    "LAYER_MARGIN_PCT": "0.04",
+    "LEVERAGE": "10",
+    "MAX_LAYERS": "12",
+    "SIDECAR_ENABLED": "false",
+}
+
+
+class TestLegacyOkxConfigReady:
+    """Legacy OKX live config (LIVE_TRADING=true + sizing vars) passes the
+    launch checklist without requiring Binance-only env vars."""
+
+    def test_legacy_okx_config_ready_returns_0(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+    ) -> None:
+        _set_env(monkeypatch, dict(LEGACY_OKX_LAUNCH_ENV))
+        state_path = tmp_path / "missing_live_state.json"
+        assert not state_path.exists()
+        rc = main(argv=["--state-path", str(state_path)])
+        captured = capsys.readouterr()
+        assert rc == 0, f"Expected exit 0, got {rc}. stdout={captured.out}"
+        assert "BINANCE_LIVE_LAUNCH_READY" in captured.out
+
+    def test_legacy_okx_config_includes_derived_notional(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+    ) -> None:
+        _set_env(monkeypatch, dict(LEGACY_OKX_LAUNCH_ENV))
+        state_path = tmp_path / "missing_live_state.json"
+        rc = main(argv=["--state-path", str(state_path)])
+        captured = capsys.readouterr()
+        assert rc == 0
+        assert "max_order_notional_usdt=16000" in captured.out
+        assert "max_position_notional_usdt=192000" in captured.out
+
+    def test_legacy_okx_config_includes_sources(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+    ) -> None:
+        _set_env(monkeypatch, dict(LEGACY_OKX_LAUNCH_ENV))
+        state_path = tmp_path / "missing_live_state.json"
+        rc = main(argv=["--state-path", str(state_path)])
+        captured = capsys.readouterr()
+        assert rc == 0
+        assert "live_enabled_source=LIVE_TRADING" in captured.out
+        assert "live_allow_orders_source=LIVE_TRADING" in captured.out
+        assert "max_order_notional_source=DERIVED_FROM_MAX_LIVE_EQUITY" in captured.out
+        assert (
+            "max_position_notional_source=DERIVED_FROM_MAX_LIVE_EQUITY_AND_MAX_LAYERS"
+            in captured.out
+        )
+        assert "live_leverage_source=LEVERAGE" in captured.out
+
+    def test_legacy_okx_config_warns_on_confirmation(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+    ) -> None:
+        _set_env(monkeypatch, dict(LEGACY_OKX_LAUNCH_ENV))
+        state_path = tmp_path / "missing_live_state.json"
+        rc = main(argv=["--state-path", str(state_path)])
+        captured = capsys.readouterr()
+        assert rc == 0
+        assert "WARNING_LEGACY_LIVE_TRADING_CONFIRMATION_USED" in captured.out
+
+    def test_legacy_okx_config_includes_leverage(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+    ) -> None:
+        _set_env(monkeypatch, dict(LEGACY_OKX_LAUNCH_ENV))
+        state_path = tmp_path / "missing_live_state.json"
+        rc = main(argv=["--state-path", str(state_path)])
+        captured = capsys.readouterr()
+        assert rc == 0
+        assert "leverage=10" in captured.out
+
+
+class TestLegacyOkxConfigJsonReady:
+    """Legacy OKX config produces correct JSON output with sources and warnings."""
+
+    def test_json_legacy_ready_has_sources(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+    ) -> None:
+        _set_env(monkeypatch, dict(LEGACY_OKX_LAUNCH_ENV))
+        state_path = tmp_path / "missing_live_state.json"
+        rc = main(argv=["--state-path", str(state_path), "--json"])
+        captured = capsys.readouterr()
+        assert rc == 0
+        data = json.loads(captured.out)
+        assert data["status"] == "ready"
+        sources = data["sources"]
+        assert sources["live_enabled"] == "LIVE_TRADING"
+        assert sources["allow_orders"] == "LIVE_TRADING"
+        assert sources["confirmation"] == "LEGACY_LIVE_TRADING"
+        assert sources["max_order_notional"] == "DERIVED_FROM_MAX_LIVE_EQUITY"
+        assert (
+            sources["max_position_notional"]
+            == "DERIVED_FROM_MAX_LIVE_EQUITY_AND_MAX_LAYERS"
+        )
+        assert sources["leverage"] == "LEVERAGE"
+
+    def test_json_legacy_ready_has_warnings(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+    ) -> None:
+        _set_env(monkeypatch, dict(LEGACY_OKX_LAUNCH_ENV))
+        state_path = tmp_path / "missing_live_state.json"
+        rc = main(argv=["--state-path", str(state_path), "--json"])
+        captured = capsys.readouterr()
+        assert rc == 0
+        data = json.loads(captured.out)
+        assert data["status"] == "ready"
+        assert "WARNING_LEGACY_LIVE_TRADING_CONFIRMATION_USED" in data["warnings"]
