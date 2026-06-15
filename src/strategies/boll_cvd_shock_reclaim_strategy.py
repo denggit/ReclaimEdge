@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import os
 import time
+from collections import deque
 
 from src.indicators.cvd_tracker import CvdSnapshot
 from src.monitors.boll_band_breakout_monitor import BollSnapshot
 from src.risk.simple_position_sizer import SimplePositionSizer
 from src.strategies import add_freeze_chain
+from src.strategies import add_layer_gates
+from src.strategies import extreme_retest_add as _extreme_retest
 from src.strategies.boll_cvd_reclaim_strategy import (
     BollCvdReclaimStrategy,
     BollCvdReclaimStrategyConfig,
@@ -41,9 +44,29 @@ class BollCvdShockReclaimStrategy(BollCvdReclaimStrategy):
         self._last_lower_outside_no_burst_log_monotonic: float = 0.0
         self._last_upper_outside_no_burst_log_monotonic: float = 0.0
         self.outside_no_burst_log_interval_seconds = float(os.getenv("OUTSIDE_NO_BURST_LOG_INTERVAL_SECONDS", "10"))
+        # ── Extreme Retest Add ────────────────────────────────────────────
+        self._extreme_retest_config = _extreme_retest.ExtremeRetestConfig(
+            enabled=getattr(config, "extreme_retest_add_enabled", False),
+            pivot_left_bars=getattr(config, "extreme_retest_pivot_left_bars", 2),
+            pivot_right_bars=getattr(config, "extreme_retest_pivot_right_bars", 2),
+            anchor_max_age_candles=getattr(config, "extreme_retest_anchor_max_age_candles", 12),
+            sweep_max_age_seconds=getattr(config, "extreme_retest_sweep_max_age_seconds", 900.0),
+            near_extreme_pct=getattr(config, "extreme_retest_near_extreme_pct", 0.0015),
+            reclaim_pct=getattr(config, "extreme_retest_reclaim_pct", 0.0005),
+            min_reverse_ratio=getattr(config, "extreme_retest_min_reverse_ratio", 0.55),
+            one_add_per_anchor=getattr(config, "extreme_retest_one_add_per_anchor", True),
+        )
+        self._extreme_retest_anchor = _extreme_retest.ExtremeRetestAnchor()
+        self._prev_boll: BollSnapshot | None = None
+        self._candle_buffer: deque[dict] = deque(maxlen=50)
+        self._last_detected_candle_ts_ms: int = 0
 
     def on_tick(self, price: float, ts_ms: int, boll: BollSnapshot, cvd: CvdSnapshot) -> list[TradeIntent]:
         intents: list[TradeIntent] = []
+
+        # ── Extreme Retest: track candle buffer on candle close ──────────
+        if self._extreme_retest_config.enabled:
+            self._track_candle_buffer(boll)
 
         if boll.alert_switch_on:
             self._last_switch_on_ts_ms = ts_ms
@@ -76,6 +99,11 @@ class BollCvdShockReclaimStrategy(BollCvdReclaimStrategy):
         if not self._cooldown_ok(ts_ms):
             return intents
 
+        # ── Extreme Retest Add evaluation (before original add logic) ────
+        ext_retest_intent = None
+        if self._extreme_retest_config.enabled and self.state.side is not None:
+            ext_retest_intent = self._evaluate_extreme_retest_add(price, ts_ms, boll, cvd)
+
         if self._long_setup(price, cvd):
             intent = self._maybe_open_or_add_long(price, ts_ms, boll, cvd)
             if intent is not None:
@@ -85,6 +113,10 @@ class BollCvdShockReclaimStrategy(BollCvdReclaimStrategy):
             intent = self._maybe_open_or_add_short(price, ts_ms, boll, cvd)
             if intent is not None:
                 intents.append(intent)
+
+        # ── If extreme retest generated an ADD intent, add it ────────────
+        if ext_retest_intent is not None:
+            intents.append(ext_retest_intent)
 
         return intents
 
@@ -121,6 +153,9 @@ class BollCvdShockReclaimStrategy(BollCvdReclaimStrategy):
                 )
         else:
             self._extend_add_freeze_after_successful_add(ts_ms, was_active_freeze=was_active_freeze)
+        # ── Revalidate extreme retest anchor after any ADD ─────────────
+        if previous_layers > 0 and self._extreme_retest_config.enabled:
+            self._maybe_revalidate_extreme_retest_anchor_after_add()
         return intent
 
     def _add_timing_passed(self, side: PositionSide, price: float, ts_ms: int, target_layer: int) -> tuple[bool, str]:
@@ -502,3 +537,391 @@ class BollCvdShockReclaimStrategy(BollCvdReclaimStrategy):
     def _reset_upper_armed(self) -> None:
         super()._reset_upper_armed()
         self.state.upper_last_burst_ts_ms = 0
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Extreme Retest Add methods
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def _track_candle_buffer(self, boll: BollSnapshot) -> None:
+        """Detect candle close and push closed candle data into buffer."""
+        if self._prev_boll is not None and boll.candle_ts_ms != self._prev_boll.candle_ts_ms:
+            # Previous boll represents the just-closed candle at its final state
+            prev = self._prev_boll
+            high = prev.high if prev.high is not None else prev.close
+            low = prev.low if prev.low is not None else prev.close
+            self._candle_buffer.append({
+                "ts_ms": prev.candle_ts_ms,
+                "high": high,
+                "low": low,
+                "close": prev.close,
+                "boll_upper": prev.upper,
+                "boll_lower": prev.lower,
+            })
+            # Run pivot detection on candle close
+            if self.state.side is not None:
+                self._detect_pivot_on_new_candle(prev.candle_ts_ms, prev.upper, prev.lower)
+        self._prev_boll = boll
+
+    def _detect_pivot_on_new_candle(self, candle_ts_ms: int, boll_upper: float, boll_lower: float) -> None:
+        """Detect extreme pivots from candle buffer on new candle close."""
+        cfg = self._extreme_retest_config
+        side = self.state.side
+
+        # Skip if not in a position
+        if side is None or self.state.layers <= 0:
+            return
+
+        anchor = self._extreme_retest_anchor
+        self._sync_anchor_from_state()
+
+        # Drop expired anchor
+        _extreme_retest.drop_expired_anchor(anchor, candle_ts_ms, cfg.anchor_max_age_candles)
+
+        # Need enough candles: left_bars + 1 (pivot) + right_bars
+        min_candles = cfg.pivot_left_bars + 1 + cfg.pivot_right_bars
+        buf = list(self._candle_buffer)
+        if len(buf) < min_candles:
+            return
+
+        # Scan recent candles for pivots — check the rightmost candidate that has enough right bars
+        # The pivot_idx is len(buf) - 1 - right_bars (most recent candle that has right_bars candles after it)
+        pivot_idx = len(buf) - 1 - cfg.pivot_right_bars
+
+        # Only process if this is a new candle we haven't detected on yet
+        if buf[pivot_idx]["ts_ms"] != candle_ts_ms:
+            return
+        if self._last_detected_candle_ts_ms == candle_ts_ms:
+            return
+        self._last_detected_candle_ts_ms = candle_ts_ms
+
+        if side == "SHORT":
+            if not _extreme_retest.detect_pivot_high(buf, pivot_idx, cfg.pivot_left_bars, cfg.pivot_right_bars):
+                return
+            candidate_price = buf[pivot_idx]["high"]
+        else:
+            if not _extreme_retest.detect_pivot_low(buf, pivot_idx, cfg.pivot_left_bars, cfg.pivot_right_bars):
+                return
+            candidate_price = buf[pivot_idx]["low"]
+
+        # Compute effective required gap
+        effective_required_gap_pct = self._extreme_retest_effective_required_gap_pct()
+
+        # Try to create or replace anchor
+        _extreme_retest.try_create_or_replace_anchor(
+            side=side,
+            candidate_price=candidate_price,
+            candle_ts_ms=candle_ts_ms,
+            boll_upper=boll_upper,
+            boll_lower=boll_lower,
+            last_entry_price=self.state.last_entry_price,
+            effective_required_gap_pct=effective_required_gap_pct,
+            anchor=anchor,
+            config=cfg,
+        )
+
+        self._sync_anchor_to_state()
+
+    def _evaluate_extreme_retest_add(
+        self, price: float, ts_ms: int, boll: BollSnapshot, cvd: CvdSnapshot
+    ) -> TradeIntent | None:
+        """Evaluate extreme retest add trigger and run through original add gates."""
+        self._sync_anchor_from_state()
+
+        anchor = self._extreme_retest_anchor
+        cfg = self._extreme_retest_config
+        side = self.state.side
+        if side is None:
+            return None
+
+        # Drop expired anchor based on candle age
+        _extreme_retest.drop_expired_anchor(anchor, boll.candle_ts_ms, cfg.anchor_max_age_candles)
+
+        # Evaluate on tick
+        eval_result = _extreme_retest.evaluate_on_tick(
+            side=side,
+            price=price,
+            ts_ms=ts_ms,
+            boll_upper=boll.upper,
+            boll_lower=boll.lower,
+            anchor=anchor,
+            config=cfg,
+            buy_ratio=cvd.buy_ratio,
+            sell_ratio=cvd.sell_ratio,
+        )
+
+        # Log evaluation
+        if anchor.is_active():
+            logger.info(
+                "EXTREME_RETEST_ADD_EVALUATED | side=%s layers=%s target_layer=%s "
+                "price=%s boll_upper=%s boll_lower=%s inside_band=%s "
+                "anchor_price=%s anchor_kind=%s pattern=%s "
+                "sweep_seen=%s sweep_extreme_price=%s reclaimed=%s "
+                "near_extreme=%s buy_ratio=%.4f sell_ratio=%.4f "
+                "reverse_ratio_ok=%s triggered=%s decision=%s reason=%s",
+                side,
+                self.state.layers,
+                self.state.layers + 1,
+                price,
+                boll.upper,
+                boll.lower,
+                eval_result.inside_band,
+                eval_result.anchor_price,
+                eval_result.anchor_kind,
+                eval_result.pattern,
+                eval_result.sweep_seen,
+                eval_result.sweep_extreme_price,
+                eval_result.reclaimed,
+                eval_result.near_extreme,
+                eval_result.buy_ratio,
+                eval_result.sell_ratio,
+                eval_result.reverse_ratio_ok,
+                eval_result.triggered,
+                eval_result.decision,
+                eval_result.reason,
+            )
+
+        if not eval_result.triggered:
+            self._sync_anchor_to_state()
+            return None
+
+        # ── Run through original add gates ──────────────────────────────────
+        if self.state.layers >= self.config.max_layers:
+            logger.info(
+                "ADD_SKIPPED | reason=max_layers side=%s trigger_source=EXTREME_RETEST "
+                "pattern=%s anchor_price=%s layers=%s",
+                side,
+                eval_result.pattern,
+                eval_result.anchor_price,
+                self.state.layers,
+            )
+            self._sync_anchor_to_state()
+            return None
+
+        target_layer = self.state.layers + 1
+
+        # Timing check (add_freeze / first_add_block / add_interval)
+        timing_ok, timing_reason = self._add_timing_passed(side, price, ts_ms, target_layer)
+        if not timing_ok:
+            self._log_add_timing_skipped(side, timing_reason, price, ts_ms, target_layer)
+            self._sync_anchor_to_state()
+            return None
+
+        # Gap check
+        gap_ok, gap_pct, required_price = self._add_gap_passed(side, price, target_layer)
+        if not gap_ok:
+            logger.info(
+                "ADD_SKIPPED | reason=add_gap side=%s price=%s trigger_source=EXTREME_RETEST "
+                "pattern=%s anchor_price=%s layers=%s target_layer=%s required_price=%s gap_pct=%.4f%%",
+                side, price, eval_result.pattern, eval_result.anchor_price,
+                self.state.layers, target_layer, required_price, gap_pct * 100,
+            )
+            self._sync_anchor_to_state()
+            return None
+
+        # Avg improvement check
+        avg_improvement_ok, improvement_pct, projected_avg = self._add_avg_improvement_passed(side, price, target_layer)
+        if not avg_improvement_ok:
+            logger.info(
+                "ADD_SKIPPED | reason=avg_improvement side=%s price=%s trigger_source=EXTREME_RETEST "
+                "pattern=%s anchor_price=%s avg_entry=%s projected_avg_entry=%s improvement_pct=%.6f",
+                side, price, eval_result.pattern, eval_result.anchor_price,
+                self.state.avg_entry_price, projected_avg, improvement_pct,
+            )
+            self._sync_anchor_to_state()
+            return None
+
+        # Check other add-disabled conditions (near_tp, middle_runner, trend_runner, etc.)
+        if self.state.near_tp_add_disabled:
+            logger.info(
+                "ADD_SKIPPED | reason=near_tp_protected side=%s trigger_source=EXTREME_RETEST "
+                "pattern=%s anchor_price=%s",
+                side, eval_result.pattern, eval_result.anchor_price,
+            )
+            self._sync_anchor_to_state()
+            return None
+        if getattr(self.state, "middle_bucket_split_add_disabled", False):
+            logger.info(
+                "ADD_SKIPPED | reason=middle_bucket_fast_consumed side=%s trigger_source=EXTREME_RETEST "
+                "pattern=%s anchor_price=%s",
+                side, eval_result.pattern, eval_result.anchor_price,
+            )
+            self._sync_anchor_to_state()
+            return None
+        if self.state.trend_runner_active:
+            logger.info(
+                "ADD_SKIPPED | reason=trend_runner_active side=%s trigger_source=EXTREME_RETEST "
+                "pattern=%s anchor_price=%s",
+                side, eval_result.pattern, eval_result.anchor_price,
+            )
+            self._sync_anchor_to_state()
+            return None
+
+        # ── Generate ADD intent ─────────────────────────────────────────────
+        reason = (
+            f"EXTREME_RETEST pat={eval_result.pattern} "
+            f"anchor={eval_result.anchor_price:.4f} "
+            f"gap={gap_pct * 100:.2f}% improvement={improvement_pct * 100:.2f}%"
+        )
+
+        # Use original open_position which handles all state updates
+        was_active_freeze = self._add_freeze_active(ts_ms)
+        intent = super()._open_position(
+            side, "ADD_SHORT" if side == "SHORT" else "ADD_LONG",
+            price, ts_ms, boll, cvd, reason,
+        )
+
+        # Extend add freeze
+        if self.state.layers > 1:
+            self._extend_add_freeze_after_successful_add(ts_ms, was_active_freeze=was_active_freeze)
+
+        # ── Consume anchor after successful ADD ─────────────────────────────
+        _extreme_retest.mark_anchor_consumed(anchor)
+
+        # Revalidate after add (last_entry_price changed)
+        effective_required_gap_pct = self._extreme_retest_effective_required_gap_pct()
+        _extreme_retest.revalidate_anchor_after_add(
+            anchor=anchor,
+            last_entry_price=self.state.last_entry_price,
+            effective_required_gap_pct=effective_required_gap_pct,
+        )
+
+        self._sync_anchor_to_state()
+
+        logger.warning(
+            "EXTREME_RETEST_ADD_SUCCESS | side=%s layers=%s price=%s "
+            "trigger_source=EXTREME_RETEST pattern=%s anchor_price=%s",
+            side, self.state.layers, price, eval_result.pattern, eval_result.anchor_price,
+        )
+        return intent
+
+    def _extreme_retest_effective_required_gap_pct(self) -> float:
+        """Compute effective required gap pct for anchor checking.
+
+        Reuses the same add_gap logic used by the main add flow, including
+        target_layer adjustments for the NEXT layer.
+        """
+        target_layer = max(self.state.layers, 1) + 1
+        base_gap = add_layer_gates.add_layer_gap_pct_for_target_layer(
+            target_layer=target_layer,
+            add_gap_mode=self.config.add_gap_mode,
+            add_gap_base_pct=self.config.add_gap_base_pct,
+            add_gap_step_pct=self.config.add_gap_step_pct,
+        )
+        return base_gap
+
+    def _sync_anchor_from_state(self) -> None:
+        """Sync ExtremeRetestAnchor from strategy state fields."""
+        anchor = self._extreme_retest_anchor
+        anchor.side = self.state.extreme_retest_anchor_side
+        anchor.kind = self.state.extreme_retest_anchor_kind
+        anchor.price = self.state.extreme_retest_anchor_price
+        anchor.candle_ts_ms = self.state.extreme_retest_anchor_candle_ts_ms
+        anchor.boll_upper = self.state.extreme_retest_anchor_boll_upper
+        anchor.boll_lower = self.state.extreme_retest_anchor_boll_lower
+        anchor.sweep_seen = self.state.extreme_retest_sweep_seen
+        anchor.sweep_extreme_price = self.state.extreme_retest_sweep_extreme_price
+        anchor.sweep_first_seen_ts_ms = self.state.extreme_retest_sweep_first_seen_ts_ms
+        anchor.sweep_last_seen_ts_ms = self.state.extreme_retest_sweep_last_seen_ts_ms
+        anchor.consumed_watermark_price = self.state.extreme_retest_consumed_watermark_price
+        anchor.consumed_anchor_ts_ms = self.state.extreme_retest_consumed_anchor_ts_ms
+
+    def _sync_anchor_to_state(self) -> None:
+        """Sync ExtremeRetestAnchor back to strategy state fields."""
+        anchor = self._extreme_retest_anchor
+        self.state.extreme_retest_anchor_side = anchor.side
+        self.state.extreme_retest_anchor_kind = anchor.kind
+        self.state.extreme_retest_anchor_price = anchor.price
+        self.state.extreme_retest_anchor_candle_ts_ms = anchor.candle_ts_ms
+        self.state.extreme_retest_anchor_boll_upper = anchor.boll_upper
+        self.state.extreme_retest_anchor_boll_lower = anchor.boll_lower
+        self.state.extreme_retest_sweep_seen = anchor.sweep_seen
+        self.state.extreme_retest_sweep_extreme_price = anchor.sweep_extreme_price
+        self.state.extreme_retest_sweep_first_seen_ts_ms = anchor.sweep_first_seen_ts_ms
+        self.state.extreme_retest_sweep_last_seen_ts_ms = anchor.sweep_last_seen_ts_ms
+        self.state.extreme_retest_consumed_watermark_price = anchor.consumed_watermark_price
+        self.state.extreme_retest_consumed_anchor_ts_ms = anchor.consumed_anchor_ts_ms
+
+    def _maybe_revalidate_extreme_retest_anchor_after_add(self) -> None:
+        """Revalidate extreme retest anchor after any ADD changes last_entry_price."""
+        self._sync_anchor_from_state()
+        anchor = self._extreme_retest_anchor
+        effective_required_gap_pct = self._extreme_retest_effective_required_gap_pct()
+        _extreme_retest.revalidate_anchor_after_add(
+            anchor=anchor,
+            last_entry_price=self.state.last_entry_price,
+            effective_required_gap_pct=effective_required_gap_pct,
+        )
+        self._sync_anchor_to_state()
+
+    def restore_extreme_retest_state_from_saved(self, trusted: bool) -> None:
+        """Restore extreme retest state from saved state fields during startup recovery.
+
+        Called externally (e.g., from startup recovery) after strategy state is loaded.
+
+        When trusted=False, drops the saved anchor but preserves consumed watermark.
+        """
+        self._sync_anchor_from_state()
+        anchor = self._extreme_retest_anchor
+        if not trusted:
+            # Drop anchor but keep consumed watermark
+            consumed_price = anchor.consumed_watermark_price
+            consumed_ts = anchor.consumed_anchor_ts_ms
+            anchor.clear()
+            anchor.consumed_watermark_price = consumed_price
+            anchor.consumed_anchor_ts_ms = consumed_ts
+            logger.info(
+                "EXTREME_RETEST_STATE_DROPPED | reason=untrusted_saved_state_or_no_valid_anchor"
+            )
+            self._sync_anchor_to_state()
+            return
+
+        if anchor.is_active():
+            logger.info("EXTREME_RETEST_STATE_RESTORED")
+        self._sync_anchor_to_state()
+
+    def rebuild_extreme_retest_anchor_from_candles(self) -> bool:
+        """Try to rebuild anchor from closed candle buffer after startup.
+
+        Returns True if an anchor was successfully rebuilt.
+        """
+        if self.state.side is None or self.state.layers <= 0:
+            return False
+
+        self._sync_anchor_from_state()
+        anchor = self._extreme_retest_anchor
+        cfg = self._extreme_retest_config
+        side = self.state.side
+
+        effective_required_gap_pct = self._extreme_retest_effective_required_gap_pct()
+
+        buf = list(self._candle_buffer)
+        if len(buf) < cfg.pivot_left_bars + 1 + cfg.pivot_right_bars:
+            logger.info(
+                "EXTREME_RETEST_STATE_DROPPED | reason=untrusted_saved_state_or_no_valid_anchor"
+            )
+            self._sync_anchor_to_state()
+            return False
+
+        # Get current boll band from most recent candle in buffer
+        latest = buf[-1]
+        boll_upper = latest.get("boll_upper", 0)
+        boll_lower = latest.get("boll_lower", 0)
+
+        rebuilt = _extreme_retest.rebuild_anchor_from_closed_candles(
+            side=side,
+            candles=buf,
+            boll_upper=boll_upper,
+            boll_lower=boll_lower,
+            last_entry_price=self.state.last_entry_price,
+            effective_required_gap_pct=effective_required_gap_pct,
+            consumed_watermark_price=anchor.consumed_watermark_price,
+            config=cfg,
+        )
+
+        if rebuilt is not None:
+            self._extreme_retest_anchor = rebuilt
+            self._sync_anchor_to_state()
+            return True
+
+        self._sync_anchor_to_state()
+        return False

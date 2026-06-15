@@ -139,6 +139,17 @@ class BollCvdReclaimStrategyConfig:
     # ── Three-Stage TP2 structure BOLL ─────────────────────────────────
     three_stage_tp2_use_structure_boll: bool = True
 
+    # ── Extreme Retest Add ────────────────────────────────────────────
+    extreme_retest_add_enabled: bool = False
+    extreme_retest_pivot_left_bars: int = 2
+    extreme_retest_pivot_right_bars: int = 2
+    extreme_retest_anchor_max_age_candles: int = 12
+    extreme_retest_sweep_max_age_seconds: float = 900.0
+    extreme_retest_near_extreme_pct: float = 0.0015
+    extreme_retest_reclaim_pct: float = 0.0005
+    extreme_retest_min_reverse_ratio: float = 0.55
+    extreme_retest_one_add_per_anchor: bool = True
+
     def __post_init__(self) -> None:
         mode = str(self.add_gap_mode or "linear").strip().lower()
         if mode != "linear":
@@ -271,6 +282,16 @@ class BollCvdReclaimStrategyConfig:
             middle_bucket_split_fast_sl_fail_action=os.getenv(
                 "MIDDLE_BUCKET_FAST_SL_FAIL_ACTION", "MARKET_EXIT").strip().upper(),
             three_stage_tp2_use_structure_boll=_env_bool("THREE_STAGE_TP2_USE_STRUCTURE_BOLL", True),
+            # ── Extreme Retest Add ────────────────────────────────────
+            extreme_retest_add_enabled=_env_bool("EXTREME_RETEST_ADD_ENABLED", False),
+            extreme_retest_pivot_left_bars=int(os.getenv("EXTREME_RETEST_PIVOT_LEFT_BARS", "2")),
+            extreme_retest_pivot_right_bars=int(os.getenv("EXTREME_RETEST_PIVOT_RIGHT_BARS", "2")),
+            extreme_retest_anchor_max_age_candles=int(os.getenv("EXTREME_RETEST_ANCHOR_MAX_AGE_CANDLES", "12")),
+            extreme_retest_sweep_max_age_seconds=float(os.getenv("EXTREME_RETEST_SWEEP_MAX_AGE_SECONDS", "900")),
+            extreme_retest_near_extreme_pct=float(os.getenv("EXTREME_RETEST_NEAR_EXTREME_PCT", "0.0015")),
+            extreme_retest_reclaim_pct=float(os.getenv("EXTREME_RETEST_RECLAIM_PCT", "0.0005")),
+            extreme_retest_min_reverse_ratio=float(os.getenv("EXTREME_RETEST_MIN_REVERSE_RATIO", "0.55")),
+            extreme_retest_one_add_per_anchor=_env_bool("EXTREME_RETEST_ONE_ADD_PER_ANCHOR", True),
         )
 
 
@@ -533,6 +554,22 @@ class StrategyPositionState:
     delayed_market_exit_executed_ts_ms: int | None = None
     delayed_market_exit_exit_attempt_count: int = 0
     delayed_market_exit_last_exit_message: str | None = None
+
+    # ── Extreme Retest Add state ──────────────────────────────────────
+    extreme_retest_anchor_side: Optional[str] = None
+    extreme_retest_anchor_kind: Optional[str] = None
+    extreme_retest_anchor_price: Optional[float] = None
+    extreme_retest_anchor_candle_ts_ms: Optional[int] = None
+    extreme_retest_anchor_boll_upper: Optional[float] = None
+    extreme_retest_anchor_boll_lower: Optional[float] = None
+
+    extreme_retest_sweep_seen: bool = False
+    extreme_retest_sweep_extreme_price: Optional[float] = None
+    extreme_retest_sweep_first_seen_ts_ms: Optional[int] = None
+    extreme_retest_sweep_last_seen_ts_ms: Optional[int] = None
+
+    extreme_retest_consumed_watermark_price: Optional[float] = None
+    extreme_retest_consumed_anchor_ts_ms: Optional[int] = None
 
 
 def _env_bool(name: str, default: bool) -> bool:

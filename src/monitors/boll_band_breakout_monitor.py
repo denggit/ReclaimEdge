@@ -97,6 +97,11 @@ class BollSnapshot:
     tp_middle: float | None = None
     tp_upper: float | None = None
     tp_window: int | None = None
+    # Latest candle's high and low — used by strategies for pivot detection.
+    # These are the confirmed closed-candle values when candle has closed,
+    # or the live-candle values when use_live_candle=True.
+    high: float | None = None
+    low: float | None = None
 
 
 @dataclass(frozen=True)
@@ -340,6 +345,7 @@ class BollBandBreakoutMonitor:
             self.config.inst_id, latest.ts_ms, latest.close, middle, upper, lower,
             upper_distance_pct, lower_distance_pct, alert_switch_on, self.config.use_live_candle,
             tp_lower=tp_lower, tp_middle=tp_middle, tp_upper=tp_upper, tp_window=tp_window,
+            high=latest.high, low=latest.low,
         )
         self._latest_candle_ts_ms = latest.ts_ms
         self._latest_switch_state = alert_switch_on
