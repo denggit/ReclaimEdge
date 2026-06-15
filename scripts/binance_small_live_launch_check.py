@@ -42,7 +42,7 @@ from src.exchanges.binance.live_preflight import (
 )
 from src.exchanges.runtime_adapter_factory import create_exchange_runtime_adapters
 from src.exchanges.runtime_config import load_unified_runtime_config
-from src.reporting.live_state_store import DEFAULT_STATE_PATH, LiveStateStore
+from src.reporting.live_state_store import DEFAULT_STATE_PATH, LivePositionState, LiveStateStore
 
 # ---------------------------------------------------------------------------
 # Default hard caps for small live
@@ -63,7 +63,7 @@ _TRUTHY: frozenset[str] = frozenset({"1", "true", "yes", "y", "on"})
 class LocalStateStatus:
     """Result of loading and inspecting the local live_state.json."""
 
-    status: str  # "absent" | "flat" | "has_position"
+    status: str  # "absent" | "flat" | "has_position" | "unreadable"
     has_open_position: bool
     startup_force_tp_reconcile: bool
     details: dict[str, Any]
@@ -131,19 +131,43 @@ def load_local_state_status(path: Path) -> LocalStateStatus:
     Returns
     -------
     LocalStateStatus
-        - ``status="absent"`` — file does not exist.
-        - ``status="flat"`` — file exists but no open position.
-        - ``status="has_position"`` — file exists with an open position.
+        - ``status="absent"`` — file does not exist (safe).
+        - ``status="flat"`` — file exists, valid JSON, no open position (safe).
+        - ``status="has_position"`` — file exists, valid JSON, open position held.
+        - ``status="unreadable"`` — file exists but cannot be parsed / constructed
+          into a LivePositionState (dangerous — always blocked).
     """
-    store = LiveStateStore(path)
-    state = store.load()
-
-    if state is None:
+    if not path.exists():
         return LocalStateStatus(
             status="absent",
             has_open_position=False,
             startup_force_tp_reconcile=False,
             details={},
+        )
+
+    # Attempt to read and parse the JSON
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return LocalStateStatus(
+            status="unreadable",
+            has_open_position=False,
+            startup_force_tp_reconcile=False,
+            details={"error": str(exc)},
+        )
+
+    # Attempt to construct a LivePositionState from the parsed dict
+    try:
+        fields = set(LivePositionState.__dataclass_fields__.keys())
+        state = LivePositionState(
+            **{k: v for k, v in raw.items() if k in fields}
+        )
+    except Exception as exc:
+        return LocalStateStatus(
+            status="unreadable",
+            has_open_position=False,
+            startup_force_tp_reconcile=False,
+            details={"error": str(exc)},
         )
 
     side = state.side
@@ -437,12 +461,33 @@ def main(argv: list[str] | None = None) -> int:
     try:
         config = load_unified_runtime_config(env)
     except ValueError as exc:
+        raw_msg = str(exc)
+        exchange_value: str = env.get("EXCHANGE", "okx").strip().lower()
+
+        # Unsupported EXCHANGE → wrong exchange, not config error
+        if "Unsupported EXCHANGE" in raw_msg:
+            if args.json:
+                print(
+                    json.dumps(
+                        {
+                            "status": "wrong_exchange",
+                            "exchange": exchange_value,
+                            "error": "BINANCE_SMALL_LIVE_WRONG_EXCHANGE",
+                        }
+                    )
+                )
+            else:
+                print("BINANCE_SMALL_LIVE_WRONG_EXCHANGE")
+                print(f"exchange={exchange_value}")
+            return 3
+
+        # Other config errors (e.g. TRADE_ASSET=BTC) → config error
         if args.json:
             print(
                 json.dumps(
                     {
                         "status": "config_error",
-                        "exchange": env.get("EXCHANGE", "okx").strip().lower(),
+                        "exchange": exchange_value,
                         "error": f"BINANCE_SMALL_LIVE_CONFIG_ERROR: {exc}",
                     }
                 )
@@ -496,6 +541,10 @@ def main(argv: list[str] | None = None) -> int:
     # ── 6. Local state check ────────────────────────────────────────────
     state_path = Path(args.state_path)
     local_state = load_local_state_status(state_path)
+
+    # Unreadable state is ALWAYS blocked — cannot be bypassed by any flag.
+    if local_state.status == "unreadable":
+        blocking_reasons.append("LOCAL_STATE_UNREADABLE")
 
     if local_state.has_open_position:
         if not args.allow_existing_local_position:

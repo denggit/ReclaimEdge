@@ -114,44 +114,49 @@ def _make_state_file(overrides: dict | None = None) -> Path:
 
 
 class TestHappyPath:
-    """All env ready, no state file → exit 0, BINANCE_SMALL_LIVE_LAUNCH_READY."""
+    """All env ready, truly missing state file → exit 0, BINANCE_SMALL_LIVE_LAUNCH_READY."""
 
     def test_ready_returns_0(
-        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
     ) -> None:
         _set_env(monkeypatch, dict(READY_ENV))
-        with tempfile.NamedTemporaryFile(suffix=".json", prefix="no_state_") as tf:
-            rc = main(argv=["--state-path", tf.name])
+        state_path = tmp_path / "missing_live_state.json"
+        assert not state_path.exists()
+        rc = main(argv=["--state-path", str(state_path)])
         captured = capsys.readouterr()
         assert rc == 0, f"Expected exit 0, got {rc}. stdout={captured.out}"
         assert "BINANCE_SMALL_LIVE_LAUNCH_READY" in captured.out
 
     def test_ready_output_includes_symbol(
-        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
     ) -> None:
         _set_env(monkeypatch, dict(READY_ENV))
-        with tempfile.NamedTemporaryFile(suffix=".json", prefix="no_state_") as tf:
-            rc = main(argv=["--state-path", tf.name])
+        state_path = tmp_path / "missing_live_state.json"
+        rc = main(argv=["--state-path", str(state_path)])
         captured = capsys.readouterr()
         assert rc == 0
         assert "symbol=ETHUSDT" in captured.out
 
     def test_ready_output_includes_exchange(
-        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
     ) -> None:
         _set_env(monkeypatch, dict(READY_ENV))
-        with tempfile.NamedTemporaryFile(suffix=".json", prefix="no_state_") as tf:
-            rc = main(argv=["--state-path", tf.name])
+        state_path = tmp_path / "missing_live_state.json"
+        rc = main(argv=["--state-path", str(state_path)])
         captured = capsys.readouterr()
         assert rc == 0
         assert "exchange=binance" in captured.out
 
     def test_ready_output_includes_config_fields(
-        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
     ) -> None:
         _set_env(monkeypatch, dict(READY_ENV))
-        with tempfile.NamedTemporaryFile(suffix=".json", prefix="no_state_") as tf:
-            rc = main(argv=["--state-path", tf.name])
+        state_path = tmp_path / "missing_live_state.json"
+        rc = main(argv=["--state-path", str(state_path)])
         captured = capsys.readouterr()
         assert rc == 0
         assert "trade_asset=ETH" in captured.out
@@ -164,43 +169,47 @@ class TestHappyPath:
         assert "live_allow_orders=true" in captured.out
 
     def test_ready_output_includes_qty_check(
-        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
     ) -> None:
         _set_env(monkeypatch, dict(READY_ENV))
-        with tempfile.NamedTemporaryFile(suffix=".json", prefix="no_state_") as tf:
-            rc = main(argv=["--state-path", tf.name])
+        state_path = tmp_path / "missing_live_state.json"
+        rc = main(argv=["--state-path", str(state_path)])
         captured = capsys.readouterr()
         assert rc == 0
         assert "qty_check_0_05_eth=0.05" in captured.out
 
     def test_ready_output_side_effects_false(
-        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
     ) -> None:
         _set_env(monkeypatch, dict(READY_ENV))
-        with tempfile.NamedTemporaryFile(suffix=".json", prefix="no_state_") as tf:
-            rc = main(argv=["--state-path", tf.name])
+        state_path = tmp_path / "missing_live_state.json"
+        rc = main(argv=["--state-path", str(state_path)])
         captured = capsys.readouterr()
         assert rc == 0
         assert "orders_executed=false" in captured.out
         assert "websocket_started=false" in captured.out
 
     def test_ready_output_includes_notional_values(
-        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
     ) -> None:
         _set_env(monkeypatch, dict(READY_ENV))
-        with tempfile.NamedTemporaryFile(suffix=".json", prefix="no_state_") as tf:
-            rc = main(argv=["--state-path", tf.name])
+        state_path = tmp_path / "missing_live_state.json"
+        rc = main(argv=["--state-path", str(state_path)])
         captured = capsys.readouterr()
         assert rc == 0
         assert "max_order_notional_usdt=10" in captured.out
         assert "max_position_notional_usdt=20" in captured.out
 
     def test_ready_output_includes_sizing(
-        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
     ) -> None:
         _set_env(monkeypatch, dict(READY_ENV))
-        with tempfile.NamedTemporaryFile(suffix=".json", prefix="no_state_") as tf:
-            rc = main(argv=["--state-path", tf.name])
+        state_path = tmp_path / "missing_live_state.json"
+        rc = main(argv=["--state-path", str(state_path)])
         captured = capsys.readouterr()
         assert rc == 0
         assert "contract_multiplier=1" in captured.out
@@ -208,21 +217,24 @@ class TestHappyPath:
         assert "min_contracts=0.001" in captured.out
 
     def test_ready_output_sidecar_disabled(
-        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
     ) -> None:
         _set_env(monkeypatch, dict(READY_ENV))
-        with tempfile.NamedTemporaryFile(suffix=".json", prefix="no_state_") as tf:
-            rc = main(argv=["--state-path", tf.name])
+        state_path = tmp_path / "missing_live_state.json"
+        rc = main(argv=["--state-path", str(state_path)])
         captured = capsys.readouterr()
         assert rc == 0
         assert "sidecar_enabled=false" in captured.out
 
     def test_ready_no_state_file_status_absent(
-        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
     ) -> None:
         _set_env(monkeypatch, dict(READY_ENV))
-        with tempfile.NamedTemporaryFile(suffix=".json", prefix="no_state_") as tf:
-            rc = main(argv=["--state-path", tf.name])
+        state_path = tmp_path / "missing_live_state.json"
+        assert not state_path.exists()
+        rc = main(argv=["--state-path", str(state_path)])
         captured = capsys.readouterr()
         assert rc == 0
         assert "local_state_status=flat_or_absent" in captured.out
@@ -305,55 +317,59 @@ class TestOrderNotionalTooHigh:
     """
 
     def test_order_notional_too_high_returns_2(
-        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
     ) -> None:
         env = dict(READY_ENV)
         env["LIVE_MAX_ORDER_NOTIONAL_USDT"] = "22"
         _set_env(monkeypatch, env)
-        with tempfile.NamedTemporaryFile(suffix=".json", prefix="no_state_") as tf:
-            rc = main(argv=["--state-path", tf.name])
+        state_path = tmp_path / "missing_live_state.json"
+        rc = main(argv=["--state-path", str(state_path)])
         captured = capsys.readouterr()
         assert rc == 2, f"Expected exit 2, got {rc}. stdout={captured.out}"
         assert "LIVE_MAX_ORDER_NOTIONAL_TOO_HIGH" in captured.out
 
     def test_order_notional_too_high_blocked_output(
-        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
     ) -> None:
         env = dict(READY_ENV)
         env["LIVE_MAX_ORDER_NOTIONAL_USDT"] = "22"
         _set_env(monkeypatch, env)
-        with tempfile.NamedTemporaryFile(suffix=".json", prefix="no_state_") as tf:
-            rc = main(argv=["--state-path", tf.name])
+        state_path = tmp_path / "missing_live_state.json"
+        rc = main(argv=["--state-path", str(state_path)])
         captured = capsys.readouterr()
         assert rc == 2
         assert "BINANCE_SMALL_LIVE_LAUNCH_BLOCKED" in captured.out
 
     def test_order_notional_within_limit_passes(
-        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
     ) -> None:
         env = dict(READY_ENV)
         env["LIVE_MAX_ORDER_NOTIONAL_USDT"] = "15"
         _set_env(monkeypatch, env)
-        with tempfile.NamedTemporaryFile(suffix=".json", prefix="no_state_") as tf:
-            rc = main(argv=["--state-path", tf.name])
+        state_path = tmp_path / "missing_live_state.json"
+        rc = main(argv=["--state-path", str(state_path)])
         captured = capsys.readouterr()
         assert rc == 0, f"Expected exit 0, got {rc}. stdout={captured.out}"
         assert "BINANCE_SMALL_LIVE_LAUNCH_READY" in captured.out
 
     def test_order_notional_cli_override_allows_higher(
-        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
     ) -> None:
         """22 > default cap (20) but passes with --max-allowed-order-notional 25."""
         env = dict(READY_ENV)
         env["LIVE_MAX_ORDER_NOTIONAL_USDT"] = "22"
         _set_env(monkeypatch, env)
-        with tempfile.NamedTemporaryFile(suffix=".json", prefix="no_state_") as tf:
-            rc = main(
-                argv=[
-                    "--state-path", tf.name,
-                    "--max-allowed-order-notional", "25",
-                ]
-            )
+        state_path = tmp_path / "missing_live_state.json"
+        rc = main(
+            argv=[
+                "--state-path", str(state_path),
+                "--max-allowed-order-notional", "25",
+            ]
+        )
         captured = capsys.readouterr()
         assert rc == 0, f"Expected exit 0, got {rc}. stdout={captured.out}"
         assert "BINANCE_SMALL_LIVE_LAUNCH_READY" in captured.out
@@ -372,52 +388,55 @@ class TestPositionNotionalTooHigh:
     """
 
     def test_position_notional_too_high_returns_2(
-        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
     ) -> None:
         env = dict(READY_ENV)
         env["LIVE_MAX_POSITION_NOTIONAL_USDT"] = "30"
         _set_env(monkeypatch, env)
-        with tempfile.NamedTemporaryFile(suffix=".json", prefix="no_state_") as tf:
-            rc = main(
-                argv=[
-                    "--state-path", tf.name,
-                    "--max-allowed-position-notional", "25",
-                ]
-            )
+        state_path = tmp_path / "missing_live_state.json"
+        rc = main(
+            argv=[
+                "--state-path", str(state_path),
+                "--max-allowed-position-notional", "25",
+            ]
+        )
         captured = capsys.readouterr()
         assert rc == 2, f"Expected exit 2, got {rc}. stdout={captured.out}"
         assert "LIVE_MAX_POSITION_NOTIONAL_TOO_HIGH" in captured.out
 
     def test_position_notional_too_high_blocked_output(
-        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
     ) -> None:
         env = dict(READY_ENV)
         env["LIVE_MAX_POSITION_NOTIONAL_USDT"] = "30"
         _set_env(monkeypatch, env)
-        with tempfile.NamedTemporaryFile(suffix=".json", prefix="no_state_") as tf:
-            rc = main(
-                argv=[
-                    "--state-path", tf.name,
-                    "--max-allowed-position-notional", "25",
-                ]
-            )
+        state_path = tmp_path / "missing_live_state.json"
+        rc = main(
+            argv=[
+                "--state-path", str(state_path),
+                "--max-allowed-position-notional", "25",
+            ]
+        )
         captured = capsys.readouterr()
         assert rc == 2
         assert "BINANCE_SMALL_LIVE_LAUNCH_BLOCKED" in captured.out
 
     def test_position_notional_cli_override_allows_higher(
-        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
     ) -> None:
         env = dict(READY_ENV)
         env["LIVE_MAX_POSITION_NOTIONAL_USDT"] = "30"
         _set_env(monkeypatch, env)
-        with tempfile.NamedTemporaryFile(suffix=".json", prefix="no_state_") as tf:
-            rc = main(
-                argv=[
-                    "--state-path", tf.name,
-                    "--max-allowed-position-notional", "35",
-                ]
-            )
+        state_path = tmp_path / "missing_live_state.json"
+        rc = main(
+            argv=[
+                "--state-path", str(state_path),
+                "--max-allowed-position-notional", "35",
+            ]
+        )
         captured = capsys.readouterr()
         assert rc == 0, f"Expected exit 0, got {rc}. stdout={captured.out}"
         assert "BINANCE_SMALL_LIVE_LAUNCH_READY" in captured.out
@@ -432,25 +451,27 @@ class TestSidecarDefaultBlock:
     """SIDECAR_ENABLED=true blocks by default → exit 2."""
 
     def test_sidecar_enabled_default_block_returns_2(
-        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
     ) -> None:
         env = dict(READY_ENV)
         env["SIDECAR_ENABLED"] = "true"
         _set_env(monkeypatch, env)
-        with tempfile.NamedTemporaryFile(suffix=".json", prefix="no_state_") as tf:
-            rc = main(argv=["--state-path", tf.name])
+        state_path = tmp_path / "missing_live_state.json"
+        rc = main(argv=["--state-path", str(state_path)])
         captured = capsys.readouterr()
         assert rc == 2, f"Expected exit 2, got {rc}. stdout={captured.out}"
         assert "SIDECAR_ENABLED_FOR_FIRST_BINANCE_LIVE" in captured.out
 
     def test_sidecar_enabled_default_block_token(
-        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
     ) -> None:
         env = dict(READY_ENV)
         env["SIDECAR_ENABLED"] = "true"
         _set_env(monkeypatch, env)
-        with tempfile.NamedTemporaryFile(suffix=".json", prefix="no_state_") as tf:
-            rc = main(argv=["--state-path", tf.name])
+        state_path = tmp_path / "missing_live_state.json"
+        rc = main(argv=["--state-path", str(state_path)])
         captured = capsys.readouterr()
         assert rc == 2
         assert "BINANCE_SMALL_LIVE_LAUNCH_BLOCKED" in captured.out
@@ -465,37 +486,40 @@ class TestSidecarAllow:
     """--allow-sidecar permits SIDECAR_ENABLED=true with warning."""
 
     def test_sidecar_allow_returns_0(
-        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
     ) -> None:
         env = dict(READY_ENV)
         env["SIDECAR_ENABLED"] = "true"
         _set_env(monkeypatch, env)
-        with tempfile.NamedTemporaryFile(suffix=".json", prefix="no_state_") as tf:
-            rc = main(argv=["--state-path", tf.name, "--allow-sidecar"])
+        state_path = tmp_path / "missing_live_state.json"
+        rc = main(argv=["--state-path", str(state_path), "--allow-sidecar"])
         captured = capsys.readouterr()
         assert rc == 0, f"Expected exit 0, got {rc}. stdout={captured.out}"
         assert "WARNING_SIDECAR_ENABLED" in captured.out
 
     def test_sidecar_allow_still_shows_ready(
-        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
     ) -> None:
         env = dict(READY_ENV)
         env["SIDECAR_ENABLED"] = "true"
         _set_env(monkeypatch, env)
-        with tempfile.NamedTemporaryFile(suffix=".json", prefix="no_state_") as tf:
-            rc = main(argv=["--state-path", tf.name, "--allow-sidecar"])
+        state_path = tmp_path / "missing_live_state.json"
+        rc = main(argv=["--state-path", str(state_path), "--allow-sidecar"])
         captured = capsys.readouterr()
         assert rc == 0
         assert "BINANCE_SMALL_LIVE_LAUNCH_READY" in captured.out
 
     def test_sidecar_disabled_no_warning(
-        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
     ) -> None:
         env = dict(READY_ENV)
         env["SIDECAR_ENABLED"] = "false"
         _set_env(monkeypatch, env)
-        with tempfile.NamedTemporaryFile(suffix=".json", prefix="no_state_") as tf:
-            rc = main(argv=["--state-path", tf.name])
+        state_path = tmp_path / "missing_live_state.json"
+        rc = main(argv=["--state-path", str(state_path)])
         captured = capsys.readouterr()
         assert rc == 0
         assert "WARNING_SIDECAR_ENABLED" not in captured.out
@@ -660,11 +684,12 @@ class TestJsonOutput:
     """--json flag produces valid JSON with all required fields."""
 
     def test_json_ready_has_required_fields(
-        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
     ) -> None:
         _set_env(monkeypatch, dict(READY_ENV))
-        with tempfile.NamedTemporaryFile(suffix=".json", prefix="no_state_") as tf:
-            rc = main(argv=["--state-path", tf.name, "--json"])
+        state_path = tmp_path / "missing_live_state.json"
+        rc = main(argv=["--state-path", str(state_path), "--json"])
         captured = capsys.readouterr()
         assert rc == 0
         data = json.loads(captured.out)
@@ -678,11 +703,12 @@ class TestJsonOutput:
         assert data["checks"]["trader_sizing_ok"] is True
 
     def test_json_ready_has_runtime(
-        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
     ) -> None:
         _set_env(monkeypatch, dict(READY_ENV))
-        with tempfile.NamedTemporaryFile(suffix=".json", prefix="no_state_") as tf:
-            rc = main(argv=["--state-path", tf.name, "--json"])
+        state_path = tmp_path / "missing_live_state.json"
+        rc = main(argv=["--state-path", str(state_path), "--json"])
         captured = capsys.readouterr()
         assert rc == 0
         data = json.loads(captured.out)
@@ -693,11 +719,12 @@ class TestJsonOutput:
         assert runtime["qty_check_0_05_eth"] == "0.05"
 
     def test_json_ready_has_side_effects(
-        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
     ) -> None:
         _set_env(monkeypatch, dict(READY_ENV))
-        with tempfile.NamedTemporaryFile(suffix=".json", prefix="no_state_") as tf:
-            rc = main(argv=["--state-path", tf.name, "--json"])
+        state_path = tmp_path / "missing_live_state.json"
+        rc = main(argv=["--state-path", str(state_path), "--json"])
         captured = capsys.readouterr()
         assert rc == 0
         data = json.loads(captured.out)
@@ -705,13 +732,14 @@ class TestJsonOutput:
         assert data["side_effects"]["websocket_started"] is False
 
     def test_json_blocked_has_required_fields(
-        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
     ) -> None:
         env = dict(READY_ENV)
         env["LIVE_MAX_ORDER_NOTIONAL_USDT"] = "22"
         _set_env(monkeypatch, env)
-        with tempfile.NamedTemporaryFile(suffix=".json", prefix="no_state_") as tf:
-            rc = main(argv=["--state-path", tf.name, "--json"])
+        state_path = tmp_path / "missing_live_state.json"
+        rc = main(argv=["--state-path", str(state_path), "--json"])
         captured = capsys.readouterr()
         assert rc == 2
         data = json.loads(captured.out)
@@ -745,13 +773,14 @@ class TestJsonOutput:
         assert "BINANCE_SMALL_LIVE_CONFIG_ERROR" in data["error"]
 
     def test_json_blocked_includes_warnings(
-        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
     ) -> None:
         env = dict(READY_ENV)
         env["SIDECAR_ENABLED"] = "true"
         _set_env(monkeypatch, env)
-        with tempfile.NamedTemporaryFile(suffix=".json", prefix="no_state_") as tf:
-            rc = main(argv=["--state-path", tf.name, "--json"])
+        state_path = tmp_path / "missing_live_state.json"
+        rc = main(argv=["--state-path", str(state_path), "--json"])
         captured = capsys.readouterr()
         assert rc == 2
         data = json.loads(captured.out)
@@ -759,19 +788,20 @@ class TestJsonOutput:
         assert "SIDECAR_ENABLED_FOR_FIRST_BINANCE_LIVE" in data["blocking_reasons"]
 
     def test_json_sidecar_allow_warning(
-        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
     ) -> None:
         env = dict(READY_ENV)
         env["SIDECAR_ENABLED"] = "true"
         _set_env(monkeypatch, env)
-        with tempfile.NamedTemporaryFile(suffix=".json", prefix="no_state_") as tf:
-            rc = main(
-                argv=[
-                    "--state-path", tf.name,
-                    "--allow-sidecar",
-                    "--json",
-                ]
-            )
+        state_path = tmp_path / "missing_live_state.json"
+        rc = main(
+            argv=[
+                "--state-path", str(state_path),
+                "--allow-sidecar",
+                "--json",
+            ]
+        )
         captured = capsys.readouterr()
         assert rc == 0
         data = json.loads(captured.out)
@@ -780,7 +810,150 @@ class TestJsonOutput:
 
 
 # ======================================================================
-# 12. Source-level no side effects
+# 12. Missing state file passes
+# ======================================================================
+
+
+class TestMissingStatePasses:
+    """Truly missing state file (no file at path) → exit 0."""
+
+    def test_missing_state_file_passes(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+    ) -> None:
+        _set_env(monkeypatch, dict(READY_ENV))
+        state_path = tmp_path / "missing_live_state.json"
+        assert not state_path.exists()
+        rc = main(argv=["--state-path", str(state_path)])
+        captured = capsys.readouterr()
+        assert rc == 0, f"Expected exit 0, got {rc}. stdout={captured.out}"
+        assert "local_state_status=flat_or_absent" in captured.out
+
+
+# ======================================================================
+# 13. Empty state file blocks
+# ======================================================================
+
+
+class TestEmptyStateBlocks:
+    """Empty state file → LOCAL_STATE_UNREADABLE → exit 2."""
+
+    def test_empty_state_file_blocks(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+    ) -> None:
+        _set_env(monkeypatch, dict(READY_ENV))
+        state_path = tmp_path / "empty_live_state.json"
+        state_path.write_text("", encoding="utf-8")
+        rc = main(argv=["--state-path", str(state_path)])
+        captured = capsys.readouterr()
+        assert rc == 2, f"Expected exit 2, got {rc}. stdout={captured.out}"
+        assert "LOCAL_STATE_UNREADABLE" in captured.out
+
+
+# ======================================================================
+# 14. Corrupted JSON blocks
+# ======================================================================
+
+
+class TestCorruptedJsonBlocks:
+    """Corrupted JSON state file → LOCAL_STATE_UNREADABLE → exit 2."""
+
+    def test_corrupted_json_blocks(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+    ) -> None:
+        _set_env(monkeypatch, dict(READY_ENV))
+        state_path = tmp_path / "corrupt_live_state.json"
+        state_path.write_text("{bad json", encoding="utf-8")
+        rc = main(argv=["--state-path", str(state_path)])
+        captured = capsys.readouterr()
+        assert rc == 2, f"Expected exit 2, got {rc}. stdout={captured.out}"
+        assert "LOCAL_STATE_UNREADABLE" in captured.out
+
+    def test_corrupted_json_json_output(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+    ) -> None:
+        """Corrupted JSON → blocked JSON includes LOCAL_STATE_UNREADABLE."""
+        _set_env(monkeypatch, dict(READY_ENV))
+        state_path = tmp_path / "corrupt_live_state.json"
+        state_path.write_text("{bad json", encoding="utf-8")
+        rc = main(argv=["--state-path", str(state_path), "--json"])
+        captured = capsys.readouterr()
+        assert rc == 2
+        data = json.loads(captured.out)
+        assert data["status"] == "blocked"
+        assert "LOCAL_STATE_UNREADABLE" in data["blocking_reasons"]
+
+
+# ======================================================================
+# 15. Unreadable state cannot be bypassed
+# ======================================================================
+
+
+class TestUnreadableStateCannotBeBypassed:
+    """--allow-existing-local-position does NOT bypass LOCAL_STATE_UNREADABLE."""
+
+    def test_unreadable_not_bypassed(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+    ) -> None:
+        _set_env(monkeypatch, dict(READY_ENV))
+        state_path = tmp_path / "corrupt_live_state.json"
+        state_path.write_text("{bad json", encoding="utf-8")
+        rc = main(
+            argv=[
+                "--state-path", str(state_path),
+                "--allow-existing-local-position",
+            ]
+        )
+        captured = capsys.readouterr()
+        assert rc == 2, f"Expected exit 2, got {rc}. stdout={captured.out}"
+        assert "LOCAL_STATE_UNREADABLE" in captured.out
+
+
+# ======================================================================
+# 16. Unsupported exchange (EXCHANGE=abc) → wrong exchange
+# ======================================================================
+
+
+class TestUnsupportedExchangeWrongExchange:
+    """EXCHANGE=abc (unsupported) is classified as wrong_exchange, not config_error."""
+
+    def test_unsupported_exchange_abc_returns_3(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _set_env(monkeypatch, {"EXCHANGE": "abc"})
+        rc = main(argv=[])
+        captured = capsys.readouterr()
+        assert rc == 3, f"Expected exit 3, got {rc}. stdout={captured.out}"
+        assert "BINANCE_SMALL_LIVE_WRONG_EXCHANGE" in captured.out
+
+    def test_unsupported_exchange_abc_json(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _set_env(monkeypatch, {"EXCHANGE": "abc"})
+        rc = main(argv=["--json"])
+        captured = capsys.readouterr()
+        assert rc == 3
+        data = json.loads(captured.out)
+        assert data["status"] == "wrong_exchange"
+        assert data["exchange"] == "abc"
+        assert data["error"] == "BINANCE_SMALL_LIVE_WRONG_EXCHANGE"
+
+    def test_bybit_exchange_returns_3(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _set_env(monkeypatch, {"EXCHANGE": "bybit"})
+        rc = main(argv=[])
+        captured = capsys.readouterr()
+        assert rc == 3, f"Expected exit 3, got {rc}. stdout={captured.out}"
+        assert "BINANCE_SMALL_LIVE_WRONG_EXCHANGE" in captured.out
+
+
+# ======================================================================
+# 17. Source-level no side effects
 # ======================================================================
 
 
