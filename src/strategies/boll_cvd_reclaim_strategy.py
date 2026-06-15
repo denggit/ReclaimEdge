@@ -63,7 +63,7 @@ class BollCvdReclaimStrategyConfig:
     max_entry_distance_from_extreme_pct: float = 0.002
     max_armed_seconds: int = 900
     breakeven_fee_buffer_pct: float = 0.001
-    tp_min_net_profit_pct: float = 0.002
+    tp_min_net_profit_pct: float = 0.004
     min_outside_pct: float = 0.001
     split_tp_enabled: bool = True
     split_tp_min_layers: int = 4
@@ -204,7 +204,7 @@ class BollCvdReclaimStrategyConfig:
             max_entry_distance_from_extreme_pct=float(os.getenv("MAX_ENTRY_DISTANCE_FROM_EXTREME_PCT", "0.002")),
             max_armed_seconds=int(os.getenv("MAX_ARMED_SECONDS", "900")),
             breakeven_fee_buffer_pct=float(os.getenv("BREAKEVEN_FEE_BUFFER_PCT", "0.001")),
-            tp_min_net_profit_pct=float(os.getenv("TP_MIN_NET_PROFIT_PCT", "0.002")),
+            tp_min_net_profit_pct=float(os.getenv("TP_MIN_NET_PROFIT_PCT", "0.004")),
             min_outside_pct=float(os.getenv("BOLL_MIN_OUTSIDE_PCT", "0.001")),
             split_tp_enabled=_env_bool("SPLIT_TP_ENABLED", True),
             split_tp_min_layers=int(os.getenv("SPLIT_TP_MIN_LAYERS", "4")),
@@ -2265,6 +2265,28 @@ class BollCvdReclaimStrategy:
             tp_band=tp_band,
             tp_boll_enabled=self.config.tp_boll_enabled,
         )
+        if log_warning and sel.source == "TP_OUTER_HALF_MIN_PROFIT_FALLBACK":
+            effective_be_val = self._effective_breakeven_for_tp_selection(side)
+            half_min_profit_pct = abs(float(self.config.tp_min_net_profit_pct)) * 0.5
+            tp_boll_outer_raw = (
+                getattr(boll, "tp_upper", None)
+                if side == "LONG"
+                else getattr(boll, "tp_lower", None)
+            )
+            structure_outer_raw = float(boll.upper) if side == "LONG" else float(boll.lower)
+            logger.warning(
+                "CORE_TP_OUTER_UNPROFITABLE_HALF_MIN_FALLBACK | "
+                "side=%s effective_breakeven=%.4f half_min_profit_pct=%.6f "
+                "selected_tp=%.4f raw_outer=%s tp_boll_outer=%s structure_outer=%.4f candle_ts=%s",
+                side,
+                effective_be_val,
+                half_min_profit_pct,
+                sel.price,
+                self._format_optional_price(tp_boll_outer_raw),
+                self._format_optional_price(tp_boll_outer_raw),
+                structure_outer_raw,
+                boll.candle_ts_ms,
+            )
         if log_warning and sel.source == "TP_OUTER_PROFIT_INSUFFICIENT_FALLBACK":
             effective_be_val = self._effective_breakeven_for_tp_selection(side)
             min_net_profit_abs = abs(float(self.config.tp_min_net_profit_pct))

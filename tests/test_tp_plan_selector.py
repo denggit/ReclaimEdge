@@ -6,6 +6,8 @@ work correctly without any dependency on strategy class, state, logger, or env.
 
 from __future__ import annotations
 
+import pytest
+
 from src.strategies.tp_plan_selector import (
     TpBandSnapshot,
     effective_breakeven_for_tp_selection,
@@ -211,15 +213,12 @@ class TestSelectTpOuterWithProfitFallbackLong:
         assert sel.source == "STRUCTURE_BOLL_OUTER_PROFIT_FALLBACK"
 
     def test_both_outer_insufficient_returns_farther_with_warning_source(self):
-        tp_band = _tp_band(tp_upper=107.0, upper=108.0)
-        # effective_be=107.0, required=107.0*1.005=107.535
-        # tp_upper=107.0 < 107.535 → fail
-        # structure upper=108.0 >= 107.535 → OK, not insufficient
-        # Let me adjust to make both insufficient:
+        # Both outer values are insufficient for full min profit but NEITHER is at a loss.
         # effective_be=107.5, required=107.5*1.005=108.0375
-        # tp_upper=107.0 < 108.0375 → fail
-        # structure upper=108.0 < 108.0375 → fail
-        # farther = max(107.0, 108.0) = 108.0
+        # tp_upper=107.8 > 107.5 (not at loss), but < 108.0375 (insufficient)
+        # structure upper=108.0 > 107.5 (not at loss), but < 108.0375 (insufficient)
+        # farther = max(107.8, 108.0) = 108.0
+        tp_band = _tp_band(tp_upper=107.8, upper=108.0)
         sel = select_tp_outer_with_profit_fallback(
             side="LONG", effective_be=107.5, min_net_profit=0.005,
             tp_band=tp_band, tp_boll_enabled=True,
@@ -260,30 +259,22 @@ class TestSelectTpOuterWithProfitFallbackShort:
         assert sel.source == "STRUCTURE_BOLL_OUTER_PROFIT_FALLBACK"
 
     def test_both_outer_insufficient_returns_farther_with_warning_source(self):
-        tp_band = _tp_band(tp_lower=93.0, lower=92.0)
+        # Both outer values are insufficient for full min profit but NEITHER is at a loss.
+        # For SHORT: "at loss" means tp_lower >= effective_be → don't trigger half fallback
         # effective_be=93.5, required=93.5*0.995=93.0325
-        # tp_lower=93.0 > 93.0325 → insufficient (SHORT needs <=)
-        # structure lower=92.0 < 93.0325 → sufficient, so not both insufficient
-        # Let me adjust:
-        # effective_be=93.5, required=93.5*0.995=93.0325
-        # tp_lower=93.1 > 93.0325 → insufficient
-        # structure lower=93.0 < 93.0325 → sufficient, still not both
-        # Let me try:
-        # tp_lower=93.5, lower=93.2
-        # effective_be=94.0, required=94.0*0.995=93.53
-        # tp_lower=93.5 > 93.53 → insufficient (SHORT: price > required means insufficient)
-        # structure lower=93.2 < 93.53 → sufficient, hmm
-        # I need both tp_lower AND structure_lower > required:
-        # tp_lower=93.6, lower=93.55
-        # effective_be=94.0, required=93.53
-        # tp_lower=93.6 > 93.53 → insufficient
-        # structure lower=93.55 > 93.53 → insufficient
-        # farther = min(93.6, 93.55) = 93.55
+        # tp_lower=93.3 < 93.5 (not at loss), but > 93.0325 (insufficient: SHORT needs lower=better)
+        # structure lower=93.2 < 93.5 (not at loss), but > 93.0325 (insufficient)
+        # farther = min(93.3, 93.2) = 93.2
+        # Wait, I need tp_lower < effective_be AND tp_lower > required
+        # tp_lower=93.3 < 93.5(be) → not at loss ✓
+        # tp_lower=93.3 > 93.0325(required) → insufficient ✓
+        # But SHORT needs lower=better, so tp_lower > required means tp_lower is HIGHER than required
+        # 93.3 is HIGHER than 93.0325, which is worse → insufficient
         sel = select_tp_outer_with_profit_fallback(
-            side="SHORT", effective_be=94.0, min_net_profit=0.005,
-            tp_band=_tp_band(tp_lower=93.6, lower=93.55), tp_boll_enabled=True,
+            side="SHORT", effective_be=93.5, min_net_profit=0.005,
+            tp_band=_tp_band(tp_lower=93.3, lower=93.2), tp_boll_enabled=True,
         )
-        assert sel.price == 93.55
+        assert sel.price == 93.2
         assert sel.source == "TP_OUTER_PROFIT_INSUFFICIENT_FALLBACK"
 
 
@@ -1030,3 +1021,178 @@ class TestTpPlanUnchanged:
             new_tp_plan="SINGLE",
         )
         assert decision.unchanged is True
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 12. select_tp_outer_with_profit_fallback — half-min-profit fallback
+# ═══════════════════════════════════════════════════════════════════════
+
+
+class TestSelectTpOuterHalfMinProfitFallbackLong:
+    """LONG: when selected outer BOLL is at/below breakeven → half-min-profit fallback."""
+
+    def test_outer_at_loss_triggers_half_min_profit(self):
+        """LONG BOLL upper=99 <= effective_be=100 → half-min-profit fallback."""
+        tp_band = _tp_band(tp_upper=99.0, upper=101.0)
+        sel = select_tp_outer_with_profit_fallback(
+            side="LONG", effective_be=100.0, min_net_profit=0.004,
+            tp_band=tp_band, tp_boll_enabled=True,
+        )
+        # half_min = 0.004 * 0.5 = 0.002
+        # expected: 100 * 1.002 = 100.2
+        assert sel.source == "TP_OUTER_HALF_MIN_PROFIT_FALLBACK"
+        assert sel.price == pytest.approx(100.2)
+        # explicitly NOT the loss outer or the full min profit price
+        assert sel.price != 99.0
+        assert sel.price != pytest.approx(100.4)  # 100 * 1.004
+
+    def test_outer_exactly_at_breakeven_triggers_half_min_profit(self):
+        """LONG BOLL upper=100 == effective_be=100 → half-min-profit fallback."""
+        tp_band = _tp_band(tp_upper=100.0, upper=101.0)
+        sel = select_tp_outer_with_profit_fallback(
+            side="LONG", effective_be=100.0, min_net_profit=0.004,
+            tp_band=tp_band, tp_boll_enabled=True,
+        )
+        assert sel.source == "TP_OUTER_HALF_MIN_PROFIT_FALLBACK"
+        assert sel.price == pytest.approx(100.2)
+
+    def test_outer_small_profit_does_not_trigger_half_fallback(self):
+        """LONG BOLL upper=100.05 > effective_be=100, but < full min profit → no half fallback."""
+        tp_band = _tp_band(tp_upper=100.05, upper=102.0)
+        sel = select_tp_outer_with_profit_fallback(
+            side="LONG", effective_be=100.0, min_net_profit=0.004,
+            tp_band=tp_band, tp_boll_enabled=True,
+        )
+        # 100.05 > 100 → not at a loss → don't trigger half fallback
+        # full required = 100.4, 100.05 < 100.4 → insufficient
+        # structure upper=102.0 >= 100.4 → structure fallback
+        assert sel.source != "TP_OUTER_HALF_MIN_PROFIT_FALLBACK"
+        assert sel.price != pytest.approx(100.2)
+
+    def test_outer_meets_full_profit_uses_tp_boll(self):
+        """LONG BOLL upper=101.0 >= 100.4 (full min profit) → TP_BOLL."""
+        tp_band = _tp_band(tp_upper=101.0, upper=102.0)
+        sel = select_tp_outer_with_profit_fallback(
+            side="LONG", effective_be=100.0, min_net_profit=0.004,
+            tp_band=tp_band, tp_boll_enabled=True,
+        )
+        assert sel.source == "TP_BOLL"
+        assert sel.price == 101.0
+
+    def test_effective_be_zero_or_negative_no_half_fallback(self):
+        """effective_be=0 → no half fallback, uses basic outer selection."""
+        tp_band = _tp_band(tp_upper=99.0, upper=101.0)
+        sel = select_tp_outer_with_profit_fallback(
+            side="LONG", effective_be=0.0, min_net_profit=0.004,
+            tp_band=tp_band, tp_boll_enabled=True,
+        )
+        assert sel.source == "TP_BOLL"
+        assert sel.price == 99.0
+
+    def test_half_min_profit_uses_half_of_min_net_profit(self):
+        """Verify half = min_net_profit * 0.5, not full min_net_profit."""
+        tp_band = _tp_band(tp_upper=99.0)
+        # min_net_profit=0.006 → half=0.003
+        sel = select_tp_outer_with_profit_fallback(
+            side="LONG", effective_be=100.0, min_net_profit=0.006,
+            tp_band=tp_band, tp_boll_enabled=True,
+        )
+        assert sel.source == "TP_OUTER_HALF_MIN_PROFIT_FALLBACK"
+        assert sel.price == pytest.approx(100.3)  # 100 * 1.003
+        assert sel.price != pytest.approx(100.6)  # NOT 100 * 1.006
+
+    def test_tp_boll_disabled_uses_structure_outer(self):
+        """When TP_BOLL disabled, structure outer at loss triggers half fallback."""
+        tp_band = _tp_band(upper=99.5, tp_upper=108.0)
+        sel = select_tp_outer_with_profit_fallback(
+            side="LONG", effective_be=100.0, min_net_profit=0.004,
+            tp_band=tp_band, tp_boll_enabled=False,
+        )
+        # structure upper=99.5 <= 100 → at loss → half fallback
+        assert sel.source == "TP_OUTER_HALF_MIN_PROFIT_FALLBACK"
+        assert sel.price == pytest.approx(100.2)
+
+
+class TestSelectTpOuterHalfMinProfitFallbackShort:
+    """SHORT: when selected outer BOLL is at/above breakeven → half-min-profit fallback."""
+
+    def test_outer_at_loss_triggers_half_min_profit(self):
+        """SHORT BOLL lower=101 >= effective_be=100 → half-min-profit fallback."""
+        tp_band = _tp_band(tp_lower=101.0, lower=99.0)
+        sel = select_tp_outer_with_profit_fallback(
+            side="SHORT", effective_be=100.0, min_net_profit=0.004,
+            tp_band=tp_band, tp_boll_enabled=True,
+        )
+        # half_min = 0.004 * 0.5 = 0.002
+        # expected: 100 * 0.998 = 99.8
+        assert sel.source == "TP_OUTER_HALF_MIN_PROFIT_FALLBACK"
+        assert sel.price == pytest.approx(99.8)
+        # explicitly NOT the loss outer or the full min profit price
+        assert sel.price != 101.0
+        assert sel.price != pytest.approx(99.6)  # 100 * 0.996
+
+    def test_outer_exactly_at_breakeven_triggers_half_min_profit(self):
+        """SHORT BOLL lower=100 == effective_be=100 → half-min-profit fallback."""
+        tp_band = _tp_band(tp_lower=100.0, lower=99.0)
+        sel = select_tp_outer_with_profit_fallback(
+            side="SHORT", effective_be=100.0, min_net_profit=0.004,
+            tp_band=tp_band, tp_boll_enabled=True,
+        )
+        assert sel.source == "TP_OUTER_HALF_MIN_PROFIT_FALLBACK"
+        assert sel.price == pytest.approx(99.8)
+
+    def test_outer_small_profit_does_not_trigger_half_fallback(self):
+        """SHORT BOLL lower=99.95 < effective_be=100, but > full min profit → no half fallback."""
+        tp_band = _tp_band(tp_lower=99.95, lower=98.0)
+        sel = select_tp_outer_with_profit_fallback(
+            side="SHORT", effective_be=100.0, min_net_profit=0.004,
+            tp_band=tp_band, tp_boll_enabled=True,
+        )
+        # 99.95 < 100 → not at a loss → don't trigger half fallback
+        # full required = 99.6, 99.95 > 99.6 → insufficient (SHORT: lower is better)
+        # structure lower=98.0 <= 99.6 → structure fallback
+        assert sel.source != "TP_OUTER_HALF_MIN_PROFIT_FALLBACK"
+        assert sel.price != pytest.approx(99.8)
+
+    def test_outer_meets_full_profit_uses_tp_boll(self):
+        """SHORT BOLL lower=99.0 <= 99.6 (full min profit) → TP_BOLL."""
+        tp_band = _tp_band(tp_lower=99.0, lower=98.0)
+        sel = select_tp_outer_with_profit_fallback(
+            side="SHORT", effective_be=100.0, min_net_profit=0.004,
+            tp_band=tp_band, tp_boll_enabled=True,
+        )
+        assert sel.source == "TP_BOLL"
+        assert sel.price == 99.0
+
+    def test_effective_be_zero_or_negative_no_half_fallback(self):
+        """effective_be=0 → no half fallback, uses basic outer selection."""
+        tp_band = _tp_band(tp_lower=101.0, lower=99.0)
+        sel = select_tp_outer_with_profit_fallback(
+            side="SHORT", effective_be=0.0, min_net_profit=0.004,
+            tp_band=tp_band, tp_boll_enabled=True,
+        )
+        assert sel.source == "TP_BOLL"
+        assert sel.price == 101.0
+
+    def test_half_min_profit_uses_half_of_min_net_profit(self):
+        """Verify half = min_net_profit * 0.5, not full min_net_profit."""
+        tp_band = _tp_band(tp_lower=101.0)
+        # min_net_profit=0.006 → half=0.003
+        sel = select_tp_outer_with_profit_fallback(
+            side="SHORT", effective_be=100.0, min_net_profit=0.006,
+            tp_band=tp_band, tp_boll_enabled=True,
+        )
+        assert sel.source == "TP_OUTER_HALF_MIN_PROFIT_FALLBACK"
+        assert sel.price == pytest.approx(99.7)  # 100 * 0.997
+        assert sel.price != pytest.approx(99.4)  # NOT 100 * 0.994
+
+    def test_tp_boll_disabled_uses_structure_outer(self):
+        """When TP_BOLL disabled, structure outer at loss triggers half fallback."""
+        tp_band = _tp_band(lower=100.5, tp_lower=92.0)
+        sel = select_tp_outer_with_profit_fallback(
+            side="SHORT", effective_be=100.0, min_net_profit=0.004,
+            tp_band=tp_band, tp_boll_enabled=False,
+        )
+        # structure lower=100.5 >= 100 → at loss → half fallback
+        assert sel.source == "TP_OUTER_HALF_MIN_PROFIT_FALLBACK"
+        assert sel.price == pytest.approx(99.8)

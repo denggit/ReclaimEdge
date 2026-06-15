@@ -180,6 +180,9 @@ def select_tp_outer_with_profit_fallback(
 ) -> TpOuterSelection:
     """Select outer TP with profit-distance fallback.
 
+    0) If the selected outer BOLL is on the loss side (vs effective breakeven),
+       use half-min-profit fallback instead of locking in a losing TP.
+
     1) Try TP_BOLL15 outer first.
     2) If profit insufficient, try structure BOLL20 outer.
     3) If both insufficient, use the direction-correct farther outer
@@ -189,6 +192,7 @@ def select_tp_outer_with_profit_fallback(
     SHORT outer valid: price <= effective_be * (1 - min_net_profit)
     """
     min_net_profit = abs(float(min_net_profit))
+    half_min_profit = min_net_profit * 0.5
 
     if effective_be <= 0:
         return select_tp_outer(side=side, tp_band=tp_band, tp_boll_enabled=tp_boll_enabled)
@@ -196,6 +200,13 @@ def select_tp_outer_with_profit_fallback(
     tp_outer = select_tp_outer(side=side, tp_band=tp_band, tp_boll_enabled=tp_boll_enabled)
 
     if side == "LONG":
+        # If the selected outer BOLL is at or below breakeven, use half-min-profit fallback
+        if tp_outer.price <= effective_be:
+            return TpOuterSelection(
+                price=effective_be * (1 + half_min_profit),
+                source="TP_OUTER_HALF_MIN_PROFIT_FALLBACK",
+            )
+
         required = effective_be * (1 + min_net_profit)
         if tp_outer.price >= required:
             return tp_outer
@@ -210,6 +221,13 @@ def select_tp_outer_with_profit_fallback(
         return TpOuterSelection(price=fallback, source="TP_OUTER_PROFIT_INSUFFICIENT_FALLBACK")
 
     # SHORT
+    # If the selected outer BOLL is at or above breakeven, use half-min-profit fallback
+    if tp_outer.price >= effective_be:
+        return TpOuterSelection(
+            price=effective_be * (1 - half_min_profit),
+            source="TP_OUTER_HALF_MIN_PROFIT_FALLBACK",
+        )
+
     required = effective_be * (1 - min_net_profit)
     if tp_outer.price <= required:
         return tp_outer
