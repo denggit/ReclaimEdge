@@ -185,7 +185,6 @@ class DailyTradeReporter:
         add_count = 0
         tp_update_count = 0
         three_stage_runner_count = 0
-        near_tp_reduce_count = 0
         error_count = 0
         active_known_closed_pnl = 0.0
         active_gross_profit = 0.0
@@ -205,8 +204,6 @@ class DailyTradeReporter:
                     three_stage_runner_count += 1
             elif event.event_type == "TP_UPDATE":
                 tp_update_count += 1
-            elif event.event_type == "NEAR_TP_REDUCE":
-                near_tp_reduce_count += 1
             elif event.event_type == "ERROR":
                 error_count += 1
 
@@ -340,7 +337,6 @@ class DailyTradeReporter:
     {metric_card('ADD 事件数', str(add_count))}
     {metric_card('TP 更新数', str(tp_update_count))}
     {metric_card('Three-Stage Runner 次数', str(three_stage_runner_count))}
-    {metric_card('Near-TP 减仓数', str(near_tp_reduce_count))}
     {metric_card('错误事件数', str(error_count))}
   </div>
 

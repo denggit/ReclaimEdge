@@ -2,7 +2,6 @@
 
 Verifies:
 - order_failure_delayed_market_exit_failed is in flat_clearable_halt_reasons.
-- near_tp_final_tp_failed_delayed_market_exit_armed is in flat_clearable_halt_reasons.
 - When position is flat with DME FAILED halt, trading_halted is cleared.
 - DME WAITING_FLAT / FAILED both allow flat to clear the halt.
 - Existing halt reasons are preserved.
@@ -146,24 +145,6 @@ class TestFlatClearableHaltReasonsDmeFailed:
         assert updated_state.halt_reason is None
 
     @pytest.mark.asyncio
-    async def test_near_tp_final_tp_failed_dme_armed_clears_on_flat(self) -> None:
-        """When halt_reason=near_tp_final_tp_failed_delayed_market_exit_armed
-        and position flat, trading_halted should be cleared."""
-        strategy = _make_strategy()
-        execution_state = live_runtime_types.ExecutionState("pos-1", 1000.0)
-        execution_state.trading_halted = True
-        execution_state.halt_reason = "near_tp_final_tp_failed_delayed_market_exit_armed"
-
-        updated_state = await self._run_flat_settlement(
-            strategy, execution_state, "near_tp_final_tp_failed_delayed_market_exit_armed",
-        )
-
-        assert updated_state.trading_halted is False, (
-            "near_tp DME armed halt must clear when position is flat"
-        )
-        assert updated_state.halt_reason is None
-
-    @pytest.mark.asyncio
     async def test_dme_waiting_flat_still_clears_on_flat(self) -> None:
         """Existing order_failure_delayed_market_exit_waiting_flat still clears."""
         strategy = _make_strategy()
@@ -191,7 +172,6 @@ class TestDmeArmedReasonsStillClearable:
         "middle_runner_sl_failed_delayed_market_exit_armed",
         "middle_bucket_fast_sl_failed_delayed_market_exit_armed",
         "middle_bucket_fast_sl_invalid_delayed_market_exit_armed",
-        "near_tp_protective_sl_failed_delayed_market_exit_armed",
         "core_tp_place_failed_delayed_market_exit_armed",
     ]
 
@@ -451,26 +431,6 @@ class TestDmeFailedClearsOnFlatWithRollingLossGuard:
 
         assert updated_state.trading_halted is False, (
             "DME failed halt must clear on flat even with rolling_loss_guard present"
-        )
-        assert updated_state.halt_reason is None
-
-    @pytest.mark.asyncio
-    async def test_near_tp_final_tp_failed_dme_armed_clears_on_flat_with_rolling_loss_guard(self) -> None:
-        """When rolling_loss_guard is not None and
-        halt_reason=near_tp_final_tp_failed_delayed_market_exit_armed, flat must clear halt.
-        """
-        execution_state = live_runtime_types.ExecutionState("pos-1", 1000.0)
-        execution_state.trading_halted = True
-        execution_state.halt_reason = "near_tp_final_tp_failed_delayed_market_exit_armed"
-
-        updated_state = await self._call_flat_settlement(
-            execution_state,
-            "near_tp_final_tp_failed_delayed_market_exit_armed",
-            rolling_loss_guard=FakeRollingLossGuard(),
-        )
-
-        assert updated_state.trading_halted is False, (
-            "near_tp DME armed halt must clear on flat even with rolling_loss_guard present"
         )
         assert updated_state.halt_reason is None
 

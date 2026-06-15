@@ -236,7 +236,7 @@ async def test_market_exit_runner_context_uses_runner_semantic_action(monkeypatc
     ok, message = await manager.market_exit_remaining_position_with_retries(
         "LONG",
         1,
-        context="near_tp_market_exit_runner",
+        context="market_exit_runner",
     )
 
     assert ok is True
@@ -245,7 +245,7 @@ async def test_market_exit_runner_context_uses_runner_semantic_action(monkeypatc
     assert len(trader.semantic.calls) == 1
     call = trader.semantic.calls[0]
     assert call["method"] == "market_exit_runner"
-    assert call["label"] == "near_tp_market_exit_runner"
+    assert call["label"] == "market_exit_runner"
     assert call["side"] == BrokerPositionSide.LONG
     assert call["quantity"] == Decimal("10")
     assert call["quantity_unit"] == BrokerQuantityUnit.CONTRACTS
@@ -348,7 +348,7 @@ def test_semantic_market_exit_uses_explicit_broker_semantic_executor_access() ->
 
 
 def test_is_runner_market_exit_context() -> None:
-    assert MarketExitManager._is_runner_market_exit_context("near_tp_market_exit_runner") is True
+    assert MarketExitManager._is_runner_market_exit_context("market_exit_runner") is True
     assert MarketExitManager._is_runner_market_exit_context("trend_runner_exit") is True
     assert MarketExitManager._is_runner_market_exit_context("generic") is False
     assert MarketExitManager._is_runner_market_exit_context("") is False

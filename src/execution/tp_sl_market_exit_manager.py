@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
+from src.execution.trader import LiveTradeResult
 from src.utils.log import get_logger
 
 if TYPE_CHECKING:
     from src.execution.trader import Trader
     from src.execution.trading_client_port import TradingClientPort
-    from src.strategies.boll_cvd_reclaim_strategy import PositionSide
+    from src.strategies.boll_cvd_reclaim_strategy import PositionSide, TradeIntent
 
 logger = get_logger(__name__)
 
@@ -201,6 +203,63 @@ class MarketExitManager:
                 )
         return False, last_error or "market_exit_failed"
 
+    async def execute_market_exit_runner(self, intent: TradeIntent) -> LiveTradeResult:
+        t = self.trader
+        action = "MARKET_EXIT_RUNNER"
+        restored_trend_runner_sl_order_id = getattr(intent, "trend_runner_sl_order_id", None)
+        if restored_trend_runner_sl_order_id and not t.trend_runner_sl_order_id:
+            t.trend_runner_sl_order_id = restored_trend_runner_sl_order_id
+        position = await t.fetch_position_snapshot()
+        if not position.has_position:
+            await self.trader._cleanup_after_market_exit()
+            return LiveTradeResult(True, action, None, None, "0", t.price_to_str(intent.tp_price),
+                                   "runner_already_flat", exit_all=True)
+        if position.side != intent.side:
+            await self.trader._cleanup_after_market_exit()
+            return LiveTradeResult(True, action, None, None, "0", t.price_to_str(intent.tp_price),
+                                   "runner_side_absent", exit_all=True)
+
+        contracts_before = position.contracts
+        ok, message = await self.trader.market_exit_remaining_position_with_retries(
+            intent.side,
+            retry_count=int(os.getenv("MARKET_EXIT_RUNNER_RETRY_COUNT", "3")),
+            context="market_exit_runner",
+            retry_interval_seconds=float(os.getenv("MARKET_EXIT_RUNNER_RETRY_INTERVAL_SECONDS", "0.5")),
+        )
+        refreshed = await t.fetch_position_snapshot()
+        contracts_after = refreshed.contracts if refreshed.has_position and refreshed.side == intent.side else Decimal(
+            "0")
+        t.position_contracts = contracts_after
+        if ok:
+            return LiveTradeResult(
+                True,
+                action,
+                None,
+                None,
+                t.decimal_to_str(contracts_before),
+                t.price_to_str(intent.tp_price),
+                message,
+                reduce_filled=True,
+                exit_all=True,
+                contracts_before=t.decimal_to_str(contracts_before),
+                contracts_reduced=t.decimal_to_str(contracts_before),
+                contracts_after=t.decimal_to_str(contracts_after),
+            )
+        return LiveTradeResult(
+            False,
+            action,
+            None,
+            None,
+            t.decimal_to_str(contracts_before),
+            t.price_to_str(intent.tp_price),
+            message,
+            reduce_filled=True,
+            exit_all=False,
+            contracts_before=t.decimal_to_str(contracts_before),
+            contracts_reduced="",
+            contracts_after=t.decimal_to_str(contracts_after),
+        )
+
     async def _cleanup_after_market_exit(self) -> None:
         t = self.trader
         try:
@@ -209,10 +268,8 @@ class MarketExitManager:
             logger.warning("MARKET_EXIT_CLEANUP | cleanup=cancel_reduce_only_tp_failed")
         entry_sl_order_id = getattr(t, "entry_protective_sl_order_id", None)
         if entry_sl_order_id:
-            await self.trader.cancel_near_tp_protective_stop(entry_sl_order_id)
+            await self.trader.cancel_protective_stop(entry_sl_order_id)
             t.entry_protective_sl_order_id = None
-        if t.near_tp_protective_sl_order_id:
-            await self.trader.cancel_near_tp_protective_stop(t.near_tp_protective_sl_order_id)
         middle_runner_sl_order_id = getattr(t, "middle_runner_protective_sl_order_id", None)
         if middle_runner_sl_order_id:
             await self.trader.cancel_middle_runner_protective_stop(middle_runner_sl_order_id)
@@ -222,6 +279,3 @@ class MarketExitManager:
         trend_runner_sl_order_id = getattr(t, "trend_runner_sl_order_id", None)
         if trend_runner_sl_order_id:
             await self.trader.cancel_trend_runner_protective_stop(trend_runner_sl_order_id)
-
-    # Backward-compat alias — new code must call _cleanup_after_market_exit
-    _cleanup_after_near_tp_market_exit = _cleanup_after_market_exit

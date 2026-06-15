@@ -207,8 +207,8 @@ async def run_account_sync_protective_orders_phase(
                     three_stage_post_tp1_sl_payload["side"],
                     three_stage_post_tp1_sl_payload["contracts"],
                     float(sl_price),
-                    retry_count=int(os.getenv("NEAR_TP_PROTECTIVE_SL_RETRY_COUNT", "3")),
-                    retry_interval_seconds=float(os.getenv("NEAR_TP_PROTECTIVE_SL_RETRY_INTERVAL_SECONDS", "1")),
+                    retry_count=int(os.getenv("PROTECTIVE_SL_RETRY_COUNT", "3")),
+                    retry_interval_seconds=float(os.getenv("PROTECTIVE_SL_RETRY_INTERVAL_SECONDS", "1")),
                 )
             except Exception as exc:
                 sl_ok = False
@@ -290,12 +290,12 @@ async def run_account_sync_protective_orders_phase(
                         "tp2_ratio": getattr(strategy.state, "three_stage_tp2_ratio", 0.0),
                         "runner_ratio": getattr(strategy.state, "three_stage_runner_ratio", 0.0),
                         "reason": "three_stage_tp1_filled",
-                        "retry_config": "NEAR_TP_PROTECTIVE_SL_RETRY_COUNT/NEAR_TP_PROTECTIVE_SL_RETRY_INTERVAL_SECONDS",
+                        "retry_config": "PROTECTIVE_SL_RETRY_COUNT/PROTECTIVE_SL_RETRY_INTERVAL_SECONDS",
                     },
                     position_id=three_stage_post_tp1_sl_payload.get("position_id"),
                 )
             logger.warning(
-                "THREE_STAGE_TP1_PROTECTIVE_SL_PLACED | position_id=%s side=%s core_contracts=%s net_contracts=%s sl_contracts=%s protective_sl_price=%s protective_sl_order_id=%s retry_config=near_tp",
+                "THREE_STAGE_TP1_PROTECTIVE_SL_PLACED | position_id=%s side=%s core_contracts=%s net_contracts=%s sl_contracts=%s protective_sl_price=%s protective_sl_order_id=%s retry_config=protective_sl",
                 three_stage_post_tp1_sl_payload.get("position_id"),
                 three_stage_post_tp1_sl_payload.get("side"),
                 three_stage_post_tp1_sl_payload.get("core_contracts"),
@@ -384,7 +384,7 @@ async def run_account_sync_protective_orders_phase(
                             "reason": sl_message,
                             "trading_halted": True,
                             "halt_reason": halt_reason,
-                            "retry_config": "NEAR_TP_PROTECTIVE_SL_RETRY_COUNT/NEAR_TP_PROTECTIVE_SL_RETRY_INTERVAL_SECONDS",
+                            "retry_config": "PROTECTIVE_SL_RETRY_COUNT/PROTECTIVE_SL_RETRY_INTERVAL_SECONDS",
                             "market_exit_attempted": False,
                             "delayed_market_exit_armed": True,
                             "core_contracts": str(core_contracts) if core_contracts is not None else None,
@@ -431,8 +431,8 @@ async def run_account_sync_protective_orders_phase(
                     middle_runner_sl_payload["side"],
                     middle_runner_sl_payload["contracts"],
                     float(sl_price),
-                    retry_count=int(os.getenv("NEAR_TP_PROTECTIVE_SL_RETRY_COUNT", "3")),
-                    retry_interval_seconds=float(os.getenv("NEAR_TP_PROTECTIVE_SL_RETRY_INTERVAL_SECONDS", "1")),
+                    retry_count=int(os.getenv("PROTECTIVE_SL_RETRY_COUNT", "3")),
+                    retry_interval_seconds=float(os.getenv("PROTECTIVE_SL_RETRY_INTERVAL_SECONDS", "1")),
                 )
             except Exception as exc:
                 sl_ok = False
@@ -670,8 +670,8 @@ async def run_account_sync_protective_orders_phase(
                         side,
                         net_contracts,
                         float(decision.sl_price or fast_sl_price or 0.0),
-                        retry_count=int(os.getenv("NEAR_TP_PROTECTIVE_SL_RETRY_COUNT", "3")),
-                        retry_interval_seconds=float(os.getenv("NEAR_TP_PROTECTIVE_SL_RETRY_INTERVAL_SECONDS", "1")),
+                        retry_count=int(os.getenv("PROTECTIVE_SL_RETRY_COUNT", "3")),
+                        retry_interval_seconds=float(os.getenv("PROTECTIVE_SL_RETRY_INTERVAL_SECONDS", "1")),
                     )
                 except Exception as exc:
                     sl_ok = False

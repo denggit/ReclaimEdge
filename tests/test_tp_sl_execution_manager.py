@@ -64,7 +64,6 @@ def make_trader(**overrides) -> Trader:
     t.contract_precision = Decimal("0.01")
     t.min_contracts = Decimal("0.01")
     t.tp_order_id = None
-    t.near_tp_protective_sl_order_id = None
     t.middle_runner_protective_sl_order_id = None
     t.three_stage_post_tp1_protective_sl_order_id = None
     t.trend_runner_sl_order_id = None
@@ -141,18 +140,8 @@ class TpSlExecutionManagerTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("sidecar-tp", ids)
         self.assertIn("custom-id", ids)
 
-    def test_protected_order_ids_includes_intent_near_tp_sl_order_id(self) -> None:
-        trader = make_trader()
-        manager = TpSlExecutionManager(trader, trading_client=trader.trading_client)
-        trader._tp_sl_manager = manager  # type: ignore[assignment]
-        intent = make_intent()
-        object.__setattr__(intent, "near_tp_protective_sl_order_id", "near-sl-id")
-        ids = manager._protected_order_ids_from_intent(intent)
-        self.assertIn("near-sl-id", ids)
-
     def test_protected_order_ids_includes_trader_current_sl_order_ids(self) -> None:
         trader = make_trader(
-            near_tp_protective_sl_order_id="current-near-sl",
             middle_runner_protective_sl_order_id="current-mid-sl",
             trend_runner_sl_order_id="current-trend-sl",
         )
@@ -160,7 +149,6 @@ class TpSlExecutionManagerTest(unittest.IsolatedAsyncioTestCase):
         trader._tp_sl_manager = manager  # type: ignore[assignment]
         intent = make_intent()
         ids = manager._protected_order_ids_from_intent(intent)
-        self.assertIn("current-near-sl", ids)
         self.assertIn("current-mid-sl", ids)
         self.assertIn("current-trend-sl", ids)
 
@@ -352,68 +340,6 @@ class TpSlExecutionManagerTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result)
 
     # ------------------------------------------------------------------
-    # place_near_tp_protective_stop_with_retries — happy path
-    # ------------------------------------------------------------------
-
-    async def test_protective_sl_retries_happy_path(self) -> None:
-        trader = make_trader()
-        requests = []
-
-        async def fake_request(method, path, body):  # type: ignore[no-untyped-def]
-            requests.append((method, path, dict(body)))
-            return {"code": "0", "data": [{"algoId": "algo-1"}]}
-
-        async def fake_verify(_algo_id, _side, _contracts, _stop_price):  # type: ignore[no-untyped-def]
-            return True
-
-        trader.request = fake_request  # type: ignore[method-assign]
-        trader.verify_near_tp_protective_stop = fake_verify  # type: ignore[method-assign]
-
-        manager = TpSlExecutionManager(trader, trading_client=trader.trading_client)
-        trader._tp_sl_manager = manager  # type: ignore[assignment]
-        ok, algo_id, message = await manager.place_near_tp_protective_stop_with_retries(
-            "LONG", Decimal("10"), 3050.0, 3, 0.1
-        )
-
-        self.assertTrue(ok)
-        self.assertEqual(algo_id, "algo-1")
-        self.assertEqual(message, "protective_sl_placed")
-
-    # ------------------------------------------------------------------
-    # place_near_tp_protective_stop_with_retries — fallback path
-    # ------------------------------------------------------------------
-
-    async def test_protective_sl_retries_fallback_path(self) -> None:
-        trader = make_trader()
-        requests = []
-        verify_count = [0]
-
-        async def fake_request(method, path, body):  # type: ignore[no-untyped-def]
-            requests.append((method, path, dict(body)))
-            return {"code": "0", "data": [{"algoId": f"algo-{len(requests)}"}]}
-
-        async def fake_verify(_algo_id, _side, _contracts, _stop_price):  # type: ignore[no-untyped-def]
-            verify_count[0] += 1
-            # Primary retries fail verification; fallback succeeds on first try
-            return verify_count[0] > 3  # 3 primary retries fail, fallback succeeds
-
-        async def fake_cancel_near_tp(_order_id):  # type: ignore[no-untyped-def]
-            return True
-
-        trader.request = fake_request  # type: ignore[method-assign]
-        trader.verify_near_tp_protective_stop = fake_verify  # type: ignore[method-assign]
-        trader.cancel_near_tp_protective_stop = fake_cancel_near_tp  # type: ignore[method-assign]
-
-        manager = TpSlExecutionManager(trader, trading_client=trader.trading_client)
-        trader._tp_sl_manager = manager  # type: ignore[assignment]
-        ok, algo_id, message = await manager.place_near_tp_protective_stop_with_retries(
-            "LONG", Decimal("10"), 3050.0, 3, 0.0
-        )
-
-        self.assertTrue(ok)
-        self.assertEqual(message, "fallback_conditional_close_placed")
-
-    # ------------------------------------------------------------------
     # market_exit_remaining_position_with_retries
     # ------------------------------------------------------------------
 
@@ -520,26 +446,6 @@ class TpSlExecutionManagerTest(unittest.IsolatedAsyncioTestCase):
         finally:
             trader._tp_sl_manager.replace_take_profit = original_mgr_replace  # type: ignore[method-assign]
 
-    async def test_trader_execute_near_tp_reduce_delegates_to_manager(self) -> None:
-        trader = make_trader()
-        delegation_called = [False]
-
-        async def tracking_execute(intent):  # type: ignore[no-untyped-def]
-            delegation_called[0] = True
-            return trader_module.LiveTradeResult(
-                ok=True, action="test", order_id=None, tp_order_id=None, contracts="0", tp_price="0.00",
-                message="delegated"
-            )
-
-        original = trader._tp_sl_manager.execute_near_tp_reduce
-        trader._tp_sl_manager.execute_near_tp_reduce = tracking_execute  # type: ignore[method-assign]
-        try:
-            intent = make_intent(intent_type="NEAR_TP_REDUCE")
-            await trader.execute_near_tp_reduce(intent)
-            self.assertTrue(delegation_called[0])
-        finally:
-            trader._tp_sl_manager.execute_near_tp_reduce = original  # type: ignore[method-assign]
-
     async def test_trader_execute_market_exit_runner_delegates_to_manager(self) -> None:
         trader = make_trader()
         delegation_called = [False]
@@ -575,23 +481,6 @@ class TpSlExecutionManagerTest(unittest.IsolatedAsyncioTestCase):
         finally:
             trader._tp_sl_manager.cancel_existing_reduce_only_orders = original  # type: ignore[method-assign]
 
-    async def test_trader_place_near_tp_protective_stop_with_retries_delegates_to_manager(self) -> None:
-        trader = make_trader()
-        delegation_called = [False]
-
-        async def tracking_place(side, contracts, stop_price, retry_count,
-                                 retry_interval_seconds):  # type: ignore[no-untyped-def]
-            delegation_called[0] = True
-            return True, "algo-1", "placed"
-
-        original = trader._tp_sl_manager.place_near_tp_protective_stop_with_retries
-        trader._tp_sl_manager.place_near_tp_protective_stop_with_retries = tracking_place  # type: ignore[method-assign]
-        try:
-            await trader.place_near_tp_protective_stop_with_retries("LONG", Decimal("10"), 3050.0, 3, 0.1)
-            self.assertTrue(delegation_called[0])
-        finally:
-            trader._tp_sl_manager.place_near_tp_protective_stop_with_retries = original  # type: ignore[method-assign]
-
     # ------------------------------------------------------------------
     # sidecar fixed TP — sanitize client_order_id
     # ------------------------------------------------------------------
@@ -622,24 +511,6 @@ class TpSlExecutionManagerTest(unittest.IsolatedAsyncioTestCase):
     # ------------------------------------------------------------------
     # Regression: LiveTradeResult / PositionSnapshot runtime import
     # ------------------------------------------------------------------
-
-    async def test_execute_near_tp_reduce_no_position_returns_LiveTradeResult(self) -> None:
-        """execute_near_tp_reduce with no position returns LiveTradeResult (runtime import check)."""
-        trader = make_trader()
-
-        async def fake_fetch_snapshot():  # type: ignore[no-untyped-def]
-            return trader_module.PositionSnapshot(None, Decimal("0"), 0.0, 0.0, Decimal("0"))
-
-        trader.fetch_position_snapshot = fake_fetch_snapshot
-
-        manager = TpSlExecutionManager(trader, trading_client=trader.trading_client)
-        trader._tp_sl_manager = manager  # type: ignore[assignment]
-        intent = make_intent(intent_type="NEAR_TP_REDUCE")
-        result = await manager.execute_near_tp_reduce(intent)
-
-        self.assertIsInstance(result, trader_module.LiveTradeResult)
-        self.assertFalse(result.ok)
-        self.assertEqual(result.message, "no position")
 
     async def test_replace_take_profit_no_position_returns_LiveTradeResult(self) -> None:
         """replace_take_profit with no net position returns LiveTradeResult (runtime import check)."""

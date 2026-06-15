@@ -46,8 +46,6 @@ async def handle_execution_failure(
             execution_state.trading_halted = True
             if str(error) == "reduce_only_order_identity_unknown":
                 execution_state.halt_reason = "reduce_only_order_identity_unknown"
-            elif command.intent.intent_type == "NEAR_TP_REDUCE" and getattr(result, "reduce_filled", False):
-                execution_state.halt_reason = "near_tp_reduce_failure"
             else:
                 execution_state.halt_reason = "execution_failure_live_position"
             trader.position_contracts = contracts
@@ -79,22 +77,8 @@ async def handle_execution_failure(
     except Exception:
         logger.exception("Failed to write trade journal error event")
 
-    if command.intent.intent_type == "NEAR_TP_REDUCE" and getattr(result, "reduce_filled", False) and halted:
-        subject = "CRITICAL: Near-TP protective SL and market exit failed"
-        content = f"""
-<div style="font-family: Arial, Helvetica, sans-serif; line-height: 1.55; color: #222; max-width: 760px;">
-  <h2>CRITICAL: Near-TP protective SL and market exit failed</h2>
-  <p><strong>Trading has been halted. Manual OKX intervention is required.</strong></p>
-  <p><strong>position_id:</strong> {html.escape(str(current_position_id))}</p>
-  <p><strong>side:</strong> {html.escape(command.intent.side)}</p>
-  <p><strong>contracts_after:</strong> {html.escape(str(getattr(result, 'contracts_after', contracts)))}</p>
-  <p><strong>protective_sl_price:</strong> {html.escape(str(getattr(result, 'protective_sl_price', '-')))}</p>
-  <p><strong>Error:</strong> {html.escape(str(error))}</p>
-</div>
-""".strip()
-    else:
-        subject, content = report_helpers.build_live_failure_email(command.intent, error, rolled_back=rolled_back,
-                                                                   halted=halted)
+    subject, content = report_helpers.build_live_failure_email(command.intent, error, rolled_back=rolled_back,
+                                                               halted=halted)
     ok = await email_sender.send_email_async(subject, content, content_type="html")
     if not ok:
         logger.error("Failed to send live execution failure email")

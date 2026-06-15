@@ -96,7 +96,6 @@ def _make_trader(**overrides) -> Trader:
     t.contract_precision = Decimal("0.01")
     t.min_contracts = Decimal("0.01")
     t.tp_order_id = None
-    t.near_tp_protective_sl_order_id = None
     t.middle_runner_protective_sl_order_id = None
     t.three_stage_post_tp1_protective_sl_order_id = None
     t.trend_runner_sl_order_id = None

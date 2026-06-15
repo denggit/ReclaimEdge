@@ -36,7 +36,7 @@ class LiveTradeResult:
     contracts_before: str = ""
     contracts_reduced: str = ""
     contracts_after: str = ""
-    near_tp_exit_all: bool = False
+    exit_all: bool = False
     reduce_filled: bool = False
     middle_bucket_split_executed: bool | None = None
     middle_bucket_split_disabled_reason: str | None = None
@@ -134,7 +134,6 @@ class Trader:
 
         self.tp_order_id: str | None = None
         self.entry_protective_sl_order_id: str | None = None
-        self.near_tp_protective_sl_order_id: str | None = None
         self.middle_runner_protective_sl_order_id: str | None = None
         self.three_stage_post_tp1_protective_sl_order_id: str | None = None
         self.trend_runner_sl_order_id: str | None = None
@@ -301,8 +300,6 @@ class Trader:
     # ------------------------------------------------------------------
 
     async def execute_intent(self, intent: TradeIntent) -> LiveTradeResult:
-        if intent.intent_type == "NEAR_TP_REDUCE":
-            return await self.execute_near_tp_reduce(intent)
         if intent.intent_type == "MARKET_EXIT_RUNNER":
             return await self.execute_market_exit_runner(intent)
         if intent.intent_type == "UPDATE_TP":
@@ -436,9 +433,6 @@ class Trader:
                 protective_sl_ok=bool(entry_sl_order_id),
             )
 
-    async def execute_near_tp_reduce(self, intent: TradeIntent) -> LiveTradeResult:
-        return await self._require_tp_sl_manager().execute_near_tp_reduce(intent)
-
     async def execute_market_exit_runner(self, intent: TradeIntent) -> LiveTradeResult:
         return await self._require_tp_sl_manager().execute_market_exit_runner(intent)
 
@@ -494,7 +488,7 @@ class Trader:
             pos_side_mode=self.pos_side_mode,
         )
 
-    async def place_near_tp_protective_stop_with_retries(
+    async def place_protective_stop_with_retries(
             self,
             side: PositionSide,
             contracts: Decimal | str | int | float,
@@ -502,7 +496,7 @@ class Trader:
             retry_count: int,
             retry_interval_seconds: float,
     ) -> tuple[bool, str | None, str]:
-        return await self._require_tp_sl_manager().place_near_tp_protective_stop_with_retries(
+        return await self._require_tp_sl_manager().place_protective_stop_with_retries(
             side, contracts, stop_price, retry_count, retry_interval_seconds)
 
     async def place_middle_runner_protective_stop_with_retries(
@@ -549,38 +543,12 @@ class Trader:
         return await self._require_tp_sl_manager().place_three_stage_post_tp1_protective_stop_with_retries(
             side, contracts, stop_price, retry_count, retry_interval_seconds)
 
-    async def _cancel_unverified_near_tp_algo(self, algo_id: str, *, phase: str) -> None:
-        return await self._require_tp_sl_manager()._cancel_unverified_near_tp_algo(algo_id, phase=phase)
+    async def _cancel_unverified_algo(self, algo_id: str, *, phase: str) -> None:
+        return await self._require_tp_sl_manager()._cancel_unverified_algo(algo_id, phase=phase)
 
-    async def verify_near_tp_protective_stop(self, algo_id: str, side: PositionSide, contracts: Decimal,
+    async def verify_protective_stop(self, algo_id: str, side: PositionSide, contracts: Decimal,
                                              stop_price: float) -> bool:
-        return await self._require_tp_sl_manager().verify_near_tp_protective_stop(algo_id, side, contracts, stop_price)
-
-    def _near_tp_protective_stop_matches(self, item: dict[str, Any], algo_id: str, side: PositionSide,
-                                         contracts: Decimal, stop_price: float) -> bool:
-        return self._require_tp_sl_manager()._near_tp_protective_stop_matches(item, algo_id, side, contracts, stop_price)
-
-    def _near_tp_protective_sl_algo_body(self, side: PositionSide, contracts: Decimal, stop_price: float) -> dict[
-        str, Any]:
-        return order_specs.build_conditional_protective_sl_algo_body(
-            inst_id=self.symbol,
-            td_mode=self.td_mode,
-            side=side,
-            contracts_text=self.decimal_to_str(contracts),
-            stop_price_text=self.price_to_str(stop_price),
-            pos_side_mode=self.pos_side_mode,
-        )
-
-    def _near_tp_fallback_conditional_close_body(self, side: PositionSide, contracts: Decimal, stop_price: float) -> \
-            dict[str, Any]:
-        return order_specs.build_conditional_protective_sl_algo_body(
-            inst_id=self.symbol,
-            td_mode=self.td_mode,
-            side=side,
-            contracts_text=self.decimal_to_str(contracts),
-            stop_price_text=self.price_to_str(stop_price),
-            pos_side_mode=self.pos_side_mode,
-        )
+        return await self._require_tp_sl_manager().verify_protective_stop(algo_id, side, contracts, stop_price)
 
     async def market_exit_remaining_position_with_retries(
         self,
@@ -596,10 +564,6 @@ class Trader:
 
     async def _cleanup_after_market_exit(self) -> None:
         return await self._require_tp_sl_manager()._cleanup_after_market_exit()
-
-    # Backward-compat alias
-    async def _cleanup_after_near_tp_market_exit(self) -> None:
-        return await self._cleanup_after_market_exit()
 
     def _tp_price_summary(self, specs: list[tuple[str, Decimal, float]]) -> str:
         return self._require_tp_sl_manager()._tp_price_summary(specs)
@@ -681,8 +645,8 @@ class Trader:
         algo_orders = await self.trading_client.fetch_open_algo_orders()
         return [dict(o.raw) for o in algo_orders]
 
-    async def cancel_near_tp_protective_stop(self, order_id: str | None) -> bool:
-        return await self._require_tp_sl_manager().cancel_near_tp_protective_stop(order_id)
+    async def cancel_protective_stop(self, order_id: str | None) -> bool:
+        return await self._require_tp_sl_manager().cancel_protective_stop(order_id)
 
     async def cancel_middle_runner_protective_stop(self, order_id: str | None) -> bool:
         return await self._require_tp_sl_manager().cancel_middle_runner_protective_stop(order_id)
@@ -726,7 +690,6 @@ class Trader:
         self.position_contracts = Decimal("0")
         self.tp_order_id = None
         self.entry_protective_sl_order_id = None
-        self.near_tp_protective_sl_order_id = None
         self.middle_runner_protective_sl_order_id = None
         self.three_stage_post_tp1_protective_sl_order_id = None
         self.trend_runner_sl_order_id = None

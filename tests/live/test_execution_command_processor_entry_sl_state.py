@@ -2,7 +2,7 @@
 
 Only entry intents that carry ``entry_protective_sl_price`` should write
 to ``StrategyPositionState.entry_protective_sl_*``.  Non-entry intents
-(UPDATE_TP, NEAR_TP_REDUCE, runner SL) must NOT pollute entry SL state.
+(UPDATE_TP, runner SL) must NOT pollute entry SL state.
 """
 
 from __future__ import annotations
@@ -178,7 +178,7 @@ class TestMaybeApplyEntryProtectiveSlState(unittest.TestCase):
     def test_case_b_non_entry_intent_without_sl_price_does_not_write(self) -> None:
         """Case B: non-entry intent (UPDATE_TP) has no entry_protective_sl_price → does NOT write entry SL state.
 
-        The result still carries a protective_sl_order_id (it is a runner/near-TP protective SL),
+        The result still carries a protective_sl_order_id (it is a runner protective SL),
         but the helper must reject it because the intent is not an entry intent.
         """
         processor = _make_minimum_processor()

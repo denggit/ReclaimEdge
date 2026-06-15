@@ -12,7 +12,7 @@ class SimplePositionSizerConfig:
     layer_margin_pct: float = 0.03
     leverage: float = 20.0
     layer_multiplier_step: float = 0.15
-    trade_risk_pct: float = 0.01
+    trade_risk_pct: float = 0.003
     fee_slippage_buffer_pct: float = 0.001
     max_order_notional_usdt: float = 0.0
     sidecar_enabled: bool = False
@@ -29,7 +29,7 @@ class SimplePositionSizerConfig:
             dry_run_equity_usdt=float(os.getenv("DRY_RUN_EQUITY_USDT", "1000")),
             layer_margin_pct=float(os.getenv("LAYER_MARGIN_PCT", "0.03")),
             leverage=float(os.getenv("LEVERAGE", "20")),
-            trade_risk_pct=float(os.getenv("TRADE_RISK_PCT", os.getenv("ENTRY_RISK_PCT", "0.01"))),
+            trade_risk_pct=float(os.getenv("TRADE_RISK_PCT", os.getenv("ENTRY_RISK_PCT", "0.003"))),
             fee_slippage_buffer_pct=float(
                 os.getenv("ENTRY_FEE_SLIPPAGE_BUFFER_PCT", os.getenv("FEE_SLIPPAGE_BUFFER_PCT", "0.001"))
             ),
@@ -51,7 +51,7 @@ class SimplePositionSizerConfig:
             dry_run_equity_usdt=account_equity_usdt,
             layer_margin_pct=float(os.getenv("LAYER_MARGIN_PCT", "0.03")),
             leverage=float(os.getenv("LEVERAGE", "20")),
-            trade_risk_pct=float(os.getenv("TRADE_RISK_PCT", os.getenv("ENTRY_RISK_PCT", "0.01"))),
+            trade_risk_pct=float(os.getenv("TRADE_RISK_PCT", os.getenv("ENTRY_RISK_PCT", "0.003"))),
             fee_slippage_buffer_pct=float(
                 os.getenv("ENTRY_FEE_SLIPPAGE_BUFFER_PCT", os.getenv("FEE_SLIPPAGE_BUFFER_PCT", "0.001"))
             ),

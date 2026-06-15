@@ -7,7 +7,6 @@ These tests scan ONLY the modified files:
 - src/execution/tp_sl_core_tp_manager.py
 - src/execution/tp_sl_protective_stop_manager.py
 - src/execution/tp_sl_market_exit_manager.py
-- src/execution/tp_sl_near_tp_manager.py
 
 They verify that no forbidden patterns leak into the modified code.
 """
@@ -29,7 +28,6 @@ _MODIFIED_FILES = [
     "src/execution/tp_sl_core_tp_manager.py",
     "src/execution/tp_sl_protective_stop_manager.py",
     "src/execution/tp_sl_market_exit_manager.py",
-    "src/execution/tp_sl_near_tp_manager.py",
 ]
 
 
@@ -86,7 +84,7 @@ class TestNoDirectRestEndpoints:
 
         # Placement method names (not cancel methods)
         placement_methods = [
-            "place_near_tp_protective_stop_with_retries",
+            "place_protective_stop_with_retries",
             "place_middle_runner_protective_stop_with_retries",
             "place_middle_bucket_fast_protective_stop_with_retries",
             "place_trend_runner_protective_stop_with_retries",
@@ -150,7 +148,6 @@ class TestNoForbiddenImportsOrReferences:
         "ThreeStageAdapter",
         "MiddleRunnerAdapter",
         "SidecarAdapter",
-        "NearTpAdapter",
         "BrokerSemanticExecutor",
         "BinanceTradingClient",
         "BinanceMarketDataClient",
@@ -267,7 +264,6 @@ class TestTradingClientAttribute:
         trader.position_contracts = Decimal("0")
         trader.account_equity_usdt = 0.0
         trader.tp_order_id = None
-        trader.near_tp_protective_sl_order_id = None
         trader.middle_runner_protective_sl_order_id = None
         trader.three_stage_post_tp1_protective_sl_order_id = None
         trader.trend_runner_sl_order_id = None
@@ -294,7 +290,6 @@ class TestTradingClientAttribute:
         assert manager.core_tp.trading_client is manager.trading_client
         assert manager.protective_stops.trading_client is manager.trading_client
         assert manager.market_exit.trading_client is manager.trading_client
-        assert manager.near_tp.trading_client is manager.trading_client
 
     def test_core_tp_manager_has_trading_client(self) -> None:
         from src.execution.tp_sl_core_tp_manager import CoreTakeProfitManager
@@ -352,7 +347,7 @@ class TestProtectiveStopManagerMethodBoundaries:
     ProtectiveStopManager."""
 
     PLACEMENT_METHODS = [
-        "place_near_tp_protective_stop_with_retries",
+        "place_protective_stop_with_retries",
         "place_middle_runner_protective_stop_with_retries",
         "place_middle_bucket_fast_protective_stop_with_retries",
         "place_trend_runner_protective_stop_with_retries",
@@ -361,7 +356,7 @@ class TestProtectiveStopManagerMethodBoundaries:
     ]
 
     CANCEL_METHODS = [
-        "_cancel_unverified_near_tp_algo",
+        "_cancel_unverified_algo",
     ]
 
     FORBIDDEN_IN_PLACEMENT = [
@@ -397,7 +392,7 @@ class TestProtectiveStopManagerMethodBoundaries:
                         )
 
     def test_cancel_method_allows_cancel_algos(self) -> None:
-        """_cancel_unverified_near_tp_algo delegates to trader, which is
+        """_cancel_unverified_algo delegates to trader, which is
         allowed to use cancel-algos. This test verifies the method itself
         does not contain placement endpoints."""
         text = Path(
@@ -407,7 +402,7 @@ class TestProtectiveStopManagerMethodBoundaries:
         lines = text.splitlines()
         in_method = False
         for i, line in enumerate(lines, 1):
-            if "def _cancel_unverified_near_tp_algo" in line:
+            if "def _cancel_unverified_algo" in line:
                 in_method = True
                 continue
             if in_method and line.startswith("    def "):
@@ -419,12 +414,12 @@ class TestProtectiveStopManagerMethodBoundaries:
                     continue
                 if '"/api/v5/trade/order-algo"' in line:
                     pytest.fail(
-                        f"_cancel_unverified_near_tp_algo:{i} must not "
+                        f"_cancel_unverified_algo:{i} must not "
                         "contain placement endpoint order-algo"
                     )
                 if "extract_algo_id(" in line:
                     pytest.fail(
-                        f"_cancel_unverified_near_tp_algo:{i} must not "
+                        f"_cancel_unverified_algo:{i} must not "
                         "call extract_algo_id"
                     )
 

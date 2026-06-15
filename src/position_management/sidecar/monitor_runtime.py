@@ -102,7 +102,6 @@ async def monitor_sidecar_orders_once(
             # may now exceed current net position. Must halt for manual reconciliation.
             active_global_sl_orders: list[str] = []
             for sl_field in (
-                    "near_tp_protective_sl_order_id",
                     "middle_runner_protective_sl_order_id",
                     "three_stage_post_tp1_protective_sl_order_id",
                     "trend_runner_sl_order_id",

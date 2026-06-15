@@ -112,17 +112,10 @@ async def prepare_account_sync_flat_settlement_phase(
     entry_sl_order_id = pending_flat_payload.get("entry_protective_sl_order_id")
     if entry_sl_order_id:
         try:
-            await trader.cancel_near_tp_protective_stop(entry_sl_order_id)
+            await trader.cancel_protective_stop(entry_sl_order_id)
         except Exception:
             logger.warning("ENTRY_PROTECTIVE_SL_CANCEL_ON_FLAT | algoId=%s failed_unhandled", entry_sl_order_id)
 
-    protective_sl_order_id = pending_flat_payload.get("near_tp_protective_sl_order_id")
-    if protective_sl_order_id:
-        try:
-            await trader.cancel_near_tp_protective_stop(protective_sl_order_id)
-        except Exception:
-            logger.warning("NEAR_TP_PROTECTIVE_SL_CANCEL_ON_FLAT | algoId=%s failed_unhandled",
-                           protective_sl_order_id)
     middle_runner_sl_order_id = pending_flat_payload.get("middle_runner_protective_sl_order_id")
     if middle_runner_sl_order_id:
         try:
@@ -168,8 +161,6 @@ async def prepare_account_sync_flat_settlement_phase(
         trader.mark_flat()
         flat_clearable_halt_reasons = {
             None,
-            "near_tp_exit_all_waiting_flat",
-            "near_tp_protected_sync_failed",
             "trend_runner_market_exit_waiting_flat",
             "three_stage_post_tp1_sl_failed_market_exit_waiting_flat",
             "sidecar_tp_place_failed_market_exit_waiting_flat",
@@ -188,12 +179,9 @@ async def prepare_account_sync_flat_settlement_phase(
             "middle_runner_sl_failed_delayed_market_exit_armed",
             "middle_bucket_fast_sl_failed_delayed_market_exit_armed",
             "middle_bucket_fast_sl_invalid_delayed_market_exit_armed",
-            "near_tp_protective_sl_failed_delayed_market_exit_armed",
             "core_tp_place_failed_delayed_market_exit_armed",
             # DME market exit failed: position flat clears halt.
             "order_failure_delayed_market_exit_failed",
-            # DME armed state that must clear on flat.
-            "near_tp_final_tp_failed_delayed_market_exit_armed",
         }
         preserve_critical_halt = (
                 rolling_loss_guard is not None
@@ -208,8 +196,6 @@ async def prepare_account_sync_flat_settlement_phase(
         result_last_logged_cash = settled.cash
         result_last_logged_equity = settled.equity
         result_last_logged_position_key = current_position_key
-        logger.warning("NEAR_TP_STATE_CLEARED_ON_FLAT | protective_sl_order_id=%s", protective_sl_order_id)
-
     return AccountSyncFlatSettlementPrepareResult(
         cash=result_cash,
         equity=result_equity,
@@ -236,7 +222,6 @@ async def finalize_account_sync_flat_settlement_phase(
         clear_state: bool,
 ) -> None:
     if record_flat_payload is not None:
-        record_flat_payload.pop("near_tp_protective_sl_order_id", None)
         record_flat_payload.pop("middle_runner_protective_sl_order_id", None)
         record_flat_payload.pop("three_stage_post_tp1_protective_sl_order_id", None)
         record_flat_payload.pop("trend_runner_sl_order_id", None)
@@ -261,8 +246,6 @@ async def finalize_account_sync_flat_settlement_phase(
                 if halt_reason is not None:
                     can_apply_rolling_halt = flat_previous_halt_reason in {
                         None,
-                        "near_tp_exit_all_waiting_flat",
-                        "near_tp_protected_sync_failed",
                         "trend_runner_market_exit_waiting_flat",
                         "sidecar_tp_place_failed_market_exit_waiting_flat",
                         "sidecar_tp_rate_limited_market_exit_waiting_flat",

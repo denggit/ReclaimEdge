@@ -267,15 +267,6 @@ class EntryAddFlowCoordinatorAddDisabledTest(unittest.TestCase):
         strat._maybe_open_or_add_long(1900.0, 1000, boll, cvd)
         self.assertEqual(strat.state.side, "LONG")
 
-    def test_near_tp_add_disabled_returns_none(self) -> None:
-        strat = _strategy()
-        self._setup_long_position(strat)
-        strat.state.near_tp_add_disabled = True
-        strat.state.last_add_skip_log_reason = None
-        intent = strat._maybe_open_or_add_long(1850.0, 2000, _boll(), _cvd())
-        self.assertIsNone(intent)
-        self.assertEqual(strat.state.last_add_skip_log_reason, "near_tp_protected")
-
     def test_trend_runner_active_returns_none(self) -> None:
         strat = _strategy()
         self._setup_long_position(strat)

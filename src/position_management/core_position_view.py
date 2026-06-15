@@ -8,7 +8,7 @@ from src.position_management.sidecar.model import sidecar_open_contracts, sideca
 from src.position_management.sidecar.reconciler import build_core_position_view
 from src.strategies.boll_cvd_reclaim_strategy import StrategyPositionState, TradeIntent
 
-POSITION_MANAGEMENT_INTENTS = {"UPDATE_TP", "NEAR_TP_REDUCE", "MARKET_EXIT_RUNNER"}
+POSITION_MANAGEMENT_INTENTS = {"UPDATE_TP", "MARKET_EXIT_RUNNER"}
 ENTRY_ADD_INTENTS = {"OPEN_LONG", "OPEN_SHORT", "ADD_LONG", "ADD_SHORT"}
 
 

@@ -331,8 +331,6 @@ def three_stage_runner_plan_allowed(
         three_stage_pre_tp1_degrade_stage: str | None,
         tp_mode: TpMode | None,
         boll_exists: bool,
-        near_tp_protected: bool,
-        near_tp_add_disabled: bool,
         partial_tp_consumed: bool,
         middle_runner_enabled_for_position: bool,
         middle_runner_pending: bool,
@@ -346,8 +344,6 @@ def three_stage_runner_plan_allowed(
     if three_stage_pre_tp1_degrade_stage is not None:
         return False
     if tp_mode != "MIDDLE" or not boll_exists:
-        return False
-    if near_tp_protected or near_tp_add_disabled:
         return False
     if partial_tp_consumed:
         return False
@@ -367,8 +363,6 @@ def middle_runner_plan_allowed(
         middle_runner_enabled: bool,
         tp_mode: TpMode | None,
         boll_exists: bool,
-        near_tp_protected: bool,
-        near_tp_add_disabled: bool,
         partial_tp_consumed: bool,
         middle_runner_active: bool,
         three_stage_runner_enabled_for_position: bool,
@@ -380,8 +374,6 @@ def middle_runner_plan_allowed(
     if not middle_runner_enabled:
         return False
     if tp_mode != "MIDDLE" or not boll_exists:
-        return False
-    if near_tp_protected or near_tp_add_disabled:
         return False
     if partial_tp_consumed:
         return False

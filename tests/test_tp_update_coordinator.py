@@ -563,22 +563,7 @@ class TestThreeStagePreTp1Degrade:
         assert s.state.three_stage_pre_tp1_degrade_stage == "SINGLE"
 
 
-# ── 14. near_tp_protected / add_disabled branch ────────────────────────
-
-class TestNearTpProtected:
-    def test_near_tp_protected_sets_single_plan(self):
-        s = _strategy()
-        _setup_position_state(s, side="LONG", layers=2)
-        s.state.near_tp_protected = True
-        boll = _boll_with_tp(candle_ts_ms=2000)
-        cvd = _cvd()
-        result = s._maybe_update_tp(101.0, 2000, boll, cvd)
-        assert result is not None
-        assert result.intent_type == "UPDATE_TP"
-        assert result.tp_plan == "SINGLE"
-
-
-# ── 15. plan unchanged skip ────────────────────────────────────────────
+# ── 14. plan unchanged skip ────────────────────────────────────────────
 
 class TestPlanUnchangedSkip:
     def test_plan_unchanged_returns_none(self):

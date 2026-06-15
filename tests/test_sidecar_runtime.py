@@ -1053,7 +1053,6 @@ def test_intent_already_has_managed_core_contracts_not_overwritten() -> None:
 # Tests: Sidecar TP_FILLED + active global SL halt
 # ---------------------------------------------------------------------------
 _GLOBAL_SL_FIELDS = [
-    "near_tp_protective_sl_order_id",
     "middle_runner_protective_sl_order_id",
     "three_stage_post_tp1_protective_sl_order_id",
     "trend_runner_sl_order_id",
@@ -1580,7 +1579,6 @@ async def test_pre_core_reconcile_sl_on_trader_triggers_halt() -> None:
     refresh_sidecar_state_totals(state)
     # strategy.state has NO SL order ids
     for sl_field in (
-            "near_tp_protective_sl_order_id",
             "middle_runner_protective_sl_order_id",
             "three_stage_post_tp1_protective_sl_order_id",
             "trend_runner_sl_order_id",

@@ -28,17 +28,11 @@ def test_entry_halt_allows_position_management() -> None:
 
 
 def test_sidecar_dirty_halt_allows_core_pm_only() -> None:
-    """SIDECAR_DIRTY_HALT allows UPDATE_TP and MARKET_EXIT_RUNNER, but NOT NEAR_TP_REDUCE."""
+    """SIDECAR_DIRTY_HALT allows UPDATE_TP and MARKET_EXIT_RUNNER."""
     allowed = allowed_intents_for_halt_mode(SIDECAR_DIRTY_HALT)
     assert allowed == CORE_POSITION_MANAGEMENT_INTENTS
     assert "UPDATE_TP" in allowed
     assert "MARKET_EXIT_RUNNER" in allowed
-
-
-def test_sidecar_dirty_halt_does_not_allow_near_tp_reduce() -> None:
-    """NEAR_TP_REDUCE must NOT be in SIDECAR_DIRTY_HALT allowed intents."""
-    allowed = allowed_intents_for_halt_mode(SIDECAR_DIRTY_HALT)
-    assert "NEAR_TP_REDUCE" not in allowed
 
 
 def test_sidecar_dirty_halt_does_not_allow_open_long() -> None:
@@ -67,18 +61,9 @@ def test_is_intent_allowed_sidecar_dirty_market_exit_runner() -> None:
     assert is_intent_allowed_during_halt("MARKET_EXIT_RUNNER", SIDECAR_DIRTY_HALT) is True
 
 
-def test_is_intent_allowed_sidecar_dirty_near_tp_reduce() -> None:
-    assert is_intent_allowed_during_halt("NEAR_TP_REDUCE", SIDECAR_DIRTY_HALT) is False
-
-
 def test_is_intent_allowed_full_halt_nothing() -> None:
-    for intent_type in ["UPDATE_TP", "NEAR_TP_REDUCE", "MARKET_EXIT_RUNNER", "OPEN_LONG", "ADD_LONG"]:
+    for intent_type in ["UPDATE_TP", "MARKET_EXIT_RUNNER", "OPEN_LONG", "ADD_LONG"]:
         assert is_intent_allowed_during_halt(intent_type, FULL_HALT) is False
-
-
-def test_is_intent_allowed_rolling_loss_near_tp_reduce() -> None:
-    """Rolling loss halt (ENTRY_HALT_POSITION_MANAGEMENT_ALLOWED) DOES allow NEAR_TP_REDUCE."""
-    assert is_intent_allowed_during_halt("NEAR_TP_REDUCE", ENTRY_HALT_POSITION_MANAGEMENT_ALLOWED) is True
 
 
 # ── halt_reason classification ─────────────────────────────────────────
@@ -114,7 +99,6 @@ def test_delayed_market_exit_armed_protective_sl_reasons_are_full_halt() -> None
         "middle_runner_sl_failed_delayed_market_exit_armed",
         "middle_bucket_fast_sl_failed_delayed_market_exit_armed",
         "middle_bucket_fast_sl_invalid_delayed_market_exit_armed",
-        "near_tp_protective_sl_failed_delayed_market_exit_armed",
         "core_tp_place_failed_delayed_market_exit_armed",
     ]
     for reason in reasons:
@@ -132,12 +116,6 @@ def test_sidecar_tp_rate_limited_unprotected_is_sidecar_dirty() -> None:
 def test_rolling_loss_halt_is_entry_management() -> None:
     assert resolve_halt_mode("rolling_loss_soft_halt") == ENTRY_HALT_POSITION_MANAGEMENT_ALLOWED
     assert resolve_halt_mode("rolling_loss_hard_halt") == ENTRY_HALT_POSITION_MANAGEMENT_ALLOWED
-
-
-def test_rolling_loss_allows_near_tp_reduce() -> None:
-    """Rolling loss halt (ENTRY_HALT_PM_ALLOWED) must still allow NEAR_TP_REDUCE."""
-    allowed = allowed_intents_for_halt_mode(ENTRY_HALT_POSITION_MANAGEMENT_ALLOWED)
-    assert "NEAR_TP_REDUCE" in allowed
 
 
 def test_order_failure_failed_is_full_halt() -> None:

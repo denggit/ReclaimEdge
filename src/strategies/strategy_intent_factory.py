@@ -34,7 +34,7 @@ class StrategyIntentFactory:
         state = self.strategy.state
         if not state.sidecar_enabled_for_position:
             return None
-        if intent_type in {"UPDATE_TP", "NEAR_TP_REDUCE", "MARKET_EXIT_RUNNER"}:
+        if intent_type in {"UPDATE_TP", "MARKET_EXIT_RUNNER"}:
             return state.core_contracts
         return None
 
@@ -55,7 +55,6 @@ class StrategyIntentFactory:
         )
         for order_id in (
                 self.strategy.state.entry_protective_sl_order_id,
-                self.strategy.state.near_tp_protective_sl_order_id,
                 self.strategy.state.middle_runner_protective_sl_order_id,
                 self.strategy.state.three_stage_post_tp1_protective_sl_order_id,
                 self.strategy.state.trend_runner_sl_order_id,
@@ -165,58 +164,6 @@ class StrategyIntentFactory:
             middle_bucket_split_fast_sl_order_id=getattr(state, "middle_bucket_split_fast_sl_order_id", None),
             middle_bucket_split_fast_sl_protected=bool(
                 getattr(state, "middle_bucket_split_fast_sl_protected", False)),
-        )
-
-    def build_near_tp_reduce_intent(
-            self,
-            *,
-            side: PositionSide,
-            price: float,
-            layer_index: int,
-            tp_price: float,
-            reason: str,
-            size: PositionSize,
-            boll: BollSnapshot,
-            cvd: CvdSnapshot,
-            ts_ms: int,
-            progress: float,
-            best: float,
-            giveback: float,
-            giveback_threshold: float,
-            protective_sl: float,
-    ) -> TradeIntent:
-        from src.strategies.boll_cvd_reclaim_strategy import TradeIntent
-
-        state = self.strategy.state
-        return TradeIntent(
-            intent_type="NEAR_TP_REDUCE",
-            side=side,
-            price=price,
-            layer_index=layer_index,
-            tp_price=tp_price,
-            reason=reason,
-            size=size,
-            fast_cvd=cvd.fast_cvd,
-            previous_fast_cvd=cvd.previous_fast_cvd,
-            buy_ratio=cvd.buy_ratio,
-            sell_ratio=cvd.sell_ratio,
-            boll_upper=boll.upper,
-            boll_middle=boll.middle,
-            boll_lower=boll.lower,
-            ts_ms=ts_ms,
-            avg_entry_price=state.avg_entry_price,
-            breakeven_price=state.breakeven_price,
-            tp_mode=state.tp_mode,
-            partial_tp_price=None,
-            partial_tp_ratio=0.0,
-            tp_plan="SINGLE",
-            partial_tp_consumed=True,
-            near_tp_progress_ratio=progress,
-            near_tp_best_price=best,
-            near_tp_giveback=giveback,
-            near_tp_giveback_threshold=giveback_threshold,
-            near_tp_reduce_ratio=self.strategy.config.near_tp_reduce_ratio,
-            near_tp_protective_sl_price=protective_sl,
         )
 
     def build_runner_market_exit_intent(

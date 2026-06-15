@@ -499,7 +499,6 @@ class TestFallbackFinalReturnsSplitExecutedFalse:
         trader.min_contracts = Decimal("0.01")
         trader.position_contracts = Decimal("10")
         trader.tp_order_id = None
-        trader.near_tp_protective_sl_order_id = None
         trader.middle_runner_protective_sl_order_id = None
         trader.three_stage_post_tp1_protective_sl_order_id = None
         trader.trend_runner_sl_order_id = None

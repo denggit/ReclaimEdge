@@ -566,7 +566,7 @@ class RollingLossGuardTest(unittest.IsolatedAsyncioTestCase):
             guard.state.halt_level = "SOFT"
             guard.state.halt_until_ts_ms = 1
             guard.save()
-            execution_state = ExecutionState(None, None, trading_halted=True, halt_reason="near_tp_reduce_failure",
+            execution_state = ExecutionState(None, None, trading_halted=True, halt_reason="generic_reduce_failure",
                                              halt_until_ts_ms=1)
             trader = FakeTrader(equity=125.0)
             task = asyncio.create_task(
@@ -594,7 +594,7 @@ class RollingLossGuardTest(unittest.IsolatedAsyncioTestCase):
                 await task
 
             self.assertTrue(execution_state.trading_halted)
-            self.assertEqual(execution_state.halt_reason, "near_tp_reduce_failure")
+            self.assertEqual(execution_state.halt_reason, "generic_reduce_failure")
 
     async def test_rolling_loss_hard_halt_does_not_override_or_email_when_critical_halt_preserved(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -617,7 +617,7 @@ class RollingLossGuardTest(unittest.IsolatedAsyncioTestCase):
                 "pos-1",
                 100.0,
                 trading_halted=True,
-                halt_reason="near_tp_reduce_failure",
+                halt_reason="generic_reduce_failure",
             )
 
             with patch.dict(
@@ -655,11 +655,11 @@ class RollingLossGuardTest(unittest.IsolatedAsyncioTestCase):
                     await task
 
             self.assertTrue(execution_state.trading_halted)
-            self.assertEqual(execution_state.halt_reason, "near_tp_reduce_failure")
+            self.assertEqual(execution_state.halt_reason, "generic_reduce_failure")
             self.assertIsNone(execution_state.halt_until_ts_ms)
             self.assertEqual(journal.rolling_loss_events[-1]["action"], "HARD_HALT")
             self.assertTrue(journal.rolling_loss_events[-1]["critical_halt_preserved"])
-            self.assertEqual(journal.rolling_loss_events[-1]["existing_halt_reason"], "near_tp_reduce_failure")
+            self.assertEqual(journal.rolling_loss_events[-1]["existing_halt_reason"], "generic_reduce_failure")
             self.assertTrue(journal.rolling_loss_events[-1]["rolling_loss_halt_not_applied"])
             self.assertNotIn("Rolling loss guard hard halt: 20% realized loss reached", email_sender.subjects)
 

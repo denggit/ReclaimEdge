@@ -220,10 +220,6 @@ class TestNoAdapterPatterns:
         text = _read_source()
         assert "SidecarAdapter" not in text
 
-    def test_no_near_tp_adapter(self) -> None:
-        text = _read_source()
-        assert "NearTpAdapter" not in text
-
     def test_no_exchange_runtime_bundle(self) -> None:
         text = _read_source()
         assert "ExchangeRuntimeBundle" not in text

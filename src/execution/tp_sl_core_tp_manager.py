@@ -252,8 +252,8 @@ class CoreTakeProfitManager:
                 intent.side,
                 net_contracts_for_sl,
                 float(runner_sl_price),
-                retry_count=int(os.getenv("NEAR_TP_PROTECTIVE_SL_RETRY_COUNT", "3")),
-                retry_interval_seconds=float(os.getenv("NEAR_TP_PROTECTIVE_SL_RETRY_INTERVAL_SECONDS", "1")),
+                retry_count=int(os.getenv("PROTECTIVE_SL_RETRY_COUNT", "3")),
+                retry_interval_seconds=float(os.getenv("PROTECTIVE_SL_RETRY_INTERVAL_SECONDS", "1")),
             )
             protective_sl_price_text = t.price_to_str(float(runner_sl_price))
             if not sl_ok:
@@ -302,8 +302,8 @@ class CoreTakeProfitManager:
                 intent.side,
                 sl_contracts,
                 float(trend_runner_sl_price),
-                retry_count=int(os.getenv("NEAR_TP_PROTECTIVE_SL_RETRY_COUNT", "3")),
-                retry_interval_seconds=float(os.getenv("NEAR_TP_PROTECTIVE_SL_RETRY_INTERVAL_SECONDS", "1")),
+                retry_count=int(os.getenv("PROTECTIVE_SL_RETRY_COUNT", "3")),
+                retry_interval_seconds=float(os.getenv("PROTECTIVE_SL_RETRY_INTERVAL_SECONDS", "1")),
             )
             protective_sl_price_text = t.price_to_str(float(trend_runner_sl_price))
             if not sl_ok:
@@ -353,8 +353,8 @@ class CoreTakeProfitManager:
                 intent.side,
                 net_contracts_for_sl,
                 float(post_tp1_sl_price),
-                retry_count=int(os.getenv("NEAR_TP_PROTECTIVE_SL_RETRY_COUNT", "3")),
-                retry_interval_seconds=float(os.getenv("NEAR_TP_PROTECTIVE_SL_RETRY_INTERVAL_SECONDS", "1")),
+                retry_count=int(os.getenv("PROTECTIVE_SL_RETRY_COUNT", "3")),
+                retry_interval_seconds=float(os.getenv("PROTECTIVE_SL_RETRY_INTERVAL_SECONDS", "1")),
             )
             protective_sl_price_text = t.price_to_str(float(post_tp1_sl_price))
             if not sl_ok:
@@ -381,7 +381,7 @@ class CoreTakeProfitManager:
             if old_sl_order_id and old_sl_order_id != sl_order_id:
                 await self.trader.cancel_three_stage_post_tp1_protective_stop(old_sl_order_id)
             logger.warning(
-                "THREE_STAGE_TP1_PROTECTIVE_SL_UPDATED | side=%s sl_contracts=%s core_contracts=%s net_contracts=%s protective_sl_price=%s old_sl_order_id=%s new_sl_order_id=%s retry_config=near_tp",
+                "THREE_STAGE_TP1_PROTECTIVE_SL_UPDATED | side=%s sl_contracts=%s core_contracts=%s net_contracts=%s protective_sl_price=%s old_sl_order_id=%s new_sl_order_id=%s retry_config=protective_sl",
                 intent.side,
                 t.decimal_to_str(net_contracts_for_sl),
                 t.decimal_to_str(core_contracts_for_tp),
@@ -440,11 +440,9 @@ class CoreTakeProfitManager:
         t = self.trader
         ids = set(getattr(intent, "protected_order_ids", ()) or ())
         for value in (
-                getattr(intent, "near_tp_protective_sl_order_id", None),
                 getattr(intent, "middle_runner_protective_sl_order_id", None),
                 getattr(intent, "three_stage_post_tp1_protective_sl_order_id", None),
                 getattr(intent, "trend_runner_sl_order_id", None),
-                t.near_tp_protective_sl_order_id,
                 t.middle_runner_protective_sl_order_id,
                 t.three_stage_post_tp1_protective_sl_order_id,
                 t.trend_runner_sl_order_id,

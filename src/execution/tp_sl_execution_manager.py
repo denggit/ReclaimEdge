@@ -5,7 +5,6 @@ from typing import Any, TYPE_CHECKING
 
 from src.execution.tp_sl_core_tp_manager import CoreTakeProfitManager
 from src.execution.tp_sl_market_exit_manager import MarketExitManager
-from src.execution.tp_sl_near_tp_manager import NearTpExecutionManager
 from src.execution.tp_sl_protective_stop_manager import ProtectiveStopManager
 from src.execution.tp_sl_sidecar_manager import SidecarTpManager
 from src.execution.trading_client_port import TradingClientPort
@@ -25,24 +24,14 @@ class TpSlExecutionManager:
         self.protective_stops = ProtectiveStopManager(trader, self.trading_client)
         self.market_exit = MarketExitManager(trader, self.trading_client)
         self.core_tp = CoreTakeProfitManager(trader, self.protective_stops, self.trading_client)
-        self.near_tp = NearTpExecutionManager(
-            trader=trader,
-            core_tp=self.core_tp,
-            protective_stops=self.protective_stops,
-            market_exit=self.market_exit,
-            trading_client=self.trading_client,
-        )
         self.sidecar = SidecarTpManager(trader, self.trading_client)
 
     # ------------------------------------------------------------------
     # main TP / SL execution entry points
     # ------------------------------------------------------------------
 
-    async def execute_near_tp_reduce(self, intent: TradeIntent) -> LiveTradeResult:
-        return await self.near_tp.execute_near_tp_reduce(intent)
-
     async def execute_market_exit_runner(self, intent: TradeIntent) -> LiveTradeResult:
-        return await self.near_tp.execute_market_exit_runner(intent)
+        return await self.market_exit.execute_market_exit_runner(intent)
 
     async def replace_take_profit(self, intent: TradeIntent) -> LiveTradeResult:
         return await self.core_tp.replace_take_profit(intent)
@@ -90,7 +79,7 @@ class TpSlExecutionManager:
     # protective stop-loss placement with retries
     # ------------------------------------------------------------------
 
-    async def place_near_tp_protective_stop_with_retries(
+    async def place_protective_stop_with_retries(
             self,
             side: PositionSide,
             contracts: Decimal | str | int | float,
@@ -98,7 +87,7 @@ class TpSlExecutionManager:
             retry_count: int,
             retry_interval_seconds: float,
     ) -> tuple[bool, str | None, str]:
-        return await self.protective_stops.place_near_tp_protective_stop_with_retries(
+        return await self.protective_stops.place_protective_stop_with_retries(
             side, contracts, stop_price, retry_count, retry_interval_seconds)
 
     async def place_entry_protective_stop_with_retries(
@@ -156,16 +145,16 @@ class TpSlExecutionManager:
         return await self.protective_stops.place_middle_bucket_fast_protective_stop_with_retries(
             side, contracts, stop_price, retry_count, retry_interval_seconds)
 
-    async def _cancel_unverified_near_tp_algo(self, algo_id: str, *, phase: str) -> None:
-        return await self.protective_stops._cancel_unverified_near_tp_algo(algo_id, phase=phase)
+    async def _cancel_unverified_algo(self, algo_id: str, *, phase: str) -> None:
+        return await self.protective_stops._cancel_unverified_algo(algo_id, phase=phase)
 
-    async def verify_near_tp_protective_stop(self, algo_id: str, side: PositionSide, contracts: Decimal,
+    async def verify_protective_stop(self, algo_id: str, side: PositionSide, contracts: Decimal,
                                              stop_price: float) -> bool:
-        return await self.protective_stops.verify_near_tp_protective_stop(algo_id, side, contracts, stop_price)
+        return await self.protective_stops.verify_protective_stop(algo_id, side, contracts, stop_price)
 
-    def _near_tp_protective_stop_matches(self, item: dict[str, Any], algo_id: str, side: PositionSide,
+    def _protective_stop_matches(self, item: dict[str, Any], algo_id: str, side: PositionSide,
                                          contracts: Decimal, stop_price: float) -> bool:
-        return self.protective_stops._near_tp_protective_stop_matches(item, algo_id, side, contracts, stop_price)
+        return self.protective_stops._protective_stop_matches(item, algo_id, side, contracts, stop_price)
 
     # ------------------------------------------------------------------
     # market exit
@@ -185,10 +174,6 @@ class TpSlExecutionManager:
 
     async def _cleanup_after_market_exit(self) -> None:
         return await self.market_exit._cleanup_after_market_exit()
-
-    # Backward-compat alias
-    async def _cleanup_after_near_tp_market_exit(self) -> None:
-        return await self.market_exit._cleanup_after_near_tp_market_exit()
 
     # ------------------------------------------------------------------
     # TP price helpers
@@ -315,13 +300,13 @@ class TpSlExecutionManager:
             ):
                 return True
             logger.warning(
-                "NEAR_TP_PROTECTIVE_SL_CANCEL_ON_FLAT | algoId=%s failed=%s",
+                "PROTECTIVE_SL_CANCEL_ON_FLAT | algoId=%s failed=%s",
                 order_id,
                 exc,
             )
             return False
 
-    async def cancel_near_tp_protective_stop(self, order_id: str | None) -> bool:
+    async def cancel_protective_stop(self, order_id: str | None) -> bool:
         t = self.trader
         if not order_id:
             return True
@@ -329,10 +314,8 @@ class TpSlExecutionManager:
         if self._broker_semantic_protective_sl_cancel_enabled():
             ok = await self._cancel_protective_stop_semantic(order_id)
             if ok:
-                if t.near_tp_protective_sl_order_id == order_id:
-                    t.near_tp_protective_sl_order_id = None
                 logger.warning(
-                    "NEAR_TP_PROTECTIVE_SL_CANCEL_ON_FLAT | algoId=%s semantic=true",
+                    "PROTECTIVE_SL_CANCEL_ON_FLAT | algoId=%s semantic=true",
                     order_id,
                 )
             return ok
@@ -340,24 +323,22 @@ class TpSlExecutionManager:
         try:
             result = await self.trading_client.cancel_algo_order(order_id=order_id)
             if result.ok:
-                if t.near_tp_protective_sl_order_id == order_id:
-                    t.near_tp_protective_sl_order_id = None
-                logger.warning("NEAR_TP_PROTECTIVE_SL_CANCEL_ON_FLAT | algoId=%s", order_id)
+                logger.warning("PROTECTIVE_SL_CANCEL_ON_FLAT | algoId=%s", order_id)
                 return True
             return False
         except Exception as exc:
             text = str(exc).lower()
             if "not found" in text or "not exist" in text or "does not exist" in text or "already" in text:
-                logger.info("NEAR_TP_PROTECTIVE_SL_CANCEL_ON_FLAT | algoId=%s already_absent message=%s", order_id, exc)
+                logger.info("PROTECTIVE_SL_CANCEL_ON_FLAT | algoId=%s already_absent message=%s", order_id, exc)
                 return True
-            logger.warning("NEAR_TP_PROTECTIVE_SL_CANCEL_ON_FLAT | algoId=%s failed=%s", order_id, exc)
+            logger.warning("PROTECTIVE_SL_CANCEL_ON_FLAT | algoId=%s failed=%s", order_id, exc)
             return False
 
     async def cancel_middle_runner_protective_stop(self, order_id: str | None) -> bool:
         t = self.trader
         if not order_id:
             return True
-        ok = await self.trader.cancel_near_tp_protective_stop(order_id)
+        ok = await self.trader.cancel_protective_stop(order_id)
         if ok and getattr(t, "middle_runner_protective_sl_order_id", None) == order_id:
             t.middle_runner_protective_sl_order_id = None
         if ok:
@@ -368,7 +349,7 @@ class TpSlExecutionManager:
         t = self.trader
         if not order_id:
             return True
-        ok = await self.trader.cancel_near_tp_protective_stop(order_id)
+        ok = await self.trader.cancel_protective_stop(order_id)
         if ok and getattr(t, "trend_runner_sl_order_id", None) == order_id:
             t.trend_runner_sl_order_id = None
         if ok:
@@ -379,7 +360,7 @@ class TpSlExecutionManager:
         t = self.trader
         if not order_id:
             return True
-        ok = await self.trader.cancel_near_tp_protective_stop(order_id)
+        ok = await self.trader.cancel_protective_stop(order_id)
         if ok and getattr(t, "three_stage_post_tp1_protective_sl_order_id", None) == order_id:
             t.three_stage_post_tp1_protective_sl_order_id = None
         if ok:
@@ -390,7 +371,7 @@ class TpSlExecutionManager:
         t = self.trader
         if not order_id:
             return True
-        ok = await self.trader.cancel_near_tp_protective_stop(order_id)
+        ok = await self.trader.cancel_protective_stop(order_id)
         if ok and getattr(t, "middle_bucket_fast_sl_order_id", None) == order_id:
             t.middle_bucket_fast_sl_order_id = None
         if ok:

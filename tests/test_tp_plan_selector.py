@@ -517,8 +517,6 @@ class TestThreeStageRunnerPlanAllowed:
             three_stage_pre_tp1_degrade_stage=None,
             tp_mode="MIDDLE",
             boll_exists=True,
-            near_tp_protected=False,
-            near_tp_add_disabled=False,
             partial_tp_consumed=False,
             middle_runner_enabled_for_position=False,
             middle_runner_pending=False,
@@ -550,16 +548,6 @@ class TestThreeStageRunnerPlanAllowed:
     def test_boll_not_exists_returns_false(self):
         assert three_stage_runner_plan_allowed(
             **self._default_allowed_kwargs(boll_exists=False)
-        ) is False
-
-    def test_near_tp_protected_returns_false(self):
-        assert three_stage_runner_plan_allowed(
-            **self._default_allowed_kwargs(near_tp_protected=True)
-        ) is False
-
-    def test_near_tp_add_disabled_returns_false(self):
-        assert three_stage_runner_plan_allowed(
-            **self._default_allowed_kwargs(near_tp_add_disabled=True)
         ) is False
 
     def test_partial_tp_consumed_returns_false(self):
@@ -603,8 +591,6 @@ class TestMiddleRunnerPlanAllowed:
             middle_runner_enabled=True,
             tp_mode="MIDDLE",
             boll_exists=True,
-            near_tp_protected=False,
-            near_tp_add_disabled=False,
             partial_tp_consumed=False,
             middle_runner_active=False,
             three_stage_runner_enabled_for_position=False,
@@ -631,11 +617,6 @@ class TestMiddleRunnerPlanAllowed:
     def test_boll_not_exists_returns_false(self):
         assert middle_runner_plan_allowed(
             **self._default_allowed_kwargs(boll_exists=False)
-        ) is False
-
-    def test_near_tp_protected_returns_false(self):
-        assert middle_runner_plan_allowed(
-            **self._default_allowed_kwargs(near_tp_protected=True)
         ) is False
 
     def test_partial_tp_consumed_returns_false(self):

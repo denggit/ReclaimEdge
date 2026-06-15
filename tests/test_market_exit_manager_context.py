@@ -47,7 +47,6 @@ class FakeTrader:
     contract_precision = Decimal("0.01")
     min_contracts = Decimal("0.01")
     position_contracts = Decimal("0")
-    near_tp_protective_sl_order_id: str | None = None
     middle_runner_protective_sl_order_id: str | None = None
     three_stage_post_tp1_protective_sl_order_id: str | None = None
     trend_runner_sl_order_id: str | None = None
@@ -94,7 +93,7 @@ class FakeTrader:
     async def cancel_existing_reduce_only_orders(self):
         self.cancelled_reduce_only.append("all")
 
-    async def cancel_near_tp_protective_stop(self, order_id):
+    async def cancel_protective_stop(self, order_id):
         self.cancelled_protective_stops.append(order_id)
         return True
 
@@ -112,9 +111,6 @@ class FakeTrader:
 
     async def _cleanup_after_market_exit(self):
         await self.cancel_existing_reduce_only_orders()
-
-    async def _cleanup_after_near_tp_market_exit(self):
-        await self._cleanup_after_market_exit()
 
 
 @pytest.mark.asyncio
@@ -196,10 +192,6 @@ async def test_cleanup_after_market_exit_renamed() -> None:
     # New name works
     await mgr._cleanup_after_market_exit()
     assert len(trader.cancelled_reduce_only) == 1
-
-    # Old name is backward-compat alias
-    await mgr._cleanup_after_near_tp_market_exit()
-    assert len(trader.cancelled_reduce_only) == 2
 
 
 @pytest.mark.asyncio

@@ -35,7 +35,6 @@ class TestSplitNormalReturnsSplitFastSlow:
         trader.min_contracts = Decimal("0.01")
         trader.position_contracts = Decimal("10")
         trader.tp_order_id = None
-        trader.near_tp_protective_sl_order_id = None
         trader.middle_runner_protective_sl_order_id = None
         trader.three_stage_post_tp1_protective_sl_order_id = None
         trader.trend_runner_sl_order_id = None
@@ -138,7 +137,6 @@ class TestSublegTooSmallReturnsUnsplitMiddleBucket:
         trader.min_contracts = Decimal("0.01")
         trader.position_contracts = Decimal("10")
         trader.tp_order_id = None
-        trader.near_tp_protective_sl_order_id = None
         trader.middle_runner_protective_sl_order_id = None
         trader.three_stage_post_tp1_protective_sl_order_id = None
         trader.trend_runner_sl_order_id = None
@@ -240,7 +238,6 @@ class TestPlacementFailedReturnsFinalFullSize:
         trader.min_contracts = Decimal("0.01")
         trader.position_contracts = Decimal("10")
         trader.tp_order_id = None
-        trader.near_tp_protective_sl_order_id = None
         trader.middle_runner_protective_sl_order_id = None
         trader.three_stage_post_tp1_protective_sl_order_id = None
         trader.trend_runner_sl_order_id = None
@@ -355,7 +352,6 @@ class TestNoSplitActiveReturnsNone:
         trader.min_contracts = Decimal("0.01")
         trader.position_contracts = Decimal("10")
         trader.tp_order_id = None
-        trader.near_tp_protective_sl_order_id = None
         trader.middle_runner_protective_sl_order_id = None
         trader.three_stage_post_tp1_protective_sl_order_id = None
         trader.trend_runner_sl_order_id = None
@@ -599,7 +595,6 @@ class TestThreeStageTp2TooSmallClassifiesFinalFullSize:
         trader.min_contracts = Decimal("0.01")
         trader.position_contracts = Decimal("10")
         trader.tp_order_id = None
-        trader.near_tp_protective_sl_order_id = None
         trader.middle_runner_protective_sl_order_id = None
         trader.three_stage_post_tp1_protective_sl_order_id = None
         trader.trend_runner_sl_order_id = None
@@ -701,7 +696,6 @@ class TestMiddleRunnerRunnerTooSmallClassifiesFinalFullSize:
         trader.min_contracts = Decimal("0.01")
         trader.position_contracts = Decimal("10")
         trader.tp_order_id = None
-        trader.near_tp_protective_sl_order_id = None
         trader.middle_runner_protective_sl_order_id = None
         trader.three_stage_post_tp1_protective_sl_order_id = None
         trader.trend_runner_sl_order_id = None
@@ -799,7 +793,6 @@ class TestMiddleRunnerSlFailurePreservesActualOrderModeFinalFullSize:
         trader.min_contracts = Decimal("0.01")
         trader.position_contracts = Decimal("10")
         trader.tp_order_id = None
-        trader.near_tp_protective_sl_order_id = None
         trader.middle_runner_protective_sl_order_id = None
         trader.three_stage_post_tp1_protective_sl_order_id = None
         trader.trend_runner_sl_order_id = None
@@ -908,7 +901,6 @@ class TestThreeStagePostTp1SlFailurePreservesActualOrderModeUnsplitMiddleBucket:
         trader.min_contracts = Decimal("0.01")
         trader.position_contracts = Decimal("10")
         trader.tp_order_id = None
-        trader.near_tp_protective_sl_order_id = None
         trader.middle_runner_protective_sl_order_id = None
         trader.three_stage_post_tp1_protective_sl_order_id = None
         trader.trend_runner_sl_order_id = None
@@ -1023,7 +1015,6 @@ class TestTrendRunnerSlFailurePreservesActualOrderModeSplitFastSlow:
         trader.min_contracts = Decimal("0.01")
         trader.position_contracts = Decimal("10")
         trader.tp_order_id = None
-        trader.near_tp_protective_sl_order_id = None
         trader.middle_runner_protective_sl_order_id = None
         trader.three_stage_post_tp1_protective_sl_order_id = None
         trader.trend_runner_sl_order_id = None

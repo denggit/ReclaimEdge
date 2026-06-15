@@ -224,11 +224,6 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
         self.assertIsNone(partial_tp)
         self.assertEqual(partial_ratio, 0.0)
 
-    def test_three_stage_and_near_tp_env_conflict_raises(self) -> None:
-        with patch.dict(os.environ, {"THREE_STAGE_RUNNER_ENABLED": "true", "NEAR_TP_ENABLED": "true"}, clear=True):
-            with self.assertRaises(RuntimeError):
-                BollCvdReclaimStrategyConfig.from_env()
-
     def test_dynamic_runner_orders_long_and_short(self) -> None:
         strat = strategy()
         bands = boll(middle=100.0, upper=110.0, lower=90.0)
@@ -1693,7 +1688,6 @@ class RecordingTrader(Trader):
         self.contract_precision = Decimal("0.01")
         self.min_contracts = Decimal("0.01")
         self.tp_order_id = None
-        self.near_tp_protective_sl_order_id = None
         self.middle_runner_protective_sl_order_id = None
         self.three_stage_post_tp1_protective_sl_order_id = None
         self.trend_runner_sl_order_id = None
@@ -1719,7 +1713,7 @@ class RecordingTrader(Trader):
 
     async def market_exit_remaining_position_with_retries(self, side, retry_count, *, context="generic", retry_interval_seconds=None):  # type: ignore[no-untyped-def]
         self.position_contracts = Decimal("0")
-        await self._cleanup_after_near_tp_market_exit()
+        await self._cleanup_after_market_exit()
         return True, "market_exit_order_id=runner-exit"
 
     async def _place_reduce_only_take_profit_orders(self, intent_: TradeIntent, specs):  # type: ignore[no-untyped-def]
@@ -1927,7 +1921,7 @@ class ThreeStageTrendRunnerTraderTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertTrue(result.ok)
-        self.assertTrue(result.near_tp_exit_all)
+        self.assertTrue(result.exit_all)
         self.assertEqual(trader.cancelled_trend_runner_stop_ids, ["old-algo"])
         self.assertIsNone(trader.trend_runner_sl_order_id)
 

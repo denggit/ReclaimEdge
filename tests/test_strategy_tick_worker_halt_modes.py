@@ -27,7 +27,7 @@ class FakeIntent:
 
 
 ENTRY_INTENTS = ["OPEN_LONG", "OPEN_SHORT", "ADD_LONG", "ADD_SHORT"]
-PM_INTENTS = ["UPDATE_TP", "NEAR_TP_REDUCE", "MARKET_EXIT_RUNNER"]
+PM_INTENTS = ["UPDATE_TP", "MARKET_EXIT_RUNNER"]
 CORE_PM_INTENTS = ["UPDATE_TP", "MARKET_EXIT_RUNNER"]
 
 
@@ -103,25 +103,23 @@ def test_full_halt_blocks_all_intents() -> None:
 
 
 def test_entry_halt_keeps_only_pm_intents() -> None:
-    intents = [FakeIntent(t) for t in ["OPEN_LONG", "UPDATE_TP", "ADD_SHORT", "MARKET_EXIT_RUNNER", "NEAR_TP_REDUCE"]]
+    intents = [FakeIntent(t) for t in ["OPEN_LONG", "UPDATE_TP", "ADD_SHORT", "MARKET_EXIT_RUNNER"]]
     filtered = _halt_filter_intents(intents, ENTRY_HALT_POSITION_MANAGEMENT_ALLOWED)
-    # ENTRY_HALT allows UPDATE_TP, NEAR_TP_REDUCE, MARKET_EXIT_RUNNER
+    # ENTRY_HALT allows UPDATE_TP, MARKET_EXIT_RUNNER
     types = [i.intent_type for i in filtered]
     assert "UPDATE_TP" in types
-    assert "NEAR_TP_REDUCE" in types
     assert "MARKET_EXIT_RUNNER" in types
     assert "OPEN_LONG" not in types
     assert "ADD_SHORT" not in types
 
 
 def test_sidecar_dirty_halt_keeps_only_core_pm_intents() -> None:
-    """SIDECAR_DIRTY_HALT: only UPDATE_TP and MARKET_EXIT_RUNNER (no NEAR_TP_REDUCE)."""
-    intents = [FakeIntent(t) for t in ["OPEN_LONG", "UPDATE_TP", "NEAR_TP_REDUCE", "ADD_LONG", "MARKET_EXIT_RUNNER"]]
+    """SIDECAR_DIRTY_HALT: only UPDATE_TP and MARKET_EXIT_RUNNER."""
+    intents = [FakeIntent(t) for t in ["OPEN_LONG", "UPDATE_TP", "ADD_LONG", "MARKET_EXIT_RUNNER"]]
     filtered = _halt_filter_intents(intents, SIDECAR_DIRTY_HALT)
     types = [i.intent_type for i in filtered]
     assert "UPDATE_TP" in types
     assert "MARKET_EXIT_RUNNER" in types
-    assert "NEAR_TP_REDUCE" not in types
     assert "OPEN_LONG" not in types
     assert "ADD_LONG" not in types
 
@@ -140,13 +138,6 @@ def test_sidecar_dirty_halt_allows_market_exit_runner() -> None:
     filtered = _halt_filter_intents(intents, SIDECAR_DIRTY_HALT)
     assert len(filtered) == 1
     assert filtered[0].intent_type == "MARKET_EXIT_RUNNER"
-
-
-def test_sidecar_dirty_halt_blocks_near_tp_reduce() -> None:
-    """NEAR_TP_REDUCE must be blocked in SIDECAR_DIRTY_HALT."""
-    intents = [FakeIntent("NEAR_TP_REDUCE")]
-    filtered = _halt_filter_intents(intents, SIDECAR_DIRTY_HALT)
-    assert len(filtered) == 0
 
 
 def test_sidecar_dirty_halt_blocks_new_open() -> None:
@@ -183,7 +174,6 @@ def test_protective_sl_delayed_exit_armed_is_full_halt() -> None:
         "middle_runner_sl_failed_delayed_market_exit_armed",
         "middle_bucket_fast_sl_failed_delayed_market_exit_armed",
         "middle_bucket_fast_sl_invalid_delayed_market_exit_armed",
-        "near_tp_protective_sl_failed_delayed_market_exit_armed",
         "core_tp_place_failed_delayed_market_exit_armed",
     ]
     for r in reasons:

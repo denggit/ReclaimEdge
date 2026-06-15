@@ -67,7 +67,7 @@ class ProtectiveStopManager:
             )
         return str(result.order_id)
 
-    async def place_near_tp_protective_stop_with_retries(
+    async def place_protective_stop_with_retries(
             self,
             side: PositionSide,
             contracts: Decimal | str | int | float,
@@ -96,15 +96,15 @@ class ProtectiveStopManager:
                         client_order_id="",
                     )
                     algo_id = result.order_id
-                if await self.trader.verify_near_tp_protective_stop(algo_id, side, contracts, stop_price):
+                if await self.trader.verify_protective_stop(algo_id, side, contracts, stop_price):
                     return True, algo_id, "protective_sl_placed"
-                await self.trader._cancel_unverified_near_tp_algo(algo_id, phase="primary")
+                await self.trader._cancel_unverified_algo(algo_id, phase="primary")
                 last_error = f"protective_sl_verify_failed algoId={algo_id}"
                 raise RuntimeError(last_error)
             except Exception as exc:
                 last_error = str(exc)
                 logger.warning(
-                    "NEAR_TP_PROTECTIVE_SL_RETRY | attempt=%s/%s side=%s contracts=%s stop_price=%s error=%s",
+                    "PROTECTIVE_SL_RETRY | attempt=%s/%s side=%s contracts=%s stop_price=%s error=%s",
                     attempt,
                     retry_count,
                     side,
@@ -132,15 +132,15 @@ class ProtectiveStopManager:
                 algo_id = result.order_id
                 if algo_id is None:
                     raise RuntimeError("protective_stop_fallback_missing_order_id")
-                if await self.trader.verify_near_tp_protective_stop(algo_id, side, contracts, stop_price):
+                if await self.trader.verify_protective_stop(algo_id, side, contracts, stop_price):
                     return True, algo_id, "fallback_conditional_close_placed"
-                await self.trader._cancel_unverified_near_tp_algo(algo_id, phase="secondary")
+                await self.trader._cancel_unverified_algo(algo_id, phase="secondary")
                 last_error = f"fallback_conditional_verify_failed algoId={algo_id}"
                 raise RuntimeError(last_error)
             except Exception as exc:
                 last_error = str(exc)
                 logger.warning(
-                    "NEAR_TP_PROTECTIVE_SL_FALLBACK_RETRY | attempt=%s/%s side=%s contracts=%s stop_price=%s error=%s",
+                    "PROTECTIVE_SL_FALLBACK_RETRY | attempt=%s/%s side=%s contracts=%s stop_price=%s error=%s",
                     attempt,
                     retry_count,
                     side,
@@ -160,7 +160,7 @@ class ProtectiveStopManager:
             retry_count: int,
             retry_interval_seconds: float,
     ) -> tuple[bool, str | None, str]:
-        ok, order_id, message = await self.place_near_tp_protective_stop_with_retries(
+        ok, order_id, message = await self.place_protective_stop_with_retries(
             side,
             contracts,
             stop_price,
@@ -179,7 +179,7 @@ class ProtectiveStopManager:
             retry_count: int,
             retry_interval_seconds: float,
     ) -> tuple[bool, str | None, str]:
-        ok, order_id, message = await self.place_near_tp_protective_stop_with_retries(
+        ok, order_id, message = await self.place_protective_stop_with_retries(
             side,
             contracts,
             stop_price,
@@ -198,7 +198,7 @@ class ProtectiveStopManager:
             retry_count: int,
             retry_interval_seconds: float,
     ) -> tuple[bool, str | None, str]:
-        ok, order_id, message = await self.place_near_tp_protective_stop_with_retries(
+        ok, order_id, message = await self.place_protective_stop_with_retries(
             side,
             contracts,
             stop_price,
@@ -217,7 +217,7 @@ class ProtectiveStopManager:
             retry_count: int,
             retry_interval_seconds: float,
     ) -> tuple[bool, str | None, str]:
-        ok, order_id, message = await self.place_near_tp_protective_stop_with_retries(
+        ok, order_id, message = await self.place_protective_stop_with_retries(
             side,
             contracts,
             stop_price,
@@ -236,7 +236,7 @@ class ProtectiveStopManager:
             retry_count: int,
             retry_interval_seconds: float,
     ) -> tuple[bool, str | None, str]:
-        ok, order_id, message = await self.place_near_tp_protective_stop_with_retries(
+        ok, order_id, message = await self.place_protective_stop_with_retries(
             side,
             contracts,
             stop_price,
@@ -247,44 +247,44 @@ class ProtectiveStopManager:
             self.trader.three_stage_post_tp1_protective_sl_order_id = order_id
         return ok, order_id, message
 
-    async def _cancel_unverified_near_tp_algo(self, algo_id: str, *, phase: str) -> None:
+    async def _cancel_unverified_algo(self, algo_id: str, *, phase: str) -> None:
         try:
-            ok = await self.trader.cancel_near_tp_protective_stop(algo_id)
+            ok = await self.trader.cancel_protective_stop(algo_id)
             logger.warning(
-                "NEAR_TP_PROTECTIVE_SL_VERIFY_CANCELLED | phase=%s algoId=%s ok=%s",
+                "PROTECTIVE_SL_VERIFY_CANCELLED | phase=%s algoId=%s ok=%s",
                 phase,
                 algo_id,
                 ok,
             )
         except Exception as exc:
             logger.warning(
-                "NEAR_TP_PROTECTIVE_SL_VERIFY_CANCEL_FAILED | phase=%s algoId=%s error=%s",
+                "PROTECTIVE_SL_VERIFY_CANCEL_FAILED | phase=%s algoId=%s error=%s",
                 phase,
                 algo_id,
                 exc,
             )
 
-    async def verify_near_tp_protective_stop(self, algo_id: str, side: PositionSide, contracts: Decimal,
+    async def verify_protective_stop(self, algo_id: str, side: PositionSide, contracts: Decimal,
                                              stop_price: float) -> bool:
         t = self.trader
-        attempts = max(int(os.getenv("NEAR_TP_PROTECTIVE_SL_VERIFY_ATTEMPTS", "3")), 1)
-        interval_seconds = float(os.getenv("NEAR_TP_PROTECTIVE_SL_VERIFY_INTERVAL_SECONDS", "0.2"))
+        attempts = max(int(os.getenv("PROTECTIVE_SL_VERIFY_ATTEMPTS", "3")), 1)
+        interval_seconds = float(os.getenv("PROTECTIVE_SL_VERIFY_INTERVAL_SECONDS", "0.2"))
         for attempt in range(1, attempts + 1):
             try:
                 orders = await self.trading_client.fetch_open_algo_orders()
                 for item in orders:
-                    if self._near_tp_protective_stop_snapshot_matches(item, algo_id, side, contracts, stop_price):
+                    if self._protective_stop_snapshot_matches(item, algo_id, side, contracts, stop_price):
                         return True
             except Exception as exc:
-                logger.warning("NEAR_TP_PROTECTIVE_SL_VERIFY_FAILED | attempt=%s/%s algoId=%s error=%s", attempt,
+                logger.warning("PROTECTIVE_SL_VERIFY_FAILED | attempt=%s/%s algoId=%s error=%s", attempt,
                                attempts, algo_id, exc)
             if attempt < attempts and interval_seconds > 0:
                 await asyncio.sleep(interval_seconds)
-        logger.warning("NEAR_TP_PROTECTIVE_SL_VERIFY_MISSING | algoId=%s side=%s contracts=%s stop_price=%s", algo_id,
+        logger.warning("PROTECTIVE_SL_VERIFY_MISSING | algoId=%s side=%s contracts=%s stop_price=%s", algo_id,
                        side, t.decimal_to_str(contracts), t.price_to_str(stop_price))
         return False
 
-    def _near_tp_protective_stop_snapshot_matches(
+    def _protective_stop_snapshot_matches(
         self,
         item: AlgoOrderSnapshot,
         algo_id: str,
@@ -314,7 +314,7 @@ class ProtectiveStopManager:
         price_tolerance = max(Decimal("0.01"), expected_stop.copy_abs() * Decimal("0.0001"))
         return abs(item_trigger - expected_stop) <= price_tolerance
 
-    def _near_tp_protective_stop_matches(self, item: dict[str, Any], algo_id: str, side: PositionSide,
+    def _protective_stop_matches(self, item: dict[str, Any], algo_id: str, side: PositionSide,
                                          contracts: Decimal, stop_price: float) -> bool:
         t = self.trader
         item_algo_id = str(item.get("algoId") or item.get("ordId") or "")

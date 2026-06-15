@@ -160,12 +160,6 @@ class TpUpdateCoordinator:
                     tp_price, boll, ts_ms, reason_override,
                 )
 
-        # ── Near-TP protected / add_disabled branch ───────────────────
-        elif not middle_profit_fallback_locked and not degrade_applied and (
-            s.state.near_tp_protected or s.state.near_tp_add_disabled
-        ):
-            partial_tp_price, partial_tp_ratio, tp_plan = None, 0.0, "SINGLE"
-
         # ── Normal _select_tp_plan branch ─────────────────────────────
         elif not middle_profit_fallback_locked and not degrade_applied:
             tp_price, tp_mode, partial_tp_price, partial_tp_ratio, tp_plan, \

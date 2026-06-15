@@ -346,16 +346,6 @@ class SidecarManagedCoreTest(unittest.TestCase):
         result = self.factory.managed_core_eth_qty_for_intent("UPDATE_TP")
         self.assertEqual(result, 2.0)
 
-    def test_sidecar_enabled_near_tp_reduce_contracts(self) -> None:
-        self._enable_sidecar()
-        result = self.factory.managed_core_contracts_for_intent("NEAR_TP_REDUCE")
-        self.assertEqual(result, "10")
-
-    def test_sidecar_enabled_near_tp_reduce_eth_qty(self) -> None:
-        self._enable_sidecar()
-        result = self.factory.managed_core_eth_qty_for_intent("NEAR_TP_REDUCE")
-        self.assertEqual(result, 0.5)
-
     def test_sidecar_enabled_market_exit_runner_contracts(self) -> None:
         self._enable_sidecar()
         result = self.factory.managed_core_contracts_for_intent("MARKET_EXIT_RUNNER")
@@ -422,11 +412,6 @@ class ProtectedOrderIdsTest(unittest.TestCase):
         result = self.factory.protected_order_ids()
         self.assertIn("sc-tp-2", result)
 
-    def test_includes_near_tp_protective_sl_order_id(self) -> None:
-        self.strat.state.near_tp_protective_sl_order_id = "near-sl-1"
-        result = self.factory.protected_order_ids()
-        self.assertIn("near-sl-1", result)
-
     def test_includes_middle_runner_protective_sl_order_id(self) -> None:
         self.strat.state.middle_runner_protective_sl_order_id = "mid-sl-1"
         result = self.factory.protected_order_ids()
@@ -443,7 +428,6 @@ class ProtectedOrderIdsTest(unittest.TestCase):
         self.assertIn("tr-sl-1", result)
 
     def test_deduplicates_preserving_order(self) -> None:
-        self.strat.state.near_tp_protective_sl_order_id = "dup-id"
         self.strat.state.trend_runner_sl_order_id = "dup-id"
         self.strat.state.middle_runner_protective_sl_order_id = "unique-id"
         result = self.factory.protected_order_ids()
@@ -453,7 +437,6 @@ class ProtectedOrderIdsTest(unittest.TestCase):
         self.assertEqual(len(result), 2)
 
     def test_none_order_ids_are_skipped(self) -> None:
-        self.strat.state.near_tp_protective_sl_order_id = None
         self.strat.state.middle_runner_protective_sl_order_id = None
         self.strat.state.three_stage_post_tp1_protective_sl_order_id = None
         self.strat.state.trend_runner_sl_order_id = None
@@ -461,91 +444,6 @@ class ProtectedOrderIdsTest(unittest.TestCase):
         self.assertEqual(result, ())
 
 
-class NearTpReduceIntentFactoryTest(unittest.TestCase):
-    """Verify build_near_tp_reduce_intent constructs correct TradeIntent."""
-
-    def setUp(self) -> None:
-        self.strat = _strategy()
-        _setup_long_position(self.strat)
-        s = self.strat.state
-        s.layers = 3
-        s.tp_price = 115.0
-        s.tp_mode = "UPPER"
-        s.avg_entry_price = 96.0
-        s.breakeven_price = 96.5
-        self.factory = StrategyIntentFactory(self.strat)
-
-    def test_build_near_tp_reduce_intent_fields(self) -> None:
-        b = _boll()
-        c = _cvd()
-        sz = _size(eth_qty=2.0, layer_index=3)
-        intent = self.factory.build_near_tp_reduce_intent(
-            side="LONG",
-            price=110.0,
-            layer_index=3,
-            tp_price=115.0,
-            reason="near_tp_giveback_protection",
-            size=sz,
-            boll=b,
-            cvd=c,
-            ts_ms=3_000,
-            progress=0.92,
-            best=113.0,
-            giveback=2.5,
-            giveback_threshold=3.0,
-            protective_sl=97.5,
-        )
-        self.assertEqual(intent.intent_type, "NEAR_TP_REDUCE")
-        self.assertEqual(intent.side, "LONG")
-        self.assertEqual(intent.price, 110.0)
-        self.assertEqual(intent.layer_index, 3)
-        self.assertEqual(intent.tp_price, 115.0)
-        self.assertEqual(intent.reason, "near_tp_giveback_protection")
-        self.assertEqual(intent.size, sz)
-        self.assertEqual(intent.ts_ms, 3_000)
-        # Near-TP specific fields
-        self.assertEqual(intent.near_tp_progress_ratio, 0.92)
-        self.assertEqual(intent.near_tp_best_price, 113.0)
-        self.assertEqual(intent.near_tp_giveback, 2.5)
-        self.assertEqual(intent.near_tp_giveback_threshold, 3.0)
-        self.assertEqual(intent.near_tp_reduce_ratio, self.strat.config.near_tp_reduce_ratio)
-        self.assertEqual(intent.near_tp_protective_sl_price, 97.5)
-        # Standard near-TP intent fields
-        self.assertEqual(intent.tp_plan, "SINGLE")
-        self.assertTrue(intent.partial_tp_consumed)
-        self.assertIsNone(intent.partial_tp_price)
-        self.assertEqual(intent.partial_tp_ratio, 0.0)
-
-    def test_build_near_tp_reduce_intent_includes_cvd_boll(self) -> None:
-        b = _boll(upper=120.0, middle=110.0, lower=90.0)
-        c = _cvd(fast_cvd=0.8, previous_fast_cvd=0.5, buy_ratio=0.7, sell_ratio=0.3)
-        sz = _size()
-        intent = self.factory.build_near_tp_reduce_intent(
-            side="LONG",
-            price=110.0,
-            layer_index=3,
-            tp_price=115.0,
-            reason="near_tp_giveback_protection",
-            size=sz,
-            boll=b,
-            cvd=c,
-            ts_ms=3_000,
-            progress=0.92,
-            best=113.0,
-            giveback=2.5,
-            giveback_threshold=3.0,
-            protective_sl=97.5,
-        )
-        self.assertEqual(intent.fast_cvd, 0.8)
-        self.assertEqual(intent.previous_fast_cvd, 0.5)
-        self.assertEqual(intent.buy_ratio, 0.7)
-        self.assertEqual(intent.sell_ratio, 0.3)
-        self.assertEqual(intent.boll_upper, 120.0)
-        self.assertEqual(intent.boll_middle, 110.0)
-        self.assertEqual(intent.boll_lower, 90.0)
-        self.assertEqual(intent.avg_entry_price, 96.0)
-        self.assertEqual(intent.breakeven_price, 96.5)
-        self.assertEqual(intent.tp_mode, "UPPER")
 
 
 class RunnerMarketExitIntentFactoryTest(unittest.TestCase):
@@ -629,63 +527,6 @@ class RunnerMarketExitIntentFactoryTest(unittest.TestCase):
         self.assertEqual(intent.avg_entry_price, 96.0)
         self.assertEqual(intent.breakeven_price, 96.5)
         self.assertEqual(intent.tp_mode, "UPPER")
-
-
-class NearTpReduceIntentWrapperTest(unittest.TestCase):
-    """Verify _near_tp_reduce_intent wrapper preserves behavior
-    (state writes, logs, enable guards) and delegates intent construction."""
-
-    def test_returns_none_when_side_is_none(self) -> None:
-        strat = _strategy()
-        strat.state.side = None
-        intent = strat._near_tp_reduce_intent(100.0, 1_000, _boll(), _cvd(), 0.9, 105.0, 2.0, 3.0)
-        self.assertIsNone(intent)
-
-    def test_returns_none_when_tp_price_is_none(self) -> None:
-        strat = _strategy()
-        strat.state.side = "LONG"
-        strat.state.tp_price = None
-        intent = strat._near_tp_reduce_intent(100.0, 1_000, _boll(), _cvd(), 0.9, 105.0, 2.0, 3.0)
-        self.assertIsNone(intent)
-
-    def test_returns_intent_when_enabled(self) -> None:
-        strat = _strategy(near_tp_enabled=True, near_tp_reduce_enabled=True)
-        _setup_long_position(strat)
-        strat.state.layers = 2
-        strat.state.tp_price = 115.0
-        strat.state.avg_entry_price = 96.0
-        intent = strat._near_tp_reduce_intent(110.0, 3_000, _boll(), _cvd(), 0.92, 113.0, 2.5, 3.0)
-        self.assertIsNotNone(intent)
-        self.assertEqual(intent.intent_type, "NEAR_TP_REDUCE")
-        self.assertEqual(strat.state.near_tp_trigger_ts_ms, 3_000)
-
-    def test_returns_none_when_shadow_enabled_and_reduce_disabled(self) -> None:
-        strat = _strategy(near_tp_shadow_enabled=True, near_tp_reduce_enabled=False)
-        _setup_long_position(strat)
-        strat.state.layers = 2
-        strat.state.tp_price = 115.0
-        strat.state.avg_entry_price = 96.0
-        intent = strat._near_tp_reduce_intent(110.0, 3_000, _boll(), _cvd(), 0.92, 113.0, 2.5, 3.0)
-        self.assertIsNone(intent)
-
-    def test_returns_none_when_reduce_disabled(self) -> None:
-        strat = _strategy(near_tp_reduce_enabled=False)
-        _setup_long_position(strat)
-        strat.state.layers = 2
-        strat.state.tp_price = 115.0
-        strat.state.avg_entry_price = 96.0
-        intent = strat._near_tp_reduce_intent(110.0, 3_000, _boll(), _cvd(), 0.92, 113.0, 2.5, 3.0)
-        self.assertIsNone(intent)
-
-    def test_writes_near_tp_trigger_ts_ms(self) -> None:
-        strat = _strategy(near_tp_reduce_enabled=True)
-        _setup_long_position(strat)
-        strat.state.layers = 2
-        strat.state.tp_price = 115.0
-        strat.state.avg_entry_price = 96.0
-        strat.state.near_tp_trigger_ts_ms = 0
-        strat._near_tp_reduce_intent(110.0, 5_000, _boll(), _cvd(), 0.92, 113.0, 2.5, 3.0)
-        self.assertEqual(strat.state.near_tp_trigger_ts_ms, 5_000)
 
 
 class RunnerMarketExitIntentWrapperTest(unittest.TestCase):

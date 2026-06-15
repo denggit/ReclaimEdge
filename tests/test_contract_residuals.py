@@ -58,7 +58,6 @@ def make_trader(**overrides) -> Trader:
     t.contract_precision = Decimal("0.01")
     t.min_contracts = Decimal("0.01")
     t.tp_order_id = None
-    t.near_tp_protective_sl_order_id = None
     t.middle_runner_protective_sl_order_id = None
     t.three_stage_post_tp1_protective_sl_order_id = None
     t.trend_runner_sl_order_id = None
@@ -241,7 +240,7 @@ async def test_market_exit_closes_exact_min_contracts() -> None:
 
     trader.fetch_position_snapshot = mock_fetch_snapshot
     trader.request = mock_request
-    trader._cleanup_after_near_tp_market_exit = mock_cleanup
+    trader._cleanup_after_market_exit = mock_cleanup
     trader.fetch_pending_orders = mock_fetch_pending
 
     # The exit should submit the order with sz=0.01 (the position contracts)

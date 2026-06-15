@@ -21,7 +21,6 @@ import pytest
 # ======================================================================
 
 _MARKET_EXIT_PATH = Path(__file__).resolve().parents[2] / "src" / "execution" / "tp_sl_market_exit_manager.py"
-_NEAR_TP_PATH = Path(__file__).resolve().parents[2] / "src" / "execution" / "tp_sl_near_tp_manager.py"
 
 
 def _read_source(path: Path) -> str:
@@ -109,83 +108,6 @@ class TestMarketExitManagerPositionReadMigrated:
 
 
 # ======================================================================
-# 2. NearTpExecutionManager — migrated method checks
-# ======================================================================
-
-
-class TestNearTpExecutionManagerPositionReadMigrated:
-    """execute_near_tp_reduce must use self.trading_client.fetch_position()
-    for its initial position read.
-
-    Note: the refreshed position read (line ~70) intentionally remains as
-    legacy t.fetch_position_snapshot() because the exception fallback
-    (line ~73) constructs a legacy trader.PositionSnapshot with eth_qty
-    and raw_pos fields that are not present on the port PositionSnapshot.
-    """
-
-    METHOD = "execute_near_tp_reduce"
-
-    REQUIRED = [
-        "self.trading_client.fetch_position(",
-    ]
-
-    # The refreshed position read still uses t.fetch_position_snapshot()
-    # because the exception fallback creates a legacy PositionSnapshot with
-    # eth_qty and raw_pos.  This is documented and intentional.
-    FORBIDDEN = [
-        # self.trader.fetch_position_snapshot(  — not present; t. alias is used
-    ]
-
-    def test_method_contains_fetch_position(self):
-        text = _read_source(_NEAR_TP_PATH)
-        method_text = _extract_method(text, self.METHOD)
-
-        for required in self.REQUIRED:
-            assert required in method_text, (
-                f"{self.METHOD} must contain {required}"
-            )
-
-    def test_initial_position_read_not_from_trader(self):
-        """The initial position read (for execution decisions) is not from
-        self.trader.fetch_position_snapshot."""
-        text = _read_source(_NEAR_TP_PATH)
-        method_text = _extract_method(text, self.METHOD)
-
-        # self.trader.fetch_position_snapshot( must not appear in this method
-        assert "self.trader.fetch_position_snapshot(" not in method_text, (
-            f"{self.METHOD} must not use self.trader.fetch_position_snapshot("
-        )
-
-    def test_field_mapping_contracts_to_qty(self):
-        """position.contracts must NOT appear; position.qty must be used."""
-        text = _read_source(_NEAR_TP_PATH)
-        method_text = _extract_method(text, self.METHOD)
-
-        # position.contracts should not appear (initial read uses .qty)
-        assert "position.contracts" not in method_text, (
-            f"{self.METHOD} must use position.qty for the initial read, not position.contracts"
-        )
-        # contracts_before = position.qty (not position.contracts)
-        assert "contracts_before = position.qty" in method_text, (
-            f"{self.METHOD} must set contracts_before from position.qty"
-        )
-
-    def test_legacy_refreshed_read_documented(self):
-        """The refreshed position read is intentionally kept as legacy.
-        This test documents why — if someone later removes it, this test
-        reminds them to also update the fallback PositionSnapshot."""
-        text = _read_source(_NEAR_TP_PATH)
-        method_text = _extract_method(text, self.METHOD)
-
-        # The refreshed read (line 70) still uses legacy — this is
-        # intentional because the fallback (line 73) creates a legacy
-        # PositionSnapshot that needs eth_qty and raw_pos.
-        assert "t.fetch_position_snapshot()" in method_text or (
-            "self.trading_client.fetch_position()" in method_text
-        ), f"{self.METHOD} must have a position refresh"
-
-
-# ======================================================================
 # 3. File-level forbidden tokens
 # ======================================================================
 
@@ -193,7 +115,7 @@ class TestNearTpExecutionManagerPositionReadMigrated:
 class TestNoForbiddenTokensInMigratedFiles:
     """Migrated files must not contain forbidden abstractions or patterns."""
 
-    MIGRATED_FILES = [_MARKET_EXIT_PATH, _NEAR_TP_PATH]
+    MIGRATED_FILES = [_MARKET_EXIT_PATH]
 
     FORBIDDEN_TOKENS = [
         "Binance",
@@ -239,7 +161,7 @@ class TestNoForbiddenTokensInMigratedFiles:
 
 
 class TestFilesCompile:
-    @pytest.mark.parametrize("file_path", [_MARKET_EXIT_PATH, _NEAR_TP_PATH])
+    @pytest.mark.parametrize("file_path", [_MARKET_EXIT_PATH])
     def test_file_compiles(self, file_path: Path) -> None:
         text = _read_source(file_path)
         compile(text, str(file_path), "exec")

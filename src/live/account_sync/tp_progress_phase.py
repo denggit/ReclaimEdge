@@ -551,20 +551,6 @@ def run_account_sync_tp_progress_phase(
                         "keep_ratio": getattr(strategy.state, "middle_runner_keep_ratio", 0.0),
                         "reason": filled_reason,
                     }
-
-    if (
-            execution_state.trading_halted
-            and execution_state.halt_reason == "near_tp_protected_sync_failed"
-            and getattr(strategy.state, "near_tp_protected", False)
-    ):
-        execution_state.trading_halted = False
-        execution_state.halt_reason = None
-        logger.warning(
-            "NEAR_TP_PROTECTED_SYNC_RECOVERED | trading_halted=false side=%s contracts=%s avg_entry=%.4f",
-            core_position.side,
-            core_position.contracts,
-            core_position.avg_entry_price,
-        )
     save_state_payload = (
         execution_state.current_position_id, copy.deepcopy(strategy.state), execution_state.cash_before_position)
     if current_position_key != last_logged_position_key:

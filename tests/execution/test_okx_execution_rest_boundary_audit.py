@@ -30,7 +30,6 @@ EXECUTION_FILES: list[str] = [
     "src/execution/tp_sl_core_tp_manager.py",
     "src/execution/tp_sl_protective_stop_manager.py",
     "src/execution/tp_sl_market_exit_manager.py",
-    "src/execution/tp_sl_near_tp_manager.py",
     "src/execution/tp_sl_sidecar_manager.py",
 ]
 
@@ -54,8 +53,6 @@ ORDER_BODY_BUILDERS: list[str] = [
     "build_reduce_only_tp_order_body",
     "build_conditional_protective_sl_algo_body",
     "_reduce_only_market_order_body",
-    "_near_tp_protective_sl_algo_body",
-    "_near_tp_fallback_conditional_close_body",
 ]
 
 # ── Allowed direct REST whitelist ────────────────────────────────────────
@@ -108,19 +105,11 @@ ALLOWED_ORDER_BODY_BUILDERS: dict[tuple[str, str, str], str] = {
     # ── Trader legacy body helpers ───────────────────────────────────────
     ("src/execution/trader.py", "_reduce_only_market_order_body", "_reduce_only_market_order_body"):
         "legacy helper pending deletion after all call sites are migrated",
-    ("src/execution/trader.py", "_near_tp_protective_sl_algo_body", "_near_tp_protective_sl_algo_body"):
-        "legacy helper pending deletion after all call sites are migrated",
-    ("src/execution/trader.py", "_near_tp_fallback_conditional_close_body", "_near_tp_fallback_conditional_close_body"):
-        "legacy helper pending deletion after all call sites are migrated",
 
     # ── Trader legacy helpers calling order_specs builders ──────────────
     ("src/execution/trader.py", "_reduce_only_tp_order_body", "build_reduce_only_tp_order_body"):
         "legacy helper pending deletion after all call sites are migrated",
     ("src/execution/trader.py", "_reduce_only_market_order_body", "build_reduce_only_market_order_body"):
-        "legacy helper pending deletion after all call sites are migrated",
-    ("src/execution/trader.py", "_near_tp_protective_sl_algo_body", "build_conditional_protective_sl_algo_body"):
-        "legacy helper pending deletion after all call sites are migrated",
-    ("src/execution/trader.py", "_near_tp_fallback_conditional_close_body", "build_conditional_protective_sl_algo_body"):
         "legacy helper pending deletion after all call sites are migrated",
 }
 
@@ -141,15 +130,12 @@ MIGRATED_METHODS: set[tuple[str, str]] = {
     ("src/execution/tp_sl_execution_manager.py", "cancel_existing_reduce_only_orders"),
     ("src/execution/tp_sl_core_tp_manager.py", "replace_take_profit"),
     ("src/execution/tp_sl_core_tp_manager.py", "_place_reduce_only_take_profit_orders"),
-    ("src/execution/tp_sl_protective_stop_manager.py", "place_near_tp_protective_stop_with_retries"),
     ("src/execution/tp_sl_market_exit_manager.py", "market_exit_remaining_position_with_retries"),
-    ("src/execution/tp_sl_near_tp_manager.py", "execute_near_tp_reduce"),
     ("src/execution/tp_sl_sidecar_manager.py", "place_sidecar_fixed_take_profit"),
     ("src/execution/tp_sl_sidecar_manager.py", "cancel_sidecar_take_profit"),
     ("src/execution/trader.py", "initialize"),
     ("src/execution/trader.py", "fetch_sidecar_order_status"),
     ("src/execution/tp_sl_sidecar_manager.py", "fetch_sidecar_order_status"),
-    ("src/execution/tp_sl_protective_stop_manager.py", "verify_near_tp_protective_stop"),
 }
 
 # ── Migrated methods must call these port methods ────────────────────────
@@ -163,13 +149,7 @@ MIGRATED_METHOD_REQUIRED_PORT_CALLS: dict[tuple[str, str], list[str]] = {
     ("src/execution/tp_sl_core_tp_manager.py", "_place_reduce_only_take_profit_orders"): [
         ".place_limit_order(",
     ],
-    ("src/execution/tp_sl_protective_stop_manager.py", "place_near_tp_protective_stop_with_retries"): [
-        ".place_stop_market_order(",
-    ],
     ("src/execution/tp_sl_market_exit_manager.py", "market_exit_remaining_position_with_retries"): [
-        ".fetch_position(", ".place_market_order(",
-    ],
-    ("src/execution/tp_sl_near_tp_manager.py", "execute_near_tp_reduce"): [
         ".fetch_position(", ".place_market_order(",
     ],
     ("src/execution/tp_sl_sidecar_manager.py", "place_sidecar_fixed_take_profit"): [
@@ -187,9 +167,6 @@ MIGRATED_METHOD_REQUIRED_PORT_CALLS: dict[tuple[str, str], list[str]] = {
     ],
     ("src/execution/tp_sl_sidecar_manager.py", "fetch_sidecar_order_status"): [
         ".fetch_order_status(",
-    ],
-    ("src/execution/tp_sl_protective_stop_manager.py", "verify_near_tp_protective_stop"): [
-        ".fetch_open_algo_orders(",
     ],
 }
 
@@ -553,7 +530,6 @@ def test_tp_sl_managers_no_okx_body_builders(report: AuditReport) -> None:
     - src/execution/tp_sl_core_tp_manager.py
     - src/execution/tp_sl_protective_stop_manager.py
     - src/execution/tp_sl_market_exit_manager.py
-    - src/execution/tp_sl_near_tp_manager.py
     - src/execution/tp_sl_sidecar_manager.py
     """
     tp_sl_files: frozenset[str] = frozenset({
@@ -561,7 +537,6 @@ def test_tp_sl_managers_no_okx_body_builders(report: AuditReport) -> None:
         "src/execution/tp_sl_core_tp_manager.py",
         "src/execution/tp_sl_protective_stop_manager.py",
         "src/execution/tp_sl_market_exit_manager.py",
-        "src/execution/tp_sl_near_tp_manager.py",
         "src/execution/tp_sl_sidecar_manager.py",
     })
 

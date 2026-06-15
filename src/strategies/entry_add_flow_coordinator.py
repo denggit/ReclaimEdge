@@ -154,7 +154,6 @@ class EntryAddFlowCoordinator:
                 position_age_seconds=strategy._three_stage_pre_tp1_age_seconds(ts_ms),
             )
         strategy.state.partial_tp_consumed = False
-        strategy._reset_near_tp_state()
         strategy._reset_middle_runner_state()
         strategy._reset_three_stage_runner_state()
         tp_price, tp_mode = strategy._select_tp_price(side, boll)

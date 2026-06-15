@@ -146,7 +146,6 @@ def _make_core_tp_trader():
     trader.contract_precision = Decimal("0.01")
     trader.position_contracts = Decimal("0")
     trader.tp_order_id = None
-    trader.near_tp_protective_sl_order_id = None
     trader.middle_runner_protective_sl_order_id = None
     trader.three_stage_post_tp1_protective_sl_order_id = None
     trader.trend_runner_sl_order_id = None
@@ -177,11 +176,9 @@ def _make_core_tp_trader():
     trader.cancel_middle_runner_protective_stop = AsyncMock()
     trader.cancel_three_stage_post_tp1_protective_stop = AsyncMock()
     trader.cancel_trend_runner_protective_stop = AsyncMock()
-    trader.cancel_near_tp_protective_stop = AsyncMock()
 
     # --- trader methods used internally ---
     trader.fetch_pending_algo_orders = AsyncMock(return_value=[])
-    trader.verify_near_tp_protective_stop = AsyncMock(return_value=False)
 
     return trader
 

@@ -119,7 +119,6 @@ class SplitTakeProfitStrategyTest(unittest.TestCase):
                     "MIDDLE_RUNNER_ENABLED": "true",
                     "MIDDLE_RUNNER_FIRST_CLOSE_RATIO": "0.99",
                     "MIDDLE_RUNNER_EXTENSION_TRIGGER_RATIO": "0.6",
-                    "NEAR_TP_ENABLED": "false",
                 },
                 clear=True,
         ):
@@ -131,11 +130,6 @@ class SplitTakeProfitStrategyTest(unittest.TestCase):
         with patch.dict(os.environ, {"MIDDLE_RUNNER_FIRST_CLOSE_RATIO": "0.01"}, clear=True):
             config = BollCvdReclaimStrategyConfig.from_env()
         self.assertEqual(config.middle_runner_first_close_ratio, 0.1)
-
-    def test_middle_runner_and_near_tp_env_conflict_raises(self) -> None:
-        with patch.dict(os.environ, {"MIDDLE_RUNNER_ENABLED": "true", "NEAR_TP_ENABLED": "true"}, clear=True):
-            with self.assertRaises(RuntimeError):
-                BollCvdReclaimStrategyConfig.from_env()
 
     def test_long_tp_switches_to_upper_when_middle_net_profit_below_threshold(self) -> None:
         strat = strategy(breakeven_fee_buffer_pct=0.001, tp_min_net_profit_pct=0.002)
@@ -534,34 +528,6 @@ class SplitTakeProfitStrategyTest(unittest.TestCase):
         self.assertEqual(strat.state.middle_runner_protective_sl_order_id, "algo-old")
         self.assertEqual(update_intent.middle_runner_protective_sl_order_id, "algo-old")
 
-    def test_near_tp_skips_middle_runner_pending_and_active(self) -> None:
-        strat = strategy(
-            near_tp_enabled=True,
-            middle_runner_enabled=True,
-            near_tp_min_progress_ratio=0.1,
-            near_tp_min_profit_pct=0.0,
-            near_tp_min_reduce_profit_pct=0.0,
-        )
-        base_state = dict(
-            side="LONG",
-            layers=1,
-            total_entry_qty=1.0,
-            total_entry_notional=100.0,
-            avg_entry_price=100.0,
-            tp_price=110.0,
-            tp_plan="MIDDLE_RUNNER",
-            middle_runner_first_close_ratio=0.8,
-            middle_runner_keep_ratio=0.2,
-        )
-
-        strat.state = StrategyPositionState(**base_state, middle_runner_pending=True)
-        self.assertIsNone(strat._maybe_near_tp_reduce(109.0, 2_000, boll(), cvd()))
-        self.assertFalse(strat.state.near_tp_armed)
-
-        strat.state = StrategyPositionState(**base_state, middle_runner_active=True)
-        self.assertIsNone(strat._maybe_near_tp_reduce(109.0, 3_000, boll(), cvd()))
-        self.assertFalse(strat.state.near_tp_armed)
-
     # ── Middle-profit eligibility enforcement ──
 
     def test_middle_runner_pending_disables_when_middle_profit_insufficient(self) -> None:
@@ -644,7 +610,6 @@ class SplitTakeProfitTraderTest(unittest.IsolatedAsyncioTestCase):
         trader.contract_precision = Decimal("0.01")
         trader.min_contracts = Decimal("0.01")
         trader.tp_order_id = None
-        trader.near_tp_protective_sl_order_id = None
         trader.middle_runner_protective_sl_order_id = None
         trader.three_stage_post_tp1_protective_sl_order_id = None
         trader.trend_runner_sl_order_id = None

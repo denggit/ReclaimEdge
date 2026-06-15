@@ -51,7 +51,6 @@ class FakeTrader:
     def __init__(self) -> None:
         self.requests: list[tuple[str, str, object | None]] = []
         self.semantic = FakeSemanticExecutor()
-        self.near_tp_protective_sl_order_id = "algo-1"
         self.middle_runner_protective_sl_order_id = "algo-1"
         self.trend_runner_sl_order_id = "algo-1"
         self.three_stage_post_tp1_protective_sl_order_id = "algo-1"
@@ -108,9 +107,9 @@ class FakeTrader:
         self.requests.append((method, endpoint, payload))
         return {"data": [{"algoId": payload[0]["algoId"], "sCode": "0"}]}
 
-    async def cancel_near_tp_protective_stop(self, order_id: str | None) -> bool:
+    async def cancel_protective_stop(self, order_id: str | None) -> bool:
         assert self._manager is not None
-        return await self._manager.cancel_near_tp_protective_stop(order_id)
+        return await self._manager.cancel_protective_stop(order_id)
 
 
 def make_manager() -> tuple[FakeTrader, TpSlExecutionManager]:
@@ -126,7 +125,7 @@ async def test_default_off_uses_legacy_cancel_algos(monkeypatch) -> None:
     monkeypatch.delenv("BROKER_SEMANTIC_PROTECTIVE_SL_CANCEL_ENABLED", raising=False)
     trader, manager = make_manager()
 
-    ok = await manager.cancel_near_tp_protective_stop("algo-1")
+    ok = await manager.cancel_protective_stop("algo-1")
 
     assert ok is True
     assert len(trader.requests) == 1
@@ -135,7 +134,6 @@ async def test_default_off_uses_legacy_cancel_algos(monkeypatch) -> None:
     assert endpoint == "/api/v5/trade/cancel-algos"
     assert payload == [{"instId": "ETH-USDT-SWAP", "algoId": "algo-1"}]
     assert trader.semantic.calls == []
-    assert trader.near_tp_protective_sl_order_id is None
 
 
 @pytest.mark.asyncio
@@ -143,12 +141,11 @@ async def test_enabled_uses_semantic_cancel_without_legacy_request(monkeypatch) 
     monkeypatch.setenv("BROKER_SEMANTIC_PROTECTIVE_SL_CANCEL_ENABLED", "true")
     trader, manager = make_manager()
 
-    ok = await manager.cancel_near_tp_protective_stop("algo-1")
+    ok = await manager.cancel_protective_stop("algo-1")
 
     assert ok is True
     assert trader.semantic.calls == [("ETH-USDT-SWAP", "algo-1")]
     assert trader.requests == []
-    assert trader.near_tp_protective_sl_order_id is None
 
 
 @pytest.mark.asyncio
@@ -158,12 +155,12 @@ async def test_semantic_failure_returns_false_without_legacy_fallback(monkeypatc
     trader.semantic.ok = False
     trader.semantic.message = "boom"
 
-    ok = await manager.cancel_near_tp_protective_stop("algo-1")
+    ok = await manager.cancel_protective_stop("algo-1")
 
     assert ok is False
     assert trader.semantic.calls == [("ETH-USDT-SWAP", "algo-1")]
     assert trader.requests == []
-    assert trader.near_tp_protective_sl_order_id == "algo-1"
+    assert trader.middle_runner_protective_sl_order_id == "algo-1"
 
 
 @pytest.mark.asyncio
@@ -173,7 +170,7 @@ async def test_semantic_already_absent_returns_true_without_legacy_request(monke
     trader.semantic.ok = False
     trader.semantic.message = "order not found"
 
-    ok = await manager.cancel_near_tp_protective_stop("algo-1")
+    ok = await manager.cancel_protective_stop("algo-1")
 
     assert ok is True
     assert trader.semantic.calls == [("ETH-USDT-SWAP", "algo-1")]
@@ -185,7 +182,7 @@ async def test_none_order_id_returns_true_without_any_cancel(monkeypatch) -> Non
     monkeypatch.setenv("BROKER_SEMANTIC_PROTECTIVE_SL_CANCEL_ENABLED", "true")
     trader, manager = make_manager()
 
-    ok = await manager.cancel_near_tp_protective_stop(None)
+    ok = await manager.cancel_protective_stop(None)
 
     assert ok is True
     assert trader.requests == []

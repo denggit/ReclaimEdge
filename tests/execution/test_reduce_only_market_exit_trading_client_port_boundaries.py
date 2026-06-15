@@ -24,7 +24,6 @@ import pytest
 # ======================================================================
 
 _MARKET_EXIT_PATH = Path(__file__).resolve().parents[2] / "src" / "execution" / "tp_sl_market_exit_manager.py"
-_NEAR_TP_PATH = Path(__file__).resolve().parents[2] / "src" / "execution" / "tp_sl_near_tp_manager.py"
 _SIDECAR_PATH = Path(__file__).resolve().parents[2] / "src" / "execution" / "tp_sl_sidecar_manager.py"
 _EXECUTION_MGR_PATH = Path(__file__).resolve().parents[2] / "src" / "execution" / "tp_sl_execution_manager.py"
 _TRADER_PATH = Path(__file__).resolve().parents[2] / "src" / "execution" / "trader.py"
@@ -116,63 +115,6 @@ class TestMarketExitManagerMigratedMethods:
 
 
 # ======================================================================
-# 2. NearTpExecutionManager — migrated method checks
-# ======================================================================
-
-
-class TestNearTpExecutionManagerMigratedMethods:
-    """execute_near_tp_reduce is the migrated method."""
-
-    FORBIDDEN_IN_MIGRATED = [
-        "build_reduce_only_market_order_body",
-        "_reduce_only_market_order_body",
-        '"/api/v5/trade/order"',
-        '"/api/v5/trade/order\'',
-        "extract_order_id(",
-    ]
-
-    REQUIRED_IN_MIGRATED = [
-        ".place_market_order(",
-        "reduce_only=True",
-    ]
-
-    def test_migrated_method_no_forbidden_patterns(self):
-        """execute_near_tp_reduce must NOT contain legacy patterns."""
-        text = _read_source(_NEAR_TP_PATH)
-        method_text = _extract_method(text, "execute_near_tp_reduce")
-
-        for forbidden in self.FORBIDDEN_IN_MIGRATED:
-            lines = method_text.splitlines()
-            for i, line in enumerate(lines, 1):
-                stripped = line.strip()
-                if stripped.startswith("#"):
-                    continue
-                if forbidden in line:
-                    pytest.fail(
-                        f"execute_near_tp_reduce:{i} must not contain {forbidden}"
-                    )
-
-    def test_migrated_method_has_required_patterns(self):
-        """execute_near_tp_reduce must contain .place_market_order( and reduce_only=True."""
-        text = _read_source(_NEAR_TP_PATH)
-        method_text = _extract_method(text, "execute_near_tp_reduce")
-
-        for required in self.REQUIRED_IN_MIGRATED:
-            assert required in method_text, (
-                f"execute_near_tp_reduce must contain {required}"
-            )
-
-    def test_migrated_method_checks_missing_order_id(self):
-        """The migrated method must raise on missing order_id."""
-        text = _read_source(_NEAR_TP_PATH)
-        method_text = _extract_method(text, "execute_near_tp_reduce")
-
-        assert "near_tp_reduce_only_market_order_missing_order_id" in method_text, (
-            "Missing order_id must raise RuntimeError with descriptive message"
-        )
-
-
-# ======================================================================
 # 3. MarketExitManager __init__ accepts trading_client
 # ======================================================================
 
@@ -196,29 +138,6 @@ class TestMarketExitManagerInit:
 
 
 # ======================================================================
-# 4. NearTpExecutionManager __init__ accepts trading_client
-# ======================================================================
-
-
-class TestNearTpExecutionManagerInit:
-    """NearTpExecutionManager.__init__ must accept trading_client."""
-
-    def test_init_accepts_trading_client(self):
-        text = _read_source(_NEAR_TP_PATH)
-        init_text = _extract_method(text, "__init__")
-        assert "trading_client" in init_text, (
-            "NearTpExecutionManager.__init__ must accept trading_client"
-        )
-
-    def test_init_assigns_trading_client(self):
-        text = _read_source(_NEAR_TP_PATH)
-        init_text = _extract_method(text, "__init__")
-        assert "self.trading_client = trading_client" in init_text, (
-            "NearTpExecutionManager.__init__ must assign self.trading_client"
-        )
-
-
-# ======================================================================
 # 5. TpSlExecutionManager wires trading_client
 # ======================================================================
 
@@ -231,13 +150,6 @@ class TestTpSlExecutionManagerWiring:
         init_text = _extract_method(text, "__init__")
         assert "MarketExitManager(trader, self.trading_client)" in init_text, (
             "TpSlExecutionManager must pass self.trading_client to MarketExitManager"
-        )
-
-    def test_near_tp_gets_trading_client(self):
-        text = _read_source(_EXECUTION_MGR_PATH)
-        init_text = _extract_method(text, "__init__")
-        assert "trading_client=self.trading_client" in init_text, (
-            "TpSlExecutionManager must pass self.trading_client to NearTpExecutionManager"
         )
 
 
@@ -322,7 +234,6 @@ class TestNoForbiddenImports:
 
     MIGRATED_FILES = [
         _MARKET_EXIT_PATH,
-        _NEAR_TP_PATH,
         _EXECUTION_MGR_PATH,
         _SIDECAR_PATH,
     ]
@@ -359,7 +270,6 @@ class TestNoNewClientInstantiation_OLD:
 
     MIGRATED_FILES = [
         _MARKET_EXIT_PATH,
-        _NEAR_TP_PATH,
         _SIDECAR_PATH,
     ]
 
@@ -414,7 +324,7 @@ class TestNoNewClientInstantiation_OLD:
 class TestNoNewEnvReads:
     """The trading_client wiring in __init__ must not read env vars."""
 
-    MIGRATED_FILES = [_MARKET_EXIT_PATH, _NEAR_TP_PATH, _SIDECAR_PATH]
+    MIGRATED_FILES = [_MARKET_EXIT_PATH, _SIDECAR_PATH]
 
     @pytest.mark.parametrize("file_path", MIGRATED_FILES)
     def test_no_load_dotenv(self, file_path: Path) -> None:
@@ -431,17 +341,6 @@ class TestNoNewEnvReads:
 
 class TestUnmigratedMethodsAllowedDirectRequest:
     """Methods that are NOT migrated may still use direct request."""
-
-    def test_execute_market_exit_runner_still_delegates(self):
-        """execute_market_exit_runner delegates to market_exit which is migrated,
-        but the method itself is just a delegate — no direct request."""
-        text = _read_source(_NEAR_TP_PATH)
-        method_text = _extract_method(text, "execute_market_exit_runner")
-        # This method calls market_exit_remaining_position_with_retries (delegated)
-        # and should NOT contain direct request itself
-        assert '"/api/v5/trade/order"' not in method_text, (
-            "execute_market_exit_runner delegates to market_exit, no direct request needed"
-        )
 
     def test_sidecar_tp_placement_uses_trading_client_port(self):
         """Sidecar TP placement now uses TradingClientPort.place_limit_order
@@ -461,7 +360,6 @@ class TestUnmigratedMethodsAllowedDirectRequest:
 class TestFilesCompile:
     @pytest.mark.parametrize("file_path", [
         _MARKET_EXIT_PATH,
-        _NEAR_TP_PATH,
         _EXECUTION_MGR_PATH,
         _SIDECAR_PATH,
     ])

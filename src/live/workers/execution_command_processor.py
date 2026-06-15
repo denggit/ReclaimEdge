@@ -223,51 +223,6 @@ class ExecutionCommandProcessor:
         if entry_intent is not command.intent:
             command = replace(command, intent=entry_intent)
 
-        # ── guard: sidecar blocks NEAR_TP_REDUCE ─────────────────────────
-        if command.intent.intent_type == "NEAR_TP_REDUCE" and getattr(
-            self.strategy.state, "sidecar_enabled_for_position", False
-        ):
-            logger.error(
-                "SIDECAR_BLOCKS_NEAR_TP_REDUCE | sidecar_enabled_for_position=True; NEAR_TP_REDUCE would reduce sidecar portion of OKX net position trading_halted=true halt_reason=sidecar_blocks_near_tp_reduce",
-            )
-            async with self.state_lock:
-                self.execution_state.trading_halted = True
-                self.execution_state.halt_reason = "sidecar_blocks_near_tp_reduce"
-                self.strategy.state.sidecar_dirty = True
-                self.strategy.state.sidecar_halt_reason = "sidecar_blocks_near_tp_reduce"
-                current_position_id = self.execution_state.current_position_id
-                cash_before_position = self.execution_state.cash_before_position
-            if hasattr(self.journal, "append"):
-                self.journal.append(
-                    "SIDECAR_BLOCKS_NEAR_TP_REDUCE",
-                    {
-                        "sidecar_enabled_for_position": True,
-                        "trading_halted": True,
-                        "halt_reason": "sidecar_blocks_near_tp_reduce",
-                        "intent_type": command.intent.intent_type,
-                        "side": command.intent.side,
-                        "manual_intervention_required": True,
-                    },
-                    position_id=current_position_id,
-                )
-            self.state_store.save(
-                LiveStateStore.from_strategy_state(
-                    position_id=current_position_id,
-                    symbol=self.trader.symbol,
-                    strategy_state=self.strategy.state,
-                    cash_before_position=cash_before_position,
-                )
-            )
-            await self._send_halt_alert(
-                halt_reason="sidecar_blocks_near_tp_reduce",
-                side=command.intent.side,
-                layer=command.intent.layer_index,
-                sidecar_dirty=True,
-                manual_intervention_required=True,
-                message="Sidecar is enabled; NEAR_TP_REDUCE blocked to avoid sidecar portion reduction.",
-            )
-            return None
-
         # ── sidecar combined entry plan ──────────────────────────────────
         sidecar_plan: SidecarExecutionPlan | None = None
         if command.intent.intent_type in {"OPEN_LONG", "OPEN_SHORT", "ADD_LONG", "ADD_SHORT"}:
@@ -378,68 +333,6 @@ class ExecutionCommandProcessor:
                     )
                 return result
 
-            # ── Near-TP reduce: protective SL failed ────────────────────
-            if (
-                command.intent.intent_type == "NEAR_TP_REDUCE"
-                and not getattr(result, "protective_sl_ok", True)
-                and not getattr(result, "near_tp_exit_all", False)
-            ):
-                logger.error(
-                    "NEAR_TP_PROTECTIVE_SL_FAILED | position_id=%s side=%s message=%s delayed_market_exit_armed=true",
-                    current_position_id,
-                    command.intent.side,
-                    getattr(result, "message", ""),
-                )
-                async with self.state_lock:
-                    arm_payload = dme.arm_delayed_market_exit(
-                        strategy_state=self.strategy.state,
-                        execution_state=self.execution_state,
-                        position_id=current_position_id,
-                        side=command.intent.side,
-                        reason="near_tp_protective_sl_failed_delayed_market_exit_armed",
-                        context="near_tp_protective_sl_failed",
-                        source_event="NEAR_TP_PROTECTIVE_SL_FAILED",
-                        now_ms=command.intent.ts_ms,
-                        error=getattr(result, "message", str(result)),
-                    )
-                if hasattr(self.journal, "append"):
-                    self.journal.append(
-                        "NEAR_TP_PROTECTIVE_SL_FAILED",
-                        {
-                            "position_id": current_position_id,
-                            "side": command.intent.side,
-                            "message": getattr(result, "message", ""),
-                            "delayed_market_exit_armed": True,
-                            "halt_reason": "near_tp_protective_sl_failed_delayed_market_exit_armed",
-                            **arm_payload,
-                        },
-                        position_id=current_position_id,
-                    )
-                self.state_store.save(
-                    LiveStateStore.from_strategy_state(
-                        position_id=current_position_id,
-                        symbol=self.trader.symbol,
-                        strategy_state=self.strategy.state,
-                        cash_before_position=cash_before_position,
-                    )
-                )
-                await self._send_halt_alert(
-                    halt_reason="near_tp_protective_sl_failed_delayed_market_exit_armed",
-                    side=command.intent.side,
-                    layer=command.intent.layer_index,
-                    manual_intervention_required=True,
-                    message=(
-                        "Near-TP protective SL failed. "
-                        "Delayed market exit armed (30 min countdown). NO immediate market exit."
-                    ),
-                    extra={
-                        "protective_sl_ok": False,
-                        "delayed_market_exit_armed": True,
-                        "error": getattr(result, "message", str(result)),
-                    },
-                )
-                return result
-
             # ── Core entry filled but TP/SL placement failed ────────────
             entry_filled = getattr(result, "entry_filled", False)
             tp_ok = getattr(result, "tp_ok", True)
@@ -507,8 +400,6 @@ class ExecutionCommandProcessor:
         # ── apply result ─────────────────────────────────────────────────
         if command.intent.intent_type == "UPDATE_TP":
             await self._apply_update_tp_result(command, result)
-        elif command.intent.intent_type == "NEAR_TP_REDUCE":
-            await self._apply_near_tp_reduce_result(command, result)
         elif command.intent.intent_type == "MARKET_EXIT_RUNNER":
             await self._apply_market_exit_runner_result(command, result)
         else:
@@ -834,7 +725,7 @@ class ExecutionCommandProcessor:
         """Apply entry protective SL state from result only when the intent carries an entry protective SL price.
 
         IMPORTANT: Only entry intents (OPEN/ADD) carry ``entry_protective_sl_price``.
-        Non-entry intents (UPDATE_TP, NEAR_TP_REDUCE, MARKET_EXIT_RUNNER) do NOT
+        Non-entry intents (UPDATE_TP, MARKET_EXIT_RUNNER) do NOT
         carry this field, so their ``protective_sl_order_id`` (which belongs to
         a middle-runner / near-TP / three-stage runner protective SL) will never
         be written into ``entry_protective_sl_order_id``.
@@ -1104,7 +995,7 @@ class ExecutionCommandProcessor:
                     "tp2_ratio": getattr(command.intent, "three_stage_tp2_ratio", 0.0),
                     "runner_ratio": getattr(command.intent, "three_stage_runner_ratio", 0.0),
                     "reason": command.intent.reason,
-                    "retry_config": "NEAR_TP_PROTECTIVE_SL_RETRY_COUNT/NEAR_TP_PROTECTIVE_SL_RETRY_INTERVAL_SECONDS",
+                    "retry_config": "PROTECTIVE_SL_RETRY_COUNT/PROTECTIVE_SL_RETRY_INTERVAL_SECONDS",
                 },
                 position_id=current_position_id,
             )
@@ -1129,221 +1020,6 @@ class ExecutionCommandProcessor:
             command.intent.avg_entry_price,
             command.intent.breakeven_price,
             result.tp_order_id,
-        )
-
-    async def _apply_near_tp_reduce_result(
-        self,
-        command: live_runtime_types.TradeCommand,
-        result: Any,
-    ) -> None:
-        fail_action = None
-        if not getattr(result, "protective_sl_ok", False) and getattr(result, "near_tp_exit_all", False):
-            fail_action = "MARKET_EXIT"
-        remaining_position: PositionSnapshot | None = None
-        remaining_position_sync_error: str | None = None
-        if getattr(result, "protective_sl_ok", False) and not getattr(result, "near_tp_exit_all", False):
-            try:
-                position = await self.trader.fetch_position_snapshot()
-                if position.has_position and position.side == command.intent.side:
-                    remaining_position = position
-                else:
-                    remaining_position_sync_error = (
-                        f"position_absent_or_side_mismatch has_position={position.has_position} side={position.side}"
-                    )
-            except Exception:
-                remaining_position_sync_error = "fetch_position_failed"
-                logger.exception("NEAR_TP_STATE_PROTECTED | failed_to_sync_remaining_position_before_save")
-        async with self.state_lock:
-            current_position_id = self.execution_state.current_position_id
-            cash_before_position = self.execution_state.cash_before_position
-            self.execution_state.last_order_ts_ms = command.intent.ts_ms
-            self.strategy.state.tp_order_id = result.tp_order_id
-            self.strategy.state.tp_order_ids = list(getattr(result, "tp_order_ids", ()) or [])
-            self._maybe_apply_entry_protective_sl_state(command, result)
-            near_tp_state_synced = False
-            if getattr(result, "near_tp_exit_all", False):
-                self.execution_state.trading_halted = True
-                self.execution_state.halt_reason = "near_tp_exit_all_waiting_flat"
-            elif getattr(result, "protective_sl_ok", False):
-                if remaining_position is not None:
-                    position_cost_runtime.sync_strategy_cost_from_position(
-                        self.strategy,
-                        remaining_position,
-                        restore_from_position=startup_basic_restore.restore_strategy_from_position,
-                    )
-                    self.account_snapshot.position = remaining_position
-                    self.trader.position_contracts = remaining_position.contracts
-                    near_tp_state_synced = True
-                else:
-                    self.execution_state.trading_halted = True
-                    self.execution_state.halt_reason = "near_tp_protected_sync_failed"
-                    logger.warning(
-                        "NEAR_TP_STATE_PROTECTED_SYNC_FAILED | position_id=%s reason=%s trading_halted=true",
-                        current_position_id,
-                        remaining_position_sync_error or "unknown",
-                    )
-                self.strategy.state.near_tp_protected = True
-                self.strategy.state.near_tp_reduce_pending = False
-                strategy_config = getattr(self.strategy, "config", None)
-                self.strategy.state.near_tp_add_disabled = bool(
-                    getattr(strategy_config, "near_tp_disable_add_after_reduce", True)
-                )
-                self.strategy.state.near_tp_protective_sl_price = getattr(
-                    command.intent, "near_tp_protective_sl_price", None
-                ) or live_config_helpers._parse_optional_float(getattr(result, "protective_sl_price", ""))
-                self.strategy.state.near_tp_protective_sl_order_id = getattr(
-                    result, "protective_sl_order_id", None
-                )
-                self.strategy.state.tp_plan = "SINGLE"
-                self.strategy.state.partial_tp_price = None
-                self.strategy.state.partial_tp_ratio = 0.0
-                self.strategy.state.partial_tp_consumed = True
-                logger.warning(
-                    "NEAR_TP_STATE_PROTECTED | position_id=%s protective_sl_order_id=%s protective_sl_price=%s",
-                    current_position_id,
-                    self.strategy.state.near_tp_protective_sl_order_id,
-                    self.strategy.state.near_tp_protective_sl_price,
-                )
-            strategy_state_for_save = copy.deepcopy(self.strategy.state)
-            equity = self.account_snapshot.equity
-        self.journal.record_near_tp_reduce(
-            position_id=current_position_id,
-            symbol=self.trader.symbol,
-            intent=command.intent,
-            result=result,
-            protective_sl_fail_action=fail_action,
-        )
-        if getattr(result, "protective_sl_ok", False) and not getattr(result, "near_tp_exit_all", False):
-            self.state_store.save(
-                LiveStateStore.from_strategy_state(
-                    position_id=current_position_id,
-                    symbol=self.trader.symbol,
-                    strategy_state=strategy_state_for_save,
-                    cash_before_position=cash_before_position,
-                )
-            )
-            if not near_tp_state_synced:
-                subject = "Near-TP protected but position sync failed"
-                content = (
-                    "<div style='font-family:Arial,Helvetica,sans-serif;line-height:1.55;'>"
-                    "<h2>Near-TP protected but position sync failed</h2>"
-                    "<p>Reduce succeeded and protective SL was placed. Protected state was saved.</p>"
-                    "<p>Trading is temporarily halted until account sync refreshes the position.</p>"
-                    f"<p><b>position_id:</b> {html.escape(str(current_position_id))}</p>"
-                    f"<p><b>protective_sl_order_id:</b> {html.escape(str(getattr(result, 'protective_sl_order_id', None)))}</p>"
-                    f"<p><b>reason:</b> {html.escape(str(remaining_position_sync_error or 'unknown'))}</p>"
-                    "</div>"
-                )
-                ok = await self.email_sender.send_email_async(subject, content, content_type="html")
-                if not ok:
-                    logger.error("Failed to send Near-TP protected sync failure email")
-        # ── Near-TP final TP placement failed but protective SL ok ─────
-        # The position is protected by SL, but final TP is missing.
-        # This is still a TP placement failure → arm delayed exit.
-        near_tp_tp_failed = (
-            getattr(result, "reduce_filled", False)
-            and not getattr(result, "tp_ok", True)
-            and getattr(result, "protective_sl_ok", False)
-            and not getattr(result, "near_tp_exit_all", False)
-        )
-        if near_tp_tp_failed:
-            async with self.state_lock:
-                already_armed = getattr(self.strategy.state, "delayed_market_exit_armed", False)
-                if not already_armed:
-                    arm_payload = dme.arm_delayed_market_exit(
-                        strategy_state=self.strategy.state,
-                        execution_state=self.execution_state,
-                        position_id=current_position_id,
-                        side=command.intent.side,
-                        reason="core_tp_place_failed_delayed_market_exit_armed",
-                        context="near_tp_final_tp_replacement_failed",
-                        source_event="NEAR_TP_FINAL_TP_REPLACE_FAILED",
-                        now_ms=command.intent.ts_ms,
-                        error=getattr(result, "message", ""),
-                    )
-                current_position_id = self.execution_state.current_position_id
-                cash_before_position = self.execution_state.cash_before_position
-            if not already_armed:
-                if hasattr(self.journal, "append"):
-                    self.journal.append(
-                        "NEAR_TP_FINAL_TP_REPLACE_FAILED",
-                        {
-                            "position_id": current_position_id,
-                            "side": command.intent.side,
-                            "reduce_filled": True,
-                            "tp_ok": False,
-                            "protective_sl_ok": True,
-                            "delayed_market_exit_armed": True,
-                            "halt_reason": "core_tp_place_failed_delayed_market_exit_armed",
-                            **arm_payload,
-                        },
-                        position_id=current_position_id,
-                    )
-                self.state_store.save(
-                    LiveStateStore.from_strategy_state(
-                        position_id=current_position_id,
-                        symbol=self.trader.symbol,
-                        strategy_state=self.strategy.state,
-                        cash_before_position=cash_before_position,
-                    )
-                )
-                await self._send_halt_alert(
-                    halt_reason="core_tp_place_failed_delayed_market_exit_armed",
-                    side=command.intent.side,
-                    layer=command.intent.layer_index,
-                    manual_intervention_required=True,
-                    message=(
-                        "Near-TP final TP replacement failed (protective SL is OK). "
-                        "Delayed market exit armed (30 min countdown). NO immediate market exit."
-                    ),
-                    extra={
-                        "reduce_filled": True,
-                        "tp_ok": False,
-                        "protective_sl_ok": True,
-                        "delayed_market_exit_armed": True,
-                    },
-                )
-
-        if fail_action == "MARKET_EXIT":
-            # ── Protective SL failed → arm delayed market exit ──────────
-            async with self.state_lock:
-                arm_payload = dme.arm_delayed_market_exit(
-                    strategy_state=self.strategy.state,
-                    execution_state=self.execution_state,
-                    position_id=current_position_id,
-                    side=command.intent.side,
-                    reason="near_tp_protective_sl_failed_delayed_market_exit_armed",
-                    context="near_tp_protective_sl_failed",
-                    source_event="NEAR_TP_PROTECTIVE_SL_FAILED",
-                    now_ms=command.intent.ts_ms,
-                    error=result.message,
-                )
-            subject = "Near-TP protective SL failed; delayed market exit armed"
-            content = (
-                "<div style='font-family:Arial,Helvetica,sans-serif;line-height:1.55;'>"
-                "<h2>Near-TP protective SL failed</h2>"
-                "<p>Delayed market exit armed (30 min countdown). NO immediate market exit.</p>"
-                "<p>Please check OKX position and decide whether to manually exit.</p>"
-                f"<p><b>position_id:</b> {html.escape(str(current_position_id))}</p>"
-                f"<p><b>message:</b> {html.escape(result.message)}</p>"
-                "</div>"
-            )
-            ok = await self.email_sender.send_email_async(subject, content, content_type="html")
-            if not ok:
-                logger.error("Failed to send Near-TP delayed market exit arm email")
-        logger.warning(
-            "LIVE Near-TP reduce success | side=%s layer=%s price=%.4f contracts_before=%s contracts_reduced=%s contracts_after=%s tp_order_id=%s protective_sl_ok=%s protective_sl_order_id=%s near_tp_exit_all=%s equity=%.4f",
-            command.intent.side,
-            command.intent.layer_index,
-            command.intent.price,
-            result.contracts_before,
-            result.contracts_reduced,
-            result.contracts_after,
-            result.tp_order_id,
-            result.protective_sl_ok,
-            result.protective_sl_order_id,
-            result.near_tp_exit_all,
-            equity or 0.0,
         )
 
     async def _apply_market_exit_runner_result(

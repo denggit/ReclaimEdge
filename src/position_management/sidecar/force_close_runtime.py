@@ -105,7 +105,7 @@ async def force_close_sidecar_after_core_flat(
             raise RuntimeError("side_missing")
         exit_ok, exit_message = await trader.market_exit_remaining_position_with_retries(
             side,
-            retry_count=int(os.getenv("NEAR_TP_SL_FAIL_MARKET_EXIT_RETRY_COUNT", "3")),
+            retry_count=3,
         )
         if not exit_ok:
             raise RuntimeError(exit_message)

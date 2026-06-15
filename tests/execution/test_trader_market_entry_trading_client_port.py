@@ -275,25 +275,8 @@ class TestMarketEntryMissingOrderId:
 
 
 class TestSpecialIntentsDoNotRouteToPlaceMarketOrder:
-    """NEAR_TP_REDUCE, MARKET_EXIT_RUNNER, and UPDATE_TP must NOT call
+    """MARKET_EXIT_RUNNER and UPDATE_TP must NOT call
     place_market_order."""
-
-    @pytest.mark.asyncio
-    async def test_near_tp_reduce_does_not_call_place_market_order(self):
-        fake = FakeTradingClient()
-        trader = _make_trader(trading_client=fake)
-        # execute_near_tp_reduce delegates to _tp_sl_manager — mock it
-        trader.execute_near_tp_reduce = AsyncMock(
-            return_value=LiveTradeResult(
-                ok=True, action="NEAR_TP_REDUCE", order_id=None, tp_order_id=None,
-                contracts="1", tp_price="0", message="mocked",
-            )
-        )
-        intent = _make_intent(intent_type="NEAR_TP_REDUCE", side="LONG")
-
-        await trader.execute_intent(intent)
-
-        assert len(fake.market_calls) == 0
 
     @pytest.mark.asyncio
     async def test_market_exit_runner_does_not_call_place_market_order(self):

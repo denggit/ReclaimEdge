@@ -104,7 +104,6 @@ def _make_minimal_trader() -> Any:
     t.position_contracts = Decimal("0")
     t.account_equity_usdt = 0.0
     t.tp_order_id = None
-    t.near_tp_protective_sl_order_id = None
     t.middle_runner_protective_sl_order_id = None
     t.three_stage_post_tp1_protective_sl_order_id = None
     t.trend_runner_sl_order_id = None
@@ -241,9 +240,9 @@ class TestProtectiveSlRoutesToPlaceStopMarketOrder:
         async def fake_verify(_algo_id, _side, _contracts, _stop_price):
             return True
 
-        trader.verify_near_tp_protective_stop = fake_verify
+        trader.verify_protective_stop = fake_verify
 
-        ok, algo_id, message = await manager.place_near_tp_protective_stop_with_retries(
+        ok, algo_id, message = await manager.place_protective_stop_with_retries(
             side="LONG",
             contracts=Decimal("10"),
             stop_price=2950.0,
@@ -278,9 +277,9 @@ class TestProtectiveSlRoutesToPlaceStopMarketOrder:
         async def fake_verify(_algo_id, _side, _contracts, _stop_price):
             return True
 
-        trader.verify_near_tp_protective_stop = fake_verify
+        trader.verify_protective_stop = fake_verify
 
-        ok, algo_id, _msg = await manager.place_near_tp_protective_stop_with_retries(
+        ok, algo_id, _msg = await manager.place_protective_stop_with_retries(
             side="SHORT",
             contracts=Decimal("5"),
             stop_price=3700.0,
@@ -316,11 +315,11 @@ class TestProtectiveSlRoutesToPlaceStopMarketOrder:
         async def fake_cancel_algo(_algo_id):
             return None
 
-        trader.verify_near_tp_protective_stop = fake_verify
-        trader._cancel_unverified_near_tp_algo = fake_cancel_algo
-        trader.cancel_near_tp_protective_stop = lambda _: True
+        trader.verify_protective_stop = fake_verify
+        trader._cancel_unverified_algo = fake_cancel_algo
+        trader.cancel_protective_stop = lambda _: True
 
-        ok, algo_id, message = await manager.place_near_tp_protective_stop_with_retries(
+        ok, algo_id, message = await manager.place_protective_stop_with_retries(
             side="LONG",
             contracts=Decimal("10"),
             stop_price=2950.0,
@@ -367,7 +366,6 @@ class TestCancelOrderRoutesToPort:
         manager.protective_stops = None  # not needed for this test
         manager.core_tp = None
         manager.market_exit = None
-        manager.near_tp = None
         manager.sidecar = None
 
         await manager.cancel_existing_reduce_only_orders()
@@ -408,7 +406,6 @@ class TestCancelOrderRoutesToPort:
         manager.protective_stops = None
         manager.core_tp = None
         manager.market_exit = None
-        manager.near_tp = None
         manager.sidecar = None
 
         await manager.cancel_existing_reduce_only_orders()
@@ -446,7 +443,6 @@ class TestCancelOrderRoutesToPort:
         manager.protective_stops = None
         manager.core_tp = None
         manager.market_exit = None
-        manager.near_tp = None
         manager.sidecar = None
 
         # Must not raise — exception is caught and logged
@@ -490,7 +486,7 @@ class TestNoDirectRestEndpointsInReplacedPaths:
         )
 
     def test_no_direct_order_algo_endpoint_in_place_sl_primary(self) -> None:
-        """ProtectiveStopManager.place_near_tp_protective_stop_with_retries
+        """ProtectiveStopManager.place_protective_stop_with_retries
         primary path no longer contains /api/v5/trade/order-algo."""
         from pathlib import Path
 
@@ -507,7 +503,7 @@ class TestNoDirectRestEndpointsInReplacedPaths:
         fallback_section = False
         primary_has_direct = False
         for line in lines:
-            if "def place_near_tp_protective_stop_with_retries" in line:
+            if "def place_protective_stop_with_retries" in line:
                 in_method = True
                 continue
             if in_method and "fallback" in line.lower() and "conditional" in line.lower():
@@ -546,7 +542,7 @@ class TestNoDirectRestEndpointsInReplacedPaths:
         )
 
     def test_algo_cancel_routed_through_trading_client_port(self) -> None:
-        """cancel_near_tp_protective_stop now routes through
+        """cancel_protective_stop now routes through
         TradingClientPort.cancel_algo_order()."""
         from pathlib import Path
 
@@ -590,11 +586,11 @@ class TestProtectiveSlFallbackRoutesToPort:
         async def fake_cancel_algo(_algo_id, *, phase=""):
             return None
 
-        trader.verify_near_tp_protective_stop = fake_verify
-        trader._cancel_unverified_near_tp_algo = fake_cancel_algo
-        trader.cancel_near_tp_protective_stop = lambda _: True
+        trader.verify_protective_stop = fake_verify
+        trader._cancel_unverified_algo = fake_cancel_algo
+        trader.cancel_protective_stop = lambda _: True
 
-        ok, algo_id, message = await manager.place_near_tp_protective_stop_with_retries(
+        ok, algo_id, message = await manager.place_protective_stop_with_retries(
             side="LONG",
             contracts=Decimal("10"),
             stop_price=2950.0,
@@ -635,11 +631,11 @@ class TestProtectiveSlFallbackRoutesToPort:
         async def fake_cancel_algo(_algo_id, *, phase=""):
             return None
 
-        trader.verify_near_tp_protective_stop = fake_verify
-        trader._cancel_unverified_near_tp_algo = fake_cancel_algo
-        trader.cancel_near_tp_protective_stop = lambda _: True
+        trader.verify_protective_stop = fake_verify
+        trader._cancel_unverified_algo = fake_cancel_algo
+        trader.cancel_protective_stop = lambda _: True
 
-        ok, algo_id, message = await manager.place_near_tp_protective_stop_with_retries(
+        ok, algo_id, message = await manager.place_protective_stop_with_retries(
             side="SHORT",
             contracts=Decimal("5"),
             stop_price=3700.0,
@@ -664,7 +660,7 @@ class TestProtectiveSlFallbackRoutesToPort:
 class TestDelegatingProtectiveSlMethodsRouteToPort:
     """place_middle_runner / place_middle_bucket_fast / place_trend_runner /
     place_three_stage_post_tp1 all delegate to
-    place_near_tp_protective_stop_with_retries and therefore route
+    place_protective_stop_with_retries and therefore route
     through trading_client.place_stop_market_order()."""
 
     @pytest.mark.asyncio
@@ -683,7 +679,7 @@ class TestDelegatingProtectiveSlMethodsRouteToPort:
         async def fake_verify(_algo_id, _side, _contracts, _stop_price):
             return True
 
-        trader.verify_near_tp_protective_stop = fake_verify
+        trader.verify_protective_stop = fake_verify
 
         ok, algo_id, message = await manager.place_middle_runner_protective_stop_with_retries(
             side="LONG",
@@ -721,7 +717,7 @@ class TestDelegatingProtectiveSlMethodsRouteToPort:
         async def fake_verify(_algo_id, _side, _contracts, _stop_price):
             return True
 
-        trader.verify_near_tp_protective_stop = fake_verify
+        trader.verify_protective_stop = fake_verify
 
         ok, algo_id, message = await manager.place_middle_bucket_fast_protective_stop_with_retries(
             side="SHORT",
@@ -758,7 +754,7 @@ class TestDelegatingProtectiveSlMethodsRouteToPort:
         async def fake_verify(_algo_id, _side, _contracts, _stop_price):
             return True
 
-        trader.verify_near_tp_protective_stop = fake_verify
+        trader.verify_protective_stop = fake_verify
 
         ok, algo_id, message = await manager.place_trend_runner_protective_stop_with_retries(
             side="LONG",
@@ -795,7 +791,7 @@ class TestDelegatingProtectiveSlMethodsRouteToPort:
         async def fake_verify(_algo_id, _side, _contracts, _stop_price):
             return True
 
-        trader.verify_near_tp_protective_stop = fake_verify
+        trader.verify_protective_stop = fake_verify
 
         ok, algo_id, message = await manager.place_three_stage_post_tp1_protective_stop_with_retries(
             side="SHORT",

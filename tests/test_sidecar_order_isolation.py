@@ -57,7 +57,6 @@ class IsolationTrader(Trader):
         self.contract_precision = Decimal("0.01")
         self.min_contracts = Decimal("0.01")
         self.tp_order_id = "core-old"
-        self.near_tp_protective_sl_order_id = "near-sl"
         self.middle_runner_protective_sl_order_id = None
         self.three_stage_post_tp1_protective_sl_order_id = None
         self.trend_runner_sl_order_id = None
@@ -149,7 +148,7 @@ async def test_main_tp_update_does_not_cancel_sidecar_tp() -> None:
     trader = IsolationTrader()
 
     result = await trader.replace_take_profit(
-        intent(protected_order_ids=("sidecar-tp", "near-sl"), managed_core_contracts="10"))
+        intent(protected_order_ids=("sidecar-tp",), managed_core_contracts="10"))
 
     assert result.ok
     assert trader.cancelled == ["core-old"]

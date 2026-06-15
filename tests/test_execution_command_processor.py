@@ -69,7 +69,6 @@ class FakeJournal:
         self.entries: list[int] = []
         self.events: list[tuple] = []
         self.tp_updates: list[dict] = []
-        self.near_tp_reduces: list[dict] = []
         self.trend_exits: list[dict] = []
         self.errors: list[dict] = []
 
@@ -81,9 +80,6 @@ class FakeJournal:
 
     def record_tp_update(self, **kwargs) -> None:  # type: ignore[no-untyped-def]
         self.tp_updates.append(kwargs)
-
-    def record_near_tp_reduce(self, **kwargs) -> None:  # type: ignore[no-untyped-def]
-        self.near_tp_reduces.append(kwargs)
 
     def record_trend_runner_market_exit(self, **kwargs) -> None:  # type: ignore[no-untyped-def]
         self.trend_exits.append(kwargs)
@@ -569,47 +565,6 @@ class TestExecutionCommandProcessor(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(result)
         self.assertEqual(trader.executed, [])
 
-    # ── sidecar blocks NEAR_TP_REDUCE ────────────────────────────────────
-
-    async def test_sidecar_blocks_near_tp_reduce(self) -> None:
-        """NEAR_TP_REDUCE skipped and trading halted when sidecar enabled."""
-        strategy = BollCvdShockReclaimStrategy(
-            BollCvdReclaimStrategyConfig(),
-            SimplePositionSizer(SimplePositionSizerConfig()),
-        )
-        strategy.state = StrategyPositionState(
-            side="LONG",
-            layers=1,
-            total_entry_qty=1.0,
-            sidecar_enabled_for_position=True,
-        )
-        execution_state = ExecutionState("pos-1", 100.0)
-        trader = FakeTrader()
-        journal = FakeJournal()
-        state_store = FakeStateStore()
-        processor, _, _, _ = make_processor(
-            execution_state=execution_state,
-            strategy=strategy,
-            trader=trader,
-            journal=journal,
-            state_store=state_store,
-        )
-
-        command = make_command(1_000, "NEAR_TP_REDUCE")
-        result = await processor.process(command)
-
-        self.assertIsNone(result)
-        self.assertEqual(trader.executed, [])
-        self.assertTrue(execution_state.trading_halted)
-        self.assertEqual(execution_state.halt_reason, "sidecar_blocks_near_tp_reduce")
-        self.assertTrue(strategy.state.sidecar_dirty)
-        self.assertEqual(strategy.state.sidecar_halt_reason, "sidecar_blocks_near_tp_reduce")
-        self.assertGreaterEqual(len(state_store.saved), 1)
-        sidecar_events = [
-            e for e in journal.events if e[0] == "SIDECAR_BLOCKS_NEAR_TP_REDUCE"
-        ]
-        self.assertEqual(len(sidecar_events), 1)
-
     # ── entry command creates position id ────────────────────────────────
 
     async def test_entry_creates_position_id_when_none(self) -> None:
@@ -769,166 +724,6 @@ class TestExecutionCommandProcessor(unittest.IsolatedAsyncioTestCase):
             e for e in journal.events if e[0] == "THREE_STAGE_TP1_PROTECTIVE_SL_UPDATED"
         ]
         self.assertEqual(len(ts_events), 1)
-
-    # ── NEAR_TP_REDUCE result application ────────────────────────────────
-
-    async def test_near_tp_reduce_protected_result(self) -> None:
-        """NEAR_TP_REDUCE with protective_sl_ok applies protected state."""
-        strategy = BollCvdShockReclaimStrategy(
-            BollCvdReclaimStrategyConfig(near_tp_disable_add_after_reduce=True),
-            SimplePositionSizer(SimplePositionSizerConfig()),
-        )
-        strategy.state = StrategyPositionState(
-            side="LONG",
-            layers=3,
-            total_entry_qty=3.0,
-            total_entry_notional=300.0,
-            avg_entry_price=100.0,
-            tp_price=110.0,
-            tp_plan="SINGLE",
-            near_tp_reduce_pending=True,
-        )
-        execution_state = ExecutionState("pos-1", 100.0)
-        journal = FakeJournal()
-        state_store = FakeStateStore()
-        trader = FakeTrader()
-        trader.set_position(long_position())
-
-        near_tp_result = LiveTradeResult(
-            ok=True,
-            action="NEAR_TP_REDUCE",
-            order_id="ord-near",
-            tp_order_id="tp-near",
-            contracts="7",
-            tp_price="110",
-            message="ok",
-            protective_sl_ok=True,
-            protective_sl_order_id="sl-near",
-            protective_sl_price="105",
-            contracts_before="10",
-            contracts_reduced="3",
-            contracts_after="7",
-            near_tp_exit_all=False,
-            tp_order_ids=("tp-near",),
-        )
-        trader.set_next_result(near_tp_result)
-
-        processor, _, _, _ = make_processor(
-            execution_state=execution_state,
-            strategy=strategy,
-            journal=journal,
-            state_store=state_store,
-            trader=trader,
-        )
-
-        command = make_command(1_000, "NEAR_TP_REDUCE")
-        result = await processor.process(command)
-
-        self.assertIsNotNone(result)
-        self.assertTrue(strategy.state.near_tp_protected)
-        self.assertFalse(strategy.state.near_tp_reduce_pending)
-        self.assertTrue(strategy.state.near_tp_add_disabled)
-        self.assertEqual(strategy.state.near_tp_protective_sl_order_id, "sl-near")
-        self.assertEqual(strategy.state.tp_plan, "SINGLE")
-        self.assertTrue(strategy.state.partial_tp_consumed)
-        self.assertEqual(len(journal.near_tp_reduces), 1)
-        self.assertGreaterEqual(len(state_store.saved), 1)
-
-    async def test_near_tp_reduce_exit_all_arms_delayed_exit(self) -> None:
-        """NEAR_TP_REDUCE with near_tp_exit_all arms delayed market exit (no immediate exit)."""
-        strategy = BollCvdShockReclaimStrategy(
-            BollCvdReclaimStrategyConfig(),
-            SimplePositionSizer(SimplePositionSizerConfig()),
-        )
-        strategy.state = StrategyPositionState(
-            side="LONG",
-            layers=3,
-            total_entry_qty=3.0,
-            total_entry_notional=300.0,
-            avg_entry_price=100.0,
-            tp_price=110.0,
-            near_tp_reduce_pending=True,
-        )
-        execution_state = ExecutionState("pos-1", 100.0)
-        trader = FakeTrader()
-
-        near_tp_result = LiveTradeResult(
-            ok=True,
-            action="NEAR_TP_REDUCE",
-            order_id="ord-near",
-            tp_order_id="tp-near",
-            contracts="7",
-            tp_price="110",
-            message="ok",
-            protective_sl_ok=False,
-            near_tp_exit_all=True,
-            contracts_before="10",
-            contracts_reduced="10",
-            contracts_after="0",
-        )
-        trader.set_next_result(near_tp_result)
-
-        processor, _, _, _ = make_processor(
-            execution_state=execution_state,
-            strategy=strategy,
-            trader=trader,
-        )
-
-        command = make_command(1_000, "NEAR_TP_REDUCE")
-        result = await processor.process(command)
-
-        self.assertIsNotNone(result)
-        self.assertTrue(execution_state.trading_halted)
-        # Delayed market exit armed, not market exit success
-        self.assertTrue(getattr(strategy.state, "delayed_market_exit_armed", False))
-
-    async def test_near_tp_market_exit_on_sl_fail(self) -> None:
-        """NEAR_TP_REDUCE with protective_sl_ok=False arms delayed market exit email."""
-        strategy = BollCvdShockReclaimStrategy(
-            BollCvdReclaimStrategyConfig(),
-            SimplePositionSizer(SimplePositionSizerConfig()),
-        )
-        strategy.state = StrategyPositionState(
-            side="LONG",
-            layers=3,
-            total_entry_qty=3.0,
-            near_tp_reduce_pending=True,
-        )
-        execution_state = ExecutionState("pos-1", 100.0)
-        email_sender = FakeEmailSender()
-        trader = FakeTrader()
-
-        near_tp_result = LiveTradeResult(
-            ok=True,
-            action="NEAR_TP_REDUCE",
-            order_id="ord-fail",
-            tp_order_id="tp-fail",
-            contracts="0",
-            tp_price="110",
-            message="market exited",
-            protective_sl_ok=False,
-            near_tp_exit_all=True,
-            contracts_before="10",
-            contracts_reduced="10",
-            contracts_after="0",
-        )
-        trader.set_next_result(near_tp_result)
-
-        processor, _, _, _ = make_processor(
-            execution_state=execution_state,
-            strategy=strategy,
-            trader=trader,
-            email_sender=email_sender,
-        )
-
-        command = make_command(1_000, "NEAR_TP_REDUCE")
-        result = await processor.process(command)
-
-        self.assertIsNotNone(result)
-        # Delayed market exit should be armed
-        self.assertTrue(getattr(strategy.state, "delayed_market_exit_armed", False))
-        self.assertEqual(len(email_sender.sent), 1)
-        self.assertIn("delayed market exit", email_sender.sent[0][0].lower())
 
     # ── MARKET_EXIT_RUNNER ───────────────────────────────────────────────
 
