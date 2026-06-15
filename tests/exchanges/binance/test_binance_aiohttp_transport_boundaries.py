@@ -53,6 +53,10 @@ def test_aiohttp_transport_is_not_wired_into_factory_or_live() -> None:
         "scripts/binance_read_only_smoke_test.py",
         "tests/scripts/test_binance_read_only_smoke_test.py",
         "tests/scripts/test_binance_read_only_smoke_test_boundaries.py",
+        # Boundary tests reference AiohttpBinanceTransport in
+        # forbidden-import assertion checks — not real wiring.
+        "tests/exchanges/okx/test_okx_runtime_adapter_boundaries.py",
+        "tests/live/test_runtime_factory_exchange_boundaries.py",
     }
 
     for path in Path(".").rglob("*.py"):

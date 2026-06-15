@@ -6,15 +6,10 @@
 @File       : runtime_factory.py
 @Description: Live runtime factory — creates the exchange-adapted runtime bundle.
 
-This module wires together the exchange runtime config, market data client,
-trading client, and trader for the configured exchange.
-
-It does NOT import or instantiate any exchange-specific concrete class.
-All exchange-specific wiring is delegated to the respective exchange adapter
-(e.g. ``src/exchanges/okx/runtime_adapter.py``).
-
-Currently only OKX is supported for live trading.
-Binance live trading is explicitly blocked.
+This module wires together the exchange runtime config and exchange adapters
+into a LiveRuntimeBundle.  It does NOT import or instantiate any
+exchange-specific concrete class or any exchange-specific adapter module.
+All exchange dispatch is delegated to the generic adapter factory.
 """
 
 from __future__ import annotations
@@ -22,7 +17,7 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 
-from src.exchanges.models import ExchangeName
+from src.exchanges.runtime_adapter_factory import create_exchange_runtime_adapters
 from src.exchanges.runtime_config import load_unified_runtime_config
 from src.live.runtime_bundle import LiveRuntimeBundle
 
@@ -47,29 +42,18 @@ def create_runtime_bundle(
     Raises
     ------
     RuntimeError
-        When ``EXCHANGE=binance`` — Binance live trading is not wired yet.
+        When the exchange is not supported for live trading (e.g. Binance).
     ValueError
-        When ``EXCHANGE`` is set to an unsupported value or configuration is
-        invalid.
+        When the exchange runtime configuration is invalid.
     """
     values = os.environ if env is None else env
 
     config = load_unified_runtime_config(values)
+    adapters = create_exchange_runtime_adapters(config, values)
 
-    if config.exchange == ExchangeName.OKX:
-        from src.exchanges.okx.runtime_adapter import create_okx_runtime_bundle
-        return create_okx_runtime_bundle(config, values)
-
-    if config.exchange == ExchangeName.BINANCE:
-        from src.live.binance_live_preflight import (
-            build_binance_live_preflight_report,
-            format_binance_live_blocked_message,
-        )
-
-        report = build_binance_live_preflight_report(
-            values,
-            orders_globally_enabled=False,
-        )
-        raise RuntimeError(format_binance_live_blocked_message(report))
-
-    raise RuntimeError(f"Unsupported exchange for live runtime: {config.exchange}")
+    return LiveRuntimeBundle(
+        runtime_config=config,
+        market_data_client=adapters.market_data_client,
+        trading_client=adapters.trading_client,
+        trader=adapters.trader,
+    )

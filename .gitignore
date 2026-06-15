@@ -1,8 +1,7 @@
-/.env.multicoin
+/.env
+/.env.*
+!/.env.example
 /logs/
 /mnt/
 /.claude/
 /.pytest_cache/
-/.env.bak
-/.env.binance
-/.env.okx

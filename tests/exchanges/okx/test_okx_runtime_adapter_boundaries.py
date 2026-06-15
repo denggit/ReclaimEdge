@@ -38,6 +38,24 @@ FORBIDDEN_OKX_IMPORTS = [
     "PrivateWriteRateLimiter",
 ]
 
+# Exchange-specific import paths that must NOT appear in runtime_factory.py
+FORBIDDEN_EXCHANGE_PATHS = [
+    "src.exchanges.okx",
+    "src.exchanges.binance",
+    "src.execution.okx_",
+    "src.data_feed.okx_",
+    "src.live.binance_live_preflight",
+]
+
+# Exchange concrete classes from any exchange that must NOT appear
+FORBIDDEN_EXCHANGE_CLASSES = [
+    "BinanceBrokerClient",
+    "BinanceTradingClient",
+    "BinanceMarketDataClient",
+    "AiohttpBinanceTransport",
+    "OKX_CONFIG",
+]
+
 
 class TestRuntimeFactoryDoesNotImportOkxClasses:
     """runtime_factory.py is a generic dispatch layer — no exchange concrete classes."""
@@ -53,15 +71,38 @@ class TestRuntimeFactoryDoesNotImportOkxClasses:
             f"runtime_factory.py must NOT import Okx* classes:\n" + "\n".join(violations)
         )
 
+    def test_no_exchange_adapter_paths(self) -> None:
+        """runtime_factory.py must NOT import any exchange-specific adapter path."""
+        violations = []
+        for path_prefix in FORBIDDEN_EXCHANGE_PATHS:
+            if path_prefix in RUNTIME_FACTORY_SOURCE:
+                for i, line in enumerate(RUNTIME_FACTORY_SOURCE.split("\n"), 1):
+                    if path_prefix in line and "import" in line and not line.strip().startswith("#"):
+                        violations.append(f"src/live/runtime_factory.py:{i}: {line.strip()}")
+        assert not violations, (
+            f"runtime_factory.py must NOT import exchange adapter paths:\n" + "\n".join(violations)
+        )
+
+    def test_no_exchange_concrete_classes(self) -> None:
+        violations = []
+        for symbol in FORBIDDEN_EXCHANGE_CLASSES:
+            if symbol in RUNTIME_FACTORY_SOURCE:
+                for i, line in enumerate(RUNTIME_FACTORY_SOURCE.split("\n"), 1):
+                    if symbol in line and not line.strip().startswith("#"):
+                        violations.append(f"src/live/runtime_factory.py:{i}: {line.strip()}")
+        assert not violations, (
+            f"runtime_factory.py must NOT reference exchange concrete classes:\n" + "\n".join(violations)
+        )
+
     def test_no_okx_config_import(self) -> None:
         assert "from config.env_loader import OKX_CONFIG" not in RUNTIME_FACTORY_SOURCE, (
             "runtime_factory.py must NOT import OKX_CONFIG from config.env_loader"
         )
 
-    def test_runtime_factory_delegates_to_okx_adapter(self) -> None:
-        """runtime_factory.py must delegate to src.exchanges.okx.runtime_adapter."""
-        assert "from src.exchanges.okx.runtime_adapter import" in RUNTIME_FACTORY_SOURCE, (
-            "runtime_factory.py must delegate to src.exchanges.okx.runtime_adapter"
+    def test_runtime_factory_uses_generic_factory(self) -> None:
+        """runtime_factory.py must delegate to the generic adapter factory, not OKX directly."""
+        assert "from src.exchanges.runtime_adapter_factory import" in RUNTIME_FACTORY_SOURCE, (
+            "runtime_factory.py must delegate to src.exchanges.runtime_adapter_factory"
         )
 
 
@@ -108,10 +149,25 @@ class TestOkxRuntimeAdapterIsCompositionRoot:
             "OKX runtime_adapter must NOT import OKX_CONFIG global"
         )
 
-    def test_uses_config_api_key_not_okx_config(self) -> None:
-        """Adapter uses config.api_key (from ExchangeRuntimeConfig), not OKX_CONFIG.get()."""
-        assert "config.api_key" in OKX_ADAPTER_SOURCE, (
-            "OKX runtime_adapter must read credentials from ExchangeRuntimeConfig"
+    def test_uses_resolve_okx_credentials(self) -> None:
+        """Adapter resolves credentials via resolve_okx_credentials, not OKX_CONFIG global."""
+        assert "resolve_okx_credentials" in OKX_ADAPTER_SOURCE, (
+            "OKX runtime_adapter must resolve credentials via resolve_okx_credentials"
+        )
+
+    def test_returns_exchange_runtime_adapters_not_live_bundle(self) -> None:
+        """Adapter must return ExchangeRuntimeAdapters, not LiveRuntimeBundle."""
+        assert "ExchangeRuntimeAdapters" in OKX_ADAPTER_SOURCE, (
+            "OKX runtime_adapter must return ExchangeRuntimeAdapters"
+        )
+        assert "LiveRuntimeBundle" not in OKX_ADAPTER_SOURCE, (
+            "OKX runtime_adapter must NOT import or return LiveRuntimeBundle"
+        )
+
+    def test_uses_config_leverage_not_env_leverage(self) -> None:
+        """Adapter must use config.leverage, not env.get('LEVERAGE', ...)."""
+        assert 'env.get("LEVERAGE"' not in OKX_ADAPTER_SOURCE, (
+            "OKX runtime_adapter must NOT read LEVERAGE from env directly"
         )
 
 

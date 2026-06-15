@@ -8,11 +8,11 @@
 
 This module is the ONLY place in the codebase that creates OKX concrete
 instances (OkxPrivateClient, OkxTradingClient, OkxMarketDataClient,
-OkxBrokerClient, OkxBrokerSemanticExecutor) and wires them into a
-LiveRuntimeBundle.
+OkxBrokerClient, OkxBrokerSemanticExecutor) and wires them into
+ExchangeRuntimeAdapters.
 
 Business / live layers must NOT import or instantiate any Okx* class
-directly — they go through this factory.
+directly — they go through the generic exchange adapter factory.
 """
 
 from __future__ import annotations
@@ -31,16 +31,17 @@ from src.execution.okx_private_client import (
 from src.execution.okx_trading_client import OkxTradingClient
 from src.execution.trader import Trader, TraderRuntimeSettings
 from src.exchanges.okx.client import OkxBrokerClient
+from src.exchanges.okx.credentials import resolve_okx_credentials
 from src.exchanges.okx.semantic_executor import OkxBrokerSemanticExecutor
+from src.exchanges.runtime_adapters import ExchangeRuntimeAdapters
 from src.exchanges.runtime_config import ExchangeRuntimeConfig
-from src.live.runtime_bundle import LiveRuntimeBundle
 
 
-def create_okx_runtime_bundle(
+def create_okx_runtime_adapters(
     config: ExchangeRuntimeConfig,
     env: Mapping[str, str],
-) -> LiveRuntimeBundle:
-    """Wire the OKX live runtime bundle from canonical config.
+) -> ExchangeRuntimeAdapters:
+    """Wire the OKX live runtime adapters from canonical config.
 
     Creates:
     - OkxPrivateClient (private REST client with signing)
@@ -54,25 +55,23 @@ def create_okx_runtime_bundle(
     Parameters
     ----------
     config:
-        Canonical exchange runtime configuration.  Credentials are read from
-        ``config.api_key`` / ``config.api_secret`` / ``config.api_passphrase``.
+        Canonical exchange runtime configuration.  Credentials are resolved
+        via :func:`resolve_okx_credentials`.
     env:
         Environment variable mapping for OKX-specific infrastructure settings
         (base URL, timeouts, rate-limit, etc.).
 
     Returns
     -------
-    LiveRuntimeBundle
+    ExchangeRuntimeAdapters
 
     Raises
     ------
     ValueError
         When API credentials are incomplete.
     """
-    # --- credential validation ---
-    api_key = config.api_key
-    secret_key = config.api_secret
-    passphrase = config.api_passphrase
+    # --- credential resolution (with legacy OKX_* fallback) ---
+    api_key, secret_key, passphrase = resolve_okx_credentials(config, env)
     if not api_key or not secret_key or not passphrase:
         raise ValueError(
             "OKX API config is incomplete. "
@@ -98,7 +97,7 @@ def create_okx_runtime_bundle(
         base_url=env.get("OKX_BASE_URL", "https://www.okx.com"),
         td_mode=config.margin_mode,
         pos_side_mode=config.position_mode,
-        leverage=env.get("LEVERAGE", "50"),
+        leverage=str(config.leverage),
         live_trading=True,
         max_live_equity_usdt=float(env.get("MAX_LIVE_EQUITY_USDT", "30")),
     )
@@ -128,8 +127,7 @@ def create_okx_runtime_bundle(
     )
     market_data_client = OkxMarketDataClient(market_data_config)
 
-    return LiveRuntimeBundle(
-        runtime_config=config,
+    return ExchangeRuntimeAdapters(
         market_data_client=market_data_client,
         trading_client=trading_client,
         trader=trader,

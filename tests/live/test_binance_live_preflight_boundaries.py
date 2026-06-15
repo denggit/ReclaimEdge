@@ -62,9 +62,17 @@ class TestForbiddenImports:
         text = _read_preflight_text()
         assert "src.strategies" not in text
 
-    def test_does_not_import_src_exchanges(self) -> None:
+    def test_does_not_import_src_exchanges_except_re_export(self) -> None:
+        """The re-export wrapper may import from src.exchanges.binance.live_preflight
+        (the canonical location), but must NOT import other exchange adapter internals."""
         text = _read_preflight_text()
-        assert "src.exchanges" not in text
+        # Only the re-export import is allowed; other exchange paths are forbidden.
+        assert "src.exchanges.binance.live_preflight" in text, (
+            "preflight wrapper must re-export from src.exchanges.binance.live_preflight"
+        )
+        assert "src.exchanges.binance.client" not in text
+        assert "src.exchanges.binance.semantic_executor" not in text
+        assert "src.exchanges.okx" not in text
 
     def test_does_not_import_binance_client(self) -> None:
         text = _read_preflight_text()

@@ -11,11 +11,10 @@ The only differences between platforms are ``EXCHANGE`` and the API credentials;
 all other parameters (trade asset, quote asset, market type, margin mode,
 position mode, leverage, kline interval) are identical.
 
-Legacy OKX-specific environment variables (OKX_TD_MODE, OKX_POS_SIDE_MODE,
-OKX_INST_ID, OKX_BAR) are NOT consumed by this module.  They remain available
-for backward-compatible raw config paths only.
-
-This module is NOT wired into live trading paths.
+This module is the canonical runtime config source used by live runtime
+factories.  It intentionally does not instantiate exchange-specific clients
+and does not read exchange-specific legacy credential variables (those live
+in the respective exchange adapter).
 """
 
 from __future__ import annotations
@@ -107,9 +106,10 @@ def load_unified_runtime_config(
 ) -> ExchangeRuntimeConfig:
     """Build an :class:`ExchangeRuntimeConfig` from environment variables.
 
-    OKX and Binance share every parameter except ``EXCHANGE`` and the three
-    API credentials.  Legacy OKX-specific environment variables (OKX_TD_MODE,
-    OKX_POS_SIDE_MODE, OKX_INST_ID, OKX_BAR) are intentionally NOT consumed.
+    OKX and Binance share every parameter except ``EXCHANGE`` and API
+    credentials.  Credentials are read from the unified ``EXCHANGE_API_*``
+    variables only; legacy exchange-specific credential fallback is handled
+    by the respective exchange adapter.
 
     Parameters
     ----------
@@ -192,26 +192,12 @@ def load_unified_runtime_config(
         )
 
     # -- credentials ----------------------------------------------------------
-    # Unified EXCHANGE_API_* takes priority.  Legacy OKX_* vars serve as
-    # fallback for backward compatibility.  The fallback chain is:
-    #   EXCHANGE_API_KEY         > OKX_API_KEY
-    #   EXCHANGE_API_SECRET      > OKX_SECRET_KEY   > OKX_API_SECRET
-    #   EXCHANGE_API_PASSPHRASE  > OKX_PASSPHASE    > OKX_PASSPHRASE
+    # Only unified EXCHANGE_API_* variables are read here.
+    # Legacy OKX_* credential fallback lives in src/exchanges/okx/credentials.py.
 
-    api_key = str(
-        values.get("EXCHANGE_API_KEY", "")
-        or values.get("OKX_API_KEY", "")
-    )
-    api_secret = str(
-        values.get("EXCHANGE_API_SECRET", "")
-        or values.get("OKX_SECRET_KEY", "")
-        or values.get("OKX_API_SECRET", "")
-    )
-    api_passphrase = str(
-        values.get("EXCHANGE_API_PASSPHRASE", "")
-        or values.get("OKX_PASSPHASE", "")
-        or values.get("OKX_PASSPHRASE", "")
-    )
+    api_key = str(values.get("EXCHANGE_API_KEY", ""))
+    api_secret = str(values.get("EXCHANGE_API_SECRET", ""))
+    api_passphrase = str(values.get("EXCHANGE_API_PASSPHRASE", ""))
 
     return ExchangeRuntimeConfig(
         exchange=exchange,
