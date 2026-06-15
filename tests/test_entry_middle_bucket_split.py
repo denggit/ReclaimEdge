@@ -101,6 +101,7 @@ class TestThreeStageEntrySplitShort(unittest.TestCase):
             tp_boll_enabled=True,
             tp_min_net_profit_pct=0.002,
             split_tp_enabled=False,
+            entry_rr_target="FINAL_TP",
         )
         sizer = _sizer()
         return BollCvdReclaimStrategy(config, sizer)
@@ -167,6 +168,7 @@ class TestThreeStageEntrySplitLong(unittest.TestCase):
             tp_boll_enabled=True,
             tp_min_net_profit_pct=0.002,
             split_tp_enabled=False,
+            entry_rr_target="FINAL_TP",
         )
         sizer = _sizer()
         return BollCvdReclaimStrategy(config, sizer)
@@ -213,6 +215,7 @@ class TestThreeStageEntryUnsplitSlowMiddle(unittest.TestCase):
             tp_boll_enabled=True,
             tp_min_net_profit_pct=0.002,
             split_tp_enabled=False,
+            entry_rr_target="FINAL_TP",
         )
         sizer = _sizer()
         return BollCvdReclaimStrategy(config, sizer)
@@ -282,6 +285,7 @@ class TestThreeStageEntrySplitFallbackDisabled(unittest.TestCase):
             tp_boll_enabled=True,
             tp_min_net_profit_pct=0.002,
             split_tp_enabled=False,
+            entry_rr_target="FINAL_TP",
         )
         vals.update(overrides)
         config = BollCvdReclaimStrategyConfig(**vals)
@@ -334,6 +338,7 @@ class TestThreeStageEntrySplitSublegTooSmall(unittest.TestCase):
             tp_boll_enabled=True,
             tp_min_net_profit_pct=0.002,
             split_tp_enabled=False,
+            entry_rr_target="FINAL_TP",
         )
         sizer = _sizer()
         return BollCvdReclaimStrategy(config, sizer)
@@ -374,6 +379,7 @@ class TestThreeStageEntryTp2StructureBoll(unittest.TestCase):
             tp_min_net_profit_pct=0.002,
             split_tp_enabled=False,
             three_stage_tp2_use_structure_boll=True,
+            entry_rr_target="FINAL_TP",
         )
         sizer = _sizer()
         return BollCvdReclaimStrategy(config, sizer)
@@ -463,6 +469,7 @@ class TestMiddleRunnerEntrySplitShort(unittest.TestCase):
             tp_boll_enabled=True,
             tp_min_net_profit_pct=0.002,
             split_tp_enabled=False,
+            entry_rr_target="FINAL_TP",
         )
         sizer = _sizer()
         return BollCvdReclaimStrategy(config, sizer)
@@ -528,6 +535,7 @@ class TestMiddleRunnerEntrySplitLong(unittest.TestCase):
             tp_boll_enabled=True,
             tp_min_net_profit_pct=0.002,
             split_tp_enabled=False,
+            entry_rr_target="FINAL_TP",
         )
         sizer = _sizer()
         return BollCvdReclaimStrategy(config, sizer)
@@ -575,6 +583,7 @@ class TestMiddleRunnerEntryUnsplitSlowMiddle(unittest.TestCase):
             tp_boll_enabled=True,
             tp_min_net_profit_pct=0.002,
             split_tp_enabled=False,
+            entry_rr_target="FINAL_TP",
         )
         sizer = _sizer()
         return BollCvdReclaimStrategy(config, sizer)

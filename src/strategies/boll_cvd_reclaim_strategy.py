@@ -146,6 +146,12 @@ class BollCvdReclaimStrategyConfig:
     # ── Three-Stage TP2 structure BOLL ─────────────────────────────────
     three_stage_tp2_use_structure_boll: bool = True
 
+    # ── Entry RR Target ───────────────────────────────────────────────
+    # Which price to use for entry reward/risk filtering.
+    # STRUCTURE_MIDDLE — BOLL20 middle (default, conservative).
+    # FINAL_TP         — the actual selected take-profit price.
+    entry_rr_target: str = "STRUCTURE_MIDDLE"
+
     # ── Extreme Retest Add ────────────────────────────────────────────
     extreme_retest_add_enabled: bool = False
     extreme_retest_pivot_left_bars: int = 2
@@ -172,6 +178,11 @@ class BollCvdReclaimStrategyConfig:
             raise RuntimeError(
                 "THREE_STAGE_PRE_TP1_SINGLE_AFTER_SECONDS must be greater than "
                 "THREE_STAGE_PRE_TP1_MIDDLE_RUNNER_AFTER_SECONDS"
+            )
+        if self.entry_rr_target not in {"STRUCTURE_MIDDLE", "FINAL_TP"}:
+            raise RuntimeError(
+                f"ENTRY_RR_TARGET={self.entry_rr_target!r} is not supported; "
+                f"must be STRUCTURE_MIDDLE or FINAL_TP"
             )
         if self.middle_bucket_split_enabled:
             _fr = self.middle_bucket_split_fast_ratio
@@ -296,6 +307,8 @@ class BollCvdReclaimStrategyConfig:
             middle_bucket_split_fast_sl_fail_action=os.getenv(
                 "MIDDLE_BUCKET_FAST_SL_FAIL_ACTION", "MARKET_EXIT").strip().upper(),
             three_stage_tp2_use_structure_boll=_env_bool("THREE_STAGE_TP2_USE_STRUCTURE_BOLL", True),
+            # ── Entry RR Target ──────────────────────────────────────
+            entry_rr_target=os.getenv("ENTRY_RR_TARGET", "STRUCTURE_MIDDLE").strip().upper(),
             # ── Extreme Retest Add ────────────────────────────────────
             extreme_retest_add_enabled=_env_bool("EXTREME_RETEST_ADD_ENABLED", False),
             extreme_retest_pivot_left_bars=int(os.getenv("EXTREME_RETEST_PIVOT_LEFT_BARS", "2")),
@@ -839,6 +852,22 @@ class BollCvdReclaimStrategy:
         if reward_risk < self.config.entry_min_reward_risk:
             return False, "reward_risk_below_min", stop_distance_pct, reward_pct, reward_risk
         return True, "ok", stop_distance_pct, reward_pct, reward_risk
+
+    def _entry_reward_risk_target_price(
+        self,
+        *,
+        side: PositionSide,
+        boll: BollSnapshot,
+        final_tp_price: float,
+    ) -> tuple[float, str]:
+        """Return the price to use for entry reward/risk filtering.
+
+        STRUCTURE_MIDDLE — BOLL20 middle band (default, conservative entry quality).
+        FINAL_TP         — the actual selected take-profit price (legacy behaviour).
+        """
+        if self.config.entry_rr_target == "STRUCTURE_MIDDLE":
+            return float(boll.middle), "STRUCTURE_MIDDLE"
+        return final_tp_price, "FINAL_TP"
 
     def _entry_add_flow(self):
         if not hasattr(self, "_entry_add_flow_coordinator"):

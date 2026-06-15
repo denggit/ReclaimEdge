@@ -26,6 +26,7 @@ def strategy(**overrides) -> BollCvdReclaimStrategy:
         split_tp_min_layers=4,
         breakeven_fee_buffer_pct=0.001,
         tp_min_net_profit_pct=0.002,
+        entry_rr_target="FINAL_TP",
     )
     values.update(overrides)
     return BollCvdReclaimStrategy(BollCvdReclaimStrategyConfig(**values),

@@ -172,20 +172,27 @@ class EntryAddFlowCoordinator:
             reason = f"{reason} + 中轨先平{partial_tp_ratio * 100:.0f}%，剩余runner到外轨"
         if tp_plan == "THREE_STAGE_RUNNER":
             reason = f"{reason} + 三段式趋势Runner：中轨{strategy.config.three_stage_tp1_ratio * 100:.0f}%/外轨{strategy.config.three_stage_tp2_ratio * 100:.0f}%/Runner{strategy.config.three_stage_runner_ratio * 100:.0f}%"
+        rr_target_price, rr_target_source = strategy._entry_reward_risk_target_price(
+            side=side,
+            boll=boll,
+            final_tp_price=tp_price,
+        )
         rr_ok, rr_reason, stop_distance_pct, reward_pct, reward_risk = strategy._entry_reward_risk_check(
             side=side,
             entry_price=price,
-            tp_price=tp_price,
+            tp_price=rr_target_price,
             stop_price=entry_sl_price,
         )
         if not rr_ok:
             strategy.state = previous_state
             logger.info(
-                "ENTRY_SKIPPED | reason=%s side=%s price=%.4f tp=%.4f sl=%.4f stop_pct=%.6f reward_pct=%.6f reward_risk=%.4f min_reward_risk=%.4f",
+                "ENTRY_SKIPPED | reason=%s side=%s price=%.4f tp=%.4f rr_target=%.4f rr_target_source=%s sl=%.4f stop_pct=%.6f reward_pct=%.6f reward_risk=%.4f min_reward_risk=%.4f",
                 rr_reason,
                 side,
                 price,
                 tp_price,
+                rr_target_price,
+                rr_target_source,
                 entry_sl_price,
                 stop_distance_pct,
                 reward_pct,
@@ -196,6 +203,7 @@ class EntryAddFlowCoordinator:
         reason = (
             f"{reason} + risk_size stop={entry_sl_price:.4f} "
             f"stop={stop_distance_pct * 100:.3f}% reward={reward_pct * 100:.3f}% R={reward_risk:.2f}"
+            f" rr_target_source={rr_target_source} rr_target={rr_target_price:.4f}"
         )
         strategy.state.entry_protective_sl_price = entry_sl_price
         strategy.state.entry_protective_sl_order_id = None

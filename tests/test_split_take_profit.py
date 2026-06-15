@@ -35,6 +35,7 @@ def strategy(**config_overrides) -> BollCvdReclaimStrategy:
         split_tp_path_ratio=0.8,
         split_tp_partial_ratio=0.5,
         split_tp_min_profit_pct=0.004,
+        entry_rr_target="FINAL_TP",
     )
     config_values.update(config_overrides)
     return BollCvdReclaimStrategy(
