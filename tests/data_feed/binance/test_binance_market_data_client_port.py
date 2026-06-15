@@ -142,13 +142,22 @@ def _make_client(
     *,
     symbol: str = "ETHUSDT",
     interval: str = "15m",
-    rest_client: _BinancePublicRestClient | FakeRestClient | None = None,
+    rest_client: Any = None,
     ws_connector: Any = None,
     request_timeout_seconds: float = 10.0,
 ) -> BinanceMarketDataClient:
-    """Construct a BinanceMarketDataClient without reading env."""
-    rest = rest_client or FakeRestClient()
-    return BinanceMarketDataClient.__new__(BinanceMarketDataClient)
+    """Construct a BinanceMarketDataClient using the real constructor.
+
+    Passes fake implementations for rest_client and ws_connector so that
+    the constructor injection path is exercised in every test.
+    """
+    return BinanceMarketDataClient(
+        symbol=symbol,
+        interval=interval,
+        rest_client=rest_client or FakeRestClient(),
+        ws_connector=ws_connector or FakeWsConnector(),
+        request_timeout_seconds=request_timeout_seconds,
+    )
 
 
 def _inject_deps(
@@ -159,7 +168,11 @@ def _inject_deps(
     rest: Any = None,
     ws_connector: Any = None,
 ) -> None:
-    """Inject internal dependencies into a bare BinanceMarketDataClient instance."""
+    """Inject internal dependencies into a bare BinanceMarketDataClient instance.
+
+    Reserved for rare internal-state tests that cannot use the real
+    constructor.  Most tests should use ``_make_client(...)`` instead.
+    """
     client._symbol = symbol
     client._interval = interval
     client._rest = rest or FakeRestClient()
@@ -178,8 +191,7 @@ class TestFetchRecentKlines:
     async def test_returns_candle_snapshots(self) -> None:
         rows = [_make_kline_row(open_time=1000 + i * 60000) for i in range(5)]
         fake_rest = FakeRestClient(rows)
-        client = _make_client()
-        _inject_deps(client, rest=fake_rest)
+        client = _make_client(rest_client=fake_rest)
 
         result = await client.fetch_recent_klines(limit=3)
 
@@ -195,8 +207,7 @@ class TestFetchRecentKlines:
             close_time=5000 + 15 * 60 * 1000,
         )]
         fake_rest = FakeRestClient(rows)
-        client = _make_client()
-        _inject_deps(client, rest=fake_rest)
+        client = _make_client(rest_client=fake_rest)
 
         result = await client.fetch_recent_klines(limit=1)
 
@@ -214,8 +225,7 @@ class TestFetchRecentKlines:
         # close_time_ms = 1000, now_ms will be much larger → closed
         rows = [_make_kline_row(open_time=500, close_time=1000)]
         fake_rest = FakeRestClient(rows)
-        client = _make_client()
-        _inject_deps(client, rest=fake_rest)
+        client = _make_client(rest_client=fake_rest)
 
         result = await client.fetch_recent_klines(limit=1)
 
@@ -225,8 +235,7 @@ class TestFetchRecentKlines:
     async def test_raw_contains_symbol(self) -> None:
         rows = [_make_kline_row()]
         fake_rest = FakeRestClient(rows)
-        client = _make_client()
-        _inject_deps(client, symbol="ETHUSDT", interval="15m", rest=fake_rest)
+        client = _make_client(symbol="ETHUSDT", interval="15m", rest_client=fake_rest)
 
         result = await client.fetch_recent_klines(limit=1)
 
@@ -235,24 +244,21 @@ class TestFetchRecentKlines:
 
     @pytest.mark.asyncio
     async def test_limit_zero_raises_value_error(self) -> None:
-        client = _make_client()
-        _inject_deps(client, rest=FakeRestClient())
+        client = _make_client(rest_client=FakeRestClient())
 
         with pytest.raises(ValueError, match="limit must be positive"):
             await client.fetch_recent_klines(limit=0)
 
     @pytest.mark.asyncio
     async def test_limit_negative_raises_value_error(self) -> None:
-        client = _make_client()
-        _inject_deps(client, rest=FakeRestClient())
+        client = _make_client(rest_client=FakeRestClient())
 
         with pytest.raises(ValueError, match="limit must be positive"):
             await client.fetch_recent_klines(limit=-5)
 
     @pytest.mark.asyncio
     async def test_limit_exceeds_max_raises(self) -> None:
-        client = _make_client()
-        _inject_deps(client, rest=FakeRestClient())
+        client = _make_client(rest_client=FakeRestClient())
 
         with pytest.raises(ValueError, match="limit must not exceed"):
             await client.fetch_recent_klines(limit=1501)
@@ -260,8 +266,7 @@ class TestFetchRecentKlines:
     @pytest.mark.asyncio
     async def test_empty_klines_returns_empty_list(self) -> None:
         fake_rest = FakeRestClient([])
-        client = _make_client()
-        _inject_deps(client, rest=fake_rest)
+        client = _make_client(rest_client=fake_rest)
 
         result = await client.fetch_recent_klines(limit=5)
 
@@ -269,37 +274,55 @@ class TestFetchRecentKlines:
 
     @pytest.mark.asyncio
     async def test_returns_oldest_first(self) -> None:
+        """Input rows are unordered (3000, 1000, 2000).
+        Output must be sorted oldest -> newest: 1000, 2000, 3000."""
         rows = [
             _make_kline_row(open_time=3000),
             _make_kline_row(open_time=1000),
             _make_kline_row(open_time=2000),
         ]
         fake_rest = FakeRestClient(rows)
-        client = _make_client()
-        _inject_deps(client, rest=fake_rest)
+        client = _make_client(rest_client=fake_rest)
 
         result = await client.fetch_recent_klines(limit=3)
 
-        assert result[0].open_time_ms == 3000
-        assert result[1].open_time_ms == 1000
-        assert result[2].open_time_ms == 2000
+        assert result[0].open_time_ms == 1000
+        assert result[1].open_time_ms == 2000
+        assert result[2].open_time_ms == 3000
 
     @pytest.mark.asyncio
-    async def test_skips_too_short_rows(self) -> None:
+    async def test_oldest_first_with_limit(self) -> None:
+        """5 unordered rows, limit=3 → returns the 3 most recent, oldest -> newest."""
+        rows = [
+            _make_kline_row(open_time=5000),
+            _make_kline_row(open_time=1000),
+            _make_kline_row(open_time=3000),
+            _make_kline_row(open_time=2000),
+            _make_kline_row(open_time=4000),
+        ]
+        fake_rest = FakeRestClient(rows)
+        client = _make_client(rest_client=fake_rest)
+
+        result = await client.fetch_recent_klines(limit=3)
+
+        assert len(result) == 3
+        assert result[0].open_time_ms == 3000
+        assert result[1].open_time_ms == 4000
+        assert result[2].open_time_ms == 5000
+
+    @pytest.mark.asyncio
+    async def test_malformed_kline_row_raises_value_error(self) -> None:
+        """REST kline row malformed must raise ValueError — no silent skip."""
         rows = [
             _make_kline_row(open_time=2000),
-            ["just", "two"],  # too short → skipped
+            ["just", "two"],  # too short → must raise
             _make_kline_row(open_time=3000),
         ]
         fake_rest = FakeRestClient(rows)
-        client = _make_client()
-        _inject_deps(client, rest=fake_rest)
+        client = _make_client(rest_client=fake_rest)
 
-        result = await client.fetch_recent_klines(limit=3)
-
-        assert len(result) == 2
-        assert result[0].open_time_ms == 2000
-        assert result[1].open_time_ms == 3000
+        with pytest.raises(ValueError):
+            await client.fetch_recent_klines(limit=3)
 
 
 # ======================================================================
@@ -311,8 +334,7 @@ class TestClose:
     @pytest.mark.asyncio
     async def test_closes_rest_client(self) -> None:
         fake_rest = FakeRestClient()
-        client = _make_client()
-        _inject_deps(client, rest=fake_rest)
+        client = _make_client(rest_client=fake_rest)
 
         await client.close()
 
@@ -321,8 +343,18 @@ class TestClose:
     @pytest.mark.asyncio
     async def test_close_idempotent(self) -> None:
         fake_rest = FakeRestClient()
-        client = _make_client()
-        _inject_deps(client, rest=fake_rest)
+        client = _make_client(rest_client=fake_rest)
+
+        await client.close()
+        await client.close()
+
+        assert fake_rest.closed is True
+
+    @pytest.mark.asyncio
+    async def test_close_after_real_constructor_is_idempotent(self) -> None:
+        """close() must be idempotent when client is built via real constructor."""
+        fake_rest = FakeRestClient()
+        client = _make_client(rest_client=fake_rest)
 
         await client.close()
         await client.close()
@@ -332,8 +364,7 @@ class TestClose:
     @pytest.mark.asyncio
     async def test_stops_ws_running_flag(self) -> None:
         fake_rest = FakeRestClient()
-        client = _make_client()
-        _inject_deps(client, rest=fake_rest)
+        client = _make_client(rest_client=fake_rest)
         client._ws_running = True
 
         await client.close()
@@ -344,8 +375,7 @@ class TestClose:
     async def test_closes_ws_connection(self) -> None:
         fake_rest = FakeRestClient()
         fake_ws_conn = FakeWsConnection([])
-        client = _make_client()
-        _inject_deps(client, rest=fake_rest)
+        client = _make_client(rest_client=fake_rest)
         client._ws_running = True
         client._ws_connection = fake_ws_conn
 
@@ -364,8 +394,7 @@ class TestStreamMarketEvents:
     async def test_calls_on_event_with_market_trade_snapshot(self) -> None:
         messages = [_make_agg_trade_msg()]
         connector = FakeWsConnector(messages)
-        client = _make_client()
-        _inject_deps(client, rest=FakeRestClient(), ws_connector=connector)
+        client = _make_client(rest_client=FakeRestClient(), ws_connector=connector)
         client._ws_running = True
 
         events: list = []
@@ -384,8 +413,7 @@ class TestStreamMarketEvents:
     async def test_trade_snapshot_fields(self) -> None:
         messages = [_make_agg_trade_msg(price="3100.50", qty="1.25", event_time=1710000000123, m=True)]
         connector = FakeWsConnector(messages)
-        client = _make_client()
-        _inject_deps(client, rest=FakeRestClient(), ws_connector=connector)
+        client = _make_client(rest_client=FakeRestClient(), ws_connector=connector)
         client._ws_running = True
 
         events: list = []
@@ -411,8 +439,7 @@ class TestStreamMarketEvents:
             _make_agg_trade_msg(),
         ]
         connector = FakeWsConnector(messages)
-        client = _make_client()
-        _inject_deps(client, rest=FakeRestClient(), ws_connector=connector)
+        client = _make_client(rest_client=FakeRestClient(), ws_connector=connector)
         client._ws_running = True
 
         events: list = []
@@ -433,8 +460,7 @@ class TestStreamMarketEvents:
             _make_agg_trade_msg(),
         ]
         connector = FakeWsConnector(messages)
-        client = _make_client()
-        _inject_deps(client, rest=FakeRestClient(), ws_connector=connector)
+        client = _make_client(rest_client=FakeRestClient(), ws_connector=connector)
         client._ws_running = True
 
         events: list = []
@@ -456,8 +482,7 @@ class TestStreamMarketEvents:
             _make_agg_trade_msg(),
         ]
         connector = FakeWsConnector(messages)
-        client = _make_client()
-        _inject_deps(client, rest=FakeRestClient(), ws_connector=connector)
+        client = _make_client(rest_client=FakeRestClient(), ws_connector=connector)
         client._ws_running = True
 
         events: list = []
@@ -475,8 +500,7 @@ class TestStreamMarketEvents:
     async def test_uses_correct_ws_url(self) -> None:
         msg = _make_agg_trade_msg()
         connector = FakeWsConnector([msg])
-        client = _make_client()
-        _inject_deps(client, symbol="ETHUSDT", rest=FakeRestClient(), ws_connector=connector)
+        client = _make_client(symbol="ETHUSDT", rest_client=FakeRestClient(), ws_connector=connector)
         client._ws_running = True
 
         async def _on_event(event: Any) -> None:
@@ -496,8 +520,7 @@ class TestStreamMarketEvents:
         and does not call any strategy module."""
         messages = [_make_agg_trade_msg()]
         connector = FakeWsConnector(messages)
-        client = _make_client()
-        _inject_deps(client, rest=FakeRestClient(), ws_connector=connector)
+        client = _make_client(rest_client=FakeRestClient(), ws_connector=connector)
         client._ws_running = True
 
         events: list = []
@@ -524,8 +547,7 @@ class TestStreamMarketEvents:
         }
         messages = [json.dumps(payload)]
         connector = FakeWsConnector(messages)
-        client = _make_client()
-        _inject_deps(client, rest=FakeRestClient(), ws_connector=connector)
+        client = _make_client(rest_client=FakeRestClient(), ws_connector=connector)
         client._ws_running = True
 
         events: list = []
@@ -538,6 +560,37 @@ class TestStreamMarketEvents:
 
         assert len(events) == 1
         assert events[0].side is None
+
+
+# ======================================================================
+# Tests: real constructor
+# ======================================================================
+
+
+class TestRealConstructor:
+    """Verify that the real __init__ injection path works correctly."""
+
+    def test_constructor_accepts_fake_rest_and_ws_connector(self) -> None:
+        fake_rest = FakeRestClient()
+        fake_ws = FakeWsConnector()
+        client = BinanceMarketDataClient(
+            symbol="ETHUSDT",
+            interval="15m",
+            rest_client=fake_rest,
+            ws_connector=fake_ws,
+        )
+        assert client._rest is fake_rest
+        assert client._ws_connector is fake_ws
+
+    def test_constructor_sets_symbol_and_interval(self) -> None:
+        client = BinanceMarketDataClient(
+            symbol="BTCUSDT",
+            interval="1h",
+            rest_client=FakeRestClient(),
+            ws_connector=FakeWsConnector(),
+        )
+        assert client._symbol == "BTCUSDT"
+        assert client._interval == "1h"
 
 
 # ======================================================================

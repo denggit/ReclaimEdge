@@ -216,15 +216,19 @@ class BinanceMarketDataClient(MarketDataClientPort):
                     now_ms=now_ms,
                 )
                 result.append(snapshot)
-            except ValueError:
+            except ValueError as exc:
                 logger.warning(
                     "BINANCE_MARKET_DATA_INVALID_KLINE_ROW | symbol=%s row=%s",
                     self._symbol,
                     row,
                 )
+                raise
 
-        # Binance REST returns oldest first already, but ensure ordering
-        result = result[-limit:]
+        # Sort by open_time_ms to guarantee oldest -> newest ordering
+        result.sort(key=lambda c: c.open_time_ms)
+        # Take the most recent 'limit' candles, still oldest -> newest
+        if len(result) > limit:
+            result = result[-limit:]
         return result
 
     async def stream_market_events(

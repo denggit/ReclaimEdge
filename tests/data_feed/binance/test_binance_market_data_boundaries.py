@@ -165,8 +165,31 @@ class TestNoTickPathViolations:
         assert "all_ticks" not in text
 
     def test_no_full_sort_in_tick_path(self) -> None:
+        """The streaming / on_event tick path must not sort.  Sorting is
+        only allowed in fetch_recent_klines (REST initialization/refresh)."""
         text = _read(_MARKET_DATA_CLIENT_PATH)
-        assert ".sort(" not in text
+        lines = text.split("\n")
+
+        in_stream = False
+        stream_indent = 0
+        for i, line in enumerate(lines):
+            stripped = line.rstrip()
+            if not stripped:
+                continue
+            indent = len(line) - len(line.lstrip())
+            if "async def stream_market_events" in stripped:
+                in_stream = True
+                stream_indent = indent
+                continue
+            if in_stream:
+                if stripped and indent <= stream_indent:
+                    in_stream = False
+                    continue
+                if ".sort(" in stripped:
+                    assert False, (
+                        f".sort() found in tick path "
+                        f"(stream_market_events line {i + 1}): {stripped.strip()}"
+                    )
 
 
 # ======================================================================
