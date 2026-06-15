@@ -964,6 +964,7 @@ def rebuild_anchor_from_closed_candles(
     """Try to rebuild an anchor from closed 15m candle history.
 
     Only used during startup restore when saved state is not trusted.
+    Each candidate pivot is validated against its OWN candle's boll_upper/boll_lower.
     """
     anchor = ExtremeRetestAnchor()
     pivot_left = config.pivot_left_bars
@@ -971,27 +972,38 @@ def rebuild_anchor_from_closed_candles(
 
     best_price: float | None = None
     best_idx: int = -1
+    best_upper: float = 0.0
+    best_lower: float = 0.0
 
     # Scan from newest to oldest (index len-1 down to pivot_left)
     for i in range(len(candles) - 1 - pivot_right, pivot_left - 1, -1):
+        candidate = candles[i]
+        # Use THIS candidate's own boll band
+        candidate_upper = float(candidate.get("boll_upper") or 0)
+        candidate_lower = float(candidate.get("boll_lower") or 0)
+
         if side == "SHORT":
             if not detect_pivot_high(candles, i, pivot_left, pivot_right):
                 continue
             pivot_price = _candle_high(candles[i])
-            if not is_outside_band_pivot_high(pivot_price, boll_upper):
+            if not is_outside_band_pivot_high(pivot_price, candidate_upper):
                 continue
             if best_price is None or pivot_price > best_price:
                 best_price = pivot_price
                 best_idx = i
+                best_upper = candidate_upper
+                best_lower = candidate_lower
         else:
             if not detect_pivot_low(candles, i, pivot_left, pivot_right):
                 continue
             pivot_price = _candle_low(candles[i])
-            if not is_outside_band_pivot_low(pivot_price, boll_lower):
+            if not is_outside_band_pivot_low(pivot_price, candidate_lower):
                 continue
             if best_price is None or pivot_price < best_price:
                 best_price = pivot_price
                 best_idx = i
+                best_upper = candidate_upper
+                best_lower = candidate_lower
 
     if best_price is None or best_idx < 0:
         logger.info(
@@ -1037,17 +1049,21 @@ def rebuild_anchor_from_closed_candles(
     anchor.kind = kind
     anchor.price = best_price
     anchor.candle_ts_ms = candle_ts
-    anchor.boll_upper = boll_upper
-    anchor.boll_lower = boll_lower
+    # Store the CANDIDATE's own boll band, not the latest candle's
+    anchor.boll_upper = best_upper
+    anchor.boll_lower = best_lower
     anchor.consumed_watermark_price = consumed_watermark_price
 
     logger.info(
         "EXTREME_RETEST_STATE_REBUILT_FROM_CANDLES | side=%s kind=%s "
-        "anchor_price=%s anchor_candle_ts_ms=%s",
+        "anchor_price=%s anchor_candle_ts_ms=%s "
+        "anchor_boll_upper=%s anchor_boll_lower=%s",
         side,
         kind,
         best_price,
         candle_ts,
+        best_upper,
+        best_lower,
     )
     return anchor
 

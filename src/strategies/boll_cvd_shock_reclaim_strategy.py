@@ -59,7 +59,9 @@ class BollCvdShockReclaimStrategy(BollCvdReclaimStrategy):
         self._extreme_retest_anchor = _extreme_retest.ExtremeRetestAnchor()
         self._prev_boll: BollSnapshot | None = None
         self._candle_buffer: deque[dict] = deque(maxlen=50)
-        self._last_detected_candle_ts_ms: int = 0
+        self._last_detected_pivot_ts_ms: int = 0
+        self._last_extreme_retest_eval_log_ts_ms: int = 0
+        self._last_extreme_retest_sweep_seen_logged: bool = False
 
     def on_tick(self, price: float, ts_ms: int, boll: BollSnapshot, cvd: CvdSnapshot) -> list[TradeIntent]:
         intents: list[TradeIntent] = []
@@ -99,11 +101,7 @@ class BollCvdShockReclaimStrategy(BollCvdReclaimStrategy):
         if not self._cooldown_ok(ts_ms):
             return intents
 
-        # ── Extreme Retest Add evaluation (before original add logic) ────
-        ext_retest_intent = None
-        if self._extreme_retest_config.enabled and self.state.side is not None:
-            ext_retest_intent = self._evaluate_extreme_retest_add(price, ts_ms, boll, cvd)
-
+        # ── Normal OUTER_BAND ADD (runs first) ───────────────────────────
         if self._long_setup(price, cvd):
             intent = self._maybe_open_or_add_long(price, ts_ms, boll, cvd)
             if intent is not None:
@@ -114,9 +112,18 @@ class BollCvdShockReclaimStrategy(BollCvdReclaimStrategy):
             if intent is not None:
                 intents.append(intent)
 
-        # ── If extreme retest generated an ADD intent, add it ────────────
-        if ext_retest_intent is not None:
-            intents.append(ext_retest_intent)
+        # ── Extreme Retest ADD only if no normal ADD was generated ───────
+        normal_add_generated = any(
+            i.intent_type in {"ADD_LONG", "ADD_SHORT"} for i in intents
+        )
+        if (
+            not normal_add_generated
+            and self._extreme_retest_config.enabled
+            and self.state.side is not None
+        ):
+            ext_retest_intent = self._evaluate_extreme_retest_add(price, ts_ms, boll, cvd)
+            if ext_retest_intent is not None:
+                intents.append(ext_retest_intent)
 
         return intents
 
@@ -586,33 +593,39 @@ class BollCvdShockReclaimStrategy(BollCvdReclaimStrategy):
         # Scan recent candles for pivots — check the rightmost candidate that has enough right bars
         # The pivot_idx is len(buf) - 1 - right_bars (most recent candle that has right_bars candles after it)
         pivot_idx = len(buf) - 1 - cfg.pivot_right_bars
+        candidate = buf[pivot_idx]
+        candidate_ts_ms = int(candidate["ts_ms"])
 
-        # Only process if this is a new candle we haven't detected on yet
-        if buf[pivot_idx]["ts_ms"] != candle_ts_ms:
+        # Dedup: skip if we already detected a pivot on this candidate candle
+        if self._last_detected_pivot_ts_ms == candidate_ts_ms:
             return
-        if self._last_detected_candle_ts_ms == candle_ts_ms:
-            return
-        self._last_detected_candle_ts_ms = candle_ts_ms
 
+        # Detect pivot
         if side == "SHORT":
             if not _extreme_retest.detect_pivot_high(buf, pivot_idx, cfg.pivot_left_bars, cfg.pivot_right_bars):
                 return
-            candidate_price = buf[pivot_idx]["high"]
+            candidate_price = float(candidate["high"])
         else:
             if not _extreme_retest.detect_pivot_low(buf, pivot_idx, cfg.pivot_left_bars, cfg.pivot_right_bars):
                 return
-            candidate_price = buf[pivot_idx]["low"]
+            candidate_price = float(candidate["low"])
+
+        # Use candidate candle's own boll_upper/lower for strict outer-band check
+        candidate_boll_upper = float(candidate.get("boll_upper") or 0)
+        candidate_boll_lower = float(candidate.get("boll_lower") or 0)
+
+        self._last_detected_pivot_ts_ms = candidate_ts_ms
 
         # Compute effective required gap
-        effective_required_gap_pct = self._extreme_retest_effective_required_gap_pct()
+        effective_required_gap_pct = self._extreme_retest_effective_required_gap_pct(ts_ms=None)
 
         # Try to create or replace anchor
         _extreme_retest.try_create_or_replace_anchor(
             side=side,
             candidate_price=candidate_price,
-            candle_ts_ms=candle_ts_ms,
-            boll_upper=boll_upper,
-            boll_lower=boll_lower,
+            candle_ts_ms=candidate_ts_ms,
+            boll_upper=candidate_boll_upper,
+            boll_lower=candidate_boll_lower,
             last_entry_price=self.state.last_entry_price,
             effective_required_gap_pct=effective_required_gap_pct,
             anchor=anchor,
@@ -649,36 +662,52 @@ class BollCvdShockReclaimStrategy(BollCvdReclaimStrategy):
             sell_ratio=cvd.sell_ratio,
         )
 
-        # Log evaluation
+        # Log evaluation — throttled: at most once per 60s when not triggered
         if anchor.is_active():
-            logger.info(
-                "EXTREME_RETEST_ADD_EVALUATED | side=%s layers=%s target_layer=%s "
-                "price=%s boll_upper=%s boll_lower=%s inside_band=%s "
-                "anchor_price=%s anchor_kind=%s pattern=%s "
-                "sweep_seen=%s sweep_extreme_price=%s reclaimed=%s "
-                "near_extreme=%s buy_ratio=%.4f sell_ratio=%.4f "
-                "reverse_ratio_ok=%s triggered=%s decision=%s reason=%s",
-                side,
-                self.state.layers,
-                self.state.layers + 1,
-                price,
-                boll.upper,
-                boll.lower,
-                eval_result.inside_band,
-                eval_result.anchor_price,
-                eval_result.anchor_kind,
-                eval_result.pattern,
-                eval_result.sweep_seen,
-                eval_result.sweep_extreme_price,
-                eval_result.reclaimed,
-                eval_result.near_extreme,
-                eval_result.buy_ratio,
-                eval_result.sell_ratio,
-                eval_result.reverse_ratio_ok,
-                eval_result.triggered,
-                eval_result.decision,
-                eval_result.reason,
+            now_ms = ts_ms
+            interval_since_last = now_ms - self._last_extreme_retest_eval_log_ts_ms
+            sweep_state_changed = (
+                anchor.sweep_seen and not self._last_extreme_retest_sweep_seen_logged
             )
+            should_log = (
+                eval_result.triggered
+                or sweep_state_changed
+                or interval_since_last >= 60_000
+            )
+            if should_log:
+                self._last_extreme_retest_eval_log_ts_ms = now_ms
+                if sweep_state_changed:
+                    self._last_extreme_retest_sweep_seen_logged = True
+                elif not anchor.sweep_seen:
+                    self._last_extreme_retest_sweep_seen_logged = False
+                logger.info(
+                    "EXTREME_RETEST_ADD_EVALUATED | side=%s layers=%s target_layer=%s "
+                    "price=%s boll_upper=%s boll_lower=%s inside_band=%s "
+                    "anchor_price=%s anchor_kind=%s pattern=%s "
+                    "sweep_seen=%s sweep_extreme_price=%s reclaimed=%s "
+                    "near_extreme=%s buy_ratio=%.4f sell_ratio=%.4f "
+                    "reverse_ratio_ok=%s triggered=%s decision=%s reason=%s",
+                    side,
+                    self.state.layers,
+                    self.state.layers + 1,
+                    price,
+                    boll.upper,
+                    boll.lower,
+                    eval_result.inside_band,
+                    eval_result.anchor_price,
+                    eval_result.anchor_kind,
+                    eval_result.pattern,
+                    eval_result.sweep_seen,
+                    eval_result.sweep_extreme_price,
+                    eval_result.reclaimed,
+                    eval_result.near_extreme,
+                    eval_result.buy_ratio,
+                    eval_result.sell_ratio,
+                    eval_result.reverse_ratio_ok,
+                    eval_result.triggered,
+                    eval_result.decision,
+                    eval_result.reason,
+                )
 
         if not eval_result.triggered:
             self._sync_anchor_to_state()
@@ -702,7 +731,11 @@ class BollCvdShockReclaimStrategy(BollCvdReclaimStrategy):
         # Timing check (add_freeze / first_add_block / add_interval)
         timing_ok, timing_reason = self._add_timing_passed(side, price, ts_ms, target_layer)
         if not timing_ok:
-            self._log_add_timing_skipped(side, timing_reason, price, ts_ms, target_layer)
+            self._log_extreme_retest_add_timing_skipped(
+                side, timing_reason, price, ts_ms, target_layer,
+                pattern=eval_result.pattern,
+                anchor_price=eval_result.anchor_price,
+            )
             self._sync_anchor_to_state()
             return None
 
@@ -794,20 +827,108 @@ class BollCvdShockReclaimStrategy(BollCvdReclaimStrategy):
         )
         return intent
 
-    def _extreme_retest_effective_required_gap_pct(self) -> float:
+    def _extreme_retest_effective_required_gap_pct(self, ts_ms: int | None = None) -> float:
         """Compute effective required gap pct for anchor checking.
 
-        Reuses the same add_gap logic used by the main add flow, including
-        target_layer adjustments for the NEXT layer.
+        Accounts for add_freeze / first_add_block / multiplier / penalty_count
+        when applicable, so the anchor is rejected early if it can't clear the
+        real add timing gate.
+
+        Falls back to base target-layer gap when timing state is indeterminate.
         """
-        target_layer = max(self.state.layers, 1) + 1
+        target_layer = self.state.layers + 1
         base_gap = add_layer_gates.add_layer_gap_pct_for_target_layer(
             target_layer=target_layer,
             add_gap_mode=self.config.add_gap_mode,
             add_gap_base_pct=self.config.add_gap_base_pct,
             add_gap_step_pct=self.config.add_gap_step_pct,
         )
+
+        # If add_freeze is active, the real required gap is base_gap * multiplier
+        if (
+            ts_ms is not None
+            and self.config.add_freeze_chain_enabled
+            and self._add_freeze_active(ts_ms)
+        ):
+            multiplier = self._active_add_freeze_bypass_multiplier()
+            return base_gap * multiplier
+
+        # If layers == 1 and first_add_block is not yet elapsed, use bypass multiplier
+        if self.state.layers == 1:
+            first_entry_ts = int(getattr(self.state, "first_entry_ts_ms", 0) or 0)
+            if first_entry_ts > 0 and ts_ms is not None:
+                elapsed_s = (ts_ms - first_entry_ts) / 1000.0
+                if elapsed_s < self.config.first_add_block_seconds:
+                    return base_gap * self.first_add_block_bypass_multiplier
+
         return base_gap
+
+    def _log_extreme_retest_add_timing_skipped(
+        self,
+        side: PositionSide,
+        reason: str,
+        price: float,
+        ts_ms: int,
+        target_layer: int,
+        *,
+        pattern: str | None,
+        anchor_price: float | None,
+    ) -> None:
+        """Log timing skip for extreme retest with trigger_source included."""
+        last = self.state.last_entry_price if self.state.last_entry_price is not None else 0.0
+        adverse_gap_pct = self._adverse_gap_pct(side, price)
+        if reason == "add_freeze":
+            multiplier = self._active_add_freeze_bypass_multiplier()
+            logger.info(
+                "ADD_SKIPPED | reason=add_freeze side=%s price=%s "
+                "trigger_source=EXTREME_RETEST pattern=%s anchor_price=%s "
+                "layers=%s target_layer=%s last_entry=%s "
+                "freeze_remaining_seconds=%.1f adverse_gap_pct=%.4f%% "
+                "required_gap_pct=%.4f%% multiplier=%.2f",
+                side, price, pattern, anchor_price,
+                self.state.layers, target_layer, last,
+                self._add_freeze_remaining_seconds(ts_ms),
+                adverse_gap_pct * 100,
+                self._add_layer_gap_pct_for_target_layer(target_layer) * multiplier * 100,
+                multiplier,
+            )
+            return
+        if reason == "first_add_block":
+            logger.info(
+                "ADD_SKIPPED | reason=first_add_block side=%s price=%s "
+                "trigger_source=EXTREME_RETEST pattern=%s anchor_price=%s "
+                "layers=%s target_layer=%s last_entry=%s "
+                "first_elapsed_seconds=%.1f required_seconds=%s "
+                "adverse_gap_pct=%.4f%%",
+                side, price, pattern, anchor_price,
+                self.state.layers, target_layer, last,
+                self._first_entry_elapsed_seconds(ts_ms),
+                self.config.first_add_block_seconds,
+                adverse_gap_pct * 100,
+            )
+            return
+        if reason == "add_interval":
+            logger.info(
+                "ADD_SKIPPED | reason=add_interval side=%s price=%s "
+                "trigger_source=EXTREME_RETEST pattern=%s anchor_price=%s "
+                "layers=%s target_layer=%s last_entry=%s "
+                "elapsed_seconds=%.1f required_seconds=%s "
+                "adverse_gap_pct=%.4f%%",
+                side, price, pattern, anchor_price,
+                self.state.layers, target_layer, last,
+                self._add_elapsed_seconds(ts_ms),
+                self.config.add_min_interval_seconds,
+                adverse_gap_pct * 100,
+            )
+            return
+        logger.info(
+            "ADD_SKIPPED | reason=%s side=%s price=%s "
+            "trigger_source=EXTREME_RETEST pattern=%s anchor_price=%s "
+            "layers=%s target_layer=%s last_entry=%s elapsed_seconds=%.1f",
+            reason, side, price, pattern, anchor_price,
+            self.state.layers, target_layer, last,
+            self._add_elapsed_seconds(ts_ms),
+        )
 
     def _sync_anchor_from_state(self) -> None:
         """Sync ExtremeRetestAnchor from strategy state fields."""

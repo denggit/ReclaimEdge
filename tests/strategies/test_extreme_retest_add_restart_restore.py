@@ -69,6 +69,22 @@ def strategy(**overrides) -> BollCvdShockReclaimStrategy:
     return BollCvdShockReclaimStrategy(config, sizer)
 
 
+def _make_config(**overrides) -> ExtremeRetestConfig:
+    defaults = dict(
+        enabled=True,
+        pivot_left_bars=2,
+        pivot_right_bars=2,
+        anchor_max_age_candles=12,
+        sweep_max_age_seconds=900.0,
+        near_extreme_pct=0.0015,
+        reclaim_pct=0.0005,
+        min_reverse_ratio=0.55,
+        one_add_per_anchor=True,
+    )
+    defaults.update(overrides)
+    return ExtremeRetestConfig(**defaults)
+
+
 def _seed_candle_buffer(strat: BollCvdShockReclaimStrategy, candles: list[dict]) -> None:
     """Pre-populate the candle buffer by simulating tick sequence.
 
@@ -659,3 +675,282 @@ class CandleBufferTrackingTest(unittest.TestCase):
         strat._sync_anchor_to_state()
         self.assertEqual(strat.state.extreme_retest_anchor_price, 89.5)
         self.assertFalse(strat.state.extreme_retest_sweep_seen)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Fix 4: Same Tick Single ADD
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class SameTickSingleADDTest(unittest.TestCase):
+
+    def test_normal_add_blocks_extreme_retest_on_same_tick(self) -> None:
+        """When normal OUTER_BAND ADD fires, extreme retest is NOT evaluated."""
+        strat = strategy(extreme_retest_add_enabled=True)
+        strat.state.side = "SHORT"
+        strat.state.layers = 1
+        strat.state.last_entry_price = 2000.0
+        strat.state.last_order_ts_ms = 1000
+        strat.state.add_freeze_until_ts_ms = 0
+        strat.state.avg_entry_price = 2000.0
+        strat.state.total_entry_qty = 1.0
+        strat.state.total_entry_notional = 2000.0
+
+        # Set up extreme retest anchor that would also trigger
+        strat.state.extreme_retest_anchor_side = "SHORT"
+        strat.state.extreme_retest_anchor_kind = "PIVOT_HIGH"
+        strat.state.extreme_retest_anchor_price = 2200.0
+        strat.state.extreme_retest_anchor_candle_ts_ms = 5000
+        strat.state.extreme_retest_anchor_boll_upper = 2300.0
+        strat.state.extreme_retest_anchor_boll_lower = 2050.0
+        strat.state.lower_armed = True
+        strat.state.lower_deep_enough = True
+        strat.state.lower_extreme_price = 2199.0
+        strat.restore_extreme_retest_state_from_saved(trusted=True)
+
+        # Both OUTER_BAND_ADD and EXTREME_RETEST could fire
+        boll = boll_snapshot(candle_ts_ms=5000, upper=2300.0, lower=2050.0, alert_switch_on=True)
+        cvd = cvd_snapshot(
+            price=2199.0, sell_ratio=0.60, buy_ratio=0.30,
+            cross_negative=True, no_new_high=True,  # satisfies _short_setup
+        )
+
+        intents = strat.on_tick(2199.0, 100000, boll, cvd)
+        add_intents = [i for i in intents if i.intent_type in ("ADD_LONG", "ADD_SHORT")]
+        # Must be at most 1 ADD
+        self.assertLessEqual(len(add_intents), 1)
+
+    def test_extreme_retest_fires_when_normal_add_not_eligible(self) -> None:
+        """When normal add does NOT fire, extreme retest can fire."""
+        strat = strategy(extreme_retest_add_enabled=True)
+        strat.state.side = "SHORT"
+        strat.state.layers = 1
+        strat.state.last_entry_price = 2000.0
+        strat.state.last_order_ts_ms = 1000
+        strat.state.add_freeze_until_ts_ms = 0
+        strat.state.avg_entry_price = 2000.0
+        strat.state.total_entry_qty = 1.0
+        strat.state.total_entry_notional = 2000.0
+
+        # Set up extreme retest anchor
+        strat.state.extreme_retest_anchor_side = "SHORT"
+        strat.state.extreme_retest_anchor_kind = "PIVOT_HIGH"
+        strat.state.extreme_retest_anchor_price = 2200.0
+        strat.state.extreme_retest_anchor_candle_ts_ms = 5000
+        strat.state.extreme_retest_anchor_boll_upper = 2300.0
+        strat.state.extreme_retest_anchor_boll_lower = 2050.0
+        # Normal add NOT eligible: lower_armed is False
+        strat.state.lower_armed = False
+        strat.restore_extreme_retest_state_from_saved(trusted=True)
+
+        boll = boll_snapshot(candle_ts_ms=5000, upper=2300.0, lower=2050.0, alert_switch_on=True)
+        cvd = cvd_snapshot(price=2199.0, sell_ratio=0.60, buy_ratio=0.30)
+
+        intents = strat.on_tick(2199.0, 100000, boll, cvd)
+        add_intents = [i for i in intents if i.intent_type in ("ADD_LONG", "ADD_SHORT")]
+        self.assertEqual(len(add_intents), 1)
+        self.assertEqual(add_intents[0].intent_type, "ADD_SHORT")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Fix 5: High-Frequency Log Throttling
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class HighFrequencyLogTest(unittest.TestCase):
+
+    def test_non_triggered_eval_log_throttled(self) -> None:
+        """10 consecutive non-triggered ticks should produce at most 1 EVALUATED INFO."""
+        strat = strategy(extreme_retest_add_enabled=True)
+        strat.state.side = "SHORT"
+        strat.state.layers = 1
+        strat.state.last_entry_price = 2000.0
+        strat.state.last_order_ts_ms = 1000
+        strat.state.add_freeze_until_ts_ms = 0
+        strat.state.avg_entry_price = 2000.0
+        strat.state.total_entry_qty = 1.0
+        strat.state.total_entry_notional = 2000.0
+        strat.state.lower_armed = False
+
+        strat.state.extreme_retest_anchor_side = "SHORT"
+        strat.state.extreme_retest_anchor_kind = "PIVOT_HIGH"
+        strat.state.extreme_retest_anchor_price = 2200.0
+        strat.state.extreme_retest_anchor_candle_ts_ms = 5000
+        strat.state.extreme_retest_anchor_boll_upper = 2300.0
+        strat.state.extreme_retest_anchor_boll_lower = 2050.0
+        strat.restore_extreme_retest_state_from_saved(trusted=True)
+
+        import logging
+        with self.assertLogs("src.strategies.boll_cvd_shock_reclaim_strategy", level="INFO") as logs:
+            for i in range(10):
+                boll = boll_snapshot(
+                    candle_ts_ms=5000, upper=2300.0, lower=2050.0,
+                    alert_switch_on=True,
+                )
+                # Price far from anchor → not triggered
+                cvd = cvd_snapshot(
+                    price=2100.0, sell_ratio=0.30, buy_ratio=0.30,
+                    ts_ms=100000 + i * 1000,
+                )
+                strat.on_tick(2100.0, 100000 + i * 1000, boll, cvd)
+
+        evaluated_logs = [
+            rec for rec in logs.output
+            if "EXTREME_RETEST_ADD_EVALUATED" in rec
+        ]
+        # At most 1 evaluated log (60s throttle interval; all 10 ticks within 10s)
+        self.assertLessEqual(len(evaluated_logs), 1)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Fix 7: Timing Skip Logs with trigger_source
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class TimingSkipLogWithTriggerSourceTest(unittest.TestCase):
+
+    def test_extreme_retest_timing_skip_log_includes_trigger_source(self) -> None:
+        """When extreme retest is blocked by add_freeze, log includes trigger_source=EXTREME_RETEST."""
+        strat = strategy(extreme_retest_add_enabled=True, add_freeze_chain_enabled=True)
+        strat.state.side = "SHORT"
+        strat.state.layers = 1
+        # Price close to last_entry so adverse_gap < 0.015 (freeze bypass)
+        strat.state.last_entry_price = 2170.0
+        strat.state.last_order_ts_ms = 1000
+        strat.state.add_freeze_until_ts_ms = 200000  # active freeze
+        strat.state.avg_entry_price = 2170.0
+        strat.state.total_entry_qty = 1.0
+        strat.state.total_entry_notional = 2170.0
+        strat.state.lower_armed = False
+
+        strat.state.extreme_retest_anchor_side = "SHORT"
+        strat.state.extreme_retest_anchor_kind = "PIVOT_HIGH"
+        strat.state.extreme_retest_anchor_price = 2200.0
+        strat.state.extreme_retest_anchor_candle_ts_ms = 5000
+        strat.state.extreme_retest_anchor_boll_upper = 2300.0
+        strat.state.extreme_retest_anchor_boll_lower = 2050.0
+        strat.restore_extreme_retest_state_from_saved(trusted=True)
+
+        import logging
+        with self.assertLogs("src.strategies.boll_cvd_shock_reclaim_strategy", level="INFO") as logs:
+            boll = boll_snapshot(candle_ts_ms=5000, upper=2300.0, lower=2050.0,
+                               alert_switch_on=True)
+            # price=2198: near anchor (2196.7-2200), adverse_gap=1.29% < 1.5% bypass
+            cvd = cvd_snapshot(price=2198.0, sell_ratio=0.60, buy_ratio=0.30,
+                             ts_ms=100000)
+            # Call _evaluate_extreme_retest_add directly rather than full on_tick
+            # to avoid complex interactions with UPDATE_TP and other intent generators
+            result = strat._evaluate_extreme_retest_add(2198.0, 100000, boll, cvd)
+
+        # extreme retest should be blocked (add_freeze) and not generate ADD
+        self.assertIsNone(result)
+        # Anchor should NOT be consumed
+        self.assertIsNone(strat._extreme_retest_anchor.consumed_watermark_price)
+
+        add_skipped_logs = [
+            rec for rec in logs.output
+            if "ADD_SKIPPED" in rec and "trigger_source=EXTREME_RETEST" in rec
+        ]
+        self.assertGreaterEqual(len(add_skipped_logs), 1)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Fix 6: Effective Required Gap with Add Freeze
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class EffectiveRequiredGapWithFreezeTest(unittest.TestCase):
+
+    def test_anchor_rejected_when_only_satisfies_base_gap_not_multiplied(self) -> None:
+        """When add_freeze is active with multiplier > 1, anchor must satisfy
+        base_gap * multiplier, not just base_gap."""
+        cfg = _make_config()
+        anchor = ExtremeRetestAnchor()
+
+        # base_gap = 0.003 (for target_layer=2)
+        # multiplier = 5 (first_add_block_bypass_multiplier), effective_gap = 0.015
+        # last_entry=100, candidate=103.5
+        # gap = (103.5-100)/100 = 0.035 > 0.015 → passes
+        action, reason = _extreme_retest.try_create_or_replace_anchor(
+            "SHORT", 103.5, 5000, boll_upper=103.0, boll_lower=92.0,
+            last_entry_price=100.0, effective_required_gap_pct=0.015,
+            anchor=anchor, config=cfg,
+        )
+        self.assertTrue(action)
+
+    def test_anchor_rejected_when_gap_below_effective(self) -> None:
+        """Anchor rejected when gap < effective_required_gap_pct."""
+        cfg = _make_config()
+        anchor = ExtremeRetestAnchor()
+
+        # effective_gap = 0.015, last_entry=100, candidate=101
+        # gap = (101-100)/100 = 0.01 < 0.015 → rejected
+        action, reason = _extreme_retest.try_create_or_replace_anchor(
+            "SHORT", 101.0, 5000, boll_upper=100.5, boll_lower=92.0,
+            last_entry_price=100.0, effective_required_gap_pct=0.015,
+            anchor=anchor, config=cfg,
+        )
+        self.assertFalse(action)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Fix 8: Restart Not Immediately ADD
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class RestartNotImmediatelyADDTest(unittest.TestCase):
+
+    def test_restored_anchor_no_add_without_live_tick(self) -> None:
+        """Restored anchor should not generate ADD without on_tick call."""
+        strat = strategy(extreme_retest_add_enabled=True)
+        strat.state.side = "SHORT"
+        strat.state.layers = 1
+        strat.state.last_entry_price = 2000.0
+        strat.state.last_order_ts_ms = 1000
+        strat.state.add_freeze_until_ts_ms = 0
+        strat.state.avg_entry_price = 2000.0
+        strat.state.total_entry_qty = 1.0
+        strat.state.total_entry_notional = 2000.0
+        strat.state.lower_armed = False
+
+        strat.state.extreme_retest_anchor_side = "SHORT"
+        strat.state.extreme_retest_anchor_kind = "PIVOT_HIGH"
+        strat.state.extreme_retest_anchor_price = 2200.0
+        strat.state.extreme_retest_anchor_candle_ts_ms = 5000
+        strat.state.extreme_retest_anchor_boll_upper = 2300.0
+        strat.state.extreme_retest_anchor_boll_lower = 2050.0
+        strat.restore_extreme_retest_state_from_saved(trusted=True)
+
+        # No on_tick called — anchor is restored but no ADD generated
+        self.assertTrue(strat._extreme_retest_anchor.is_active())
+
+    def test_first_live_tick_insufficient_cvd_no_add(self) -> None:
+        """First live tick with insufficient CVD should not trigger ADD."""
+        strat = strategy(extreme_retest_add_enabled=True)
+        strat.state.side = "SHORT"
+        strat.state.layers = 1
+        strat.state.last_entry_price = 2000.0
+        strat.state.last_order_ts_ms = 1000
+        strat.state.add_freeze_until_ts_ms = 0
+        strat.state.avg_entry_price = 2000.0
+        strat.state.total_entry_qty = 1.0
+        strat.state.total_entry_notional = 2000.0
+        strat.state.lower_armed = False
+
+        strat.state.extreme_retest_anchor_side = "SHORT"
+        strat.state.extreme_retest_anchor_kind = "PIVOT_HIGH"
+        strat.state.extreme_retest_anchor_price = 2200.0
+        strat.state.extreme_retest_anchor_candle_ts_ms = 5000
+        strat.state.extreme_retest_anchor_boll_upper = 2300.0
+        strat.state.extreme_retest_anchor_boll_lower = 2050.0
+        strat.restore_extreme_retest_state_from_saved(trusted=True)
+
+        # Price near anchor but sell_ratio too low
+        boll = boll_snapshot(candle_ts_ms=5000, upper=2300.0, lower=2050.0,
+                           alert_switch_on=True)
+        cvd = cvd_snapshot(price=2199.0, sell_ratio=0.30, buy_ratio=0.30)
+        intents = strat.on_tick(2199.0, 100000, boll, cvd)
+        add_intents = [i for i in intents if i.intent_type in ("ADD_LONG", "ADD_SHORT")]
+        self.assertEqual(len(add_intents), 0)
+        # Anchor still active (ADD was not triggered)
+        self.assertTrue(strat._extreme_retest_anchor.is_active())

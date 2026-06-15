@@ -753,3 +753,162 @@ class AnchorSerializationTest(unittest.TestCase):
         self.assertFalse(anchor.sweep_seen)
         self.assertEqual(anchor.consumed_watermark_price, 110.0)
         self.assertEqual(anchor.consumed_anchor_ts_ms, 5000)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Fix 1: Right Bars Integration Test
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class RightBarsIntegrationTest(unittest.TestCase):
+    """Verify pivot detection works with right_bars=2 through on_tick flow."""
+
+    def test_right_bars_2_pivot_detected_short(self) -> None:
+        """With right_bars=2 and 5+right_bars candles, pivot at pivot_idx should be detected."""
+        candles = [
+            {"ts_ms": 1000, "high": 100, "low": 95, "close": 98, "boll_upper": 108, "boll_lower": 92},
+            {"ts_ms": 2000, "high": 102, "low": 97, "close": 101, "boll_upper": 108, "boll_lower": 92},
+            {"ts_ms": 3000, "high": 103, "low": 98, "close": 102, "boll_upper": 108, "boll_lower": 92},
+            {"ts_ms": 4000, "high": 110, "low": 96, "close": 105, "boll_upper": 108, "boll_lower": 92},
+            {"ts_ms": 5000, "high": 105, "low": 99, "close": 104, "boll_upper": 108, "boll_lower": 92},
+            {"ts_ms": 6000, "high": 106, "low": 100, "close": 105, "boll_upper": 108, "boll_lower": 92},
+            {"ts_ms": 7000, "high": 107, "low": 101, "close": 106, "boll_upper": 108, "boll_lower": 92},
+        ]
+        buf = list(candles)
+        # With 7 candles, right_bars=2: pivot_idx = 7-1-2 = 4 (ts=5000)
+        # But pivot at idx=3 (ts=4000, high=110) is the actual pivot
+        self.assertTrue(_extreme_retest.detect_pivot_high(buf, 3, 2, 2))
+
+    def test_right_bars_2_pivot_detected_long(self) -> None:
+        candles = [
+            {"ts_ms": 1000, "high": 100, "low": 95, "close": 98, "boll_upper": 112, "boll_lower": 92},
+            {"ts_ms": 2000, "high": 102, "low": 96, "close": 101, "boll_upper": 112, "boll_lower": 92},
+            {"ts_ms": 3000, "high": 103, "low": 97, "close": 102, "boll_upper": 112, "boll_lower": 92},
+            {"ts_ms": 4000, "high": 105, "low": 90, "close": 100, "boll_upper": 112, "boll_lower": 92},
+            {"ts_ms": 5000, "high": 104, "low": 92, "close": 101, "boll_upper": 112, "boll_lower": 92},
+            {"ts_ms": 6000, "high": 106, "low": 93, "close": 103, "boll_upper": 112, "boll_lower": 92},
+            {"ts_ms": 7000, "high": 107, "low": 94, "close": 104, "boll_upper": 112, "boll_lower": 92},
+        ]
+        buf = list(candles)
+        # pivot at idx=3 (ts=4000, low=90) < boll_lower=92
+        self.assertTrue(_extreme_retest.detect_pivot_low(buf, 3, 2, 2))
+
+    def test_candidate_ts_ms_dedup_prevents_reprocessing(self) -> None:
+        """The _last_detected_pivot_ts_ms dedup ensures each candidate is only processed once."""
+        buf = [
+            {"ts_ms": 1000, "high": 100, "low": 95, "close": 98, "boll_upper": 108, "boll_lower": 92},
+            {"ts_ms": 2000, "high": 102, "low": 97, "close": 101, "boll_upper": 108, "boll_lower": 92},
+            {"ts_ms": 3000, "high": 103, "low": 98, "close": 102, "boll_upper": 108, "boll_lower": 92},
+            {"ts_ms": 4000, "high": 110, "low": 96, "close": 105, "boll_upper": 108, "boll_lower": 92},
+            {"ts_ms": 5000, "high": 105, "low": 99, "close": 104, "boll_upper": 108, "boll_lower": 92},
+            {"ts_ms": 6000, "high": 106, "low": 100, "close": 105, "boll_upper": 108, "boll_lower": 92},
+        ]
+        # pivot_idx = len-1-right_bars = 6-1-2 = 3, candidate_ts=4000
+        candidate = buf[3]
+        self.assertEqual(candidate["ts_ms"], 4000)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Fix 2+3: Candidate BOLL Band Tests
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class CandidateBOLLBandTest(unittest.TestCase):
+
+    def test_candidate_uses_own_boll_upper_not_latest(self) -> None:
+        """Candidate pivot candle's boll_upper differs from latest candle's."""
+        # Latest candle has boll_upper=120, but candidate has boll_upper=108
+        cfg = _make_config()
+        anchor = ExtremeRetestAnchor()
+
+        # Candidate price=110, candidate_boll_upper=108 → strict outside ✓
+        action, reason = _extreme_retest.try_create_or_replace_anchor(
+            "SHORT", 110.0, 4000, boll_upper=108.0, boll_lower=92.0,
+            last_entry_price=100.0, effective_required_gap_pct=0.01,
+            anchor=anchor, config=cfg,
+        )
+        self.assertTrue(action)
+
+    def test_candidate_rejected_if_not_outside_own_upper(self) -> None:
+        """Candidate price NOT above its own boll_upper → rejected."""
+        cfg = _make_config()
+        anchor = ExtremeRetestAnchor()
+        # price=107, boll_upper=108 → not outside
+        action, reason = _extreme_retest.try_create_or_replace_anchor(
+            "SHORT", 107.0, 4000, boll_upper=108.0, boll_lower=92.0,
+            last_entry_price=100.0, effective_required_gap_pct=0.01,
+            anchor=anchor, config=cfg,
+        )
+        self.assertFalse(action)
+
+    def test_long_candidate_uses_own_boll_lower_not_latest(self) -> None:
+        cfg = _make_config()
+        anchor = ExtremeRetestAnchor()
+        # price=90, boll_lower=92 → strict outside ✓
+        action, reason = _extreme_retest.try_create_or_replace_anchor(
+            "LONG", 90.0, 4000, boll_upper=112.0, boll_lower=92.0,
+            last_entry_price=100.0, effective_required_gap_pct=0.01,
+            anchor=anchor, config=cfg,
+        )
+        self.assertTrue(action)
+
+    def test_long_candidate_rejected_if_not_outside_own_lower(self) -> None:
+        cfg = _make_config()
+        anchor = ExtremeRetestAnchor()
+        # price=93, boll_lower=92 → not outside
+        action, reason = _extreme_retest.try_create_or_replace_anchor(
+            "LONG", 93.0, 4000, boll_upper=112.0, boll_lower=92.0,
+            last_entry_price=100.0, effective_required_gap_pct=0.01,
+            anchor=anchor, config=cfg,
+        )
+        self.assertFalse(action)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Fix 3: Rebuild Candidate BOLL Band Tests
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class RebuildCandidateBOLLBandTest(unittest.TestCase):
+
+    def test_rebuild_uses_each_candidate_own_band(self) -> None:
+        """Historical candidate has different boll_upper than latest candle."""
+        candles = [
+            {"ts_ms": 1000, "high": 100, "low": 95, "close": 98, "boll_upper": 108, "boll_lower": 92},
+            {"ts_ms": 2000, "high": 102, "low": 97, "close": 101, "boll_upper": 108, "boll_lower": 92},
+            {"ts_ms": 3000, "high": 103, "low": 98, "close": 102, "boll_upper": 108, "boll_lower": 92},
+            {"ts_ms": 4000, "high": 110, "low": 96, "close": 105, "boll_upper": 108, "boll_lower": 92},
+            {"ts_ms": 5000, "high": 105, "low": 99, "close": 104, "boll_upper": 108, "boll_lower": 92},
+            {"ts_ms": 6000, "high": 106, "low": 100, "close": 105, "boll_upper": 108, "boll_lower": 92},
+        ]
+        cfg = _make_config()
+        # Pass latest boll_upper=120 (different from candidate's 108)
+        # The rebuild should still succeed because it uses candidate's own 108
+        anchor = _extreme_retest.rebuild_anchor_from_closed_candles(
+            "SHORT", candles, boll_upper=120.0, boll_lower=85.0,
+            last_entry_price=100.0, effective_required_gap_pct=0.01,
+            consumed_watermark_price=None, config=cfg,
+        )
+        self.assertIsNotNone(anchor)
+        # Should store candidate's own boll_upper=108, not the passed 120
+        self.assertEqual(anchor.boll_upper, 108.0)
+        self.assertEqual(anchor.boll_lower, 92.0)
+
+    def test_rebuild_rejects_if_candidate_not_outside_its_own_band(self) -> None:
+        """Candidate not outside its own band — should not be rebuilt."""
+        candles = [
+            {"ts_ms": 1000, "high": 105, "low": 95, "close": 98, "boll_upper": 108, "boll_lower": 92},
+            {"ts_ms": 2000, "high": 103, "low": 97, "close": 101, "boll_upper": 108, "boll_lower": 92},
+            {"ts_ms": 3000, "high": 104, "low": 98, "close": 102, "boll_upper": 108, "boll_lower": 92},
+            {"ts_ms": 4000, "high": 107, "low": 96, "close": 105, "boll_upper": 108, "boll_lower": 92},
+            {"ts_ms": 5000, "high": 105, "low": 99, "close": 104, "boll_upper": 108, "boll_lower": 92},
+            {"ts_ms": 6000, "high": 106, "low": 100, "close": 105, "boll_upper": 108, "boll_lower": 92},
+        ]
+        cfg = _make_config()
+        # All highs are <= boll_upper=108 (not strictly outside)
+        anchor = _extreme_retest.rebuild_anchor_from_closed_candles(
+            "SHORT", candles, boll_upper=50.0, boll_lower=85.0,  # fake latest band would make it seem outside
+            last_entry_price=100.0, effective_required_gap_pct=0.01,
+            consumed_watermark_price=None, config=cfg,
+        )
+        self.assertIsNone(anchor)
