@@ -811,10 +811,24 @@ class TimingSkipLogWithTriggerSourceTest(unittest.TestCase):
 
     def test_extreme_retest_timing_skip_log_includes_trigger_source(self) -> None:
         """When extreme retest is blocked by add_freeze, log includes trigger_source=EXTREME_RETEST."""
-        strat = strategy(extreme_retest_add_enabled=True, add_freeze_chain_enabled=True)
+        # Explicit multiplier=5 ensures the bypass required gap is 0.015 (1.5%),
+        # which is greater than the adverse gap of ~1.29% fabricated below.
+        # If the multiplier were 4 (the old implicit default), the required gap
+        # would be 0.012 (1.2%) and the bypass would incorrectly allow ADD_SHORT.
+        strat = strategy(
+            extreme_retest_add_enabled=True,
+            add_freeze_chain_enabled=True,
+            add_min_interval_bypass_multiplier=5,
+        )
+        # first_add_block_bypass_multiplier is an instance attribute (not a
+        # config field), so it must be set directly on the strategy object.
+        strat.first_add_block_bypass_multiplier = 5
+
         strat.state.side = "SHORT"
         strat.state.layers = 1
-        # Price close to last_entry so adverse_gap < 0.015 (freeze bypass)
+        # target_layer=2 base_gap=0.003, multiplier=5 → required_gap=0.015 (1.5%)
+        # price=2198, last_entry=2170 → adverse_gap≈(2198-2170)/2170=0.0129 (1.29%)
+        # 0.0129 < 0.015, so this must be blocked by add_freeze (NOT bypassed).
         strat.state.last_entry_price = 2170.0
         strat.state.last_order_ts_ms = 1000
         strat.state.add_freeze_until_ts_ms = 200000  # active freeze
@@ -835,7 +849,7 @@ class TimingSkipLogWithTriggerSourceTest(unittest.TestCase):
         with self.assertLogs("src.strategies.boll_cvd_shock_reclaim_strategy", level="INFO") as logs:
             boll = boll_snapshot(candle_ts_ms=5000, upper=2300.0, lower=2050.0,
                                alert_switch_on=True)
-            # price=2198: near anchor (2196.7-2200), adverse_gap=1.29% < 1.5% bypass
+            # price=2198: near anchor (2196.7-2200), adverse_gap≈1.29% < 1.5% required
             cvd = cvd_snapshot(price=2198.0, sell_ratio=0.60, buy_ratio=0.30,
                              ts_ms=100000)
             # Call _evaluate_extreme_retest_add directly rather than full on_tick
@@ -851,7 +865,14 @@ class TimingSkipLogWithTriggerSourceTest(unittest.TestCase):
             rec for rec in logs.output
             if "ADD_SKIPPED" in rec and "trigger_source=EXTREME_RETEST" in rec
         ]
-        self.assertGreaterEqual(len(add_skipped_logs), 1)
+        self.assertGreaterEqual(len(add_skipped_logs), 1,
+                                "ADD_SKIPPED log with trigger_source=EXTREME_RETEST must be present")
+
+        # Extra hardening: confirm the skip reason is add_freeze (not max_layers etc.)
+        self.assertTrue(
+            any("reason=add_freeze" in rec for rec in add_skipped_logs),
+            "ADD_SKIPPED log must contain reason=add_freeze",
+        )
 
 
 # ──────────────────────────────────────────────────────────────────────────────
