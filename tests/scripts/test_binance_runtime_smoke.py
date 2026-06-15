@@ -321,6 +321,265 @@ class TestWrongExchange:
 
 
 # ======================================================================
+# 5. --expect-blocked in ready env → exit 4
+# ======================================================================
+
+
+class TestExpectBlockedButReady:
+    """When env is ready but --expect-blocked is passed, exit 4."""
+
+    def test_ready_env_expect_blocked_returns_4(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _set_env(monkeypatch, dict(LIVE_PREFLIGHT_PASS_ENV))
+        rc = main(argv=["--expect-blocked"])
+        captured = capsys.readouterr()
+        assert rc == 4, f"Expected exit 4, got {rc}. stdout={captured.out}"
+        assert (
+            "BINANCE_RUNTIME_SMOKE_EXPECTED_BLOCKED_BUT_READY" in captured.out
+        )
+        assert "BINANCE_RUNTIME_SMOKE_READY" not in captured.out
+
+    def test_ready_env_expect_blocked_does_not_create_adapters(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """--expect-blocked must NOT call create_exchange_runtime_adapters."""
+        _set_env(monkeypatch, dict(LIVE_PREFLIGHT_PASS_ENV))
+
+        import scripts.binance_runtime_smoke as smoke_module
+
+        def _fail_if_called(*args: object, **kwargs: object) -> None:
+            pytest.fail(
+                "create_exchange_runtime_adapters must not be called "
+                "when --expect-blocked and preflight is ready"
+            )
+
+        monkeypatch.setattr(
+            smoke_module,
+            "create_exchange_runtime_adapters",
+            _fail_if_called,
+        )
+
+        rc = main(argv=["--expect-blocked"])
+        captured = capsys.readouterr()
+        assert rc == 4
+        assert (
+            "BINANCE_RUNTIME_SMOKE_EXPECTED_BLOCKED_BUT_READY" in captured.out
+        )
+
+
+# ======================================================================
+# 6. Both --expect-blocked and --expect-ready → exit 4
+# ======================================================================
+
+
+class TestBothExpectationFlags:
+    """Passing both --expect-blocked and --expect-ready is invalid."""
+
+    def test_both_flags_returns_4(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        rc = main(argv=["--expect-blocked", "--expect-ready"])
+        captured = capsys.readouterr()
+        assert rc == 4, f"Expected exit 4, got {rc}. stdout={captured.out}"
+        assert "BINANCE_RUNTIME_SMOKE_INVALID_EXPECTATION_FLAGS" in captured.out
+
+    def test_both_flags_does_not_load_config(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Both flags must fail BEFORE load_unified_runtime_config is called."""
+        import scripts.binance_runtime_smoke as smoke_module
+
+        def _fail_if_called(*args: object, **kwargs: object) -> None:
+            pytest.fail(
+                "load_unified_runtime_config must not be called "
+                "when both --expect-blocked and --expect-ready are passed"
+            )
+
+        monkeypatch.setattr(
+            smoke_module,
+            "load_unified_runtime_config",
+            _fail_if_called,
+        )
+        monkeypatch.setattr(
+            smoke_module,
+            "create_exchange_runtime_adapters",
+            _fail_if_called,
+        )
+
+        rc = main(argv=["--expect-blocked", "--expect-ready"])
+        captured = capsys.readouterr()
+        assert rc == 4
+        assert "BINANCE_RUNTIME_SMOKE_INVALID_EXPECTATION_FLAGS" in captured.out
+
+
+# ======================================================================
+# 7. Unsupported exchange via ValueError (e.g. EXCHANGE=abc) → exit 3
+# ======================================================================
+
+
+class TestUnsupportedExchangeViaValueError:
+    """When EXCHANGE is not a valid ExchangeName, ValueError is caught."""
+
+    def test_invalid_exchange_returns_3(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _set_env(monkeypatch, {"EXCHANGE": "abc"})
+        rc = main(argv=[])
+        captured = capsys.readouterr()
+        assert rc == 3, f"Expected exit 3, got {rc}. stdout={captured.out}"
+        assert "BINANCE_RUNTIME_SMOKE_WRONG_EXCHANGE" in captured.out
+        assert "abc" in captured.out
+
+    def test_invalid_exchange_bybit_returns_3_no_exception(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """EXCHANGE=bybit is a valid enum member but not binance — must not crash."""
+        _set_env(monkeypatch, {"EXCHANGE": "bybit"})
+        rc = main(argv=[])
+        captured = capsys.readouterr()
+        assert rc == 3
+        assert "BINANCE_RUNTIME_SMOKE_WRONG_EXCHANGE" in captured.out
+        assert "bybit" in captured.out.lower()
+
+
+# ======================================================================
+# 8. EXCHANGE=binance but invalid config → exit 1
+# ======================================================================
+
+
+class TestConfigError:
+    """When EXCHANGE=binance but other config is invalid, exit 1."""
+
+    def test_invalid_trade_asset_returns_1(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _set_env(monkeypatch, {"EXCHANGE": "binance", "TRADE_ASSET": "BTC"})
+        rc = main(argv=[])
+        captured = capsys.readouterr()
+        assert rc == 1, f"Expected exit 1, got {rc}. stdout={captured.out}"
+        assert "BINANCE_RUNTIME_SMOKE_CONFIG_ERROR" in captured.out
+        assert "BTC" in captured.out
+
+    def test_invalid_leverage_returns_1(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _set_env(monkeypatch, {"EXCHANGE": "binance", "LEVERAGE": "not_a_number"})
+        rc = main(argv=[])
+        captured = capsys.readouterr()
+        assert rc == 1, f"Expected exit 1, got {rc}. stdout={captured.out}"
+        assert "BINANCE_RUNTIME_SMOKE_CONFIG_ERROR" in captured.out
+
+
+# ======================================================================
+# 9. --expect-ready in blocked env → exit 2 (clear message)
+# ======================================================================
+
+
+class TestExpectReadyButBlocked:
+    """When --expect-ready is passed but preflight is blocked, exit 2."""
+
+    def test_expect_ready_blocked_returns_2(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _set_env(monkeypatch, {"EXCHANGE": "binance"})
+        rc = main(argv=["--expect-ready"])
+        captured = capsys.readouterr()
+        assert rc == 2, f"Expected exit 2, got {rc}. stdout={captured.out}"
+        assert (
+            "BINANCE_RUNTIME_SMOKE_EXPECTED_READY_BUT_BLOCKED" in captured.out
+        )
+        # Still includes blocked reasons
+        assert "BINANCE_RUNTIME_SMOKE_BLOCKED" in captured.out
+        assert "blocking_reasons=[" in captured.out
+
+
+# ======================================================================
+# 10. JSON output for new paths
+# ======================================================================
+
+# (continued below — see TestJsonOutput for existing JSON tests)
+
+
+class TestJsonOutputNew:
+    """JSON output for newly added exit paths."""
+
+    # --expect-blocked in ready env (JSON)
+    def test_json_expect_blocked_but_ready(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _set_env(monkeypatch, dict(LIVE_PREFLIGHT_PASS_ENV))
+        rc = main(argv=["--json", "--expect-blocked"])
+        captured = capsys.readouterr()
+        assert rc == 4
+        data = json.loads(captured.out)
+        assert data["status"] == "expectation_failed"
+        assert data["exchange"] == "binance"
+        assert data["symbol"] == "ETHUSDT"
+        assert data["preflight_ok"] is True
+        assert (
+            data["error"] == "BINANCE_RUNTIME_SMOKE_EXPECTED_BLOCKED_BUT_READY"
+        )
+
+    # Both flags (JSON)
+    def test_json_both_flags(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        rc = main(argv=["--json", "--expect-blocked", "--expect-ready"])
+        captured = capsys.readouterr()
+        assert rc == 4
+        data = json.loads(captured.out)
+        assert data["status"] == "invalid_args"
+        assert (
+            data["error"] == "BINANCE_RUNTIME_SMOKE_INVALID_EXPECTATION_FLAGS"
+        )
+
+    # Unsupported exchange (JSON)
+    def test_json_wrong_exchange_via_value_error(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _set_env(monkeypatch, {"EXCHANGE": "bybit"})
+        rc = main(argv=["--json"])
+        captured = capsys.readouterr()
+        assert rc == 3
+        data = json.loads(captured.out)
+        assert data["status"] == "wrong_exchange"
+        assert data["exchange"] == "bybit"
+
+    # Config error (JSON)
+    def test_json_config_error(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _set_env(monkeypatch, {"EXCHANGE": "binance", "TRADE_ASSET": "BTC"})
+        rc = main(argv=["--json"])
+        captured = capsys.readouterr()
+        assert rc == 1
+        data = json.loads(captured.out)
+        assert data["status"] == "config_error"
+        assert data["exchange"] == "binance"
+        assert "BINANCE_RUNTIME_SMOKE_CONFIG_ERROR" in data["error"]
+
+    # --expect-ready blocked (JSON)
+    def test_json_expect_ready_but_blocked(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _set_env(monkeypatch, {"EXCHANGE": "binance"})
+        rc = main(argv=["--json", "--expect-ready"])
+        captured = capsys.readouterr()
+        assert rc == 2
+        data = json.loads(captured.out)
+        assert data["status"] == "blocked"
+        assert data["preflight_ok"] is False
+        assert data["expected_ready"] is True
+        assert (
+            data["error"]
+            == "BINANCE_RUNTIME_SMOKE_EXPECTED_READY_BUT_BLOCKED"
+        )
+        assert isinstance(data["blocking_reasons"], list)
+        assert len(data["blocking_reasons"]) > 0
+
+
+# ======================================================================
 # 5. JSON output
 # ======================================================================
 
@@ -419,7 +678,7 @@ class TestJsonOutput:
 
 
 # ======================================================================
-# 6. Source-level safety scan
+# 11. Source-level safety scan
 # ======================================================================
 
 

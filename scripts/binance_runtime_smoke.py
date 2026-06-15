@@ -201,13 +201,55 @@ def _build_ready_json(
 def main(argv: list[str] | None = None) -> int:
     """Run the Binance runtime smoke preflight check.
 
-    Returns an exit code (0 = pass, 2 = blocked, 3 = wrong exchange).
+    Returns an exit code (0 = pass, 1 = config error, 2 = blocked,
+    3 = wrong exchange, 4 = expectation failed / invalid args).
     """
     args = parse_args(argv)
     env: Mapping[str, str] = dict(os.environ)
 
-    # --- 1. Load unified runtime config ---
-    config = load_unified_runtime_config(env)
+    # --- 0. Validate expectation flags (mutually exclusive) ---
+    if args.expect_blocked and args.expect_ready:
+        msg = "BINANCE_RUNTIME_SMOKE_INVALID_EXPECTATION_FLAGS"
+        if args.json_output:
+            print(json.dumps({
+                "status": "invalid_args",
+                "error": msg,
+            }))
+        else:
+            print(msg)
+        return 4
+
+    # --- 1. Load unified runtime config (with error handling) ---
+    try:
+        config = load_unified_runtime_config(env)
+    except ValueError as exc:
+        raw_msg = str(exc)
+        exchange_value: str = env.get("EXCHANGE", "unknown")
+        if "Unsupported EXCHANGE" in raw_msg:
+            full_msg = (
+                f"BINANCE_RUNTIME_SMOKE_WRONG_EXCHANGE: "
+                f"expected EXCHANGE=binance, got {exchange_value}"
+            )
+            if args.json_output:
+                print(json.dumps({
+                    "status": "wrong_exchange",
+                    "exchange": exchange_value,
+                    "error": full_msg,
+                }))
+            else:
+                print(full_msg)
+            return 3
+        else:
+            full_msg = f"BINANCE_RUNTIME_SMOKE_CONFIG_ERROR: {raw_msg}"
+            if args.json_output:
+                print(json.dumps({
+                    "status": "config_error",
+                    "exchange": "binance",
+                    "error": full_msg,
+                }))
+            else:
+                print(full_msg)
+            return 1
 
     # --- 2. Exchange check ---
     if config.exchange != ExchangeName.BINANCE:
@@ -235,6 +277,21 @@ def main(argv: list[str] | None = None) -> int:
 
     if not report.ok:
         # Blocked path
+        if args.expect_ready:
+            if args.json_output:
+                data = _build_blocked_json(report, symbol)
+                data["expected_ready"] = True
+                data["error"] = (
+                    "BINANCE_RUNTIME_SMOKE_EXPECTED_READY_BUT_BLOCKED"
+                )
+                print(json.dumps(data))
+            else:
+                print(_format_blocked_text(report))
+                print(
+                    "BINANCE_RUNTIME_SMOKE_EXPECTED_READY_BUT_BLOCKED"
+                )
+            return 2
+
         if args.json_output:
             print(json.dumps(_build_blocked_json(report, symbol)))
         else:
@@ -244,10 +301,25 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         return 2
 
-    # --- 4. Create runtime adapters (no network) ---
+    # --- 4. Preflight OK — check for --expect-blocked before adapters ---
+    if args.expect_blocked:
+        msg = "BINANCE_RUNTIME_SMOKE_EXPECTED_BLOCKED_BUT_READY"
+        if args.json_output:
+            print(json.dumps({
+                "status": "expectation_failed",
+                "exchange": "binance",
+                "symbol": symbol,
+                "preflight_ok": True,
+                "error": msg,
+            }))
+        else:
+            print(msg)
+        return 4
+
+    # --- 5. Create runtime adapters (no network) ---
     adapters = create_exchange_runtime_adapters(config=config, env=env)
 
-    # --- 5. Validate adapter types ---
+    # --- 6. Validate adapter types ---
     market_data_client = adapters.market_data_client
     trading_client = adapters.trading_client
     trader = adapters.trader
@@ -266,7 +338,7 @@ def main(argv: list[str] | None = None) -> int:
     trading_client_type: str = type(trading_client).__name__
     trader_type: str = type(trader).__name__
 
-    # --- 6. Validate trader sizing ---
+    # --- 7. Validate trader sizing ---
     contract_multiplier: str = str(trader.contract_multiplier)
     contract_precision: str = str(trader.contract_precision)
     min_contracts: str = str(trader.min_contracts)
@@ -275,7 +347,7 @@ def main(argv: list[str] | None = None) -> int:
     qty_contracts: Decimal = trader.eth_qty_to_contracts(Decimal("0.05"))
     qty_check: str = str(qty_contracts)
 
-    # --- 7. Output ---
+    # --- 8. Output ---
     if args.json_output:
         print(json.dumps(_build_ready_json(
             symbol=symbol,
