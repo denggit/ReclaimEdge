@@ -139,6 +139,12 @@ async def main() -> None:
                 cash=startup_cash,
                 equity=trader.account_equity_usdt,
             )
+        # ── Extreme Retest startup restore ──────────────────────────
+        if hasattr(strategy, "restore_extreme_retest_state_from_saved"):
+            strategy.restore_extreme_retest_state_from_saved(
+                trusted=trusted_saved_state is not None
+            )
+
         strategy.state.startup_force_tp_reconcile = True
         logger.warning(
             "STARTUP_FORCE_TP_RECONCILE_ARMED | position_id=%s side=%s layers=%s tp_plan=%s last_tp_update_candle_ts_ms=%s trusted_saved_state=%s",

@@ -954,3 +954,315 @@ class RestartNotImmediatelyADDTest(unittest.TestCase):
         self.assertEqual(len(add_intents), 0)
         # Anchor still active (ADD was not triggered)
         self.assertTrue(strat._extreme_retest_anchor.is_active())
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Startup Glue Restore — trusted/untrusted log verification
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class StartupGlueTrustedRestoreTest(unittest.TestCase):
+    """Verify that the glue call restore_extreme_retest_state_from_saved(trusted=True)
+    logs EXTREME_RETEST_STATE_RESTORED and preserves the active anchor."""
+
+    def test_trusted_restore_logs_restored_when_anchor_active(self) -> None:
+        strat = strategy(extreme_retest_add_enabled=True)
+        strat.state.side = "SHORT"
+        strat.state.layers = 1
+        strat.state.last_entry_price = 1700.0
+        strat.state.extreme_retest_anchor_side = "SHORT"
+        strat.state.extreme_retest_anchor_kind = "PIVOT_HIGH"
+        strat.state.extreme_retest_anchor_price = 1740.0
+        strat.state.extreme_retest_anchor_candle_ts_ms = 5000
+
+        import logging
+        with self.assertLogs("src.strategies.boll_cvd_shock_reclaim_strategy", level="INFO") as logs:
+            strat.restore_extreme_retest_state_from_saved(trusted=True)
+
+        restored_logs = [r for r in logs.output if "EXTREME_RETEST_STATE_RESTORED" in r]
+        self.assertGreaterEqual(len(restored_logs), 1,
+                                "Trusted restore must log EXTREME_RETEST_STATE_RESTORED")
+        # Anchor preserved
+        self.assertEqual(strat._extreme_retest_anchor.side, "SHORT")
+        self.assertEqual(strat._extreme_retest_anchor.kind, "PIVOT_HIGH")
+        self.assertEqual(strat._extreme_retest_anchor.price, 1740.0)
+        self.assertTrue(strat._extreme_retest_anchor.is_active())
+
+    def test_trusted_restore_preserves_sweep_state(self) -> None:
+        strat = strategy(extreme_retest_add_enabled=True)
+        strat.state.side = "SHORT"
+        strat.state.layers = 1
+        strat.state.last_entry_price = 1700.0
+        strat.state.extreme_retest_anchor_side = "SHORT"
+        strat.state.extreme_retest_anchor_kind = "PIVOT_HIGH"
+        strat.state.extreme_retest_anchor_price = 1740.0
+        strat.state.extreme_retest_anchor_candle_ts_ms = 5000
+        strat.state.extreme_retest_sweep_seen = True
+        strat.state.extreme_retest_sweep_extreme_price = 1755.0
+        strat.state.extreme_retest_sweep_first_seen_ts_ms = 6000
+
+        import logging
+        with self.assertLogs("src.strategies.boll_cvd_shock_reclaim_strategy", level="INFO") as logs:
+            strat.restore_extreme_retest_state_from_saved(trusted=True)
+
+        self.assertTrue(any("EXTREME_RETEST_STATE_RESTORED" in r for r in logs.output))
+        self.assertTrue(strat._extreme_retest_anchor.sweep_seen)
+        self.assertEqual(strat._extreme_retest_anchor.sweep_extreme_price, 1755.0)
+        self.assertEqual(strat._extreme_retest_anchor.sweep_first_seen_ts_ms, 6000)
+
+    def test_trusted_restore_preserves_consumed_watermark(self) -> None:
+        strat = strategy(extreme_retest_add_enabled=True)
+        strat.state.side = "SHORT"
+        strat.state.layers = 1
+        strat.state.last_entry_price = 1700.0
+        strat.state.extreme_retest_consumed_watermark_price = 1740.0
+        strat.state.extreme_retest_consumed_anchor_ts_ms = 5000
+
+        # When only consumed watermark is present (no active anchor),
+        # restore does not log RESTORED because there's nothing to restore.
+        # It should silently preserve the watermark.
+        strat.restore_extreme_retest_state_from_saved(trusted=True)
+
+        # No active anchor (was previously consumed), but watermark persists
+        self.assertFalse(strat._extreme_retest_anchor.is_active())
+        self.assertEqual(strat._extreme_retest_anchor.consumed_watermark_price, 1740.0)
+        self.assertEqual(strat._extreme_retest_anchor.consumed_anchor_ts_ms, 5000)
+
+
+class StartupGlueUntrustedDropTest(unittest.TestCase):
+    """Verify that the glue call restore_extreme_retest_state_from_saved(trusted=False)
+    logs EXTREME_RETEST_STATE_DROPPED, clears the active anchor, and preserves the
+    consumed watermark."""
+
+    def test_untrusted_restore_logs_dropped_and_clears_anchor(self) -> None:
+        strat = strategy(extreme_retest_add_enabled=True)
+        strat.state.side = "SHORT"
+        strat.state.layers = 1
+        strat.state.extreme_retest_anchor_side = "SHORT"
+        strat.state.extreme_retest_anchor_kind = "PIVOT_HIGH"
+        strat.state.extreme_retest_anchor_price = 1740.0
+        strat.state.extreme_retest_anchor_candle_ts_ms = 5000
+
+        import logging
+        with self.assertLogs("src.strategies.boll_cvd_shock_reclaim_strategy", level="INFO") as logs:
+            strat.restore_extreme_retest_state_from_saved(trusted=False)
+
+        dropped_logs = [r for r in logs.output if "EXTREME_RETEST_STATE_DROPPED" in r]
+        self.assertGreaterEqual(len(dropped_logs), 1,
+                                "Untrusted restore must log EXTREME_RETEST_STATE_DROPPED")
+        # Active anchor cleared
+        self.assertIsNone(strat._extreme_retest_anchor.side)
+        self.assertIsNone(strat._extreme_retest_anchor.kind)
+        self.assertIsNone(strat._extreme_retest_anchor.price)
+        self.assertFalse(strat._extreme_retest_anchor.is_active())
+
+    def test_untrusted_restore_preserves_consumed_watermark(self) -> None:
+        strat = strategy(extreme_retest_add_enabled=True)
+        strat.state.side = "SHORT"
+        strat.state.layers = 1
+        strat.state.extreme_retest_anchor_side = "SHORT"
+        strat.state.extreme_retest_anchor_kind = "PIVOT_HIGH"
+        strat.state.extreme_retest_anchor_price = 1740.0
+        strat.state.extreme_retest_anchor_candle_ts_ms = 5000
+        strat.state.extreme_retest_consumed_watermark_price = 1730.0
+        strat.state.extreme_retest_consumed_anchor_ts_ms = 4000
+
+        import logging
+        with self.assertLogs("src.strategies.boll_cvd_shock_reclaim_strategy", level="INFO") as logs:
+            strat.restore_extreme_retest_state_from_saved(trusted=False)
+
+        self.assertTrue(any("EXTREME_RETEST_STATE_DROPPED" in r for r in logs.output))
+        # Anchor cleared
+        self.assertIsNone(strat._extreme_retest_anchor.side)
+        self.assertIsNone(strat._extreme_retest_anchor.price)
+        # Watermark preserved
+        self.assertEqual(strat._extreme_retest_anchor.consumed_watermark_price, 1730.0)
+        self.assertEqual(strat._extreme_retest_anchor.consumed_anchor_ts_ms, 4000)
+
+    def test_untrusted_restore_clears_sweep_state(self) -> None:
+        strat = strategy(extreme_retest_add_enabled=True)
+        strat.state.side = "SHORT"
+        strat.state.layers = 1
+        strat.state.extreme_retest_anchor_side = "SHORT"
+        strat.state.extreme_retest_anchor_price = 1740.0
+        strat.state.extreme_retest_sweep_seen = True
+        strat.state.extreme_retest_sweep_extreme_price = 1755.0
+        strat.state.extreme_retest_sweep_first_seen_ts_ms = 6000
+        strat.state.extreme_retest_consumed_watermark_price = 1730.0
+
+        import logging
+        with self.assertLogs("src.strategies.boll_cvd_shock_reclaim_strategy", level="INFO") as logs:
+            strat.restore_extreme_retest_state_from_saved(trusted=False)
+
+        self.assertTrue(any("EXTREME_RETEST_STATE_DROPPED" in r for r in logs.output))
+        # Sweep cleared
+        self.assertFalse(strat._extreme_retest_anchor.sweep_seen)
+        self.assertIsNone(strat._extreme_retest_anchor.sweep_extreme_price)
+        # Watermark preserved
+        self.assertEqual(strat._extreme_retest_anchor.consumed_watermark_price, 1730.0)
+
+
+class StartupGlueNoADDTest(unittest.TestCase):
+    """Verify that the glue restore call itself does NOT trigger any ADD intent,
+    does NOT call on_tick(), and does NOT push to any execution queue."""
+
+    def test_restore_call_does_not_generate_add_intent(self) -> None:
+        """Calling restore_extreme_retest_state_from_saved must not generate
+        ADD_LONG or ADD_SHORT intents — it is purely a state hydration step."""
+        strat = strategy(extreme_retest_add_enabled=True)
+        strat.state.side = "SHORT"
+        strat.state.layers = 1
+        strat.state.last_entry_price = 2000.0
+        strat.state.last_order_ts_ms = 1000
+        strat.state.add_freeze_until_ts_ms = 0
+        strat.state.avg_entry_price = 2000.0
+        strat.state.total_entry_qty = 1.0
+        strat.state.total_entry_notional = 2000.0
+        strat.state.lower_armed = False
+
+        strat.state.extreme_retest_anchor_side = "SHORT"
+        strat.state.extreme_retest_anchor_kind = "PIVOT_HIGH"
+        strat.state.extreme_retest_anchor_price = 2200.0
+        strat.state.extreme_retest_anchor_candle_ts_ms = 5000
+        strat.state.extreme_retest_anchor_boll_upper = 2300.0
+        strat.state.extreme_retest_anchor_boll_lower = 2050.0
+
+        # Capture intents via monkey-patching on_tick to detect if called
+        on_tick_called = []
+
+        def fake_on_tick(price, ts_ms, boll, cvd):
+            on_tick_called.append(True)
+            return []
+
+        original_on_tick = strat.on_tick
+        strat.on_tick = fake_on_tick
+        try:
+            strat.restore_extreme_retest_state_from_saved(trusted=True)
+        finally:
+            strat.on_tick = original_on_tick
+
+        # restore call must NOT invoke on_tick
+        self.assertEqual(len(on_tick_called), 0,
+                         "restore_extreme_retest_state_from_saved must not call on_tick")
+        # Anchor should be active after restore
+        self.assertTrue(strat._extreme_retest_anchor.is_active())
+
+    def test_restore_untrusted_does_not_generate_add_intent(self) -> None:
+        """Untrusted restore must not generate ADD intent either."""
+        strat = strategy(extreme_retest_add_enabled=True)
+        strat.state.side = "SHORT"
+        strat.state.layers = 1
+        strat.state.extreme_retest_anchor_side = "SHORT"
+        strat.state.extreme_retest_anchor_kind = "PIVOT_HIGH"
+        strat.state.extreme_retest_anchor_price = 2200.0
+        strat.state.extreme_retest_consumed_watermark_price = 2100.0
+
+        on_tick_called = []
+
+        def fake_on_tick(price, ts_ms, boll, cvd):
+            on_tick_called.append(True)
+            return []
+
+        original_on_tick = strat.on_tick
+        strat.on_tick = fake_on_tick
+        try:
+            strat.restore_extreme_retest_state_from_saved(trusted=False)
+        finally:
+            strat.on_tick = original_on_tick
+
+        self.assertEqual(len(on_tick_called), 0,
+                         "Untrusted restore must not call on_tick")
+        # Anchor cleared
+        self.assertFalse(strat._extreme_retest_anchor.is_active())
+
+    def test_full_startup_sequence_no_add(self) -> None:
+        """Simulate the exact sequence the live runner uses after restore:
+        1. restore_extreme_retest_state_from_saved(trusted=False)
+        2. No on_tick is called during restore
+        3. After restore, the first live tick does NOT auto-trigger ADD
+           unless all conditions are met."""
+        strat = strategy(extreme_retest_add_enabled=True)
+        # Simulate untrusted startup: position present, but saved_state is None
+        strat.state.side = "SHORT"
+        strat.state.layers = 1
+        strat.state.last_entry_price = 2000.0
+        strat.state.last_order_ts_ms = 1000
+        strat.state.add_freeze_until_ts_ms = 0
+        strat.state.avg_entry_price = 2000.0
+        strat.state.total_entry_qty = 1.0
+        strat.state.total_entry_notional = 2000.0
+        # Residual anchor from stale state
+        strat.state.extreme_retest_anchor_side = "SHORT"
+        strat.state.extreme_retest_anchor_kind = "PIVOT_HIGH"
+        strat.state.extreme_retest_anchor_price = 2200.0
+        strat.state.extreme_retest_anchor_candle_ts_ms = 5000
+        strat.state.extreme_retest_anchor_boll_upper = 2300.0
+        strat.state.extreme_retest_anchor_boll_lower = 2050.0
+        strat.state.extreme_retest_consumed_watermark_price = 2100.0
+
+        # Step 1: Simulate startup restore call (untrusted)
+        strat.restore_extreme_retest_state_from_saved(trusted=False)
+        self.assertFalse(strat._extreme_retest_anchor.is_active())
+        self.assertEqual(strat._extreme_retest_anchor.consumed_watermark_price, 2100.0)
+
+        # Step 2: First live tick arrives (price near old anchor but anchor dropped)
+        # Even if CVD conditions were met, anchor is gone so no ADD
+        boll = boll_snapshot(candle_ts_ms=6000, upper=2300.0, lower=2050.0,
+                           alert_switch_on=True)
+        cvd = cvd_snapshot(price=2198.0, sell_ratio=0.60, buy_ratio=0.30,
+                         ts_ms=100000)
+        intents = strat.on_tick(2198.0, 100000, boll, cvd)
+        add_intents = [i for i in intents if i.intent_type in ("ADD_LONG", "ADD_SHORT")]
+        # No ADD because anchor was dropped during untrusted restore
+        self.assertEqual(len(add_intents), 0)
+
+    def test_trusted_full_sequence_anchor_preserved_no_immediate_add(self) -> None:
+        """Simulate the exact sequence the live runner uses after trusted restore:
+        1. restore_extreme_retest_state_from_saved(trusted=True)
+        2. Anchor is preserved but no ADD is generated without on_tick
+        3. First live tick with insufficient CVD does not trigger ADD
+        4. Anchor survives until conditions are met on a later tick."""
+        strat = strategy(extreme_retest_add_enabled=True)
+        # Simulate trusted startup
+        strat.state.side = "SHORT"
+        strat.state.layers = 1
+        strat.state.last_entry_price = 2000.0
+        strat.state.last_order_ts_ms = 1000
+        strat.state.add_freeze_until_ts_ms = 0
+        strat.state.avg_entry_price = 2000.0
+        strat.state.total_entry_qty = 1.0
+        strat.state.total_entry_notional = 2000.0
+        strat.state.lower_armed = False
+
+        strat.state.extreme_retest_anchor_side = "SHORT"
+        strat.state.extreme_retest_anchor_kind = "PIVOT_HIGH"
+        strat.state.extreme_retest_anchor_price = 2200.0
+        strat.state.extreme_retest_anchor_candle_ts_ms = 5000
+        strat.state.extreme_retest_anchor_boll_upper = 2300.0
+        strat.state.extreme_retest_anchor_boll_lower = 2050.0
+
+        # Step 1: Simulate startup restore call (trusted)
+        strat.restore_extreme_retest_state_from_saved(trusted=True)
+        self.assertTrue(strat._extreme_retest_anchor.is_active())
+        self.assertEqual(strat._extreme_retest_anchor.price, 2200.0)
+
+        # Step 2: First live tick with insufficient CVD → no ADD, anchor survives
+        boll = boll_snapshot(candle_ts_ms=6000, upper=2300.0, lower=2050.0,
+                           alert_switch_on=True)
+        cvd = cvd_snapshot(price=2199.0, sell_ratio=0.30, buy_ratio=0.30,
+                         ts_ms=100000)
+        intents = strat.on_tick(2199.0, 100000, boll, cvd)
+        add_intents = [i for i in intents if i.intent_type in ("ADD_LONG", "ADD_SHORT")]
+        self.assertEqual(len(add_intents), 0)
+        self.assertTrue(strat._extreme_retest_anchor.is_active(),
+                        "Anchor must survive a tick that does not meet all conditions")
+
+        # Step 3: Later tick with sufficient CVD → ADD fires and anchor consumed
+        cvd2 = cvd_snapshot(price=2199.0, sell_ratio=0.60, buy_ratio=0.30,
+                          ts_ms=200000)
+        intents2 = strat.on_tick(2199.0, 200000, boll, cvd2)
+        add_intents2 = [i for i in intents2 if i.intent_type in ("ADD_LONG", "ADD_SHORT")]
+        self.assertEqual(len(add_intents2), 1)
+        self.assertEqual(add_intents2[0].intent_type, "ADD_SHORT")
+        self.assertFalse(strat._extreme_retest_anchor.is_active(),
+                         "Anchor must be consumed after successful ADD")
