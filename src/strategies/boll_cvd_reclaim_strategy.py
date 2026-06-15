@@ -53,7 +53,6 @@ class BollCvdReclaimStrategyConfig:
     add_gap_base_pct: float = 0.003
     add_gap_step_pct: float = 0.001
     add_min_avg_improvement_pct: float = 0.0012
-    max_layers: int = 3
     order_cooldown_seconds: int = 10
     first_add_block_seconds: int = 1800
     add_min_interval_seconds: int = 600
@@ -65,6 +64,14 @@ class BollCvdReclaimStrategyConfig:
     breakeven_fee_buffer_pct: float = 0.001
     tp_min_net_profit_pct: float = 0.004
     min_outside_pct: float = 0.001
+    entry_reclaim_inside_band: bool = True
+    entry_reclaim_buffer_pct: float = 0.0
+    entry_sl_buffer_pct: float = 0.0005
+    entry_min_reward_risk: float = 1.0
+    entry_fee_slippage_buffer_pct: float = 0.001
+    entry_max_stop_distance_pct: float = 0.0
+    entry_protective_sl_retry_count: int = 3
+    entry_protective_sl_retry_interval_seconds: float = 1.0
     split_tp_enabled: bool = True
     split_tp_min_layers: int = 4
     split_tp_path_ratio: float = 0.8
@@ -194,7 +201,6 @@ class BollCvdReclaimStrategyConfig:
             add_gap_base_pct=float(os.getenv("ADD_GAP_BASE_PCT", "0.003")),
             add_gap_step_pct=float(os.getenv("ADD_GAP_STEP_PCT", "0.001")),
             add_min_avg_improvement_pct=float(os.getenv("ADD_MIN_AVG_IMPROVEMENT_PCT", "0.0012")),
-            max_layers=int(os.getenv("MAX_LAYERS", "3")),
             order_cooldown_seconds=int(os.getenv("ORDER_COOLDOWN_SECONDS", "10")),
             first_add_block_seconds=int(os.getenv("FIRST_ADD_BLOCK_SECONDS", "1800")),
             add_min_interval_seconds=int(os.getenv("ADD_MIN_INTERVAL_SECONDS", "600")),
@@ -206,6 +212,14 @@ class BollCvdReclaimStrategyConfig:
             breakeven_fee_buffer_pct=float(os.getenv("BREAKEVEN_FEE_BUFFER_PCT", "0.001")),
             tp_min_net_profit_pct=float(os.getenv("TP_MIN_NET_PROFIT_PCT", "0.004")),
             min_outside_pct=float(os.getenv("BOLL_MIN_OUTSIDE_PCT", "0.001")),
+            entry_reclaim_inside_band=_env_bool("ENTRY_RECLAIM_INSIDE_BAND", True),
+            entry_reclaim_buffer_pct=float(os.getenv("ENTRY_RECLAIM_BUFFER_PCT", "0")),
+            entry_sl_buffer_pct=float(os.getenv("ENTRY_SL_BUFFER_PCT", "0.0005")),
+            entry_min_reward_risk=float(os.getenv("ENTRY_MIN_REWARD_RISK", "1.0")),
+            entry_fee_slippage_buffer_pct=float(os.getenv("ENTRY_FEE_SLIPPAGE_BUFFER_PCT", "0.001")),
+            entry_max_stop_distance_pct=float(os.getenv("ENTRY_MAX_STOP_DISTANCE_PCT", "0")),
+            entry_protective_sl_retry_count=int(os.getenv("ENTRY_PROTECTIVE_SL_RETRY_COUNT", "3")),
+            entry_protective_sl_retry_interval_seconds=float(os.getenv("ENTRY_PROTECTIVE_SL_RETRY_INTERVAL_SECONDS", "1")),
             split_tp_enabled=_env_bool("SPLIT_TP_ENABLED", True),
             split_tp_min_layers=int(os.getenv("SPLIT_TP_MIN_LAYERS", "4")),
             split_tp_path_ratio=float(os.getenv("SPLIT_TP_PATH_RATIO", "0.8")),
@@ -325,6 +339,9 @@ class TradeIntent:
     near_tp_giveback_threshold: float = 0.0
     near_tp_reduce_ratio: float = 0.0
     near_tp_protective_sl_price: float | None = None
+    entry_protective_sl_price: float | None = None
+    entry_protective_sl_order_id: str | None = None
+    entry_protective_sl_protected: bool = False
     middle_runner_enabled_for_position: bool = False
     middle_runner_pending: bool = False
     middle_runner_active: bool = False
@@ -441,6 +458,9 @@ class StrategyPositionState:
     near_tp_pending_ts_ms: int = 0
     near_tp_trigger_ts_ms: int = 0
     near_tp_protective_sl_price: float | None = None
+    entry_protective_sl_price: float | None = None
+    entry_protective_sl_order_id: str | None = None
+    entry_protective_sl_protected: bool = False
     near_tp_protective_sl_order_id: str | None = None
     near_tp_add_disabled: bool = False
     middle_runner_enabled_for_position: bool = False
@@ -619,12 +639,12 @@ class BollCvdReclaimStrategy:
         if not self._cooldown_ok(ts_ms):
             return intents
 
-        if self._long_setup(price, cvd):
+        if self._long_setup(price, cvd, boll):
             intent = self._maybe_open_or_add_long(price, ts_ms, boll, cvd)
             if intent is not None:
                 intents.append(intent)
 
-        if self._short_setup(price, cvd):
+        if self._short_setup(price, cvd, boll):
             intent = self._maybe_open_or_add_short(price, ts_ms, boll, cvd)
             if intent is not None:
                 intents.append(intent)
@@ -744,23 +764,23 @@ class BollCvdReclaimStrategy:
         self.state.upper_last_burst_ts_ms = 0
         self.state.upper_deep_enough = False
 
-    def _long_setup(self, price: float, cvd: CvdSnapshot) -> bool:
+    def _long_setup(self, price: float, cvd: CvdSnapshot, boll: BollSnapshot) -> bool:
         if not self.state.lower_armed or self.state.lower_extreme_price is None:
             return False
         if not self.state.lower_deep_enough:
             return False
-        if not self._near_lower_extreme(price):
+        if self.config.entry_reclaim_inside_band and price < boll.lower * (1 + self.config.entry_reclaim_buffer_pct):
             return False
         cvd_reclaim = cvd.cross_positive and cvd.buy_ratio >= self.config.min_buy_ratio and cvd.no_new_low
         cvd_absorption = cvd.cvd_increasing and cvd.buy_ratio >= self.config.min_buy_ratio and cvd.no_new_low
         return cvd_reclaim or cvd_absorption
 
-    def _short_setup(self, price: float, cvd: CvdSnapshot) -> bool:
+    def _short_setup(self, price: float, cvd: CvdSnapshot, boll: BollSnapshot) -> bool:
         if not self.state.upper_armed or self.state.upper_extreme_price is None:
             return False
         if not self.state.upper_deep_enough:
             return False
-        if not self._near_upper_extreme(price):
+        if self.config.entry_reclaim_inside_band and price > boll.upper * (1 - self.config.entry_reclaim_buffer_pct):
             return False
         cvd_reject = cvd.cross_negative and cvd.sell_ratio >= self.config.min_sell_ratio and cvd.no_new_high
         cvd_absorption = cvd.cvd_decreasing and cvd.sell_ratio >= self.config.min_sell_ratio and cvd.no_new_high
@@ -777,6 +797,48 @@ class BollCvdReclaimStrategy:
         if extreme is None:
             return False
         return price >= extreme * (1 - self.config.max_entry_distance_from_extreme_pct)
+
+
+    def _entry_protective_sl_price(self, side: PositionSide) -> float | None:
+        if side == "LONG":
+            extreme = self.state.lower_extreme_price
+            if extreme is None or extreme <= 0:
+                return None
+            return extreme * (1 - self.config.entry_sl_buffer_pct)
+        if side == "SHORT":
+            extreme = self.state.upper_extreme_price
+            if extreme is None or extreme <= 0:
+                return None
+            return extreme * (1 + self.config.entry_sl_buffer_pct)
+        return None
+
+    def _entry_reward_risk_check(
+        self,
+        *,
+        side: PositionSide,
+        entry_price: float,
+        tp_price: float,
+        stop_price: float,
+    ) -> tuple[bool, str, float, float, float]:
+        if entry_price <= 0 or tp_price <= 0 or stop_price <= 0:
+            return False, "invalid_price", 0.0, 0.0, 0.0
+        if side == "LONG":
+            stop_distance_pct = (entry_price - stop_price) / entry_price
+            reward_pct = (tp_price - entry_price) / entry_price
+        else:
+            stop_distance_pct = (stop_price - entry_price) / entry_price
+            reward_pct = (entry_price - tp_price) / entry_price
+        if stop_distance_pct <= 0:
+            return False, "invalid_stop_distance", stop_distance_pct, reward_pct, 0.0
+        if reward_pct <= 0:
+            return False, "invalid_reward_distance", stop_distance_pct, reward_pct, 0.0
+        if self.config.entry_max_stop_distance_pct > 0 and stop_distance_pct > self.config.entry_max_stop_distance_pct:
+            return False, "stop_distance_too_wide", stop_distance_pct, reward_pct, 0.0
+        effective_risk_pct = stop_distance_pct + self.config.entry_fee_slippage_buffer_pct
+        reward_risk = reward_pct / effective_risk_pct if effective_risk_pct > 0 else 0.0
+        if reward_risk < self.config.entry_min_reward_risk:
+            return False, "reward_risk_below_min", stop_distance_pct, reward_pct, reward_risk
+        return True, "ok", stop_distance_pct, reward_pct, reward_risk
 
     def _entry_add_flow(self):
         if not hasattr(self, "_entry_add_flow_coordinator"):
@@ -934,7 +996,7 @@ class BollCvdReclaimStrategy:
             boll: BollSnapshot,
             cvd: CvdSnapshot,
             reason: str,
-    ) -> TradeIntent:
+    ) -> TradeIntent | None:
         return self._entry_add_flow().open_position(
             side, intent_type, price, ts_ms, boll, cvd, reason)
 

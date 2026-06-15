@@ -82,7 +82,7 @@ async def main() -> None:
         bar=rt_config.kline_interval,
         boll_window=int(os.getenv("BOLL_WINDOW", "20")),
         boll_std_multiplier=float(os.getenv("BOLL_STD_MULTIPLIER", "2.0")),
-        band_distance_threshold_pct=float(os.getenv("BOLL_DISTANCE_THRESHOLD_PCT", "0.005")),
+        band_distance_threshold_pct=float(os.getenv("BOLL_DISTANCE_THRESHOLD_PCT", "0")),
         alert_freeze_seconds=int(os.getenv("ALERT_FREEZE_SECONDS", "3600")),
         use_live_candle=env_bool("BOLL_USE_LIVE_CANDLE", True),
         boll_recalc_seconds=float(os.getenv("BOLL_RECALC_SECONDS", "1")),

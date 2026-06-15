@@ -985,6 +985,10 @@ class ExecutionCommandProcessor:
             )
             self.strategy.state.tp_order_id = result.tp_order_id
             self.strategy.state.tp_order_ids = list(getattr(result, "tp_order_ids", ()) or [])
+            if getattr(result, "protective_sl_order_id", None):
+                self.strategy.state.entry_protective_sl_order_id = result.protective_sl_order_id
+                self.strategy.state.entry_protective_sl_price = getattr(command.intent, "entry_protective_sl_price", None)
+                self.strategy.state.entry_protective_sl_protected = bool(getattr(result, "protective_sl_ok", False))
             if (
                 getattr(command.intent, "three_stage_post_tp1_protective_sl_price", None) is not None
                 and getattr(command.intent, "three_stage_tp1_consumed", False)
@@ -1127,6 +1131,10 @@ class ExecutionCommandProcessor:
             self.execution_state.last_order_ts_ms = command.intent.ts_ms
             self.strategy.state.tp_order_id = result.tp_order_id
             self.strategy.state.tp_order_ids = list(getattr(result, "tp_order_ids", ()) or [])
+            if getattr(result, "protective_sl_order_id", None):
+                self.strategy.state.entry_protective_sl_order_id = result.protective_sl_order_id
+                self.strategy.state.entry_protective_sl_price = getattr(command.intent, "entry_protective_sl_price", None)
+                self.strategy.state.entry_protective_sl_protected = bool(getattr(result, "protective_sl_ok", False))
             near_tp_state_synced = False
             if getattr(result, "near_tp_exit_all", False):
                 self.execution_state.trading_halted = True
@@ -1371,6 +1379,10 @@ class ExecutionCommandProcessor:
             self.execution_state.last_order_ts_ms = command.intent.ts_ms
             self.strategy.state.tp_order_id = result.tp_order_id
             self.strategy.state.tp_order_ids = list(getattr(result, "tp_order_ids", ()) or [])
+            if getattr(result, "protective_sl_order_id", None):
+                self.strategy.state.entry_protective_sl_order_id = result.protective_sl_order_id
+                self.strategy.state.entry_protective_sl_price = getattr(command.intent, "entry_protective_sl_price", None)
+                self.strategy.state.entry_protective_sl_protected = bool(getattr(result, "protective_sl_ok", False))
             # ── Middle Bucket Split state consistency ──────────────────
             # Entry paths (OPEN/ADD) also carry split execution status from
             # replace_take_profit.  Clear state if split was disabled.
@@ -1482,7 +1494,7 @@ class ExecutionCommandProcessor:
         )
         if sidecar_ok:
             logger.warning(
-                "LIVE entry success | intent_type=%s side=%s layer=%s price=%.4f contracts=%s tp_price=%s tp_mode=%s tp_plan=%s partial_tp=%s avg_entry=%.4f breakeven=%.4f order_id=%s tp_order_id=%s entry_status=%s",
+                "LIVE entry success | intent_type=%s side=%s layer=%s price=%.4f contracts=%s tp_price=%s tp_mode=%s tp_plan=%s partial_tp=%s avg_entry=%.4f breakeven=%.4f order_id=%s tp_order_id=%s entry_sl_ok=%s entry_sl_order_id=%s entry_status=%s",
                 command.intent.intent_type,
                 command.intent.side,
                 command.intent.layer_index,
@@ -1496,6 +1508,8 @@ class ExecutionCommandProcessor:
                 command.intent.breakeven_price,
                 result.order_id,
                 result.tp_order_id,
+                getattr(result, "protective_sl_ok", False),
+                getattr(result, "protective_sl_order_id", None),
                 entry_status,
             )
         else:

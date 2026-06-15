@@ -10,6 +10,7 @@ Phase 41 of the refactoring plan:
 
 from __future__ import annotations
 
+import copy
 from typing import TYPE_CHECKING
 
 from src.strategies.middle_bucket_split_apply import (
@@ -60,88 +61,8 @@ class EntryAddFlowCoordinator:
                                            "下轨出轨深度达标 + 低点附近快速CVD回流/跌不动")
         if strategy.state.side != "LONG":
             return None
-        if strategy.state.near_tp_add_disabled:
-            strategy._log_add_skip_once_per_window(reason="near_tp_protected", side="LONG", price=price, ts_ms=ts_ms)
-            return None
-        if getattr(strategy.state, "middle_bucket_split_add_disabled", False):
-            strategy._log_add_skip_once_per_window(reason="middle_bucket_fast_consumed", side="LONG", price=price,
-                                                   ts_ms=ts_ms)
-            return None
-        if strategy.state.trend_runner_active:
-            strategy._log_add_skip_once_per_window(reason="trend_runner_active", side="LONG", price=price, ts_ms=ts_ms)
-            return None
-        if (
-                strategy.state.three_stage_runner_enabled_for_position
-                and (strategy.state.three_stage_tp1_consumed or strategy.state.three_stage_tp2_consumed)
-        ):
-            strategy._log_add_skip_once_per_window(reason="three_stage_after_tp1", side="LONG", price=price, ts_ms=ts_ms)
-            return None
-        if strategy.state.middle_runner_add_disabled or strategy.state.middle_runner_active:
-            strategy._log_add_skip_once_per_window(reason="middle_runner_active", side="LONG", price=price, ts_ms=ts_ms)
-            return None
-        if strategy.state.layers >= strategy.config.max_layers:
-            return None
-        if strategy.state.last_entry_price is None:
-            return None
-        target_layer = strategy.state.layers + 1
-        timing_ok, timing_reason = strategy._add_timing_passed("LONG", price, ts_ms, target_layer)
-        if not timing_ok:
-            strategy._log_add_timing_skipped("LONG", timing_reason, price, ts_ms, target_layer)
-            return None
-        gap_ok, gap_pct, required_price = strategy._add_gap_passed("LONG", price, target_layer)
-        if not gap_ok:
-            logger.info(
-                "ADD_SKIPPED | reason=add_gap side=LONG price=%.4f layers=%s target_layer=%s last_entry=%.4f required_price=%.4f gap_pct=%.4f%%",
-                price,
-                strategy.state.layers,
-                target_layer,
-                strategy.state.last_entry_price,
-                required_price,
-                gap_pct * 100,
-            )
-            return None
-        logger.info(
-            "ADD_GAP_PASSED | side=LONG price=%.4f layers=%s target_layer=%s last_entry=%.4f required_price=%.4f gap_pct=%.4f%%",
-            price,
-            strategy.state.layers,
-            target_layer,
-            strategy.state.last_entry_price,
-            required_price,
-            gap_pct * 100,
-        )
-        avg_improvement_ok, improvement_pct, projected_avg = strategy._add_avg_improvement_passed("LONG", price,
-                                                                                                  target_layer)
-        if not avg_improvement_ok:
-            logger.info(
-                "ADD_SKIPPED | reason=avg_improvement side=LONG price=%.4f layers=%s target_layer=%s avg_entry=%.4f projected_avg_entry=%.4f improvement_pct=%.6f required_improvement_pct=%.6f",
-                price,
-                strategy.state.layers,
-                target_layer,
-                strategy.state.avg_entry_price,
-                projected_avg,
-                improvement_pct,
-                strategy.config.add_min_avg_improvement_pct,
-            )
-            return None
-        logger.info(
-            "ADD_AVG_IMPROVEMENT_PASSED | side=LONG price=%.4f layers=%s target_layer=%s avg_entry=%.4f projected_avg_entry=%.4f improvement_pct=%.6f required_improvement_pct=%.6f",
-            price,
-            strategy.state.layers,
-            target_layer,
-            strategy.state.avg_entry_price,
-            projected_avg,
-            improvement_pct,
-            strategy.config.add_min_avg_improvement_pct,
-        )
-        return strategy._open_position(
-            "LONG",
-            "ADD_LONG",
-            price,
-            ts_ms,
-            boll,
-            cvd,
-            f"距离上一多仓超过{gap_pct * 100:.2f}% + 补仓后均价改善{improvement_pct * 100:.2f}% + 新出轨深度达标后低点附近再次跌不动",
-        )
+        strategy._log_add_skip_once_per_window(reason="add_disabled", side="LONG", price=price, ts_ms=ts_ms)
+        return None
 
     # ------------------------------------------------------------------
     # maybe_open_or_add_short
@@ -160,88 +81,8 @@ class EntryAddFlowCoordinator:
                                            "上轨出轨深度达标 + 高点附近快速CVD转弱/涨不动")
         if strategy.state.side != "SHORT":
             return None
-        if strategy.state.near_tp_add_disabled:
-            strategy._log_add_skip_once_per_window(reason="near_tp_protected", side="SHORT", price=price, ts_ms=ts_ms)
-            return None
-        if getattr(strategy.state, "middle_bucket_split_add_disabled", False):
-            strategy._log_add_skip_once_per_window(reason="middle_bucket_fast_consumed", side="SHORT", price=price,
-                                                   ts_ms=ts_ms)
-            return None
-        if strategy.state.trend_runner_active:
-            strategy._log_add_skip_once_per_window(reason="trend_runner_active", side="SHORT", price=price, ts_ms=ts_ms)
-            return None
-        if (
-                strategy.state.three_stage_runner_enabled_for_position
-                and (strategy.state.three_stage_tp1_consumed or strategy.state.three_stage_tp2_consumed)
-        ):
-            strategy._log_add_skip_once_per_window(reason="three_stage_after_tp1", side="SHORT", price=price, ts_ms=ts_ms)
-            return None
-        if strategy.state.middle_runner_add_disabled or strategy.state.middle_runner_active:
-            strategy._log_add_skip_once_per_window(reason="middle_runner_active", side="SHORT", price=price, ts_ms=ts_ms)
-            return None
-        if strategy.state.layers >= strategy.config.max_layers:
-            return None
-        if strategy.state.last_entry_price is None:
-            return None
-        target_layer = strategy.state.layers + 1
-        timing_ok, timing_reason = strategy._add_timing_passed("SHORT", price, ts_ms, target_layer)
-        if not timing_ok:
-            strategy._log_add_timing_skipped("SHORT", timing_reason, price, ts_ms, target_layer)
-            return None
-        gap_ok, gap_pct, required_price = strategy._add_gap_passed("SHORT", price, target_layer)
-        if not gap_ok:
-            logger.info(
-                "ADD_SKIPPED | reason=add_gap side=SHORT price=%.4f layers=%s target_layer=%s last_entry=%.4f required_price=%.4f gap_pct=%.4f%%",
-                price,
-                strategy.state.layers,
-                target_layer,
-                strategy.state.last_entry_price,
-                required_price,
-                gap_pct * 100,
-            )
-            return None
-        logger.info(
-            "ADD_GAP_PASSED | side=SHORT price=%.4f layers=%s target_layer=%s last_entry=%.4f required_price=%.4f gap_pct=%.4f%%",
-            price,
-            strategy.state.layers,
-            target_layer,
-            strategy.state.last_entry_price,
-            required_price,
-            gap_pct * 100,
-        )
-        avg_improvement_ok, improvement_pct, projected_avg = strategy._add_avg_improvement_passed("SHORT", price,
-                                                                                                  target_layer)
-        if not avg_improvement_ok:
-            logger.info(
-                "ADD_SKIPPED | reason=avg_improvement side=SHORT price=%.4f layers=%s target_layer=%s avg_entry=%.4f projected_avg_entry=%.4f improvement_pct=%.6f required_improvement_pct=%.6f",
-                price,
-                strategy.state.layers,
-                target_layer,
-                strategy.state.avg_entry_price,
-                projected_avg,
-                improvement_pct,
-                strategy.config.add_min_avg_improvement_pct,
-            )
-            return None
-        logger.info(
-            "ADD_AVG_IMPROVEMENT_PASSED | side=SHORT price=%.4f layers=%s target_layer=%s avg_entry=%.4f projected_avg_entry=%.4f improvement_pct=%.6f required_improvement_pct=%.6f",
-            price,
-            strategy.state.layers,
-            target_layer,
-            strategy.state.avg_entry_price,
-            projected_avg,
-            improvement_pct,
-            strategy.config.add_min_avg_improvement_pct,
-        )
-        return strategy._open_position(
-            "SHORT",
-            "ADD_SHORT",
-            price,
-            ts_ms,
-            boll,
-            cvd,
-            f"距离上一空仓超过{gap_pct * 100:.2f}% + 补仓后均价改善{improvement_pct * 100:.2f}% + 新出轨深度达标后高点附近再次涨不动",
-        )
+        strategy._log_add_skip_once_per_window(reason="add_disabled", side="SHORT", price=price, ts_ms=ts_ms)
+        return None
 
     # ------------------------------------------------------------------
     # open_position
@@ -256,10 +97,25 @@ class EntryAddFlowCoordinator:
             boll: BollSnapshot,
             cvd: CvdSnapshot,
             reason: str,
-    ) -> TradeIntent:
+    ) -> TradeIntent | None:
         strategy = self.strategy
-        next_layer = strategy.state.layers + 1
-        size = strategy.sizer.calculate(price, layer_index=next_layer)
+        if intent_type in {"ADD_LONG", "ADD_SHORT"}:
+            strategy._log_add_skip_once_per_window(reason="add_disabled", side=side, price=price, ts_ms=ts_ms)
+            return None
+        if strategy.state.side is not None:
+            return None
+        previous_state = copy.deepcopy(strategy.state)
+        next_layer = 1
+        entry_sl_price = strategy._entry_protective_sl_price(side)
+        if entry_sl_price is None:
+            if side == "LONG" and boll.lower > 0:
+                entry_sl_price = boll.lower * (1 - strategy.config.entry_sl_buffer_pct)
+            elif side == "SHORT" and boll.upper > 0:
+                entry_sl_price = boll.upper * (1 + strategy.config.entry_sl_buffer_pct)
+        if entry_sl_price is None:
+            logger.warning("ENTRY_SKIPPED | reason=missing_entry_protective_sl side=%s price=%.4f", side, price)
+            return None
+        size = strategy.sizer.calculate(price, layer_index=next_layer, stop_price=entry_sl_price)
         if next_layer == 1:
             strategy.state.first_entry_ts_ms = ts_ms
             strategy.state.add_freeze_until_ts_ms = 0
@@ -316,6 +172,34 @@ class EntryAddFlowCoordinator:
             reason = f"{reason} + 中轨先平{partial_tp_ratio * 100:.0f}%，剩余runner到外轨"
         if tp_plan == "THREE_STAGE_RUNNER":
             reason = f"{reason} + 三段式趋势Runner：中轨{strategy.config.three_stage_tp1_ratio * 100:.0f}%/外轨{strategy.config.three_stage_tp2_ratio * 100:.0f}%/Runner{strategy.config.three_stage_runner_ratio * 100:.0f}%"
+        rr_ok, rr_reason, stop_distance_pct, reward_pct, reward_risk = strategy._entry_reward_risk_check(
+            side=side,
+            entry_price=price,
+            tp_price=tp_price,
+            stop_price=entry_sl_price,
+        )
+        if not rr_ok:
+            strategy.state = previous_state
+            logger.info(
+                "ENTRY_SKIPPED | reason=%s side=%s price=%.4f tp=%.4f sl=%.4f stop_pct=%.6f reward_pct=%.6f reward_risk=%.4f min_reward_risk=%.4f",
+                rr_reason,
+                side,
+                price,
+                tp_price,
+                entry_sl_price,
+                stop_distance_pct,
+                reward_pct,
+                reward_risk,
+                strategy.config.entry_min_reward_risk,
+            )
+            return None
+        reason = (
+            f"{reason} + risk_size stop={entry_sl_price:.4f} "
+            f"stop={stop_distance_pct * 100:.3f}% reward={reward_pct * 100:.3f}% R={reward_risk:.2f}"
+        )
+        strategy.state.entry_protective_sl_price = entry_sl_price
+        strategy.state.entry_protective_sl_order_id = None
+        strategy.state.entry_protective_sl_protected = False
         strategy.state.layers = next_layer
         strategy.state.last_entry_price = price
         strategy.state.tp_price = tp_price

@@ -54,6 +54,7 @@ class StrategyIntentFactory:
             )
         )
         for order_id in (
+                self.strategy.state.entry_protective_sl_order_id,
                 self.strategy.state.near_tp_protective_sl_order_id,
                 self.strategy.state.middle_runner_protective_sl_order_id,
                 self.strategy.state.three_stage_post_tp1_protective_sl_order_id,
@@ -105,6 +106,9 @@ class StrategyIntentFactory:
             partial_tp_ratio=state.partial_tp_ratio,
             tp_plan=state.tp_plan,
             partial_tp_consumed=state.partial_tp_consumed,
+            entry_protective_sl_price=getattr(state, "entry_protective_sl_price", None),
+            entry_protective_sl_order_id=getattr(state, "entry_protective_sl_order_id", None),
+            entry_protective_sl_protected=bool(getattr(state, "entry_protective_sl_protected", False)),
             middle_runner_enabled_for_position=state.middle_runner_enabled_for_position,
             middle_runner_pending=state.middle_runner_pending,
             middle_runner_active=state.middle_runner_active,

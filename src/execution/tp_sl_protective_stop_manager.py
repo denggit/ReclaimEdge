@@ -152,6 +152,25 @@ class ProtectiveStopManager:
                     await asyncio.sleep(retry_interval_seconds)
         return False, None, last_error or "protective_sl_retries_exhausted"
 
+    async def place_entry_protective_stop_with_retries(
+            self,
+            side: PositionSide,
+            contracts: Decimal | str | int | float,
+            stop_price: float,
+            retry_count: int,
+            retry_interval_seconds: float,
+    ) -> tuple[bool, str | None, str]:
+        ok, order_id, message = await self.place_near_tp_protective_stop_with_retries(
+            side,
+            contracts,
+            stop_price,
+            retry_count=retry_count,
+            retry_interval_seconds=retry_interval_seconds,
+        )
+        if ok:
+            self.trader.entry_protective_sl_order_id = order_id
+        return ok, order_id, message
+
     async def place_middle_runner_protective_stop_with_retries(
             self,
             side: PositionSide,

@@ -109,6 +109,13 @@ async def prepare_account_sync_flat_settlement_phase(
     result_cash = settled.cash
     result_equity = settled.equity
 
+    entry_sl_order_id = pending_flat_payload.get("entry_protective_sl_order_id")
+    if entry_sl_order_id:
+        try:
+            await trader.cancel_near_tp_protective_stop(entry_sl_order_id)
+        except Exception:
+            logger.warning("ENTRY_PROTECTIVE_SL_CANCEL_ON_FLAT | algoId=%s failed_unhandled", entry_sl_order_id)
+
     protective_sl_order_id = pending_flat_payload.get("near_tp_protective_sl_order_id")
     if protective_sl_order_id:
         try:

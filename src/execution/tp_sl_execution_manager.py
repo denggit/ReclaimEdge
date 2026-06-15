@@ -101,6 +101,17 @@ class TpSlExecutionManager:
         return await self.protective_stops.place_near_tp_protective_stop_with_retries(
             side, contracts, stop_price, retry_count, retry_interval_seconds)
 
+    async def place_entry_protective_stop_with_retries(
+            self,
+            side: PositionSide,
+            contracts: Decimal | str | int | float,
+            stop_price: float,
+            retry_count: int,
+            retry_interval_seconds: float,
+    ) -> tuple[bool, str | None, str]:
+        return await self.protective_stops.place_entry_protective_stop_with_retries(
+            side, contracts, stop_price, retry_count, retry_interval_seconds)
+
     async def place_middle_runner_protective_stop_with_retries(
             self,
             side: PositionSide,

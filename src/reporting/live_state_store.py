@@ -51,6 +51,9 @@ class LivePositionState:
     near_tp_trigger_ts_ms: int = 0
     near_tp_protective_sl_price: float | None = None
     near_tp_protective_sl_order_id: str | None = None
+    entry_protective_sl_price: float | None = None
+    entry_protective_sl_order_id: str | None = None
+    entry_protective_sl_protected: bool = False
     near_tp_add_disabled: bool = False
     middle_runner_enabled_for_position: bool = False
     middle_runner_pending: bool = False
@@ -215,6 +218,9 @@ class LiveStateStore:
             near_tp_trigger_ts_ms=int(getattr(strategy_state, "near_tp_trigger_ts_ms", 0) or 0),
             near_tp_protective_sl_price=getattr(strategy_state, "near_tp_protective_sl_price", None),
             near_tp_protective_sl_order_id=getattr(strategy_state, "near_tp_protective_sl_order_id", None),
+            entry_protective_sl_price=getattr(strategy_state, "entry_protective_sl_price", None),
+            entry_protective_sl_order_id=getattr(strategy_state, "entry_protective_sl_order_id", None),
+            entry_protective_sl_protected=bool(getattr(strategy_state, "entry_protective_sl_protected", False)),
             near_tp_add_disabled=bool(getattr(strategy_state, "near_tp_add_disabled", False)),
             middle_runner_enabled_for_position=bool(
                 getattr(strategy_state, "middle_runner_enabled_for_position", False)),

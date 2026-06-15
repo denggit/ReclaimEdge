@@ -67,7 +67,7 @@ class TraderRuntimeSettings:
     base_url: str = "https://www.okx.com"
     td_mode: str = "isolated"
     pos_side_mode: str = "net"
-    leverage: str = "50"
+    leverage: str = "20"
     live_trading: bool = False
     max_live_equity_usdt: float = 30.0
 
@@ -89,7 +89,7 @@ class TraderRuntimeSettings:
             base_url=os.getenv("OKX_BASE_URL", "https://www.okx.com"),
             td_mode=os.getenv("OKX_TD_MODE", "isolated"),
             pos_side_mode=os.getenv("OKX_POS_SIDE_MODE", "net"),
-            leverage=os.getenv("LEVERAGE", "50"),
+            leverage=os.getenv("LEVERAGE", "20"),
             live_trading=os.getenv("LIVE_TRADING", "false").strip().lower()
             in {"1", "true", "yes", "y", "on"},
             max_live_equity_usdt=float(os.getenv("MAX_LIVE_EQUITY_USDT", "30")),
@@ -133,6 +133,7 @@ class Trader:
         self._broker_semantic_executor: Any = None
 
         self.tp_order_id: str | None = None
+        self.entry_protective_sl_order_id: str | None = None
         self.near_tp_protective_sl_order_id: str | None = None
         self.middle_runner_protective_sl_order_id: str | None = None
         self.three_stage_post_tp1_protective_sl_order_id: str | None = None
@@ -327,6 +328,58 @@ class Trader:
             logger.exception("Failed to refresh position after entry; using requested contracts as fallback")
             self.position_contracts += contracts
 
+        entry_sl_order_id: str | None = None
+        entry_sl_price = getattr(intent, "entry_protective_sl_price", None)
+        if entry_sl_price is None:
+            ok, exit_message = await self.market_exit_remaining_position_with_retries(
+                intent.side,
+                retry_count=int(os.getenv("ENTRY_SL_FAIL_MARKET_EXIT_RETRY_COUNT", "3")),
+                context="entry_missing_protective_sl",
+                retry_interval_seconds=1.0,
+            )
+            return LiveTradeResult(
+                ok=False,
+                action=intent.intent_type,
+                order_id=order_id,
+                tp_order_id=None,
+                contracts=self.decimal_to_str(contracts),
+                tp_price=self.price_to_str(intent.tp_price),
+                message=f"entry_filled_but_missing_entry_protective_sl; market_exit_ok={ok}; {exit_message}",
+                entry_filled=True,
+                tp_ok=False,
+                protective_sl_ok=False,
+            )
+
+        sl_ok, sl_id, sl_message = await self.place_entry_protective_stop_with_retries(
+            side=intent.side,
+            contracts=self.position_contracts if self.position_contracts > 0 else contracts,
+            stop_price=float(entry_sl_price),
+            retry_count=int(getattr(intent, "entry_protective_sl_retry_count", 0) or os.getenv("ENTRY_PROTECTIVE_SL_RETRY_COUNT", "3")),
+            retry_interval_seconds=float(os.getenv("ENTRY_PROTECTIVE_SL_RETRY_INTERVAL_SECONDS", "1")),
+        )
+        if not sl_ok or not sl_id:
+            ok, exit_message = await self.market_exit_remaining_position_with_retries(
+                intent.side,
+                retry_count=int(os.getenv("ENTRY_SL_FAIL_MARKET_EXIT_RETRY_COUNT", "3")),
+                context="entry_protective_sl_failed",
+                retry_interval_seconds=1.0,
+            )
+            return LiveTradeResult(
+                ok=False,
+                action=intent.intent_type,
+                order_id=order_id,
+                tp_order_id=None,
+                contracts=self.decimal_to_str(contracts),
+                tp_price=self.price_to_str(intent.tp_price),
+                message=f"entry_filled_but_entry_protective_sl_failed: {sl_message}; market_exit_ok={ok}; {exit_message}",
+                entry_filled=True,
+                tp_ok=False,
+                protective_sl_order_id=sl_id,
+                protective_sl_price=self.price_to_str(float(entry_sl_price)),
+                protective_sl_ok=False,
+            )
+        entry_sl_order_id = sl_id
+
         try:
             tp = await self.replace_take_profit(intent)
             if not tp.ok:
@@ -341,9 +394,9 @@ class Trader:
                     entry_filled=True,
                     tp_ok=False,
                     tp_order_ids=tp.tp_order_ids,
-                    protective_sl_order_id=tp.protective_sl_order_id,
-                    protective_sl_price=tp.protective_sl_price,
-                    protective_sl_ok=tp.protective_sl_ok,
+                    protective_sl_order_id=tp.protective_sl_order_id or entry_sl_order_id,
+                    protective_sl_price=tp.protective_sl_price or self.price_to_str(float(entry_sl_price)),
+                    protective_sl_ok=bool(tp.protective_sl_ok or entry_sl_order_id),
                     middle_bucket_split_executed=tp.middle_bucket_split_executed,
                     middle_bucket_split_disabled_reason=tp.middle_bucket_split_disabled_reason,
                     middle_bucket_split_actual_order_mode=tp.middle_bucket_split_actual_order_mode,
@@ -359,9 +412,9 @@ class Trader:
                 entry_filled=True,
                 tp_ok=True,
                 tp_order_ids=tp.tp_order_ids,
-                protective_sl_order_id=tp.protective_sl_order_id,
-                protective_sl_price=tp.protective_sl_price,
-                protective_sl_ok=tp.protective_sl_ok,
+                protective_sl_order_id=tp.protective_sl_order_id or entry_sl_order_id,
+                protective_sl_price=tp.protective_sl_price or self.price_to_str(float(entry_sl_price)),
+                protective_sl_ok=bool(tp.protective_sl_ok or entry_sl_order_id),
                 middle_bucket_split_executed=tp.middle_bucket_split_executed,
                 middle_bucket_split_disabled_reason=tp.middle_bucket_split_disabled_reason,
                 middle_bucket_split_actual_order_mode=tp.middle_bucket_split_actual_order_mode,
@@ -378,6 +431,9 @@ class Trader:
                 message=f"entry_filled_but_tp_exception: {exc}",
                 entry_filled=True,
                 tp_ok=False,
+                protective_sl_order_id=entry_sl_order_id,
+                protective_sl_price=self.price_to_str(float(entry_sl_price)) if entry_sl_price is not None else "",
+                protective_sl_ok=bool(entry_sl_order_id),
             )
 
     async def execute_near_tp_reduce(self, intent: TradeIntent) -> LiveTradeResult:
@@ -669,6 +725,7 @@ class Trader:
     def mark_flat(self) -> None:
         self.position_contracts = Decimal("0")
         self.tp_order_id = None
+        self.entry_protective_sl_order_id = None
         self.near_tp_protective_sl_order_id = None
         self.middle_runner_protective_sl_order_id = None
         self.three_stage_post_tp1_protective_sl_order_id = None

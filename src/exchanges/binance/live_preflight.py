@@ -208,7 +208,7 @@ def load_binance_live_preflight_config(
       → derived from MAX_LIVE_EQUITY_USDT × LAYER_MARGIN_PCT × LEVERAGE
     * ``max_position_notional_usdt``: LIVE_MAX_POSITION_NOTIONAL_USDT
       → BINANCE_LIVE_MAX_POSITION_NOTIONAL_USDT
-      → derived from max_order_notional × MAX_LAYERS
+      → derived from max_order_notional (single-entry, no-add runtime)
     * ``leverage``: LIVE_LEVERAGE → BINANCE_LIVE_LEVERAGE → LEVERAGE
 
     Parameters
@@ -316,7 +316,7 @@ def load_binance_live_preflight_config(
 
     # ── max_position_notional: LIVE_MAX_POSITION_NOTIONAL_USDT
     #     → BINANCE_LIVE_MAX_POSITION_NOTIONAL_USDT
-    #     → derive from max_order_notional × MAX_LAYERS ──
+    #     → derive from max_order_notional (single-entry, no-add runtime) ──
     max_position_notional_usdt: Decimal | None
     max_position_notional_source: str
     pos_raw: str = _resolve_env(
@@ -329,16 +329,9 @@ def load_binance_live_preflight_config(
         else:
             max_position_notional_source = "BINANCE_LIVE_MAX_POSITION_NOTIONAL_USDT"
     else:
-        # Derive from max_order_notional × MAX_LAYERS
-        max_layers_raw: str = env.get("MAX_LAYERS", "")
-        max_layers: int | None = _parse_int(max_layers_raw)
-        if max_order_notional_usdt is not None and max_layers is not None:
-            max_position_notional_usdt = (
-                max_order_notional_usdt * Decimal(str(max_layers))
-            )
-            max_position_notional_source = (
-                "DERIVED_FROM_MAX_LIVE_EQUITY_AND_MAX_LAYERS"
-            )
+        if max_order_notional_usdt is not None:
+            max_position_notional_usdt = max_order_notional_usdt
+            max_position_notional_source = "DERIVED_FROM_MAX_LIVE_EQUITY_SINGLE_ENTRY"
         else:
             max_position_notional_usdt = None
             max_position_notional_source = ""

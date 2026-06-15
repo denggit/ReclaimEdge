@@ -257,6 +257,7 @@ class EntryAddFlowCoordinatorSideMismatchTest(unittest.TestCase):
 
 # ── add disabled gates ──────────────────────────────────────────────────
 
+@unittest.skip("ADD is disabled in the risk-first single-entry runtime")
 class EntryAddFlowCoordinatorAddDisabledTest(unittest.TestCase):
     """Add skips when protection flags are active."""
 
@@ -330,6 +331,7 @@ class EntryAddFlowCoordinatorAddDisabledTest(unittest.TestCase):
 
 # ── add timing gate ─────────────────────────────────────────────────────
 
+@unittest.skip("ADD is disabled in the risk-first single-entry runtime")
 class EntryAddFlowCoordinatorTimingGateTest(unittest.TestCase):
     """Timing gate blocks add when interval not passed."""
 
@@ -351,6 +353,7 @@ class EntryAddFlowCoordinatorTimingGateTest(unittest.TestCase):
 
 # ── add gap gate ────────────────────────────────────────────────────────
 
+@unittest.skip("ADD is disabled in the risk-first single-entry runtime")
 class EntryAddFlowCoordinatorGapGateTest(unittest.TestCase):
     """Gap gate blocks add when price is too close to last_entry_price."""
 
@@ -373,6 +376,7 @@ class EntryAddFlowCoordinatorGapGateTest(unittest.TestCase):
 
 # ── successful LONG add ─────────────────────────────────────────────────
 
+@unittest.skip("ADD is disabled in the risk-first single-entry runtime")
 class EntryAddFlowCoordinatorSuccessfulLongAddTest(unittest.TestCase):
     """Full LONG add flow when all gates pass."""
 
@@ -479,6 +483,7 @@ class EntryAddFlowCoordinatorSuccessfulLongAddTest(unittest.TestCase):
 
 # ── successful SHORT add ────────────────────────────────────────────────
 
+@unittest.skip("ADD is disabled in the risk-first single-entry runtime")
 class EntryAddFlowCoordinatorSuccessfulShortAddTest(unittest.TestCase):
     """Full SHORT add flow when all gates pass."""
 
@@ -593,8 +598,9 @@ class EntryAddFlowCoordinatorBaseStrategyPreservationTest(unittest.TestCase):
         self.assertEqual(strat.state.side, "LONG")
         self.assertEqual(strat.state.layers, 1)
 
+    @unittest.skip("ADD is disabled in the risk-first single-entry runtime")
     def test_base_strategy_add_long_still_works(self) -> None:
-        """Base strategy successful add via coordinator path still works."""
+        """Base strategy add path is intentionally disabled."""
         strat = _strategy(
             add_min_avg_improvement_pct=0.0,
             first_add_block_seconds=0,

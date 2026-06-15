@@ -207,6 +207,10 @@ class MarketExitManager:
             await self.trader.cancel_existing_reduce_only_orders()
         except Exception:
             logger.warning("MARKET_EXIT_CLEANUP | cleanup=cancel_reduce_only_tp_failed")
+        entry_sl_order_id = getattr(t, "entry_protective_sl_order_id", None)
+        if entry_sl_order_id:
+            await self.trader.cancel_near_tp_protective_stop(entry_sl_order_id)
+            t.entry_protective_sl_order_id = None
         if t.near_tp_protective_sl_order_id:
             await self.trader.cancel_near_tp_protective_stop(t.near_tp_protective_sl_order_id)
         middle_runner_sl_order_id = getattr(t, "middle_runner_protective_sl_order_id", None)

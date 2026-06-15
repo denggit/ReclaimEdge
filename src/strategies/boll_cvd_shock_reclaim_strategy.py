@@ -102,28 +102,19 @@ class BollCvdShockReclaimStrategy(BollCvdReclaimStrategy):
             return intents
 
         # ── Normal OUTER_BAND ADD (runs first) ───────────────────────────
-        if self._long_setup(price, cvd):
+        if self._long_setup(price, cvd, boll):
             intent = self._maybe_open_or_add_long(price, ts_ms, boll, cvd)
             if intent is not None:
                 intents.append(intent)
 
-        if self._short_setup(price, cvd):
+        if self._short_setup(price, cvd, boll):
             intent = self._maybe_open_or_add_short(price, ts_ms, boll, cvd)
             if intent is not None:
                 intents.append(intent)
 
-        # ── Extreme Retest ADD only if no normal ADD was generated ───────
-        normal_add_generated = any(
-            i.intent_type in {"ADD_LONG", "ADD_SHORT"} for i in intents
-        )
-        if (
-            not normal_add_generated
-            and self._extreme_retest_config.enabled
-            and self.state.side is not None
-        ):
-            ext_retest_intent = self._evaluate_extreme_retest_add(price, ts_ms, boll, cvd)
-            if ext_retest_intent is not None:
-                intents.append(ext_retest_intent)
+        # ADD is intentionally disabled in the risk-first runtime.
+        # Extreme Retest remains available for historical tests/helpers but is no
+        # longer invoked by the live signal path.
 
         return intents
 
@@ -136,10 +127,12 @@ class BollCvdShockReclaimStrategy(BollCvdReclaimStrategy):
             boll: BollSnapshot,
             cvd: CvdSnapshot,
             reason: str,
-    ) -> TradeIntent:
+    ) -> TradeIntent | None:
         previous_layers = self.state.layers
         was_active_freeze = self._add_freeze_active(ts_ms)
         intent = super()._open_position(side, intent_type, price, ts_ms, boll, cvd, reason)
+        if intent is None:
+            return None
         if previous_layers <= 0:
             self.state.first_entry_ts_ms = ts_ms
             decision = add_freeze_chain.start_add_freeze_after_first_entry(
@@ -523,19 +516,19 @@ class BollCvdShockReclaimStrategy(BollCvdReclaimStrategy):
             logger.info("UPPER_ARMED_RESET | reason=middle_reclaimed price=%.4f middle=%.4f", price, boll.middle)
             self._reset_upper_armed()
 
-    def _long_setup(self, price: float, cvd: CvdSnapshot) -> bool:
+    def _long_setup(self, price: float, cvd: CvdSnapshot, boll: BollSnapshot) -> bool:
         if not self.state.lower_armed or self.state.lower_extreme_price is None:
             return False
         if self.state.lower_last_burst_ts_ms <= self.state.last_order_ts_ms:
             return False
-        return super()._long_setup(price, cvd)
+        return super()._long_setup(price, cvd, boll)
 
-    def _short_setup(self, price: float, cvd: CvdSnapshot) -> bool:
+    def _short_setup(self, price: float, cvd: CvdSnapshot, boll: BollSnapshot) -> bool:
         if not self.state.upper_armed or self.state.upper_extreme_price is None:
             return False
         if self.state.upper_last_burst_ts_ms <= self.state.last_order_ts_ms:
             return False
-        return super()._short_setup(price, cvd)
+        return super()._short_setup(price, cvd, boll)
 
     def _reset_lower_armed(self) -> None:
         super()._reset_lower_armed()
@@ -713,155 +706,15 @@ class BollCvdShockReclaimStrategy(BollCvdReclaimStrategy):
             self._sync_anchor_to_state()
             return None
 
-        # ── Run through original add gates ──────────────────────────────────
-        if self.state.layers >= self.config.max_layers:
-            logger.info(
-                "ADD_SKIPPED | reason=max_layers side=%s trigger_source=EXTREME_RETEST "
-                "pattern=%s anchor_price=%s layers=%s",
-                side,
-                eval_result.pattern,
-                eval_result.anchor_price,
-                self.state.layers,
-            )
-            self._sync_anchor_to_state()
-            return None
-
-        target_layer = self.state.layers + 1
-
-        # Timing check (add_freeze / first_add_block / add_interval)
-        timing_ok, timing_reason = self._add_timing_passed(side, price, ts_ms, target_layer)
-        if not timing_ok:
-            self._log_extreme_retest_add_timing_skipped(
-                side, timing_reason, price, ts_ms, target_layer,
-                pattern=eval_result.pattern,
-                anchor_price=eval_result.anchor_price,
-            )
-            self._sync_anchor_to_state()
-            return None
-
-        # Gap check
-        gap_ok, gap_pct, required_price = self._add_gap_passed(side, price, target_layer)
-        if not gap_ok:
-            logger.info(
-                "ADD_SKIPPED | reason=add_gap side=%s price=%s trigger_source=EXTREME_RETEST "
-                "pattern=%s anchor_price=%s layers=%s target_layer=%s required_price=%s gap_pct=%.4f%%",
-                side, price, eval_result.pattern, eval_result.anchor_price,
-                self.state.layers, target_layer, required_price, gap_pct * 100,
-            )
-            self._sync_anchor_to_state()
-            return None
-
-        # Avg improvement check
-        avg_improvement_ok, improvement_pct, projected_avg = self._add_avg_improvement_passed(side, price, target_layer)
-        if not avg_improvement_ok:
-            logger.info(
-                "ADD_SKIPPED | reason=avg_improvement side=%s price=%s trigger_source=EXTREME_RETEST "
-                "pattern=%s anchor_price=%s avg_entry=%s projected_avg_entry=%s improvement_pct=%.6f",
-                side, price, eval_result.pattern, eval_result.anchor_price,
-                self.state.avg_entry_price, projected_avg, improvement_pct,
-            )
-            self._sync_anchor_to_state()
-            return None
-
-        # Check other add-disabled conditions (near_tp, middle_runner, trend_runner, etc.)
-        if self.state.near_tp_add_disabled:
-            logger.info(
-                "ADD_SKIPPED | reason=near_tp_protected side=%s trigger_source=EXTREME_RETEST "
-                "pattern=%s anchor_price=%s",
-                side, eval_result.pattern, eval_result.anchor_price,
-            )
-            self._sync_anchor_to_state()
-            return None
-        if getattr(self.state, "middle_bucket_split_add_disabled", False):
-            logger.info(
-                "ADD_SKIPPED | reason=middle_bucket_fast_consumed side=%s trigger_source=EXTREME_RETEST "
-                "pattern=%s anchor_price=%s",
-                side, eval_result.pattern, eval_result.anchor_price,
-            )
-            self._sync_anchor_to_state()
-            return None
-        if self.state.trend_runner_active:
-            logger.info(
-                "ADD_SKIPPED | reason=trend_runner_active side=%s trigger_source=EXTREME_RETEST "
-                "pattern=%s anchor_price=%s",
-                side, eval_result.pattern, eval_result.anchor_price,
-            )
-            self._sync_anchor_to_state()
-            return None
-
-        # ── Generate ADD intent ─────────────────────────────────────────────
-        reason = (
-            f"EXTREME_RETEST pat={eval_result.pattern} "
-            f"anchor={eval_result.anchor_price:.4f} "
-            f"gap={gap_pct * 100:.2f}% improvement={improvement_pct * 100:.2f}%"
+        logger.info(
+            "ADD_SKIPPED | reason=add_disabled side=%s trigger_source=EXTREME_RETEST pattern=%s anchor_price=%s layers=%s",
+            side,
+            eval_result.pattern,
+            eval_result.anchor_price,
+            self.state.layers,
         )
-
-        # Use original open_position which handles all state updates
-        was_active_freeze = self._add_freeze_active(ts_ms)
-        intent = super()._open_position(
-            side, "ADD_SHORT" if side == "SHORT" else "ADD_LONG",
-            price, ts_ms, boll, cvd, reason,
-        )
-
-        # Extend add freeze
-        if self.state.layers > 1:
-            self._extend_add_freeze_after_successful_add(ts_ms, was_active_freeze=was_active_freeze)
-
-        # ── Consume anchor after successful ADD ─────────────────────────────
-        _extreme_retest.mark_anchor_consumed(anchor)
-
-        # Revalidate after add (last_entry_price changed)
-        effective_required_gap_pct = self._extreme_retest_effective_required_gap_pct()
-        _extreme_retest.revalidate_anchor_after_add(
-            anchor=anchor,
-            last_entry_price=self.state.last_entry_price,
-            effective_required_gap_pct=effective_required_gap_pct,
-        )
-
         self._sync_anchor_to_state()
-
-        logger.warning(
-            "EXTREME_RETEST_ADD_SUCCESS | side=%s layers=%s price=%s "
-            "trigger_source=EXTREME_RETEST pattern=%s anchor_price=%s",
-            side, self.state.layers, price, eval_result.pattern, eval_result.anchor_price,
-        )
-        return intent
-
-    def _extreme_retest_effective_required_gap_pct(self, ts_ms: int | None = None) -> float:
-        """Compute effective required gap pct for anchor checking.
-
-        Accounts for add_freeze / first_add_block / multiplier / penalty_count
-        when applicable, so the anchor is rejected early if it can't clear the
-        real add timing gate.
-
-        Falls back to base target-layer gap when timing state is indeterminate.
-        """
-        target_layer = self.state.layers + 1
-        base_gap = add_layer_gates.add_layer_gap_pct_for_target_layer(
-            target_layer=target_layer,
-            add_gap_mode=self.config.add_gap_mode,
-            add_gap_base_pct=self.config.add_gap_base_pct,
-            add_gap_step_pct=self.config.add_gap_step_pct,
-        )
-
-        # If add_freeze is active, the real required gap is base_gap * multiplier
-        if (
-            ts_ms is not None
-            and self.config.add_freeze_chain_enabled
-            and self._add_freeze_active(ts_ms)
-        ):
-            multiplier = self._active_add_freeze_bypass_multiplier()
-            return base_gap * multiplier
-
-        # If layers == 1 and first_add_block is not yet elapsed, use bypass multiplier
-        if self.state.layers == 1:
-            first_entry_ts = int(getattr(self.state, "first_entry_ts_ms", 0) or 0)
-            if first_entry_ts > 0 and ts_ms is not None:
-                elapsed_s = (ts_ms - first_entry_ts) / 1000.0
-                if elapsed_s < self.config.first_add_block_seconds:
-                    return base_gap * self.first_add_block_bypass_multiplier
-
-        return base_gap
+        return None
 
     def _log_extreme_retest_add_timing_skipped(
         self,

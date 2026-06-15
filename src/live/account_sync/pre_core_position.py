@@ -275,6 +275,7 @@ async def run_account_sync_pre_core_position_phase(
                 "last_tp_plan": getattr(strategy.state, "tp_plan", "SINGLE"),
                 "partial_tp_consumed": getattr(strategy.state, "partial_tp_consumed", False),
                 "near_tp_protective_sl_order_id": getattr(strategy.state, "near_tp_protective_sl_order_id", None),
+                "entry_protective_sl_order_id": getattr(strategy.state, "entry_protective_sl_order_id", None),
                 "middle_runner_protective_sl_order_id": getattr(strategy.state, "middle_runner_protective_sl_order_id",
                                                                 None),
                 "three_stage_post_tp1_protective_sl_order_id": getattr(strategy.state,

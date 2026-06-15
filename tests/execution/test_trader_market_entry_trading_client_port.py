@@ -87,6 +87,7 @@ def _make_intent(*, intent_type: str = "OPEN_LONG", side: str = "LONG", eth_qty:
         avg_entry_price=3000.0,
         breakeven_price=3005.0,
         tp_mode="UPPER",
+        entry_protective_sl_price=2950.0 if side == "LONG" else 3050.0,
     )
 
 
@@ -124,6 +125,13 @@ def _make_trader(*, trading_client: Any) -> Trader:
             raw_pos=Decimal("1"),
         )
     )
+    trader.place_entry_protective_stop_with_retries = AsyncMock(
+        return_value=(True, "entry-sl-1", "protective_sl_placed")
+    )
+    trader.market_exit_remaining_position_with_retries = AsyncMock(
+        return_value=(True, "market_exit_order_id=exit-1")
+    )
+
     trader.replace_take_profit = AsyncMock(
         return_value=LiveTradeResult(
             ok=True,
