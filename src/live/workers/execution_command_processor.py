@@ -39,6 +39,7 @@ from src.position_management.sidecar import entry_runtime as sidecar_entry_runti
 from src.position_management.sidecar import runtime_state as sidecar_runtime_state
 from src.position_management.sidecar.reconciler import mark_sidecar_leg_force_closed
 from src.position_management.sidecar.core_exit_safety import (
+    active_sidecar_tp_order_ids,
     classify_sidecar_core_final_exit_risk,
     open_sidecar_legs,
     sidecar_core_exit_client_order_id,
@@ -301,6 +302,7 @@ class ExecutionCommandProcessor:
             alignment_result = await self._align_sidecar_tp_with_unsafe_core_final_exit(command)
             if alignment_result is not None:
                 return alignment_result
+            command = self._with_current_sidecar_tp_protected_ids(command)
 
         # ── execute intent ───────────────────────────────────────────────
         result = await self.trader.execute_intent(command.intent)
@@ -757,6 +759,52 @@ class ExecutionCommandProcessor:
                 tp_price=str(core_tp_price),
                 message="sidecar_core_exit_alignment_failed_delayed_market_exit_armed",
             )
+
+    def _with_current_sidecar_tp_protected_ids(
+        self,
+        command: live_runtime_types.TradeCommand,
+    ) -> live_runtime_types.TradeCommand:
+        """Ensure the current active sidecar TP order ids are in protected_order_ids.
+
+        After _align_sidecar_tp_with_unsafe_core_final_exit() may have placed
+        new sidecar TP orders, the intent's protected_order_ids (built before
+        alignment) needs to include those new order ids so that core TP cleanup
+        does not treat them as unknown reduce-only orders.
+        """
+        sidecar_legs: list[dict[str, Any]] = list(
+            getattr(self.strategy.state, "sidecar_legs", []) or []
+        )
+        sidecar_ids = active_sidecar_tp_order_ids(sidecar_legs)
+        if not sidecar_ids:
+            return command
+
+        old_ids = tuple(getattr(command.intent, "protected_order_ids", ()) or ())
+        merged_ids = tuple(dict.fromkeys((*old_ids, *sidecar_ids)))
+
+        if merged_ids == old_ids:
+            return command
+
+        new_intent = replace(command.intent, protected_order_ids=merged_ids)
+        logger.info(
+            "SIDECAR_TP_PROTECTED_FOR_CORE_TP_UPDATE | position_id=%s side=%s old_protected_order_ids=%s sidecar_tp_order_ids=%s merged_protected_order_ids=%s",
+            self.execution_state.current_position_id,
+            command.intent.side,
+            list(old_ids),
+            list(sidecar_ids),
+            list(merged_ids),
+        )
+        if hasattr(self.journal, "append"):
+            self.journal.append(
+                "SIDECAR_TP_PROTECTED_FOR_CORE_TP_UPDATE",
+                {
+                    "side": command.intent.side,
+                    "old_protected_order_ids": list(old_ids),
+                    "sidecar_tp_order_ids": list(sidecar_ids),
+                    "merged_protected_order_ids": list(merged_ids),
+                },
+                position_id=self.execution_state.current_position_id,
+            )
+        return replace(command, intent=new_intent)
 
     # ── DEPRECATED: old background task methods ────────────────────────────
     # These methods are no longer called.  The unified DME phase

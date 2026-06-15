@@ -4,6 +4,7 @@ import pytest
 
 from src.position_management.sidecar.core_exit_safety import (
     SidecarCoreExitRisk,
+    active_sidecar_tp_order_ids,
     classify_sidecar_core_final_exit_risk,
     core_tp_is_loss_for_position,
     open_sidecar_legs,
@@ -370,3 +371,38 @@ def test_client_order_id_only_contains_alphanumeric() -> None:
     )
     assert all(c.isalnum() for c in cid)
     assert cid.startswith("SCE")
+
+
+# ── test: active_sidecar_tp_order_ids ───────────────────────────────────
+
+def test_active_sidecar_tp_order_ids_collects_open_and_open_unprotected() -> None:
+    legs = [
+        {**_open_leg("leg-1", 105.0), "tp_order_id": "tp-aaa"},
+        {**_open_unprotected_leg("leg-2", 106.0), "tp_order_id": "tp-bbb"},
+    ]
+    result = active_sidecar_tp_order_ids(legs)
+    assert result == ("tp-aaa", "tp-bbb")
+
+
+def test_active_sidecar_tp_order_ids_ignores_closed_missing_and_duplicates() -> None:
+    legs = [
+        {**_open_leg("leg-1", 105.0), "tp_order_id": "tp-aaa"},
+        {**_open_leg("leg-1b", 106.0), "tp_order_id": "tp-aaa"},  # duplicate id
+        {"leg_id": "leg-2", "status": "TP_FILLED", "tp_order_id": "tp-filled"},
+        {"leg_id": "leg-3", "status": "FORCE_CLOSED", "tp_order_id": "tp-force"},
+        {"leg_id": "leg-4", "status": "CANCELLED", "tp_order_id": "tp-canc"},
+        {"leg_id": "leg-5", "status": "UNKNOWN_HALTED", "tp_order_id": "tp-halt"},
+        {**_open_leg("leg-6", 107.0), "tp_order_id": None},
+        {**_open_leg("leg-7", 108.0), "tp_order_id": ""},
+        {**_open_leg("leg-8", 109.0)},  # no tp_order_id key
+    ]
+    result = active_sidecar_tp_order_ids(legs)
+    # Only "tp-aaa" from the two OPEN legs (deduped), all other statuses ignored
+    assert result == ("tp-aaa",)
+
+
+def test_active_sidecar_tp_order_ids_empty_and_no_matches() -> None:
+    assert active_sidecar_tp_order_ids([]) == ()
+    assert active_sidecar_tp_order_ids(
+        [{"leg_id": "x", "status": "TP_FILLED", "tp_order_id": "x"}]
+    ) == ()

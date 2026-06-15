@@ -71,6 +71,25 @@ def classify_sidecar_core_final_exit_risk(
     return SidecarCoreExitRisk(False, "sidecar_tp_reaches_before_or_at_core_exit", ())
 
 
+def active_sidecar_tp_order_ids(sidecar_legs: list[dict[str, Any]]) -> tuple[str, ...]:
+    """Return a deduplicated, order-preserving tuple of tp_order_id strings
+    from every sidecar leg whose status is OPEN or OPEN_UNPROTECTED and
+    whose tp_order_id is present (non-empty, non-None).
+
+    This helper is intentionally pure:
+      - no trader access
+      - no network
+      - no state writes
+      - no strategy dependency
+    """
+    ids: list[str] = []
+    for leg in open_sidecar_legs(sidecar_legs):
+        order_id = leg.get("tp_order_id")
+        if order_id:
+            ids.append(str(order_id))
+    return tuple(dict.fromkeys(ids))
+
+
 def sidecar_core_exit_client_order_id(
     *,
     position_id: str | None,

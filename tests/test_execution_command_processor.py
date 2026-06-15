@@ -6,6 +6,7 @@ import importlib.util
 import sys
 import types
 import unittest
+from dataclasses import replace
 from decimal import Decimal
 from unittest.mock import patch
 
@@ -175,6 +176,7 @@ class FakeTrader:
         self.account_equity_usdt = 1000.0
         self.position_contracts = Decimal("0")
         self.executed: list[int] = []
+        self.executed_intents: list[TradeIntent] = []
         self._next_result: LiveTradeResult | None = None
         self._position: PositionSnapshot = flat_position()
         self._cash_balance: float = 1000.0
@@ -192,6 +194,7 @@ class FakeTrader:
 
     async def execute_intent(self, trade_intent: TradeIntent) -> LiveTradeResult:
         self.executed.append(trade_intent.ts_ms)
+        self.executed_intents.append(trade_intent)
         if self._next_result is not None:
             r = self._next_result
             self._next_result = None
@@ -1288,6 +1291,11 @@ class TestExecutionCommandProcessorWithSidecar(unittest.IsolatedAsyncioTestCase)
 
         # core_tp=105, sidecar leg tp=106 → LONG sidecar tp beyond core → risky
         command = self._unsafe_update_tp_command(ts_ms=5_000, core_tp_price=105.0)
+        # Pre-populate protected_order_ids with "old123" and "manual-protected"
+        # to verify they are preserved alongside the new sidecar TP id.
+        command = replace(command, intent=replace(
+            command.intent, protected_order_ids=("old123", "manual-protected"),
+        ))
 
         result = await processor.process(command)
 
@@ -1303,6 +1311,15 @@ class TestExecutionCommandProcessorWithSidecar(unittest.IsolatedAsyncioTestCase)
         self.assertTrue(str(client_order_id).startswith("SCE"))
         # Assert execute_intent called after realignment
         self.assertGreaterEqual(len(trader.executed), 1)
+        # Assert the executed intent has new sidecar TP in protected_order_ids
+        self.assertGreaterEqual(len(trader.executed_intents), 1)
+        executed_intent = trader.executed_intents[-1]
+        self.assertIn("sidecar-tp-1", executed_intent.protected_order_ids,
+                      "New sidecar TP order_id must be in protected_order_ids")
+        self.assertIn("old123", executed_intent.protected_order_ids,
+                      "Old protected order_ids must be preserved")
+        self.assertIn("manual-protected", executed_intent.protected_order_ids,
+                      "Manual protected order_ids must be preserved")
         # Assert leg updated
         leg = strategy.state.sidecar_legs[0]
         self.assertEqual(leg["tp_price"], 105.0)
@@ -1313,6 +1330,9 @@ class TestExecutionCommandProcessorWithSidecar(unittest.IsolatedAsyncioTestCase)
         realign_events = [e for e in journal.events if e[0] == "SIDECAR_TP_REALIGNED_TO_CORE_EXIT"]
         self.assertEqual(len(realign_events), 1)
         self.assertTrue(realign_events[0][1]["client_order_id"].startswith("SCE"))
+        # Assert SIDECAR_TP_PROTECTED_FOR_CORE_TP_UPDATE event was logged
+        protect_events = [e for e in journal.events if e[0] == "SIDECAR_TP_PROTECTED_FOR_CORE_TP_UPDATE"]
+        self.assertEqual(len(protect_events), 1)
 
     async def test_update_tp_safe_sidecar_does_nothing(self) -> None:
         """Test 9: UPDATE_TP with safe core TP does not touch sidecar TPs."""
@@ -1369,6 +1389,71 @@ class TestExecutionCommandProcessorWithSidecar(unittest.IsolatedAsyncioTestCase)
         # No realignment journal
         realign_events = [e for e in journal.events if e[0] == "SIDECAR_TP_REALIGNED_TO_CORE_EXIT"]
         self.assertEqual(len(realign_events), 0)
+
+    async def test_update_tp_safe_sidecar_protects_existing_sidecar_tp_before_core_execute(self) -> None:
+        """UPDATE_TP with safe sidecar (no realign) still protects existing sidecar TP in protected_order_ids."""
+        strategy = BollCvdShockReclaimStrategy(
+            BollCvdReclaimStrategyConfig(),
+            SimplePositionSizer(SimplePositionSizerConfig()),
+        )
+        strategy.state = StrategyPositionState(
+            side="LONG",
+            layers=1,
+            sidecar_enabled_for_position=True,
+            sidecar_legs=[
+                {
+                    "leg_id": "leg-open-1",
+                    "tp_order_id": "old123",
+                    "tp_price": 106.0,
+                    "contracts": "1",
+                    "qty": 0.1,
+                    "status": "OPEN",
+                    "entry_price": 3000.0,
+                    "side": "LONG",
+                    "layer_index": 1,
+                    "tp_pct": 0.004,
+                    "margin_pct": 0.01,
+                    "layer_multiplier": 1.0,
+                    "position_id": "pos-1",
+                    "created_ts_ms": 1000,
+                    "updated_ts_ms": 1000,
+                },
+            ],
+            breakeven_price=100.0,
+        )
+        execution_state = ExecutionState("pos-safe", 1000.0)
+        trader = self._sidecar_trader()
+        journal = FakeJournal()
+        processor, _, _, _ = make_processor(
+            execution_state=execution_state,
+            strategy=strategy,
+            trader=trader,
+            journal=journal,
+        )
+
+        # core_tp=107, sidecar leg tp=106 → LONG sidecar tp before core → safe
+        command = self._unsafe_update_tp_command(ts_ms=5_000, core_tp_price=107.0)
+        # No pre-existing protected_order_ids
+        command = replace(command, intent=replace(
+            command.intent, protected_order_ids=(),
+        ))
+
+        result = await processor.process(command)
+
+        self.assertIsNotNone(result)
+        # No sidecar cancel/place calls
+        self.assertEqual(len(trader.cancelled_sidecar_tps), 0)
+        self.assertEqual(len(trader.sidecar_tps), 0)
+        # execute_intent called normally
+        self.assertGreaterEqual(len(trader.executed), 1)
+        # No realignment journal
+        realign_events = [e for e in journal.events if e[0] == "SIDECAR_TP_REALIGNED_TO_CORE_EXIT"]
+        self.assertEqual(len(realign_events), 0)
+        # Active sidecar TP "old123" must be in executed intent's protected_order_ids
+        self.assertGreaterEqual(len(trader.executed_intents), 1)
+        executed_intent = trader.executed_intents[-1]
+        self.assertIn("old123", executed_intent.protected_order_ids,
+                      "Existing sidecar TP must be in protected_order_ids even without realign")
 
     async def test_realign_failure_arms_delayed_exit_without_immediate_market_exit(self) -> None:
         """Test 10: realign failure arms delayed exit WITHOUT immediate market_exit call."""

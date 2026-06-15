@@ -3,6 +3,6 @@
 /mnt/
 /.claude/
 /.pytest_cache/
-/.env.okx
+/.env.bak
 /.env.binance
-/.env
+/.env.okx

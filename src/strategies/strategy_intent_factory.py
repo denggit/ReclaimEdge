@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from src.position_management.sidecar.core_exit_safety import active_sidecar_tp_order_ids
 from src.position_management.sidecar.model import trim_sidecar_legs_for_state
 
 if TYPE_CHECKING:
@@ -46,11 +47,12 @@ class StrategyIntentFactory:
         return float(state.core_eth_qty or 0.0)
 
     def protected_order_ids(self) -> tuple[str, ...]:
-        ids: list[str] = []
         max_legs = int(getattr(self.strategy.sizer.config, "sidecar_max_legs", 10) or 10)
-        for leg in trim_sidecar_legs_for_state(self.strategy.state.sidecar_legs, max_legs):
-            if leg.get("status") in {"OPEN", "OPEN_UNPROTECTED"} and leg.get("tp_order_id"):
-                ids.append(str(leg["tp_order_id"]))
+        ids: list[str] = list(
+            active_sidecar_tp_order_ids(
+                trim_sidecar_legs_for_state(self.strategy.state.sidecar_legs, max_legs)
+            )
+        )
         for order_id in (
                 self.strategy.state.near_tp_protective_sl_order_id,
                 self.strategy.state.middle_runner_protective_sl_order_id,
