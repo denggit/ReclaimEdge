@@ -650,7 +650,7 @@ class TestStrategyConfigTpBoll:
 class TestEntryPathTpBoll:
     def test_open_position_long_selects_tp_boll_middle(self):
         """_open_position LONG uses TP_BOLL15 middle for SINGLE TP."""
-        s = _strategy(tp_min_net_profit_pct=0.001)
+        s = _strategy(tp_min_net_profit_pct=0.001, entry_rr_target="FINAL_TP")
         b = _boll_with_tp(middle=100.0, tp_middle=101.0, upper=110.0, tp_upper=108.0)
         s.state.lower_armed = True
         s.state.lower_deep_enough = True
@@ -663,7 +663,7 @@ class TestEntryPathTpBoll:
 
     def test_open_position_short_selects_tp_boll_middle(self):
         """_open_position SHORT uses TP_BOLL15 middle for SINGLE TP."""
-        s = _strategy(tp_min_net_profit_pct=0.001)
+        s = _strategy(tp_min_net_profit_pct=0.001, entry_rr_target="FINAL_TP")
         b = _boll_with_tp(middle=100.0, tp_middle=99.0, lower=90.0, tp_lower=92.0)
         s.state.upper_armed = True
         s.state.upper_deep_enough = True
