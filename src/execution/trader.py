@@ -71,6 +71,12 @@ class TraderRuntimeSettings:
     live_trading: bool = False
     max_live_equity_usdt: float = 30.0
 
+    # -- exchange-agnostic sizing (injected by the exchange adapter) ----------
+    symbol_allowlist: tuple[str, ...] = ("ETH-USDT-SWAP",)
+    contract_multiplier: Decimal = Decimal("0.1")
+    contract_precision: Decimal = Decimal("0.01")
+    min_contracts: Decimal = Decimal("0.01")
+
     @classmethod
     def from_env_compat(cls) -> "TraderRuntimeSettings":
         """Backwards-compatible factory reading legacy env vars.
@@ -107,9 +113,10 @@ class Trader:
             settings = TraderRuntimeSettings.from_env_compat()
 
         self.symbol = settings.symbol
-        if self.symbol not in ("ETH-USDT-SWAP", "ETHUSDT"):
+        if self.symbol not in settings.symbol_allowlist:
             raise RuntimeError(
-                "Live trader only supports ETH-USDT-SWAP / ETHUSDT for now."
+                f"Live trader only supports symbols {settings.symbol_allowlist!r} "
+                f"for this runtime."
             )
 
         self.base_url = settings.base_url
@@ -118,9 +125,9 @@ class Trader:
         self.pos_side_mode = settings.pos_side_mode
         self.live_trading = settings.live_trading
         self.max_live_equity_usdt = settings.max_live_equity_usdt
-        self.contract_multiplier = Decimal("0.1")
-        self.contract_precision = Decimal("0.01")
-        self.min_contracts = Decimal("0.01")
+        self.contract_multiplier = Decimal(str(settings.contract_multiplier))
+        self.contract_precision = Decimal(str(settings.contract_precision))
+        self.min_contracts = Decimal(str(settings.min_contracts))
 
         self._broker_client: Any = None
         self._broker_semantic_executor: Any = None

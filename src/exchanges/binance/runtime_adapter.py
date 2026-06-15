@@ -20,6 +20,7 @@ directly — they go through the generic exchange adapter factory.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from decimal import Decimal
 
 from src.data_feed.binance.market_data_client import BinanceMarketDataClient
 from src.exchanges.binance.credentials import resolve_binance_credentials
@@ -118,6 +119,17 @@ def create_binance_runtime_adapters(
             leverage=str(config.leverage),
             live_trading=True,
             max_live_equity_usdt=float(env.get("MAX_LIVE_EQUITY_USDT", "30")),
+            # Binance quantity is in ETH, not contracts — multiplier is 1.
+            symbol_allowlist=("ETHUSDT",),
+            contract_multiplier=Decimal(
+                env.get("BINANCE_CONTRACT_MULTIPLIER", "1")
+            ),
+            contract_precision=Decimal(
+                env.get("BINANCE_CONTRACT_PRECISION", "0.001")
+            ),
+            min_contracts=Decimal(
+                env.get("BINANCE_MIN_CONTRACTS", "0.001")
+            ),
         )
     )
     trader.bind_trading_client(trading_client)

@@ -18,6 +18,7 @@ Covers:
 
 from __future__ import annotations
 
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -560,3 +561,132 @@ class TestNoBrokerSemanticExecutor:
         trader = adapters.trader
         # Known: returns "okx" even when bound to Binance
         assert trader.broker_exchange_name == "okx"
+
+
+# ======================================================================
+# 9. Binance sizing injected via runtime adapter
+# ======================================================================
+
+
+class TestBinanceSizingInjection:
+    """Binance runtime adapter injects correct sizing into Trader."""
+
+    def test_contract_multiplier_is_1(self) -> None:
+        env = dict(LIVE_PREFLIGHT_PASS_ENV)
+        config = load_unified_runtime_config(env)
+        adapters = create_binance_runtime_adapters(config, env)
+
+        trader = adapters.trader
+        assert trader.contract_multiplier == Decimal("1")
+
+    def test_contract_precision_is_0001(self) -> None:
+        env = dict(LIVE_PREFLIGHT_PASS_ENV)
+        config = load_unified_runtime_config(env)
+        adapters = create_binance_runtime_adapters(config, env)
+
+        trader = adapters.trader
+        assert trader.contract_precision == Decimal("0.001")
+
+    def test_min_contracts_is_0001(self) -> None:
+        env = dict(LIVE_PREFLIGHT_PASS_ENV)
+        config = load_unified_runtime_config(env)
+        adapters = create_binance_runtime_adapters(config, env)
+
+        trader = adapters.trader
+        assert trader.min_contracts == Decimal("0.001")
+
+    def test_eth_qty_to_contracts_is_identity(self) -> None:
+        """Core safety test: Binance quantity = ETH quantity (multiplier 1)."""
+        env = dict(LIVE_PREFLIGHT_PASS_ENV)
+        config = load_unified_runtime_config(env)
+        adapters = create_binance_runtime_adapters(config, env)
+
+        trader = adapters.trader
+        contracts = trader.eth_qty_to_contracts(Decimal("0.05"))
+        assert contracts == Decimal("0.05")
+
+    def test_eth_qty_to_contracts_small(self) -> None:
+        env = dict(LIVE_PREFLIGHT_PASS_ENV)
+        config = load_unified_runtime_config(env)
+        adapters = create_binance_runtime_adapters(config, env)
+
+        trader = adapters.trader
+        contracts = trader.eth_qty_to_contracts(Decimal("0.001"))
+        assert contracts == Decimal("0.001")
+
+
+class TestBinanceSizingEnvOverride:
+    """Binance sizing can be overridden via env variables."""
+
+    def test_contract_precision_override(self) -> None:
+        env = dict(LIVE_PREFLIGHT_PASS_ENV)
+        env["BINANCE_CONTRACT_PRECISION"] = "0.0001"
+        config = load_unified_runtime_config(env)
+        adapters = create_binance_runtime_adapters(config, env)
+
+        trader = adapters.trader
+        assert trader.contract_precision == Decimal("0.0001")
+
+    def test_min_contracts_override(self) -> None:
+        env = dict(LIVE_PREFLIGHT_PASS_ENV)
+        env["BINANCE_MIN_CONTRACTS"] = "0.0001"
+        config = load_unified_runtime_config(env)
+        adapters = create_binance_runtime_adapters(config, env)
+
+        trader = adapters.trader
+        assert trader.min_contracts == Decimal("0.0001")
+
+    def test_contract_multiplier_override(self) -> None:
+        env = dict(LIVE_PREFLIGHT_PASS_ENV)
+        env["BINANCE_CONTRACT_MULTIPLIER"] = "0.5"
+        config = load_unified_runtime_config(env)
+        adapters = create_binance_runtime_adapters(config, env)
+
+        trader = adapters.trader
+        assert trader.contract_multiplier == Decimal("0.5")
+
+    def test_all_sizing_overridden(self) -> None:
+        env = dict(LIVE_PREFLIGHT_PASS_ENV)
+        env["BINANCE_CONTRACT_MULTIPLIER"] = "0.5"
+        env["BINANCE_CONTRACT_PRECISION"] = "0.0001"
+        env["BINANCE_MIN_CONTRACTS"] = "0.0001"
+        config = load_unified_runtime_config(env)
+        adapters = create_binance_runtime_adapters(config, env)
+
+        trader = adapters.trader
+        assert trader.contract_multiplier == Decimal("0.5")
+        assert trader.contract_precision == Decimal("0.0001")
+        assert trader.min_contracts == Decimal("0.0001")
+
+
+# ======================================================================
+# 10. Trader.py source-level: no ETHUSDT or Binance hardcoding
+# ======================================================================
+
+
+class TestTraderPyNoEthUsdtHardcoding:
+    """src/execution/trader.py must not hardcode ETHUSDT or Binance."""
+
+    TRADER_SOURCE = Path("src/execution/trader.py").read_text(encoding="utf-8")
+
+    def test_no_ethusdt_in_trader_py(self) -> None:
+        """trader.py must not contain 'ETHUSDT' outside comments."""
+        for i, line in enumerate(self.TRADER_SOURCE.split("\n"), 1):
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            if "ETHUSDT" in stripped:
+                pytest.fail(
+                    f"trader.py:{i} must not hardcode ETHUSDT: {stripped}"
+                )
+
+    def test_no_binance_in_trader_py(self) -> None:
+        """trader.py must not contain 'Binance' or 'binance' outside comments."""
+        for i, line in enumerate(self.TRADER_SOURCE.split("\n"), 1):
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            if "Binance" in stripped or "binance" in stripped:
+                pytest.fail(
+                    f"trader.py:{i} must not hardcode Binance: {stripped}"
+                )
