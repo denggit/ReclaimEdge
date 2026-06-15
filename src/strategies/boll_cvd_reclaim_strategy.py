@@ -2274,6 +2274,11 @@ class BollCvdReclaimStrategy:
                 else getattr(boll, "tp_lower", None)
             )
             structure_outer_raw = float(boll.upper) if side == "LONG" else float(boll.lower)
+            raw_outer_value = (
+                float(tp_boll_outer_raw)
+                if self._tp_boll_available(boll) and tp_boll_outer_raw is not None
+                else structure_outer_raw
+            )
             logger.warning(
                 "CORE_TP_OUTER_UNPROFITABLE_HALF_MIN_FALLBACK | "
                 "side=%s effective_breakeven=%.4f half_min_profit_pct=%.6f "
@@ -2282,7 +2287,7 @@ class BollCvdReclaimStrategy:
                 effective_be_val,
                 half_min_profit_pct,
                 sel.price,
-                self._format_optional_price(tp_boll_outer_raw),
+                self._format_optional_price(raw_outer_value),
                 self._format_optional_price(tp_boll_outer_raw),
                 structure_outer_raw,
                 boll.candle_ts_ms,

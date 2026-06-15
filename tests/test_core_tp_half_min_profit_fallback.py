@@ -13,6 +13,7 @@ from __future__ import annotations
 from unittest import mock
 
 import pytest
+from _pytest.logging import LogCaptureFixture
 
 from src.monitors.boll_band_breakout_monitor import BollSnapshot
 from src.risk.simple_position_sizer import SimplePositionSizer, SimplePositionSizerConfig
@@ -304,3 +305,84 @@ class TestTpUpdateCoordinatorHalfMinProfit:
         # tp_upper=101 >= 100.4 → TP_BOLL
         assert result.tp_price == 101.0
         assert result.tp_mode == "UPPER"
+
+
+# ── Log field correctness ───────────────────────────────────────────────
+
+class TestHalfMinProfitFallbackLogFields:
+    """Verify raw_outer, tp_boll_outer, structure_outer fields in the warning log."""
+
+    def test_tp_boll_available_raw_outer_equals_tp_boll_outer(
+        self, caplog: LogCaptureFixture,
+    ):
+        """LONG: TP_BOLL available → raw_outer = tp_boll_outer."""
+        s = _strategy()
+        _setup_position_state(s, side="LONG", avg_entry_price=100.0, net_remaining_breakeven_price=100.0)
+        # tp_upper=99 < effective_be=100 → outer at loss → half fallback
+        # tp_middle=99 < required middle=100.4 → middle also fails
+        # structure upper=98 also at loss
+        boll = _boll_with_tp(
+            middle=99.0, upper=98.0, lower=90.0,
+            tp_middle=99.0, tp_upper=99.0, tp_lower=92.0,
+            tp_window=15,
+        )
+        with caplog.at_level("WARNING"):
+            tp_price, tp_src = s._select_valid_tp_outer_with_profit_fallback(
+                "LONG", boll, log_warning=True,
+            )
+        assert tp_src == "TP_OUTER_HALF_MIN_PROFIT_FALLBACK"
+        log_text = caplog.text
+        assert "CORE_TP_OUTER_UNPROFITABLE_HALF_MIN_FALLBACK" in log_text
+        assert "raw_outer=99.0000" in log_text
+        assert "tp_boll_outer=99.0000" in log_text
+        assert "structure_outer=98.0000" in log_text
+
+    def test_tp_boll_unavailable_raw_outer_equals_structure_outer(
+        self, caplog: LogCaptureFixture,
+    ):
+        """LONG: TP_BOLL unavailable → raw_outer = structure_outer."""
+        s = _strategy()
+        _setup_position_state(s, side="LONG", avg_entry_price=100.0, net_remaining_breakeven_price=100.0)
+        # tp_upper/middle/lower all None → TP_BOLL unavailable
+        # tp_middle=None means middle also unavailable → fallback to outer
+        # structure upper=99 < effective_be=100 → outer at loss → half fallback
+        boll = _boll_with_tp(
+            middle=99.0, upper=99.0, lower=90.0,
+            tp_middle=None, tp_upper=None, tp_lower=None,
+            tp_window=None,
+        )
+        with caplog.at_level("WARNING"):
+            tp_price, tp_src = s._select_valid_tp_outer_with_profit_fallback(
+                "LONG", boll, log_warning=True,
+            )
+        assert tp_src == "TP_OUTER_HALF_MIN_PROFIT_FALLBACK"
+        log_text = caplog.text
+        assert "CORE_TP_OUTER_UNPROFITABLE_HALF_MIN_FALLBACK" in log_text
+        assert "raw_outer=99.0000" in log_text
+        assert "tp_boll_outer=-" in log_text
+        assert "structure_outer=99.0000" in log_text
+
+    def test_short_tp_boll_available_raw_outer_equals_tp_boll_outer(
+        self, caplog: LogCaptureFixture,
+    ):
+        """SHORT: TP_BOLL available → raw_outer = tp_boll_outer (lower)."""
+        s = _strategy()
+        _setup_position_state(s, side="SHORT", avg_entry_price=100.0, net_remaining_breakeven_price=100.0)
+        # tp_lower=101 > effective_be=100 → outer at loss → half fallback
+        # tp_middle=101 > required middle=99.6 → middle also fails
+        # structure lower=102 also at loss
+        boll = _boll_with_tp(
+            middle=101.0, upper=110.0, lower=102.0,
+            tp_middle=101.0, tp_upper=108.0, tp_lower=101.0,
+            tp_window=15,
+        )
+        with caplog.at_level("WARNING"):
+            tp_price, tp_src = s._select_valid_tp_outer_with_profit_fallback(
+                "SHORT", boll, log_warning=True,
+            )
+        assert tp_src == "TP_OUTER_HALF_MIN_PROFIT_FALLBACK"
+        log_text = caplog.text
+        assert "CORE_TP_OUTER_UNPROFITABLE_HALF_MIN_FALLBACK" in log_text
+        assert "raw_outer=101.0000" in log_text
+        assert "tp_boll_outer=101.0000" in log_text
+        assert "structure_outer=102.0000" in log_text
