@@ -27,6 +27,11 @@ def _binance_source_text() -> str:
         if path.name not in {
             "signing.py", "client.py", "aiohttp_transport.py",
             "live_preflight.py", "runtime_adapter.py",
+            # New TradingClientPort layer — legitimately imports from
+            # src.execution.trading_client_port (DTOs and Protocol) and
+            # src.exchanges.runtime_config (ExchangeRuntimeConfig).
+            "trading_mappers.py", "trading_client.py", "credentials.py",
+            "private_client.py",
         }
     )
 

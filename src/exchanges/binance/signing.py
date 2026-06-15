@@ -30,7 +30,12 @@ BINANCE_USDM_TESTNET_BASE_URL = "https://demo-fapi.binance.com"
 
 BINANCE_USDM_ORDER_PATH = "/fapi/v1/order"
 BINANCE_USDM_OPEN_ORDERS_PATH = "/fapi/v1/openOrders"
+BINANCE_USDM_ALL_ORDERS_PATH = "/fapi/v1/allOrders"
 BINANCE_USDM_POSITION_RISK_PATH = "/fapi/v2/positionRisk"
+BINANCE_USDM_BALANCE_PATH = "/fapi/v2/balance"
+BINANCE_USDM_LEVERAGE_PATH = "/fapi/v1/leverage"
+BINANCE_USDM_MARGIN_TYPE_PATH = "/fapi/v1/marginType"
+BINANCE_USDM_POSITION_MODE_PATH = "/fapi/v1/positionSide/dual"
 
 
 # ---------------------------------------------------------------------------
@@ -172,7 +177,12 @@ __all__ = [
     "BINANCE_USDM_TESTNET_BASE_URL",
     "BINANCE_USDM_ORDER_PATH",
     "BINANCE_USDM_OPEN_ORDERS_PATH",
+    "BINANCE_USDM_ALL_ORDERS_PATH",
     "BINANCE_USDM_POSITION_RISK_PATH",
+    "BINANCE_USDM_BALANCE_PATH",
+    "BINANCE_USDM_LEVERAGE_PATH",
+    "BINANCE_USDM_MARGIN_TYPE_PATH",
+    "BINANCE_USDM_POSITION_MODE_PATH",
     "BinanceSignedRequest",
     "binance_api_key_headers",
     "build_query_string",

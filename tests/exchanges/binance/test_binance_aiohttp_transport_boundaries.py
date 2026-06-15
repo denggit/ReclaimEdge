@@ -38,8 +38,11 @@ def test_aiohttp_transport_is_not_wired_into_factory_or_live() -> None:
     allowed = {
         "src/exchanges/binance/__init__.py",
         "src/exchanges/binance/aiohttp_transport.py",
+        "src/exchanges/binance/private_client.py",
         "tests/exchanges/binance/test_binance_aiohttp_transport.py",
         "tests/exchanges/binance/test_binance_aiohttp_transport_boundaries.py",
+        "tests/exchanges/binance/test_binance_private_client_signing.py",
+        "tests/exchanges/binance/test_binance_trading_client_port.py",
         # Smoke test script and its tests legitimately reference
         # AiohttpBinanceTransport for real (but opt-in) REST calls.
         "scripts/binance_live_smoke_test.py",
