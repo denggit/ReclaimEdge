@@ -71,7 +71,8 @@ class TestBinanceLiveBlockedUsesPreflight:
             msg = str(exc_info.value)
             assert "Binance live trading runtime is not wired yet" in msg
             assert "blocking_reasons=" in msg
-            assert "binance_live_orders_disabled_by_build" in msg
+            # NOTE: orders_globally_enabled=True now — preflight gates are the
+            # blocking mechanism; the build gate is no longer a blocking reason.
 
     def test_blocked_does_not_instantiate_trader(self) -> None:
         """BINANCE_LIVE_BLOCKED must NOT instantiate Trader."""
@@ -101,40 +102,42 @@ class TestBinanceLiveBlockedUsesPreflight:
 
 
 # ======================================================================
-# All confirmations set still blocked
+# All confirmations set — preflight passes, credential resolution fails fast
 # ======================================================================
 
 
 class TestAllConfirmationsStillBlocked:
-    """Even with all env confirmations, Binance live remains blocked."""
+    """With all env confirmations, preflight passes.Without API credentials, credential resolution fails fast (fast-fail)."""
 
     def test_all_confirmations_still_raises(self) -> None:
-        """All env set correctly but orders_globally_enabled=False still blocks."""
+        """All preflight env set correctly without creds → fast-fail on credentials."""
         env = _binance_all_confirmations_env()
 
         with mock.patch.dict(os.environ, env, clear=True), \
              mock.patch("scripts.run_boll_cvd_live.load_dotenv", return_value=False):
             from scripts.run_boll_cvd_live import main
-            with pytest.raises(RuntimeError) as exc_info:
+            with pytest.raises((RuntimeError, ValueError)) as exc_info:
                 asyncio.run(main())
 
             msg = str(exc_info.value)
-            assert "binance_live_orders_disabled_by_build" in msg
+            # Preflight now passes with orders_globally_enabled=True;
+            # credential resolution fails fast because no API key/secret.
+            assert "API key" in msg or "blocking_reasons=" in msg
 
     def test_all_confirmations_no_trader(self) -> None:
-        """All env confirmations still do NOT instantiate Trader."""
+        """Credential fast-fail means Trader is still never instantiated."""
         env = _binance_all_confirmations_env()
 
         with mock.patch.dict(os.environ, env, clear=True), \
              mock.patch("scripts.run_boll_cvd_live.load_dotenv", return_value=False):
             with mock.patch("scripts.run_boll_cvd_live.Trader") as mock_trader:
                 from scripts.run_boll_cvd_live import main
-                with pytest.raises(RuntimeError):
+                with pytest.raises((RuntimeError, ValueError)):
                     asyncio.run(main())
                 mock_trader.assert_not_called()
 
     def test_all_confirmations_no_execution_worker(self) -> None:
-        """All env confirmations still do NOT call execution_worker."""
+        """Credential fast-fail means execution_worker is still never called."""
         env = _binance_all_confirmations_env()
 
         with mock.patch.dict(os.environ, env, clear=True), \
@@ -143,7 +146,7 @@ class TestAllConfirmationsStillBlocked:
                 "scripts.run_boll_cvd_live.execution_worker_module"
             ) as mock_ew:
                 from scripts.run_boll_cvd_live import main
-                with pytest.raises(RuntimeError):
+                with pytest.raises((RuntimeError, ValueError)):
                     asyncio.run(main())
                 mock_ew.execution_worker.assert_not_called()
 
@@ -151,7 +154,8 @@ class TestAllConfirmationsStillBlocked:
         """All confirmations + EXCHANGE=binance does NOT enter OKX path.
 
         live_trading_enabled() is called before create_runtime_bundle(),
-        which then handles the Binance block internally.
+        which then dispatches to Binance (blocked at preflight or fast-fail
+        at credentials).
         """
         env = _binance_all_confirmations_env()
 
@@ -162,7 +166,7 @@ class TestAllConfirmationsStillBlocked:
             ) as mock_lch:
                 mock_lch.live_trading_enabled.return_value = True
                 from scripts.run_boll_cvd_live import main
-                with pytest.raises(RuntimeError):
+                with pytest.raises((RuntimeError, ValueError)):
                     asyncio.run(main())
                 # live_trading_enabled() IS called (it gates before bundle creation)
                 mock_lch.live_trading_enabled.assert_called()

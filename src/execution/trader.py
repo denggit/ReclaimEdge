@@ -107,8 +107,10 @@ class Trader:
             settings = TraderRuntimeSettings.from_env_compat()
 
         self.symbol = settings.symbol
-        if self.symbol != "ETH-USDT-SWAP":
-            raise RuntimeError("Live trader only supports ETH-USDT-SWAP for now.")
+        if self.symbol not in ("ETH-USDT-SWAP", "ETHUSDT"):
+            raise RuntimeError(
+                "Live trader only supports ETH-USDT-SWAP / ETHUSDT for now."
+            )
 
         self.base_url = settings.base_url
         self.td_mode = settings.td_mode
