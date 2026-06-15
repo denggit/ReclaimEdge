@@ -91,9 +91,6 @@ def test_binance_adapter_shell_not_wired_into_runtime() -> None:
         # Live trader protocol test references BinanceBrokerClient
         # only in a "must not import" safety assertion.
         "tests/execution/test_live_trader_protocol.py",
-        # Live trader factory test references BinanceBrokerClient
-        # only in a "must not import" safety assertion.
-        "tests/execution/test_live_trader_factory.py",
         # Boundary tests reference BinanceBrokerClient in
         # forbidden-import assertion checks — not real wiring.
         "tests/exchanges/okx/test_okx_runtime_adapter_boundaries.py",

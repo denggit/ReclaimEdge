@@ -179,3 +179,59 @@ class TestGenericAdapterFactoryBoundaries:
         assert "from src.data_feed.okx_market_data_client" not in GENERIC_FACTORY_SOURCE, (
             "generic factory must NOT import OkxMarketDataClient"
         )
+
+
+class TestExecutionLayerNoExchangeRouting:
+    """The execution layer must NOT have exchange-specific live trader routing.
+
+    The legacy live_trader_factory.py has been deleted.  The only supported
+    live runtime entry point is src.live.runtime_factory.create_runtime_bundle().
+    """
+
+    # These symbols must NOT appear in any execution layer file
+    # (except the OKX adapter files which live in src/execution/ for now).
+    FORBIDDEN_IN_EXECUTION = [
+        "create_live_trader",
+        "live_trader_factory",
+        'exchange == "okx"',
+        'exchange == "binance"',
+        "src.exchanges.binance.live_preflight",
+        "src.exchanges.okx.runtime_adapter",
+        "src.exchanges.binance.runtime_adapter",
+    ]
+
+    # Allowed adapter files in execution/ that may reference exchange internals
+    EXECUTION_ALLOWED_ADAPTERS = {
+        "src/execution/okx_trading_client.py",
+        "src/execution/okx_private_client.py",
+        "src/execution/trader.py",
+    }
+
+    def _execution_source_files(self):
+        """Yield (rel_path, text) for all .py files in src/execution/."""
+        exec_dir = ROOT / "src" / "execution"
+        for path in sorted(exec_dir.rglob("*.py")):
+            rel = path.relative_to(ROOT).as_posix()
+            if path.name in self.EXECUTION_ALLOWED_ADAPTERS or \
+               rel in self.EXECUTION_ALLOWED_ADAPTERS:
+                continue
+            yield rel, path.read_text(encoding="utf-8")
+
+    def test_execution_no_exchange_routing(self) -> None:
+        violations = []
+        for rel_path, text in self._execution_source_files():
+            for token in self.FORBIDDEN_IN_EXECUTION:
+                if token in text:
+                    for i, line in enumerate(text.split("\n"), 1):
+                        if token in line and not line.strip().startswith("#"):
+                            violations.append(f"{rel_path}:{i}: {line.strip()}")
+        assert not violations, (
+            "execution layer must NOT have exchange-specific routing:\n"
+            + "\n".join(violations)
+        )
+
+    def test_legacy_factory_is_deleted(self) -> None:
+        legacy_path = ROOT / "src" / "execution" / "live_trader_factory.py"
+        assert not legacy_path.exists(), (
+            "live_trader_factory.py must be deleted — use create_runtime_bundle() instead"
+        )

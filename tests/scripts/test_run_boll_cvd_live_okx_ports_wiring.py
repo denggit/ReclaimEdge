@@ -41,9 +41,10 @@ class TestRuntimeBundleImports:
         """OkxMarketDataClient should NOT be directly imported — it comes from the bundle."""
         assert "from src.data_feed.okx_market_data_client import OkxMarketDataClient" not in _SOURCE_TEXT
 
-    def test_no_create_live_trader_import(self) -> None:
-        """create_live_trader should NOT be imported — replaced by create_runtime_bundle."""
-        assert "from src.execution.live_trader_factory import create_live_trader" not in _SOURCE_TEXT
+    def test_no_legacy_live_trader_factory(self) -> None:
+        """Legacy live_trader_factory is deleted — only create_runtime_bundle is supported."""
+        assert "live_trader_factory" not in _SOURCE_TEXT
+        assert "create_live_trader" not in _SOURCE_TEXT
 
 
 # ======================================================================
