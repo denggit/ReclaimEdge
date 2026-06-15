@@ -351,9 +351,9 @@ def test_no_position_side_in_algo_params() -> None:
 
 
 def test_smoke_test_contains_preflight_import() -> None:
-    """Script must import from src.live.binance_live_preflight."""
+    """Script must import from src.exchanges.binance.live_preflight."""
     text = _read_smoke_test_text()
-    assert "src.live.binance_live_preflight" in text
+    assert "src.exchanges.binance.live_preflight" in text
 
 
 def test_smoke_test_contains_live_confirmation() -> None:

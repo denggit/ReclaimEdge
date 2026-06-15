@@ -18,7 +18,7 @@ from unittest import mock
 
 import pytest
 
-from src.live.binance_live_preflight import BINANCE_LIVE_CONFIRMATION_PHRASE
+from src.exchanges.binance.live_preflight import BINANCE_LIVE_CONFIRMATION_PHRASE
 
 
 # ======================================================================
@@ -185,7 +185,7 @@ class TestOkxPathDoesNotCallPreflight:
         with mock.patch.dict(os.environ, env, clear=True), \
              mock.patch("scripts.run_boll_cvd_live.load_dotenv", return_value=False):
             with mock.patch(
-                "src.live.binance_live_preflight.build_binance_live_preflight_report"
+                "src.exchanges.binance.live_preflight.build_binance_live_preflight_report"
             ) as mock_build:
                 from scripts.run_boll_cvd_live import main
                 with pytest.raises(RuntimeError, match="LIVE_TRADING is not true"):
@@ -202,7 +202,7 @@ class TestOkxPathDoesNotCallPreflight:
         with mock.patch.dict(os.environ, env, clear=True), \
              mock.patch("scripts.run_boll_cvd_live.load_dotenv", return_value=False):
             with mock.patch(
-                "src.live.binance_live_preflight.build_binance_live_preflight_report"
+                "src.exchanges.binance.live_preflight.build_binance_live_preflight_report"
             ) as mock_build:
                 from scripts.run_boll_cvd_live import main
                 with pytest.raises(RuntimeError, match="LIVE_TRADING is not true"):

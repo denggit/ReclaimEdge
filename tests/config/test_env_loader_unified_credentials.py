@@ -1,19 +1,23 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-Unified exchange credential loading tests for config/env_loader.py.
+Tests for config/env_loader.py — environment variable loading only.
+
+config/env_loader.py no longer reads any exchange-specific credential
+variables (OKX_API_KEY, OKX_SECRET_KEY, etc.).  Legacy OKX credential
+fallback now lives exclusively in src/exchanges/okx/credentials.py.
 
 Covers:
-    Case A — EXCHANGE_API_* takes priority over OKX_* when both are present.
-    Case B — Legacy OKX_* fallback when EXCHANGE_API_* is absent.
-    Case C — OKX_PASSPHRASE (correct spelling) fallback when OKX_PASSPHASE is absent.
-    Case D — os.environ overrides .env file values for the same key.
-    Case E — OKX_API_SECRET as additional secret_key fallback.
+    - load_env_config() reads .env and merges os.environ
+    - get_email_config() returns expected keys
+    - EMAIL_CONFIG global is a dict
+    - No exchange credential vars in env_loader source
 """
 
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from unittest.mock import mock_open, patch
 
 import pytest
@@ -21,174 +25,62 @@ import pytest
 import config.env_loader
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Case A — Unified EXCHANGE_API_* takes priority
-# ══════════════════════════════════════════════════════════════════════════════
+ROOT = Path(__file__).resolve().parents[2]
+ENV_LOADER_PATH = ROOT / "config" / "env_loader.py"
+ENV_LOADER_SOURCE = ENV_LOADER_PATH.read_text(encoding="utf-8")
+
+# Legacy OKX credential vars that must NOT appear in env_loader.py
+FORBIDDEN_EXCHANGE_CREDENTIAL_VARS = [
+    "OKX_API_KEY",
+    "OKX_SECRET_KEY",
+    "OKX_API_SECRET",
+    "OKX_PASSPHASE",
+    "OKX_PASSPHRASE",
+    "BINANCE_API_KEY",
+    "BINANCE_SECRET",
+]
 
 
-class TestUnifiedCredentialsPriority:
-    """When both unified and legacy vars are set, unified wins."""
+class TestEnvLoaderNoExchangeCredentials:
+    """config/env_loader.py must NOT read exchange-specific credential vars."""
 
-    UNIFIED_CONFIG = {
-        "EXCHANGE_API_KEY": "unified-key",
-        "EXCHANGE_API_SECRET": "unified-secret",
-        "EXCHANGE_API_PASSPHRASE": "unified-pass",
-        "OKX_API_KEY": "legacy-key",
-        "OKX_SECRET_KEY": "legacy-secret",
-        "OKX_PASSPHASE": "legacy-pass",
-    }
-
-    def test_api_key_returns_unified(self, monkeypatch) -> None:
-        monkeypatch.setattr(
-            config.env_loader, "load_env_config",
-            lambda: dict(self.UNIFIED_CONFIG),
+    def test_no_okx_legacy_credential_vars_in_source(self) -> None:
+        violations = []
+        for var in FORBIDDEN_EXCHANGE_CREDENTIAL_VARS:
+            for i, line in enumerate(ENV_LOADER_SOURCE.split("\n"), 1):
+                if var in line and not line.strip().startswith("#"):
+                    violations.append(f"config/env_loader.py:{i}: {line.strip()}")
+        assert not violations, (
+            "config/env_loader.py must NOT contain exchange credential vars:\n"
+            + "\n".join(violations)
         )
-        result = config.env_loader.get_okx_config()
-        assert result["api_key"] == "unified-key"
 
-    def test_secret_key_returns_unified(self, monkeypatch) -> None:
-        monkeypatch.setattr(
-            config.env_loader, "load_env_config",
-            lambda: dict(self.UNIFIED_CONFIG),
+    def test_no_get_okx_config_function(self) -> None:
+        assert "def get_okx_config" not in ENV_LOADER_SOURCE, (
+            "config/env_loader.py must NOT define get_okx_config()"
         )
-        result = config.env_loader.get_okx_config()
-        assert result["secret_key"] == "unified-secret"
 
-    def test_passphrase_returns_unified(self, monkeypatch) -> None:
-        monkeypatch.setattr(
-            config.env_loader, "load_env_config",
-            lambda: dict(self.UNIFIED_CONFIG),
+    def test_no_okx_config_global(self) -> None:
+        assert "OKX_CONFIG" not in ENV_LOADER_SOURCE, (
+            "config/env_loader.py must NOT have OKX_CONFIG global"
         )
-        result = config.env_loader.get_okx_config()
-        assert result["passphrase"] == "unified-pass"
-
-    def test_unified_wins_all_three_fields(self, monkeypatch) -> None:
-        monkeypatch.setattr(
-            config.env_loader, "load_env_config",
-            lambda: dict(self.UNIFIED_CONFIG),
-        )
-        result = config.env_loader.get_okx_config()
-        assert result == {
-            "api_key": "unified-key",
-            "secret_key": "unified-secret",
-            "passphrase": "unified-pass",
-        }
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Case B — Legacy fallback when EXCHANGE_API_* is absent
-# ══════════════════════════════════════════════════════════════════════════════
-
-
-class TestLegacyFallback:
-    """When only legacy OKX_* vars are set, they are used."""
-
-    LEGACY_CONFIG = {
-        "OKX_API_KEY": "legacy-key",
-        "OKX_SECRET_KEY": "legacy-secret",
-        "OKX_PASSPHASE": "legacy-pass",
-    }
-
-    def test_api_key_falls_back_to_okx_api_key(self, monkeypatch) -> None:
-        monkeypatch.setattr(
-            config.env_loader, "load_env_config",
-            lambda: dict(self.LEGACY_CONFIG),
-        )
-        result = config.env_loader.get_okx_config()
-        assert result["api_key"] == "legacy-key"
-
-    def test_secret_key_falls_back_to_okx_secret_key(self, monkeypatch) -> None:
-        monkeypatch.setattr(
-            config.env_loader, "load_env_config",
-            lambda: dict(self.LEGACY_CONFIG),
-        )
-        result = config.env_loader.get_okx_config()
-        assert result["secret_key"] == "legacy-secret"
-
-    def test_passphrase_falls_back_to_okx_passphase(self, monkeypatch) -> None:
-        monkeypatch.setattr(
-            config.env_loader, "load_env_config",
-            lambda: dict(self.LEGACY_CONFIG),
-        )
-        result = config.env_loader.get_okx_config()
-        assert result["passphrase"] == "legacy-pass"
-
-    def test_empty_when_no_vars_set(self, monkeypatch) -> None:
-        monkeypatch.setattr(
-            config.env_loader, "load_env_config", lambda: {},
-        )
-        result = config.env_loader.get_okx_config()
-        assert result["api_key"] == ""
-        assert result["secret_key"] == ""
-        assert result["passphrase"] == ""
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Case C — OKX_PASSPHRASE (correct spelling) fallback
-# ══════════════════════════════════════════════════════════════════════════════
-
-
-class TestCorrectSpellingFallback:
-    """OKX_PASSPHRASE (correct spelling) is a fallback for passphrase."""
-
-    CORRECT_SPELLING_CONFIG = {
-        "OKX_API_KEY": "legacy-key",
-        "OKX_SECRET_KEY": "legacy-secret",
-        "OKX_PASSPHRASE": "legacy-pass-correct",
-    }
-
-    def test_passphrase_reads_okx_passphrase_correct_spelling(self, monkeypatch) -> None:
-        monkeypatch.setattr(
-            config.env_loader, "load_env_config",
-            lambda: dict(self.CORRECT_SPELLING_CONFIG),
-        )
-        result = config.env_loader.get_okx_config()
-        assert result["passphrase"] == "legacy-pass-correct"
-
-    def test_okx_passphase_misspelling_has_higher_priority_than_correct(self, monkeypatch) -> None:
-        """When both misspelling and correct spelling are set, misspelling wins
-        (it is checked first in the fallback chain)."""
-        both_config = {
-            "OKX_API_KEY": "k",
-            "OKX_SECRET_KEY": "s",
-            "OKX_PASSPHASE": "misspelled",
-            "OKX_PASSPHRASE": "correct-spelling",
-        }
-        monkeypatch.setattr(
-            config.env_loader, "load_env_config",
-            lambda: dict(both_config),
-        )
-        result = config.env_loader.get_okx_config()
-        assert result["passphrase"] == "misspelled"
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Case D — os.environ overrides .env file values
-# ══════════════════════════════════════════════════════════════════════════════
-
-
-class TestOsEnvironOverrideDotEnv:
-    """os.environ values override .env file values for the same key."""
+class TestLoadEnvConfig:
+    """load_env_config() reads .env and merges os.environ."""
 
     def test_os_environ_overrides_dotenv(self, monkeypatch) -> None:
-        """Simulate .env file containing KEY_A=from-dotenv, with os.environ
-        also setting KEY_A=from-environ. The result should be from-environ."""
         dotenv_content = "KEY_A=from-dotenv\nKEY_B=from-dotenv-b\n"
-
-        # Test load_env_config in isolation: monkeypatch os.path.exists and open,
-        # then verify os.environ overrides .env.
         monkeypatch.setattr(os.path, "exists", lambda _path: True)
         m_open = mock_open(read_data=dotenv_content)
         monkeypatch.setattr("builtins.open", m_open)
         monkeypatch.setitem(os.environ, "KEY_A", "from-environ")
 
-        # load_env_config reads the (mocked) .env then merges os.environ
         result = config.env_loader.load_env_config()
         assert result["KEY_A"] == "from-environ"
         assert result["KEY_B"] == "from-dotenv-b"
 
     def test_exchange_api_key_env_overrides_dotenv(self, monkeypatch) -> None:
-        """Unified credential set via os.environ should override .env file."""
         dotenv_content = (
             "EXCHANGE_API_KEY=from-dotenv\n"
             "EXCHANGE_API_SECRET=from-dotenv\n"
@@ -197,7 +89,6 @@ class TestOsEnvironOverrideDotEnv:
         monkeypatch.setattr(os.path, "exists", lambda _path: True)
         m_open = mock_open(read_data=dotenv_content)
         monkeypatch.setattr("builtins.open", m_open)
-
         monkeypatch.setitem(os.environ, "EXCHANGE_API_KEY", "from-shell-env")
         monkeypatch.setitem(os.environ, "EXCHANGE_API_SECRET", "from-shell-env")
         monkeypatch.setitem(os.environ, "EXCHANGE_API_PASSPHRASE", "from-shell-env")
@@ -208,45 +99,36 @@ class TestOsEnvironOverrideDotEnv:
         assert result["EXCHANGE_API_PASSPHRASE"] == "from-shell-env"
 
     def test_os_environ_only_no_dotenv(self, monkeypatch) -> None:
-        """When no .env file exists, os.environ values are still loaded."""
         monkeypatch.setattr(os.path, "exists", lambda _path: False)
         monkeypatch.setitem(os.environ, "EXCHANGE_API_KEY", "env-only-key")
-
         result = config.env_loader.load_env_config()
         assert result["EXCHANGE_API_KEY"] == "env-only-key"
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Case E — OKX_API_SECRET fallback (OKX_SECRET_KEY > OKX_API_SECRET)
-# ══════════════════════════════════════════════════════════════════════════════
+class TestEmailConfig:
+    """get_email_config() and EMAIL_CONFIG are unchanged."""
+
+    def test_email_config_is_dict(self) -> None:
+        assert isinstance(config.env_loader.EMAIL_CONFIG, dict)
+
+    def test_get_email_config_has_expected_keys(self) -> None:
+        result = config.env_loader.get_email_config()
+        for key in ("sender", "password", "receiver"):
+            assert key in result, f"get_email_config missing key {key!r}"
+
+    def test_get_email_config_does_not_read_exchange_api_keys(self) -> None:
+        """get_email_config must not reference exchange API key vars."""
+        email_func_text = _extract_function_source(ENV_LOADER_SOURCE, "get_email_config")
+        for var in ("EXCHANGE_API_KEY", "OKX_API_KEY"):
+            assert var not in email_func_text, (
+                f"get_email_config must NOT reference {var}"
+            )
 
 
-class TestSecretKeyFallbackChain:
-    """EXCHANGE_API_SECRET > OKX_SECRET_KEY > OKX_API_SECRET > ''"""
-
-    def test_okx_api_secret_fallback(self, monkeypatch) -> None:
-        """When only OKX_API_SECRET is set, it is used for secret_key."""
-        config_data = {
-            "OKX_API_KEY": "k",
-            "OKX_API_SECRET": "legacy-api-secret",
-        }
-        monkeypatch.setattr(
-            config.env_loader, "load_env_config",
-            lambda: dict(config_data),
-        )
-        result = config.env_loader.get_okx_config()
-        assert result["secret_key"] == "legacy-api-secret"
-
-    def test_okx_secret_key_priority_over_okx_api_secret(self, monkeypatch) -> None:
-        """OKX_SECRET_KEY > OKX_API_SECRET in the fallback chain."""
-        config_data = {
-            "OKX_API_KEY": "k",
-            "OKX_SECRET_KEY": "primary-legacy-secret",
-            "OKX_API_SECRET": "secondary-legacy-secret",
-        }
-        monkeypatch.setattr(
-            config.env_loader, "load_env_config",
-            lambda: dict(config_data),
-        )
-        result = config.env_loader.get_okx_config()
-        assert result["secret_key"] == "primary-legacy-secret"
+def _extract_function_source(source: str, name: str) -> str:
+    import ast
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            return ast.get_source_segment(source, node) or ""
+    return ""

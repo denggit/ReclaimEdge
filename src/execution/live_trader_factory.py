@@ -39,7 +39,7 @@ def create_live_trader(
         return Trader()
 
     if exchange == "binance":
-        from src.live.binance_live_preflight import (
+        from src.exchanges.binance.live_preflight import (
             build_binance_live_preflight_report,
             format_binance_live_blocked_message,
         )

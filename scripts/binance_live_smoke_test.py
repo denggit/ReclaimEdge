@@ -117,7 +117,7 @@ from src.exchanges.models import (
     BrokerQuantityUnit,
     ExchangeName,
 )
-from src.live.binance_live_preflight import (
+from src.exchanges.binance.live_preflight import (
     BINANCE_LIVE_HARD_MAX_ORDER_NOTIONAL_USDT,
     BINANCE_LIVE_HARD_MAX_POSITION_NOTIONAL_USDT,
     BINANCE_LIVE_HARD_MAX_LEVERAGE,
@@ -1653,7 +1653,7 @@ async def main() -> int:
     )
 
     # --- notional cap enforcement (no network) ---
-    from src.live.binance_live_preflight import load_binance_live_preflight_config
+    from src.exchanges.binance.live_preflight import load_binance_live_preflight_config
     preflight_cfg = load_binance_live_preflight_config(os.environ)
     preflight_max_order = (
         preflight_cfg.max_order_notional_usdt

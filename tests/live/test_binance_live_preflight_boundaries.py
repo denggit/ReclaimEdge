@@ -22,8 +22,9 @@ import pytest
 _PREFLIGHT_PATH = (
     Path(__file__).resolve().parents[2]
     / "src"
-    / "live"
-    / "binance_live_preflight.py"
+    / "exchanges"
+    / "binance"
+    / "live_preflight.py"
 )
 
 
@@ -62,16 +63,13 @@ class TestForbiddenImports:
         text = _read_preflight_text()
         assert "src.strategies" not in text
 
-    def test_does_not_import_src_exchanges_except_re_export(self) -> None:
-        """The re-export wrapper may import from src.exchanges.binance.live_preflight
-        (the canonical location), but must NOT import other exchange adapter internals."""
+    def test_does_not_import_exchange_adapter_internals(self) -> None:
+        """The canonical preflight module must NOT import exchange adapter internals
+        (broker client, semantic executor, or OKX paths)."""
         text = _read_preflight_text()
-        # Only the re-export import is allowed; other exchange paths are forbidden.
-        assert "src.exchanges.binance.live_preflight" in text, (
-            "preflight wrapper must re-export from src.exchanges.binance.live_preflight"
-        )
         assert "src.exchanges.binance.client" not in text
         assert "src.exchanges.binance.semantic_executor" not in text
+        assert "src.exchanges.binance.runtime_adapter" not in text
         assert "src.exchanges.okx" not in text
 
     def test_does_not_import_binance_client(self) -> None:

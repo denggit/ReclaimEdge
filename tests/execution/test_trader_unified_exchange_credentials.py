@@ -1,74 +1,191 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-Tests confirming that the OKX runtime factory correctly loads OKX credentials
-from unified EXCHANGE_API_* env vars (with legacy OKX_* fallback).
+Tests confirming that OKX credentials are resolved correctly through
+the OKX adapter credential resolver (src/exchanges/okx/credentials.py).
 
-The credential validation was moved from Trader.__init__ to
-runtime_factory._create_okx_bundle().  This test verifies the credential
-loading layer and audits the error message in runtime_factory.py source.
+Legacy OKX credential fallback has been moved out of config/env_loader.py
+and into the OKX adapter layer.  The unified EXCHANGE_API_* vars are read
+by load_unified_runtime_config(); legacy OKX_* fallback is handled only by
+resolve_okx_credentials() in the OKX adapter.
 """
 
 from __future__ import annotations
 
 import ast
-import importlib
 from pathlib import Path
 
 import pytest
 
-import config.env_loader
+from src.exchanges.okx.credentials import resolve_okx_credentials
+from src.exchanges.runtime_config import ExchangeRuntimeConfig, ExchangeName
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Source-level boundary checks — runtime_factory.py error message
-# ══════════════════════════════════════════════════════════════════════════════
+ROOT = Path(__file__).resolve().parents[2]
+RUNTIME_FACTORY_PATH = ROOT / "src" / "live" / "runtime_factory.py"
+OKX_CREDENTIALS_PATH = ROOT / "src" / "exchanges" / "okx" / "credentials.py"
+RUNTIME_CONFIG_PATH = ROOT / "src" / "exchanges" / "runtime_config.py"
+ENV_LOADER_PATH = ROOT / "config" / "env_loader.py"
 
-
-RUNTIME_FACTORY_PATH = Path(__file__).resolve().parents[2] / "src" / "live" / "runtime_factory.py"
-OKX_RUNTIME_ADAPTER_PATH = (
-    Path(__file__).resolve().parents[2] / "src" / "exchanges" / "okx" / "runtime_adapter.py"
-)
-OKX_RUNTIME_ADAPTER_SOURCE = OKX_RUNTIME_ADAPTER_PATH.read_text(encoding="utf-8")
 RUNTIME_FACTORY_SOURCE = RUNTIME_FACTORY_PATH.read_text(encoding="utf-8")
+OKX_CREDENTIALS_SOURCE = OKX_CREDENTIALS_PATH.read_text(encoding="utf-8")
+RUNTIME_CONFIG_SOURCE = RUNTIME_CONFIG_PATH.read_text(encoding="utf-8")
+ENV_LOADER_SOURCE = ENV_LOADER_PATH.read_text(encoding="utf-8")
 
 
-class TestTraderErrorMessageContainsUnifiedVarNames:
-    """The OKX runtime_adapter ValueError message must mention both unified and legacy vars."""
+def _make_config(api_key="", api_secret="", api_passphrase=""):
+    """Build a minimal ExchangeRuntimeConfig for testing."""
+    return ExchangeRuntimeConfig(
+        exchange=ExchangeName.OKX,
+        trade_asset="ETH",
+        quote_asset="USDT",
+        market_type="PERPETUAL",
+        api_key=api_key,
+        api_secret=api_secret,
+        api_passphrase=api_passphrase,
+    )
 
-    def test_error_message_contains_exchange_api_key(self) -> None:
-        assert "EXCHANGE_API_KEY" in OKX_RUNTIME_ADAPTER_SOURCE, (
-            "okx runtime_adapter error message must mention EXCHANGE_API_KEY"
+
+# ══════════════════════════════════════════════════════════════════════════════
+# resolve_okx_credentials() functional tests
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestResolveOkxCredentials:
+    """resolve_okx_credentials() correctly applies unified > legacy priority."""
+
+    def test_unified_credentials_are_used(self) -> None:
+        config = _make_config(
+            api_key="u-key", api_secret="u-secret", api_passphrase="u-pass"
+        )
+        api_key, api_secret, api_passphrase = resolve_okx_credentials(config, {})
+        assert api_key == "u-key"
+        assert api_secret == "u-secret"
+        assert api_passphrase == "u-pass"
+
+    def test_unified_over_legacy_priority(self) -> None:
+        config = _make_config(
+            api_key="u-key", api_secret="u-secret", api_passphrase="u-pass"
+        )
+        env = {
+            "OKX_API_KEY": "l-key",
+            "OKX_SECRET_KEY": "l-secret",
+            "OKX_PASSPHASE": "l-pass",
+        }
+        api_key, api_secret, api_passphrase = resolve_okx_credentials(config, env)
+        assert api_key == "u-key"
+        assert api_secret == "u-secret"
+        assert api_passphrase == "u-pass"
+
+    def test_legacy_api_key_fallback(self) -> None:
+        config = _make_config()
+        env = {"OKX_API_KEY": "legacy-key"}
+        api_key, _, _ = resolve_okx_credentials(config, env)
+        assert api_key == "legacy-key"
+
+    def test_legacy_secret_key_fallback(self) -> None:
+        config = _make_config()
+        env = {"OKX_SECRET_KEY": "legacy-secret"}
+        _, api_secret, _ = resolve_okx_credentials(config, env)
+        assert api_secret == "legacy-secret"
+
+    def test_legacy_api_secret_fallback(self) -> None:
+        """OKX_API_SECRET is a fallback for secret_key."""
+        config = _make_config()
+        env = {
+            "OKX_API_KEY": "k",
+            "OKX_API_SECRET": "legacy-api-secret",
+        }
+        _, api_secret, _ = resolve_okx_credentials(config, env)
+        assert api_secret == "legacy-api-secret"
+
+    def test_okx_secret_key_over_api_secret(self) -> None:
+        """OKX_SECRET_KEY > OKX_API_SECRET in the fallback chain."""
+        config = _make_config()
+        env = {
+            "OKX_API_KEY": "k",
+            "OKX_SECRET_KEY": "primary-legacy-secret",
+            "OKX_API_SECRET": "secondary-legacy-secret",
+        }
+        _, api_secret, _ = resolve_okx_credentials(config, env)
+        assert api_secret == "primary-legacy-secret"
+
+    def test_legacy_passphrase_fallback(self) -> None:
+        config = _make_config()
+        env = {
+            "OKX_API_KEY": "k",
+            "OKX_SECRET_KEY": "s",
+            "OKX_PASSPHASE": "legacy-pass",
+        }
+        _, _, api_passphrase = resolve_okx_credentials(config, env)
+        assert api_passphrase == "legacy-pass"
+
+    def test_passphrase_correct_spelling_fallback(self) -> None:
+        """OKX_PASSPHRASE (correct spelling) is a fallback for passphrase."""
+        config = _make_config()
+        env = {
+            "OKX_API_KEY": "k",
+            "OKX_SECRET_KEY": "s",
+            "OKX_PASSPHRASE": "legacy-pass-correct",
+        }
+        _, _, api_passphrase = resolve_okx_credentials(config, env)
+        assert api_passphrase == "legacy-pass-correct"
+
+    def test_passphase_misspelling_over_correct(self) -> None:
+        """OKX_PASSPHASE (misspelling) checked before OKX_PASSPHRASE (correct)."""
+        config = _make_config()
+        env = {
+            "OKX_API_KEY": "k",
+            "OKX_SECRET_KEY": "s",
+            "OKX_PASSPHASE": "misspelled",
+            "OKX_PASSPHRASE": "correct-spelling",
+        }
+        _, _, api_passphrase = resolve_okx_credentials(config, env)
+        assert api_passphrase == "misspelled"
+
+    def test_empty_credentials_when_nothing_set(self) -> None:
+        config = _make_config()
+        api_key, api_secret, api_passphrase = resolve_okx_credentials(config, {})
+        assert api_key == ""
+        assert api_secret == ""
+        assert api_passphrase == ""
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Source-level boundary checks — credentials live in OKX adapter only
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestCredentialsOnlyInOkxAdapter:
+    """Legacy OKX credential fallback must ONLY exist in OKX adapter layer."""
+
+    def test_okx_credentials_has_legacy_fallback(self) -> None:
+        """resolve_okx_credentials reads legacy OKX_* env vars."""
+        assert "OKX_API_KEY" in OKX_CREDENTIALS_SOURCE, (
+            "credentials.py must handle legacy OKX_API_KEY fallback"
+        )
+        assert "OKX_SECRET_KEY" in OKX_CREDENTIALS_SOURCE, (
+            "credentials.py must handle legacy OKX_SECRET_KEY fallback"
         )
 
-    def test_error_message_contains_exchange_api_secret(self) -> None:
-        assert "EXCHANGE_API_SECRET" in OKX_RUNTIME_ADAPTER_SOURCE, (
-            "okx runtime_adapter error message must mention EXCHANGE_API_SECRET"
-        )
+    def test_runtime_config_no_legacy_credential_reading(self) -> None:
+        """runtime_config.py must NOT read legacy OKX credential vars."""
+        for var in ("OKX_API_KEY", "OKX_SECRET_KEY", "OKX_API_SECRET",
+                     "OKX_PASSPHASE", "OKX_PASSPHRASE"):
+            assert f'values.get("{var}"' not in RUNTIME_CONFIG_SOURCE, (
+                f"runtime_config.py must NOT read {var}"
+            )
 
-    def test_error_message_contains_exchange_api_passphrase(self) -> None:
-        assert "EXCHANGE_API_PASSPHRASE" in OKX_RUNTIME_ADAPTER_SOURCE, (
-            "okx runtime_adapter error message must mention EXCHANGE_API_PASSPHRASE"
-        )
-
-    def test_error_message_contains_legacy_okx_api_key(self) -> None:
-        assert "OKX_API_KEY" in OKX_RUNTIME_ADAPTER_SOURCE, (
-            "okx runtime_adapter error message must mention legacy OKX_API_KEY"
-        )
-
-    def test_error_message_contains_legacy_okx_secret_key(self) -> None:
-        assert "OKX_SECRET_KEY" in OKX_RUNTIME_ADAPTER_SOURCE, (
-            "okx runtime_adapter error message must mention legacy OKX_SECRET_KEY"
-        )
-
-    def test_error_message_contains_legacy_okx_passphase(self) -> None:
-        assert "OKX_PASSPHASE" in OKX_RUNTIME_ADAPTER_SOURCE, (
-            "okx runtime_adapter error message must mention legacy OKX_PASSPHRASE"
-        )
+    def test_env_loader_no_legacy_credential_reading(self) -> None:
+        for var in ("OKX_API_KEY", "OKX_SECRET_KEY", "OKX_API_SECRET",
+                     "OKX_PASSPHASE", "OKX_PASSPHRASE"):
+            assert f'.get("{var}"' not in ENV_LOADER_SOURCE, (
+                f"env_loader.py must NOT read {var}"
+            )
 
 
-class TestRuntimeFactoryDoesNotImportOkxConfig:
-    """runtime_factory.py must NOT import OKX_CONFIG or any Okx* concrete class."""
+class TestRuntimeFactoryBoundaries:
+    """runtime_factory.py must NOT import exchange-specific config."""
 
     def test_no_okx_config_import(self) -> None:
         assert "from config.env_loader import OKX_CONFIG" not in RUNTIME_FACTORY_SOURCE, (
@@ -76,137 +193,16 @@ class TestRuntimeFactoryDoesNotImportOkxConfig:
         )
 
     def test_no_okx_private_client_import(self) -> None:
-        assert "from src.execution.okx_private_client import" not in RUNTIME_FACTORY_SOURCE, (
-            "runtime_factory.py must NOT import OkxPrivateClient"
-        )
+        assert "from src.execution.okx_private_client import" not in RUNTIME_FACTORY_SOURCE
 
     def test_no_okx_trading_client_import(self) -> None:
-        assert "from src.execution.okx_trading_client import" not in RUNTIME_FACTORY_SOURCE, (
-            "runtime_factory.py must NOT import OkxTradingClient"
-        )
+        assert "from src.execution.okx_trading_client import" not in RUNTIME_FACTORY_SOURCE
 
     def test_no_okx_market_data_client_import(self) -> None:
-        assert "from src.data_feed.okx_market_data_client import" not in RUNTIME_FACTORY_SOURCE, (
-            "runtime_factory.py must NOT import OkxMarketDataClient"
-        )
+        assert "from src.data_feed.okx_market_data_client import" not in RUNTIME_FACTORY_SOURCE
 
     def test_no_okx_broker_client_import(self) -> None:
-        assert "from src.exchanges.okx.client import OkxBrokerClient" not in RUNTIME_FACTORY_SOURCE, (
-            "runtime_factory.py must NOT import OkxBrokerClient"
-        )
+        assert "from src.exchanges.okx.client import OkxBrokerClient" not in RUNTIME_FACTORY_SOURCE
 
     def test_no_okx_broker_semantic_executor_import(self) -> None:
-        assert "from src.exchanges.okx.semantic_executor import" not in RUNTIME_FACTORY_SOURCE, (
-            "runtime_factory.py must NOT import OkxBrokerSemanticExecutor"
-        )
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Trader credential loading via get_okx_config()
-# ══════════════════════════════════════════════════════════════════════════════
-
-
-class TestTraderCredentialLoading:
-    """Verify that get_okx_config() returns unified credentials with correct priority."""
-
-    def test_unified_credentials_are_read(self, monkeypatch) -> None:
-        """Trader would pick up EXCHANGE_API_* when only those are set."""
-        monkeypatch.setattr(
-            config.env_loader, "load_env_config",
-            lambda: {
-                "EXCHANGE_API_KEY": "trader-key",
-                "EXCHANGE_API_SECRET": "trader-secret",
-                "EXCHANGE_API_PASSPHRASE": "trader-pass",
-            },
-        )
-        result = config.env_loader.get_okx_config()
-        assert result["api_key"] == "trader-key"
-        assert result["secret_key"] == "trader-secret"
-        assert result["passphrase"] == "trader-pass"
-
-    def test_unified_over_legacy_priority(self, monkeypatch) -> None:
-        """When both unified and legacy are set, unified wins for all three fields."""
-        monkeypatch.setattr(
-            config.env_loader, "load_env_config",
-            lambda: {
-                "EXCHANGE_API_KEY": "u-key",
-                "EXCHANGE_API_SECRET": "u-secret",
-                "EXCHANGE_API_PASSPHRASE": "u-pass",
-                "OKX_API_KEY": "l-key",
-                "OKX_SECRET_KEY": "l-secret",
-                "OKX_PASSPHASE": "l-pass",
-            },
-        )
-        result = config.env_loader.get_okx_config()
-        assert result["api_key"] == "u-key"
-        assert result["secret_key"] == "u-secret"
-        assert result["passphrase"] == "u-pass"
-
-    def test_legacy_only_still_works(self, monkeypatch) -> None:
-        """When only legacy vars are set, Trader can still initialize."""
-        monkeypatch.setattr(
-            config.env_loader, "load_env_config",
-            lambda: {
-                "OKX_API_KEY": "legacy-key",
-                "OKX_SECRET_KEY": "legacy-secret",
-                "OKX_PASSPHASE": "legacy-pass",
-            },
-        )
-        result = config.env_loader.get_okx_config()
-        assert result["api_key"] == "legacy-key"
-        assert result["secret_key"] == "legacy-secret"
-        assert result["passphrase"] == "legacy-pass"
-
-    def test_empty_credentials_return_empty_strings(self, monkeypatch) -> None:
-        """When no credentials are set, get_okx_config returns empty strings."""
-        monkeypatch.setattr(
-            config.env_loader, "load_env_config", lambda: {},
-        )
-        result = config.env_loader.get_okx_config()
-        assert result["api_key"] == ""
-        assert result["secret_key"] == ""
-        assert result["passphrase"] == ""
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Boundary — OKX_CONFIG global variable
-# ══════════════════════════════════════════════════════════════════════════════
-
-
-class TestOkxConfigGlobal:
-    """OKX_CONFIG global variable is still named the same and is a dict."""
-
-    def test_okx_config_is_dict(self) -> None:
-        assert isinstance(config.env_loader.OKX_CONFIG, dict)
-
-    def test_okx_config_has_expected_keys(self) -> None:
-        for key in ("api_key", "secret_key", "passphrase"):
-            assert key in config.env_loader.OKX_CONFIG, (
-                f"OKX_CONFIG missing key {key!r}"
-            )
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Boundary — Binance signal-only path must NOT be affected
-# ══════════════════════════════════════════════════════════════════════════════
-
-
-class TestBinanceSignalOnlyNotAffected:
-    """The unified EXCHANGE_API_* vars should only affect OKX live credential
-    loading.  Binance signal-only path should NOT read these API keys."""
-
-    def test_get_email_config_does_not_read_exchange_api_keys(self) -> None:
-        """get_email_config must not reference exchange API key vars."""
-        source = Path(config.env_loader.__file__).read_text(encoding="utf-8")
-        email_func_src = _extract_function_source(source, "get_email_config")
-        assert "EXCHANGE_API_KEY" not in email_func_src
-        assert "OKX_API_KEY" not in email_func_src
-
-
-def _extract_function_source(source: str, name: str) -> str:
-    """Extract a function's source text from module source using AST."""
-    tree = ast.parse(source)
-    for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.name == name:
-            return ast.get_source_segment(source, node) or ""
-    return ""
+        assert "from src.exchanges.okx.semantic_executor import" not in RUNTIME_FACTORY_SOURCE

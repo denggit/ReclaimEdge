@@ -14,7 +14,7 @@ from decimal import Decimal
 
 import pytest
 
-from src.live.binance_live_preflight import (
+from src.exchanges.binance.live_preflight import (
     BINANCE_LIVE_CONFIRMATION_PHRASE,
     LIVE_CONFIRMATION_PHRASE,
     BinanceLivePreflightConfig,
