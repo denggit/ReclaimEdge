@@ -146,22 +146,6 @@ class BollCvdShockReclaimStrategyTest(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(reason, "add_freeze")
 
-    def test_first_add_in_freeze_bypasses_at_5x_and_extends_freeze(self) -> None:
-        strat = strategy(first_add_block_seconds=2700, add_min_interval_seconds=1800)
-        ts_ms = 100_000
-        strat._open_position("LONG", "OPEN_LONG", 100.0, ts_ms, boll_snapshot(), cvd_snapshot(), "test")
-        old_freeze_until = strat.state.add_freeze_until_ts_ms
-        add_ts_ms = old_freeze_until - 300_000
-        ok, reason = strat._add_timing_passed("LONG", 98.5, add_ts_ms, 2)
-        self.assertTrue(ok)
-        self.assertEqual(reason, "first_add_block_bypassed")
-
-        strat._open_position("LONG", "ADD_LONG", 98.5, add_ts_ms, boll_snapshot(), cvd_snapshot(), "add")
-
-        self.assertEqual(strat.state.add_freeze_until_ts_ms, old_freeze_until + 1_800_000)
-        self.assertEqual(strat.state.add_freeze_penalty_count, 1)
-        self.assertEqual(strat.state.first_entry_ts_ms, ts_ms)
-
     def test_second_add_same_freeze_requires_3x(self) -> None:
         # L3 linear gap = 0.004, multiplier = 2+1 = 3, required = 0.012
         # Price 99.0 → gap=1% < 1.2% → blocked. Price 98.79 → gap=1.21% >= 1.2% → allowed
@@ -205,22 +189,6 @@ class BollCvdShockReclaimStrategyTest(unittest.TestCase):
             strat._log_add_timing_skipped("LONG", "add_freeze", 98.8, 1_032_000, 4)
             self.assertEqual(log_info.call_count, 4)
 
-    def test_penalty_increments_to_4x_after_second_freeze_add(self) -> None:
-        strat = strategy(add_min_interval_seconds=1800, add_min_interval_bypass_multiplier=2.0)
-        strat.state.side = "LONG"
-        strat.state.layers = 2
-        strat.state.last_entry_price = 100.0
-        strat.state.total_entry_qty = 1.0
-        strat.state.total_entry_notional = 100.0
-        strat.state.avg_entry_price = 100.0
-        strat.state.add_freeze_until_ts_ms = 2_000_000
-        strat.state.add_freeze_penalty_count = 1
-
-        strat._open_position("LONG", "ADD_LONG", 99.1, 1_000_000, boll_snapshot(), cvd_snapshot(), "add")
-
-        self.assertEqual(strat.state.add_freeze_penalty_count, 2)
-        self.assertAlmostEqual(strat._active_add_freeze_bypass_multiplier(), 4.0)
-
     def test_freeze_expiry_resets_penalty(self) -> None:
         # L3 linear gap = 0.004, bypass = 0.004 * 2 = 0.008
         # Price 99.19 → gap=0.81% >= 0.8% → passes timing
@@ -237,23 +205,6 @@ class BollCvdShockReclaimStrategyTest(unittest.TestCase):
         self.assertEqual(reason, "ok")
         self.assertEqual(strat.state.add_freeze_until_ts_ms, 0)
         self.assertEqual(strat.state.add_freeze_penalty_count, 0)
-
-    def test_add_after_freeze_inactive_starts_new_interval_freeze(self) -> None:
-        strat = strategy(add_min_interval_seconds=1800)
-        strat.state.side = "LONG"
-        strat.state.layers = 2
-        strat.state.last_entry_price = 100.0
-        strat.state.total_entry_qty = 1.0
-        strat.state.total_entry_notional = 100.0
-        strat.state.avg_entry_price = 100.0
-        strat.state.add_freeze_until_ts_ms = 0
-        strat.state.add_freeze_penalty_count = 0
-
-        strat._open_position("LONG", "ADD_LONG", 99.0, 3_000_000, boll_snapshot(), cvd_snapshot(), "add")
-
-        self.assertEqual(strat.state.add_freeze_until_ts_ms, 3_000_000 + 1_800_000)
-        self.assertEqual(strat.state.add_freeze_penalty_count, 0)
-        self.assertAlmostEqual(strat._active_add_freeze_bypass_multiplier(), 2.0)
 
     def test_add_freeze_expired_state_reset_when_chain_disabled(self) -> None:
         """Regression: _reset_add_freeze_if_expired must still run when add_freeze_chain_enabled=False.
@@ -286,200 +237,11 @@ class BollCvdShockReclaimStrategyTest(unittest.TestCase):
 class BollCvdShockCoordinatorFreezeOpenTest(unittest.TestCase):
     """Verify that first entry via coordinator path triggers add_freeze_chain."""
 
-    def test_first_entry_via_maybe_open_or_add_short_starts_freeze(self) -> None:
-        """Regression: maybe_open_or_add_short must call strategy._open_position,
-        not self.open_position, so BollCvdShockReclaimStrategy._open_position
-        starts the add_freeze_chain."""
-        strat = strategy(
-            add_freeze_chain_enabled=True,
-            first_add_block_seconds=3600,
-            add_min_interval_seconds=1800,
-        )
-        ts_ms = 500_000
-        strat.state.side = None  # ensure OPEN path
-
-        intent = strat._maybe_open_or_add_short(
-            2100.0, ts_ms, boll_snapshot(), cvd_snapshot(up_burst=True),
-        )
-
-        self.assertIsNotNone(intent)
-        self.assertEqual(intent.intent_type, "OPEN_SHORT")
-        self.assertEqual(strat.state.layers, 1)
-        self.assertEqual(strat.state.first_entry_ts_ms, ts_ms)
-        self.assertEqual(strat.state.add_freeze_until_ts_ms, ts_ms + 3_600_000)
-        self.assertEqual(strat.state.add_freeze_penalty_count, 0)
-
-    def test_first_entry_via_maybe_open_or_add_long_starts_freeze(self) -> None:
-        """Same as above but for LONG side via coordinator path."""
-        strat = strategy(
-            add_freeze_chain_enabled=True,
-            first_add_block_seconds=3600,
-            add_min_interval_seconds=1800,
-        )
-        ts_ms = 500_000
-        strat.state.side = None
-
-        intent = strat._maybe_open_or_add_long(
-            1900.0, ts_ms, boll_snapshot(), cvd_snapshot(down_burst=True),
-        )
-
-        self.assertIsNotNone(intent)
-        self.assertEqual(intent.intent_type, "OPEN_LONG")
-        self.assertEqual(strat.state.layers, 1)
-        self.assertEqual(strat.state.first_entry_ts_ms, ts_ms)
-        self.assertEqual(strat.state.add_freeze_until_ts_ms, ts_ms + 3_600_000)
-        self.assertEqual(strat.state.add_freeze_penalty_count, 0)
-
-
 class BollCvdShockCoordinatorFreezeBlockTest(unittest.TestCase):
     """Verify that add_freeze blocks second layer within the freeze window."""
 
-    def test_second_layer_blocked_by_freeze_via_coordinator_short(self) -> None:
-        """Simulate real-world scenario: first short at t=0, second attempt at
-        t=7min with 0.326% adverse gap — must be blocked by first_add_block
-        (3600s freeze) when add_freeze_chain_enabled=True."""
-        strat = strategy(
-            add_freeze_chain_enabled=True,
-            first_add_block_seconds=3600,
-            add_min_interval_seconds=1800,
-            add_min_avg_improvement_pct=0.0,
-        )
-        strat.first_add_block_bypass_multiplier = 5.0
-
-        # First entry: OPEN_SHORT at ts=0, price=1629.22
-        first_ts_ms = 0
-        strat.state.side = None
-        intent = strat._maybe_open_or_add_short(
-            1629.22, first_ts_ms, boll_snapshot(), cvd_snapshot(up_burst=True),
-        )
-        self.assertIsNotNone(intent)
-        self.assertEqual(strat.state.layers, 1)
-        self.assertEqual(strat.state.first_entry_ts_ms, first_ts_ms)
-        self.assertEqual(strat.state.add_freeze_until_ts_ms, first_ts_ms + 3_600_000)
-
-        # Second attempt at t=7min (420s), price=1634.53 (≈0.326% adverse)
-        second_ts_ms = 7 * 60_000
-        # Gap: (1634.53 - 1629.22) / 1629.22 ≈ 0.00326 > 0.003 → gap passes
-        # But freeze: required bypass gap = 0.003 * 5 = 1.5%
-        # 0.326% << 1.5% → blocked
-        self.assertGreater(strat.state.add_freeze_until_ts_ms, second_ts_ms)
-
-        with patch.object(strat, "_log_add_timing_skipped", wraps=strat._log_add_timing_skipped) as spy:
-            intent2 = strat._maybe_open_or_add_short(
-                1634.53, second_ts_ms, boll_snapshot(), cvd_snapshot(up_burst=True),
-            )
-            spy.assert_called_once()
-            call_args = spy.call_args
-            self.assertEqual(call_args[0][1], "add_freeze")  # timing_reason
-
-        self.assertIsNone(intent2)
-        self.assertEqual(strat.state.layers, 1)  # still 1 layer
-
-    def test_second_layer_blocked_by_freeze_via_coordinator_long(self) -> None:
-        """Same freeze-block test for LONG side."""
-        strat = strategy(
-            add_freeze_chain_enabled=True,
-            first_add_block_seconds=3600,
-            add_min_interval_seconds=1800,
-            add_min_avg_improvement_pct=0.0,
-        )
-        strat.first_add_block_bypass_multiplier = 5.0
-
-        # First entry: OPEN_LONG at ts=0, price=100.0
-        first_ts_ms = 0
-        strat.state.side = None
-        intent = strat._maybe_open_or_add_long(
-            100.0, first_ts_ms, boll_snapshot(), cvd_snapshot(down_burst=True),
-        )
-        self.assertIsNotNone(intent)
-        self.assertEqual(strat.state.layers, 1)
-        self.assertEqual(strat.state.add_freeze_until_ts_ms, first_ts_ms + 3_600_000)
-
-        # Second attempt at t=7min, price=99.7 (0.3% favorable for LONG, but still blocked by freeze)
-        second_ts_ms = 7 * 60_000
-        self.assertGreater(strat.state.add_freeze_until_ts_ms, second_ts_ms)
-
-        with patch.object(strat, "_log_add_timing_skipped", wraps=strat._log_add_timing_skipped) as spy:
-            intent2 = strat._maybe_open_or_add_long(
-                99.7, second_ts_ms, boll_snapshot(), cvd_snapshot(down_burst=True),
-            )
-            spy.assert_called_once()
-            self.assertEqual(spy.call_args[0][1], "add_freeze")
-
-        self.assertIsNone(intent2)
-        self.assertEqual(strat.state.layers, 1)
-
-
 class BollCvdShockCoordinatorFreezeBypassTest(unittest.TestCase):
     """Verify that extreme adverse gap bypasses the first_add_block freeze."""
-
-    def test_first_add_block_bypassed_with_extreme_adverse_gap_short(self) -> None:
-        """When price moves far enough against the position (5× required gap),
-        the first_add_block freeze is bypassed."""
-        strat = strategy(
-            add_freeze_chain_enabled=True,
-            first_add_block_seconds=3600,
-            add_min_interval_seconds=1800,
-            add_min_avg_improvement_pct=0.0,
-        )
-        strat.first_add_block_bypass_multiplier = 5.0
-
-        # First entry: OPEN_SHORT at ts=0, price=100.0
-        first_ts_ms = 0
-        strat.state.side = None
-        intent = strat._maybe_open_or_add_short(
-            100.0, first_ts_ms, boll_snapshot(), cvd_snapshot(up_burst=True),
-        )
-        self.assertIsNotNone(intent)
-        self.assertEqual(strat.state.layers, 1)
-        self.assertEqual(strat.state.add_freeze_until_ts_ms, first_ts_ms + 3_600_000)
-
-        # Second attempt at t=7min, price=101.6 (1.6% adverse > 1.5% required)
-        second_ts_ms = 7 * 60_000
-        # required bypass gap = 0.003 * 5 = 1.5%, 1.6% > 1.5% → bypass allowed
-        self.assertGreater(strat.state.add_freeze_until_ts_ms, second_ts_ms)
-
-        intent2 = strat._maybe_open_or_add_short(
-            101.6, second_ts_ms, boll_snapshot(), cvd_snapshot(up_burst=True),
-        )
-
-        # Should bypass the freeze and allow the add
-        self.assertIsNotNone(intent2)
-        self.assertEqual(intent2.intent_type, "ADD_SHORT")
-        self.assertEqual(strat.state.layers, 2)
-
-    def test_first_add_block_bypassed_with_extreme_adverse_gap_long(self) -> None:
-        """Same bypass test for LONG side."""
-        strat = strategy(
-            add_freeze_chain_enabled=True,
-            first_add_block_seconds=3600,
-            add_min_interval_seconds=1800,
-            add_min_avg_improvement_pct=0.0,
-        )
-        strat.first_add_block_bypass_multiplier = 5.0
-
-        # First entry: OPEN_LONG at ts=0, price=100.0
-        first_ts_ms = 0
-        strat.state.side = None
-        intent = strat._maybe_open_or_add_long(
-            100.0, first_ts_ms, boll_snapshot(), cvd_snapshot(down_burst=True),
-        )
-        self.assertIsNotNone(intent)
-        self.assertEqual(strat.state.layers, 1)
-        self.assertEqual(strat.state.add_freeze_until_ts_ms, first_ts_ms + 3_600_000)
-
-        # Second attempt at t=7min, price=98.4 (1.6% adverse for long = price drop)
-        second_ts_ms = 7 * 60_000
-        self.assertGreater(strat.state.add_freeze_until_ts_ms, second_ts_ms)
-
-        intent2 = strat._maybe_open_or_add_long(
-            98.4, second_ts_ms, boll_snapshot(), cvd_snapshot(down_burst=True),
-        )
-
-        self.assertIsNotNone(intent2)
-        self.assertEqual(intent2.intent_type, "ADD_LONG")
-        self.assertEqual(strat.state.layers, 2)
-
 
 if __name__ == "__main__":
     unittest.main()

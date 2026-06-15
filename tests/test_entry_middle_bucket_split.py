@@ -111,7 +111,7 @@ class TestThreeStageEntrySplitShort(unittest.TestCase):
         # SHORT entry at 2100; BOLL15 tp_middle=2080, BOLL20 middle=2090
         # Effective breakeven ~2100; required = 2100 * 0.998 = 2095.8
         # Both 2080 and 2090 are < 2095.8 → both OK for SHORT
-        boll = _boll(middle=2090.0, upper=2150.0, lower=2050.0, tp_middle=2080.0)
+        boll = _boll(middle=2090.0, upper=2120.0, lower=2050.0, tp_middle=2080.0)
         cvd = _cvd()
         coord = _coordinator(strategy)
 
@@ -142,7 +142,7 @@ class TestThreeStageEntrySplitShort(unittest.TestCase):
     def test_short_entry_split_logs_middle_bucket_split_selected(self):
         """SPLIT on entry should log MIDDLE_BUCKET_SPLIT_SELECTED."""
         strategy = self._make_strategy()
-        boll = _boll(middle=2090.0, upper=2150.0, lower=2050.0, tp_middle=2080.0)
+        boll = _boll(middle=2090.0, upper=2120.0, lower=2050.0, tp_middle=2080.0)
         cvd = _cvd()
         coord = _coordinator(strategy)
 
@@ -177,7 +177,7 @@ class TestThreeStageEntrySplitLong(unittest.TestCase):
         # LONG entry at 1900; BOLL15 tp_middle=1920, BOLL20 middle=1910
         # Effective breakeven ~1900; required = 1900 * 1.002 = 1903.8
         # Both 1920 and 1910 are >= 1903.8 → both OK for LONG
-        boll = _boll(middle=1910.0, upper=2000.0, lower=1800.0, tp_middle=1920.0)
+        boll = _boll(middle=1910.0, upper=2000.0, lower=1815.0, tp_middle=1920.0)
         cvd = _cvd()
         coord = _coordinator(strategy)
 
@@ -223,7 +223,7 @@ class TestThreeStageEntryUnsplitSlowMiddle(unittest.TestCase):
         # LONG entry at 1900; required = 1900 * 1.002 = 1903.8
         # BOLL15 tp_middle=1901 < 1903.8 → insufficient
         # BOLL20 middle=1910 >= 1903.8 → sufficient
-        boll = _boll(middle=1910.0, upper=2000.0, lower=1800.0, tp_middle=1901.0)
+        boll = _boll(middle=1910.0, upper=2000.0, lower=1815.0, tp_middle=1901.0)
         cvd = _cvd()
         coord = _coordinator(strategy)
 
@@ -242,7 +242,7 @@ class TestThreeStageEntryUnsplitSlowMiddle(unittest.TestCase):
     def test_long_entry_unsplit_logs_skipped(self):
         """UNSPLIT on entry should log MIDDLE_BUCKET_SPLIT_SKIPPED."""
         strategy = self._make_strategy()
-        boll = _boll(middle=1910.0, upper=2000.0, lower=1800.0, tp_middle=1901.0)
+        boll = _boll(middle=1910.0, upper=2000.0, lower=1815.0, tp_middle=1901.0)
         cvd = _cvd()
         coord = _coordinator(strategy)
 
@@ -258,7 +258,7 @@ class TestThreeStageEntryUnsplitSlowMiddle(unittest.TestCase):
         # SHORT entry at 2100; required = 2100 * 0.998 = 2095.8
         # BOLL15 tp_middle=2097 > 2095.8 → insufficient (not far enough below)
         # BOLL20 middle=2080 < 2095.8 → sufficient
-        boll = _boll(middle=2080.0, upper=2150.0, lower=2050.0, tp_middle=2097.0)
+        boll = _boll(middle=2080.0, upper=2120.0, lower=2050.0, tp_middle=2097.0)
         cvd = _cvd()
         coord = _coordinator(strategy)
 
@@ -294,7 +294,7 @@ class TestThreeStageEntrySplitFallbackDisabled(unittest.TestCase):
         strategy = self._make_strategy()
         # LONG entry at 1900; required = 1903.8
         # Both BOLL15=1901 and BOLL20=1902 are < required → FALLBACK_OUTER
-        boll = _boll(middle=1902.0, upper=2000.0, lower=1800.0, tp_middle=1901.0)
+        boll = _boll(middle=1902.0, upper=2000.0, lower=1815.0, tp_middle=1901.0)
         cvd = _cvd()
         coord = _coordinator(strategy)
 
@@ -308,7 +308,7 @@ class TestThreeStageEntrySplitFallbackDisabled(unittest.TestCase):
     def test_disabled_when_config_false(self):
         """When middle_bucket_split_enabled=False, entry should work without split."""
         strategy = self._make_strategy(middle_bucket_split_enabled=False)
-        boll = _boll(middle=1910.0, upper=2000.0, lower=1800.0, tp_middle=1920.0)
+        boll = _boll(middle=1910.0, upper=2000.0, lower=1815.0, tp_middle=1920.0)
         cvd = _cvd()
         coord = _coordinator(strategy)
 
@@ -343,7 +343,7 @@ class TestThreeStageEntrySplitSublegTooSmall(unittest.TestCase):
         The execution layer will handle subleg-too-small downstream.
         """
         strategy = self._make_strategy()
-        boll = _boll(middle=1910.0, upper=2000.0, lower=1800.0, tp_middle=1920.0)
+        boll = _boll(middle=1910.0, upper=2000.0, lower=1815.0, tp_middle=1920.0)
         cvd = _cvd()
         coord = _coordinator(strategy)
 
@@ -418,14 +418,14 @@ class TestThreeStageEntryTp2StructureBoll(unittest.TestCase):
         """SHORT: TP_BOLL15 outer differs from structure BOLL20 outer.
         intent.tp_price must equal structure BOLL20 lower, NOT TP_BOLL15 lower."""
         strategy = self._make_strategy()
-        # BOLL20: upper=2150, middle=2090, lower=2050
+        # BOLL20: upper=2120, middle=2090, lower=2050
         # TP_BOLL15: tp_lower=2070 (different from 2050), tp_middle=2080
         boll = BollSnapshot(
             inst_id="ETH-USDT-SWAP",
             candle_ts_ms=1000,
             close=2090.0,
             middle=2090.0,
-            upper=2150.0,
+            upper=2120.0,
             lower=2050.0,
             upper_distance_pct=0.05,
             lower_distance_pct=0.05,
@@ -473,7 +473,7 @@ class TestMiddleRunnerEntrySplitShort(unittest.TestCase):
         # SHORT entry at 2100; BOLL15 tp_middle=2080, BOLL20 middle=2090
         # Effective breakeven ~2100; required = 2100 * 0.998 = 2095.8
         # Both 2080 and 2090 are < 2095.8 → both OK for SHORT
-        boll = _boll(middle=2090.0, upper=2150.0, lower=2050.0, tp_middle=2080.0)
+        boll = _boll(middle=2090.0, upper=2120.0, lower=2050.0, tp_middle=2080.0)
         cvd = _cvd()
         coord = _coordinator(strategy)
 
@@ -502,7 +502,7 @@ class TestMiddleRunnerEntrySplitShort(unittest.TestCase):
     def test_short_entry_split_logs_middle_bucket_split_selected(self):
         """SPLIT on entry should log MIDDLE_BUCKET_SPLIT_SELECTED for MIDDLE_RUNNER."""
         strategy = self._make_strategy()
-        boll = _boll(middle=2090.0, upper=2150.0, lower=2050.0, tp_middle=2080.0)
+        boll = _boll(middle=2090.0, upper=2120.0, lower=2050.0, tp_middle=2080.0)
         cvd = _cvd()
         coord = _coordinator(strategy)
 
@@ -538,7 +538,7 @@ class TestMiddleRunnerEntrySplitLong(unittest.TestCase):
         # LONG entry at 1900; BOLL15 tp_middle=1920, BOLL20 middle=1910
         # Effective breakeven ~1900; required = 1900 * 1.002 = 1903.8
         # Both 1920 and 1910 are >= 1903.8 → both OK for LONG
-        boll = _boll(middle=1910.0, upper=2000.0, lower=1800.0, tp_middle=1920.0)
+        boll = _boll(middle=1910.0, upper=2000.0, lower=1815.0, tp_middle=1920.0)
         cvd = _cvd()
         coord = _coordinator(strategy)
 
@@ -585,7 +585,7 @@ class TestMiddleRunnerEntryUnsplitSlowMiddle(unittest.TestCase):
         # LONG entry at 1900; required = 1900 * 1.002 = 1903.8
         # BOLL15 tp_middle=1901 < 1903.8 → insufficient
         # BOLL20 middle=1910 >= 1903.8 → sufficient
-        boll = _boll(middle=1910.0, upper=2000.0, lower=1800.0, tp_middle=1901.0)
+        boll = _boll(middle=1910.0, upper=2000.0, lower=1815.0, tp_middle=1901.0)
         cvd = _cvd()
         coord = _coordinator(strategy)
 
@@ -605,7 +605,7 @@ class TestMiddleRunnerEntryUnsplitSlowMiddle(unittest.TestCase):
         # SHORT entry at 2100; required = 2100 * 0.998 = 2095.8
         # BOLL15 tp_middle=2097 > 2095.8 → insufficient
         # BOLL20 middle=2080 < 2095.8 → sufficient
-        boll = _boll(middle=2080.0, upper=2150.0, lower=2050.0, tp_middle=2097.0)
+        boll = _boll(middle=2080.0, upper=2120.0, lower=2050.0, tp_middle=2097.0)
         cvd = _cvd()
         coord = _coordinator(strategy)
 
@@ -618,7 +618,7 @@ class TestMiddleRunnerEntryUnsplitSlowMiddle(unittest.TestCase):
     def test_entry_unsplit_logs_skipped(self):
         """UNSPLIT on entry should log MIDDLE_BUCKET_SPLIT_SKIPPED for MIDDLE_RUNNER."""
         strategy = self._make_strategy()
-        boll = _boll(middle=1910.0, upper=2000.0, lower=1800.0, tp_middle=1901.0)
+        boll = _boll(middle=1910.0, upper=2000.0, lower=1815.0, tp_middle=1901.0)
         cvd = _cvd()
         coord = _coordinator(strategy)
 

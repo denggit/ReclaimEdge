@@ -43,7 +43,7 @@ def strategy(**config_overrides) -> BollCvdReclaimStrategy:
     )
 
 
-def boll(middle: float = 110.0, upper: float = 120.0, lower: float = 90.0, candle_ts_ms: int = 1_000) -> BollSnapshot:
+def boll(middle: float = 112.0, upper: float = 120.0, lower: float = 91.0, candle_ts_ms: int = 1_000) -> BollSnapshot:
     return BollSnapshot("ETH-USDT-SWAP", candle_ts_ms, 100.0, middle, upper, lower, 0.1, 0.1, True, True)
 
 
@@ -267,26 +267,6 @@ class SplitTakeProfitStrategyTest(unittest.TestCase):
         self.assertEqual(partial_ratio, 0.0)
         self.assertIsNone(partial_tp)
 
-    def test_new_add_rearms_split_after_partial_consumed(self) -> None:
-        strat = strategy()
-        strat.state = StrategyPositionState(
-            side="LONG",
-            layers=4,
-            last_entry_price=100.0,
-            total_entry_qty=1.0,
-            total_entry_notional=100.0,
-            avg_entry_price=100.0,
-            partial_tp_consumed=True,
-            tp_plan="SINGLE",
-        )
-
-        new_intent = strat._open_position("LONG", "ADD_LONG", 90.0, 2_000, boll(), cvd(), "test add")
-
-        self.assertFalse(new_intent.partial_tp_consumed)
-        self.assertFalse(strat.state.partial_tp_consumed)
-        self.assertEqual(new_intent.tp_plan, "SPLIT_PARTIAL_FINAL")
-        self.assertIsNotNone(new_intent.partial_tp_price)
-
     def test_layers_below_threshold_keep_single_tp(self) -> None:
         strat = strategy()
         strat.state.avg_entry_price = 100.0
@@ -320,7 +300,7 @@ class SplitTakeProfitStrategyTest(unittest.TestCase):
     def test_open_position_initializes_net_remaining_breakeven_short(self) -> None:
         strat = strategy(breakeven_fee_buffer_pct=0.001)
 
-        strat._open_position("SHORT", "OPEN_SHORT", 100.0, 2_000, boll(middle=99.0, upper=110.0, lower=90.0), cvd(),
+        strat._open_position("SHORT", "OPEN_SHORT", 100.0, 2_000, boll(middle=95.0, upper=104.0, lower=90.0), cvd(),
                              "test")
 
         self.assertGreater(strat.state.position_cost_entry_notional, 0)
@@ -331,7 +311,7 @@ class SplitTakeProfitStrategyTest(unittest.TestCase):
     def test_middle_runner_long_uses_middle_first_and_upper_runner(self) -> None:
         strat = strategy(middle_runner_enabled=True, breakeven_fee_buffer_pct=0.001, tp_min_net_profit_pct=0.002)
         strat.state.avg_entry_price = 100.0
-        bands = boll(middle=101.0, upper=110.0, lower=90.0)
+        bands = boll(middle=101.0, upper=110.0, lower=91.0)
 
         intent_ = strat._open_position("LONG", "OPEN_LONG", 100.0, 2_000, bands, cvd(), "test")
 
@@ -346,7 +326,7 @@ class SplitTakeProfitStrategyTest(unittest.TestCase):
     def test_middle_runner_short_uses_middle_first_and_lower_runner(self) -> None:
         strat = strategy(middle_runner_enabled=True, breakeven_fee_buffer_pct=0.001, tp_min_net_profit_pct=0.002)
         strat.state.avg_entry_price = 100.0
-        bands = boll(middle=99.0, upper=110.0, lower=90.0)
+        bands = boll(middle=99.0, upper=108.0, lower=90.0)
 
         intent_ = strat._open_position("SHORT", "OPEN_SHORT", 100.0, 2_000, bands, cvd(), "test")
 

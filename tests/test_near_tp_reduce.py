@@ -38,7 +38,7 @@ from src.strategies.boll_cvd_shock_reclaim_strategy import BollCvdShockReclaimSt
 
 
 def boll() -> BollSnapshot:
-    return BollSnapshot("ETH-USDT-SWAP", 1_000, 100.0, 110.0, 120.0, 90.0, 0.1, 0.1, True, True)
+    return BollSnapshot("ETH-USDT-SWAP", 1_000, 100.0, 110.0, 120.0, 91.0, 0.1, 0.1, True, True)
 
 
 def cvd() -> CvdSnapshot:

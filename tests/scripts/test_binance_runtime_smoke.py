@@ -802,7 +802,7 @@ class TestLegacyOkxConfigReady:
         assert "live_allow_orders_source=LIVE_TRADING" in captured.out
         assert "max_order_notional_source=DERIVED_FROM_MAX_LIVE_EQUITY" in captured.out
         assert (
-            "max_position_notional_source=DERIVED_FROM_MAX_LIVE_EQUITY_AND_MAX_LAYERS"
+            "max_position_notional_source=DERIVED_FROM_MAX_LIVE_EQUITY_SINGLE_ENTRY"
             in captured.out
         )
         assert "live_leverage_source=LEVERAGE" in captured.out

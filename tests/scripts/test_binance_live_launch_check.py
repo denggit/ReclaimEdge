@@ -974,7 +974,7 @@ class TestLegacyOkxConfigReady:
         captured = capsys.readouterr()
         assert rc == 0
         assert "max_order_notional_usdt=16000" in captured.out
-        assert "max_position_notional_usdt=192000" in captured.out
+        assert "max_position_notional_usdt=16000" in captured.out
 
     def test_legacy_okx_config_includes_sources(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
@@ -989,7 +989,7 @@ class TestLegacyOkxConfigReady:
         assert "live_allow_orders_source=LIVE_TRADING" in captured.out
         assert "max_order_notional_source=DERIVED_FROM_MAX_LIVE_EQUITY" in captured.out
         assert (
-            "max_position_notional_source=DERIVED_FROM_MAX_LIVE_EQUITY_AND_MAX_LAYERS"
+            "max_position_notional_source=DERIVED_FROM_MAX_LIVE_EQUITY_SINGLE_ENTRY"
             in captured.out
         )
         assert "live_leverage_source=LEVERAGE" in captured.out
@@ -1038,7 +1038,7 @@ class TestLegacyOkxConfigJsonReady:
         assert sources["max_order_notional"] == "DERIVED_FROM_MAX_LIVE_EQUITY"
         assert (
             sources["max_position_notional"]
-            == "DERIVED_FROM_MAX_LIVE_EQUITY_AND_MAX_LAYERS"
+            == "DERIVED_FROM_MAX_LIVE_EQUITY_SINGLE_ENTRY"
         )
         assert sources["leverage"] == "LEVERAGE"
 

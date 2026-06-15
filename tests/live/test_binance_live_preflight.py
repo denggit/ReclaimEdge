@@ -463,7 +463,8 @@ class TestBlockingMaxOrderNotional:
 class TestBlockingMaxPositionNotional:
     """max_position_notional invalid → binance_live_max_position_notional_invalid."""
 
-    def test_missing_blocked(self) -> None:
+    def test_missing_derived_from_order_when_order_set(self) -> None:
+        """With single-entry (no MAX_LAYERS), max_position = max_order when not explicitly set."""
         report = build_binance_live_preflight_report(
             {
                 "EXCHANGE": "binance",
@@ -472,9 +473,14 @@ class TestBlockingMaxPositionNotional:
                 "LIVE_ALLOW_ORDERS": "true",
                 "LIVE_CONFIRMATION": BINANCE_LIVE_CONFIRMATION_PHRASE,
                 "LIVE_MAX_ORDER_NOTIONAL_USDT": "5",
-            }
+                "LIVE_LEVERAGE": "10",
+            },
+            orders_globally_enabled=True,
         )
-        assert "binance_live_max_position_notional_invalid" in report.blocking_reasons
+        # Single-entry: max_position = max_order = 5, which is valid (>0)
+        assert "binance_live_max_position_notional_invalid" not in report.blocking_reasons
+        assert report.config.max_position_notional_usdt == Decimal("5")
+        assert report.config.max_position_notional_source == "DERIVED_FROM_MAX_LIVE_EQUITY_SINGLE_ENTRY"
 
     def test_high_value_passes(self) -> None:
         """LIVE_MAX_POSITION_NOTIONAL_USDT=500 passes (no hard upper bound)."""
@@ -830,7 +836,7 @@ class TestLegacyOkxConfig:
         assert report.config.live_enabled is True
         assert report.config.allow_orders is True
         assert report.config.max_order_notional_usdt == Decimal("16000")
-        assert report.config.max_position_notional_usdt == Decimal("192000")
+        assert report.config.max_position_notional_usdt == Decimal("16000")
         assert report.config.leverage == 10
 
     def test_legacy_okx_config_sources(self) -> None:
@@ -845,7 +851,7 @@ class TestLegacyOkxConfig:
         assert cfg.max_order_notional_source == "DERIVED_FROM_MAX_LIVE_EQUITY"
         assert (
             cfg.max_position_notional_source
-            == "DERIVED_FROM_MAX_LIVE_EQUITY_AND_MAX_LAYERS"
+            == "DERIVED_FROM_MAX_LIVE_EQUITY_SINGLE_ENTRY"
         )
         assert cfg.leverage_source == "LEVERAGE"
 
@@ -925,11 +931,11 @@ class TestExplicitLiveOverridesLegacy:
         assert report.ok is True
         assert report.config.max_order_notional_usdt == Decimal("20000")
         assert report.config.max_order_notional_source == "LIVE_MAX_ORDER_NOTIONAL_USDT"
-        # position still derived: 20000 * 12 = 240000
-        assert report.config.max_position_notional_usdt == Decimal("240000")
+        # position still derived: 20000 (single-entry, no MAX_LAYERS multiplier)
+        assert report.config.max_position_notional_usdt == Decimal("20000")
         assert (
             report.config.max_position_notional_source
-            == "DERIVED_FROM_MAX_LIVE_EQUITY_AND_MAX_LAYERS"
+            == "DERIVED_FROM_MAX_LIVE_EQUITY_SINGLE_ENTRY"
         )
 
     def test_explicit_position_notional_overrides_derived(self) -> None:
@@ -1108,15 +1114,15 @@ class TestLegacyConfigDerivationMath:
     """Verify the derivation math for notional values."""
 
     def test_derivation_formula(self) -> None:
-        """order = equity × margin_pct × leverage; position = order × layers."""
+        """order = equity × margin_pct × leverage; position = order (single-entry, no MAX_LAYERS)."""
         cfg = load_binance_live_preflight_config(LEGACY_OKX_ENV)
         # 40000 * 0.04 * 10 = 16000
         assert cfg.max_order_notional_usdt == Decimal("16000")
-        # 16000 * 12 = 192000
-        assert cfg.max_position_notional_usdt == Decimal("192000")
+        # 16000 (single-entry, was 16000 * 12 = 192000)
+        assert cfg.max_position_notional_usdt == Decimal("16000")
 
     def test_different_equity_values(self) -> None:
-        """50000 * 0.04 * 10 = 20000; 20000 * 12 = 240000."""
+        """50000 * 0.04 * 10 = 20000; position = 20000 (single-entry, no MAX_LAYERS)."""
         env = {
             "EXCHANGE": "binance",
             "LIVE_TRADING": "true",
@@ -1127,7 +1133,7 @@ class TestLegacyConfigDerivationMath:
         }
         cfg = load_binance_live_preflight_config(env)
         assert cfg.max_order_notional_usdt == Decimal("20000")
-        assert cfg.max_position_notional_usdt == Decimal("240000")
+        assert cfg.max_position_notional_usdt == Decimal("20000")
 
     def test_different_margin_pct(self) -> None:
         """40000 * 0.05 * 10 = 20000."""
@@ -1154,4 +1160,5 @@ class TestLegacyConfigDerivationMath:
         }
         cfg = load_binance_live_preflight_config(env)
         assert cfg.max_order_notional_usdt == Decimal("8000")
-        assert cfg.max_position_notional_usdt == Decimal("96000")
+        # MAX_LAYERS no longer applies; single-entry: max_position = max_order
+        assert cfg.max_position_notional_usdt == Decimal("8000")
