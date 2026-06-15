@@ -100,6 +100,9 @@ def test_binance_adapter_shell_not_wired_into_runtime() -> None:
         # forbidden-import assertion checks — not real wiring.
         "tests/exchanges/okx/test_okx_runtime_adapter_boundaries.py",
         "tests/live/test_runtime_factory_exchange_boundaries.py",
+        # Runtime smoke test references BinanceBrokerClient only in
+        # a source-level safety scan assertion — not real wiring.
+        "tests/scripts/test_binance_runtime_smoke.py",
     }
 
     for path in Path(".").rglob("*.py"):

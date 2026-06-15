@@ -60,6 +60,9 @@ def test_aiohttp_transport_is_not_wired_into_factory_or_live() -> None:
         # forbidden-import assertion checks — not real wiring.
         "tests/exchanges/okx/test_okx_runtime_adapter_boundaries.py",
         "tests/live/test_runtime_factory_exchange_boundaries.py",
+        # Runtime smoke test references AiohttpBinanceTransport only in
+        # a source-level safety scan assertion — not real wiring.
+        "tests/scripts/test_binance_runtime_smoke.py",
     }
 
     for path in Path(".").rglob("*.py"):
