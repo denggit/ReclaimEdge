@@ -15,6 +15,13 @@ from src.data_feed.binance.feed import (
     try_map_binance_market_event,
 )
 from src.data_feed.binance.kline_mapper import map_binance_kline_event
+from src.data_feed.binance.mappers import (
+    map_binance_agg_trade_to_market_trade_snapshot,
+    map_binance_rest_kline_to_candle_snapshot,
+)
+from src.data_feed.binance.market_data_client import (
+    BinanceMarketDataClient,
+)
 from src.data_feed.binance.websocket_feed import (
     BINANCE_USDM_WS_MARKET_BASE_URL,
     BinanceWebSocketConnection,
@@ -28,6 +35,7 @@ from src.data_feed.binance.websocket_feed import (
 __all__ = [
     "BINANCE_AGG_TRADE_AGGREGATION_WINDOW_MS",
     "BINANCE_USDM_WS_MARKET_BASE_URL",
+    "BinanceMarketDataClient",
     "BinanceMarketDataFeed",
     "BinanceMarketEvent",
     "BinanceWebSocketConnection",
@@ -41,8 +49,10 @@ __all__ = [
     "build_binance_combined_market_stream_url",
     "decode_binance_ws_message",
     "map_binance_agg_trade_event",
+    "map_binance_agg_trade_to_market_trade_snapshot",
     "map_binance_kline_event",
     "map_binance_market_event",
+    "map_binance_rest_kline_to_candle_snapshot",
     "normalize_binance_stream_symbol",
     "try_map_binance_market_event",
     "unwrap_binance_combined_stream_payload",
