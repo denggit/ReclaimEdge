@@ -100,7 +100,6 @@ class TestThreeStageEntrySplitShort(unittest.TestCase):
             middle_bucket_split_fast_ratio=0.70,
             tp_boll_enabled=True,
             tp_min_net_profit_pct=0.002,
-            split_tp_enabled=False,
             entry_rr_target="FINAL_TP",
         )
         sizer = _sizer()
@@ -167,7 +166,6 @@ class TestThreeStageEntrySplitLong(unittest.TestCase):
             middle_bucket_split_fast_ratio=0.70,
             tp_boll_enabled=True,
             tp_min_net_profit_pct=0.002,
-            split_tp_enabled=False,
             entry_rr_target="FINAL_TP",
         )
         sizer = _sizer()
@@ -214,7 +212,6 @@ class TestThreeStageEntryUnsplitSlowMiddle(unittest.TestCase):
             middle_bucket_split_fast_ratio=0.70,
             tp_boll_enabled=True,
             tp_min_net_profit_pct=0.002,
-            split_tp_enabled=False,
             entry_rr_target="FINAL_TP",
         )
         sizer = _sizer()
@@ -284,7 +281,6 @@ class TestThreeStageEntrySplitFallbackDisabled(unittest.TestCase):
             middle_bucket_split_fast_ratio=0.70,
             tp_boll_enabled=True,
             tp_min_net_profit_pct=0.002,
-            split_tp_enabled=False,
             entry_rr_target="FINAL_TP",
         )
         vals.update(overrides)
@@ -337,7 +333,6 @@ class TestThreeStageEntrySplitSublegTooSmall(unittest.TestCase):
             middle_bucket_split_fast_ratio=0.70,
             tp_boll_enabled=True,
             tp_min_net_profit_pct=0.002,
-            split_tp_enabled=False,
             entry_rr_target="FINAL_TP",
         )
         sizer = _sizer()
@@ -377,7 +372,6 @@ class TestThreeStageEntryTp2StructureBoll(unittest.TestCase):
             middle_bucket_split_enabled=False,
             tp_boll_enabled=True,
             tp_min_net_profit_pct=0.002,
-            split_tp_enabled=False,
             three_stage_tp2_use_structure_boll=True,
             entry_rr_target="FINAL_TP",
         )
@@ -468,7 +462,6 @@ class TestMiddleRunnerEntrySplitShort(unittest.TestCase):
             middle_bucket_split_fast_ratio=0.70,
             tp_boll_enabled=True,
             tp_min_net_profit_pct=0.002,
-            split_tp_enabled=False,
             entry_rr_target="FINAL_TP",
         )
         sizer = _sizer()
@@ -534,7 +527,6 @@ class TestMiddleRunnerEntrySplitLong(unittest.TestCase):
             middle_bucket_split_fast_ratio=0.70,
             tp_boll_enabled=True,
             tp_min_net_profit_pct=0.002,
-            split_tp_enabled=False,
             entry_rr_target="FINAL_TP",
         )
         sizer = _sizer()
@@ -582,7 +574,6 @@ class TestMiddleRunnerEntryUnsplitSlowMiddle(unittest.TestCase):
             middle_bucket_split_fast_ratio=0.70,
             tp_boll_enabled=True,
             tp_min_net_profit_pct=0.002,
-            split_tp_enabled=False,
             entry_rr_target="FINAL_TP",
         )
         sizer = _sizer()

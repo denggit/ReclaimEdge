@@ -460,8 +460,7 @@ def build_take_profit_order_specs(
         return TakeProfitSpecsDecision(
             specs=(TakeProfitOrderSpec(label="final", contracts=position_contracts, price=final_tp_price),),
         )
-    if tp_plan not in {"SPLIT_PARTIAL_FINAL", "SPLIT_50_50",
-                       "MIDDLE_RUNNER"} or partial_tp_price is None or partial_tp_ratio <= 0 or partial_tp_ratio >= 1:
+    if tp_plan not in {"MIDDLE_RUNNER"} or partial_tp_price is None or partial_tp_ratio <= 0 or partial_tp_ratio >= 1:
         return TakeProfitSpecsDecision(
             specs=(TakeProfitOrderSpec(label="final", contracts=position_contracts, price=final_tp_price),),
         )

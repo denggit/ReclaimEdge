@@ -30,7 +30,7 @@ TradeIntentType = Literal[
 ]
 PositionSide = Literal["LONG", "SHORT"]
 TpMode = Literal["MIDDLE", "UPPER", "LOWER"]
-TpPlan = Literal["SINGLE", "SPLIT_PARTIAL_FINAL", "MIDDLE_RUNNER", "THREE_STAGE_RUNNER"]
+TpPlan = Literal["SINGLE", "MIDDLE_RUNNER", "THREE_STAGE_RUNNER"]
 
 
 def _price_changed(old: float | None, new: float | None, threshold: float = 0.0001) -> bool:
@@ -72,11 +72,6 @@ class BollCvdReclaimStrategyConfig:
     entry_max_stop_distance_pct: float = 0.0
     entry_protective_sl_retry_count: int = 3
     entry_protective_sl_retry_interval_seconds: float = 1.0
-    split_tp_enabled: bool = True
-    split_tp_min_layers: int = 4
-    split_tp_path_ratio: float = 0.8
-    split_tp_partial_ratio: float = 0.5
-    split_tp_min_profit_pct: float = 0.004
     near_tp_enabled: bool = False
     near_tp_reduce_enabled: bool = True
     near_tp_shadow_enabled: bool = False
@@ -231,11 +226,6 @@ class BollCvdReclaimStrategyConfig:
             entry_max_stop_distance_pct=float(os.getenv("ENTRY_MAX_STOP_DISTANCE_PCT", "0")),
             entry_protective_sl_retry_count=int(os.getenv("ENTRY_PROTECTIVE_SL_RETRY_COUNT", "3")),
             entry_protective_sl_retry_interval_seconds=float(os.getenv("ENTRY_PROTECTIVE_SL_RETRY_INTERVAL_SECONDS", "1")),
-            split_tp_enabled=_env_bool("SPLIT_TP_ENABLED", True),
-            split_tp_min_layers=int(os.getenv("SPLIT_TP_MIN_LAYERS", "4")),
-            split_tp_path_ratio=float(os.getenv("SPLIT_TP_PATH_RATIO", "0.8")),
-            split_tp_partial_ratio=float(os.getenv("SPLIT_TP_PARTIAL_RATIO", "0.5")),
-            split_tp_min_profit_pct=float(os.getenv("SPLIT_TP_MIN_PROFIT_PCT", "0.004")),
             near_tp_enabled=near_tp_enabled,
             near_tp_reduce_enabled=_env_bool("NEAR_TP_REDUCE_ENABLED", True),
             near_tp_shadow_enabled=_env_bool("NEAR_TP_SHADOW_ENABLED", False),
@@ -2686,13 +2676,6 @@ class BollCvdReclaimStrategy:
             three_stage_tp1_ratio=tp1_ratio,
             three_stage_runner_enabled=self.config.three_stage_runner_enabled,
             middle_runner_plan_allowed=middle_runner_allowed,
-            split_tp_enabled=self.config.split_tp_enabled,
-            split_tp_min_layers=self.config.split_tp_min_layers,
-            partial_tp_consumed=self.state.partial_tp_consumed,
-            avg_entry=self.state.avg_entry_price,
-            split_tp_partial_ratio=self.config.split_tp_partial_ratio,
-            split_tp_path_ratio=self.config.split_tp_path_ratio,
-            split_tp_min_profit_pct=self.config.split_tp_min_profit_pct,
         )
         return sel.partial_tp_price, sel.partial_tp_ratio, sel.tp_plan
 

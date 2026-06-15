@@ -12,7 +12,9 @@ from src.utils.log import get_logger
 
 logger = get_logger(__name__)
 
-SPLIT_TP_PLANS = {"SPLIT_PARTIAL_FINAL", "SPLIT_50_50"}
+# Legacy split TP plans removed. Set kept as empty for backward compatibility
+# with mark_partial_tp_consumed_if_position_reduced which now always returns False.
+SPLIT_TP_PLANS: set[str] = set()
 
 
 @dataclass(frozen=True, eq=False)

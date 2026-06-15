@@ -1456,7 +1456,7 @@ class TestOuterProfitFallback:
         assert s.state.tp_price == 110.0
 
     def test_split_fallback_uses_valid_outer_when_tp_boll_outer_lacks_profit(self):
-        """SPLIT_PARTIAL_FINAL fallback: outer uses BOLL20 upper when TP_BOLL15 insufficient."""
+        """MIDDLE_RUNNER fallback: outer uses BOLL20 upper when TP_BOLL15 insufficient."""
         s = _strategy(tp_min_net_profit_pct=0.005)
         b = _boll_with_tp(
             middle=106.5, tp_middle=106.5,
@@ -1464,7 +1464,7 @@ class TestOuterProfitFallback:
         )
         _setup_position_state(s, "LONG", 106.5)
         s.state.side = "LONG"
-        s.state.tp_plan = "SPLIT_PARTIAL_FINAL"
+        s.state.tp_plan = "MIDDLE_RUNNER"
         s.state.partial_tp_consumed = False
         s.state.tp_price = 105.0
         s.state.tp_mode = "UPPER"
@@ -1485,7 +1485,7 @@ class TestOuterProfitFallback:
         intent = s._maybe_update_tp(106.5, 2000, b, _cvd())
         assert intent is not None
         assert intent.tp_price == 110.0, (
-            "SPLIT fallback outer must use BOLL20 upper (110.0)"
+            "MIDDLE_RUNNER fallback outer must use BOLL20 upper (110.0)"
         )
         assert s.state.tp_plan == "SINGLE"
         assert s.state.tp_price == 110.0

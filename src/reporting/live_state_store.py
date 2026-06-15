@@ -340,10 +340,6 @@ class LiveStateStore:
 
 
 def _normalize_tp_plan(tp_plan: str) -> str:
-    if tp_plan == "SPLIT_50_50":
-        return "SPLIT_PARTIAL_FINAL"
-    if tp_plan == "SPLIT_PARTIAL_FINAL":
-        return tp_plan
     if tp_plan == "MIDDLE_RUNNER":
         return tp_plan
     if tp_plan == "THREE_STAGE_RUNNER":

@@ -359,29 +359,6 @@ class TpUpdateCoordinator:
             reason_override = "middle_runner_middle_profit_insufficient_single_outer"
             middle_profit_fallback_locked = True
 
-        # SPLIT partial NOT consumed: fall back to SINGLE outer
-        elif pre_tp1_lifecycle and s.state.tp_plan == "SPLIT_PARTIAL_FINAL" and not s.state.partial_tp_consumed:
-            outer, _outer_src = s._select_valid_tp_outer_with_profit_fallback(s.state.side, boll)
-            outer_mode: TpMode = "UPPER" if s.state.side == "LONG" else "LOWER"
-            logger.warning(
-                "SPLIT_TP_DISABLED_MIDDLE_PROFIT_INSUFFICIENT | "
-                "side=%s effective_breakeven=%.4f middle=%.4f required_middle=%.4f "
-                "outer=%.4f outer_source=%s candle_ts=%s",
-                s.state.side,
-                effective_be,
-                boll.middle,
-                required_middle,
-                outer,
-                _outer_src,
-                boll.candle_ts_ms,
-            )
-            tp_price = outer
-            tp_mode = outer_mode
-            partial_tp_price = None
-            partial_tp_ratio = 0.0
-            tp_plan = "SINGLE"
-            middle_profit_fallback_locked = True
-
         # Any other unfulfilled complex plan: fall back to SINGLE outer
         elif (
             pre_tp1_lifecycle

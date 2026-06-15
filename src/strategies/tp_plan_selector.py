@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 TpMode = Literal["MIDDLE", "UPPER", "LOWER"]
-TpPlan = Literal["SINGLE", "SPLIT_PARTIAL_FINAL", "MIDDLE_RUNNER", "THREE_STAGE_RUNNER"]
+TpPlan = Literal["SINGLE", "MIDDLE_RUNNER", "THREE_STAGE_RUNNER"]
 PositionSide = Literal["LONG", "SHORT"]
 
 
@@ -413,15 +413,8 @@ def select_tp_plan(
         three_stage_tp1_ratio: float,
         three_stage_runner_enabled: bool,
         middle_runner_plan_allowed: bool,
-        split_tp_enabled: bool,
-        split_tp_min_layers: int,
-        partial_tp_consumed: bool,
-        avg_entry: float,
-        split_tp_partial_ratio: float,
-        split_tp_path_ratio: float,
-        split_tp_min_profit_pct: float,
 ) -> TpPlanSelection:
-    """Select the TP plan (SINGLE / SPLIT / MIDDLE_RUNNER / THREE_STAGE_RUNNER).
+    """Select the TP plan (SINGLE / MIDDLE_RUNNER / THREE_STAGE_RUNNER).
 
     All state/config fields are received as explicit parameters so the
     function is fully pure and testable.
@@ -452,44 +445,8 @@ def select_tp_plan(
             partial_tp_ratio=first_close_ratio,
             tp_plan="MIDDLE_RUNNER",
         )
-    if tp_mode != "MIDDLE":
-        return TpPlanSelection(partial_tp_price=None, partial_tp_ratio=0.0, tp_plan="SINGLE")
-    if not split_tp_enabled:
-        return TpPlanSelection(partial_tp_price=None, partial_tp_ratio=0.0, tp_plan="SINGLE")
-    if layers < split_tp_min_layers:
-        return TpPlanSelection(partial_tp_price=None, partial_tp_ratio=0.0, tp_plan="SINGLE")
-    if partial_tp_consumed:
-        return TpPlanSelection(partial_tp_price=None, partial_tp_ratio=0.0, tp_plan="SINGLE")
-    if avg_entry <= 0 or final_tp <= 0:
-        return TpPlanSelection(partial_tp_price=None, partial_tp_ratio=0.0, tp_plan="SINGLE")
-
-    partial_ratio = min(max(split_tp_partial_ratio, 0.0), 1.0)
-    path_ratio = min(max(split_tp_path_ratio, 0.0), 1.0)
-    if partial_ratio <= 0 or partial_ratio >= 1 or path_ratio <= 0 or path_ratio >= 1:
-        return TpPlanSelection(partial_tp_price=None, partial_tp_ratio=0.0, tp_plan="SINGLE")
-
-    min_profit_pct = abs(split_tp_min_profit_pct)
-
-    if side == "LONG":
-        min_tp = avg_entry * (1 + min_profit_pct)
-        if final_tp <= min_tp:
-            return TpPlanSelection(partial_tp_price=None, partial_tp_ratio=0.0, tp_plan="SINGLE")
-        path_tp = avg_entry + (final_tp - avg_entry) * path_ratio
-        partial_tp = max(path_tp, min_tp)
-        if partial_tp >= final_tp:
-            return TpPlanSelection(partial_tp_price=None, partial_tp_ratio=0.0, tp_plan="SINGLE")
-        return TpPlanSelection(partial_tp_price=partial_tp, partial_tp_ratio=partial_ratio,
-                               tp_plan="SPLIT_PARTIAL_FINAL")
-
-    # SHORT
-    min_tp = avg_entry * (1 - min_profit_pct)
-    if final_tp >= min_tp:
-        return TpPlanSelection(partial_tp_price=None, partial_tp_ratio=0.0, tp_plan="SINGLE")
-    path_tp = avg_entry - (avg_entry - final_tp) * path_ratio
-    partial_tp = min(path_tp, min_tp)
-    if partial_tp <= final_tp:
-        return TpPlanSelection(partial_tp_price=None, partial_tp_ratio=0.0, tp_plan="SINGLE")
-    return TpPlanSelection(partial_tp_price=partial_tp, partial_tp_ratio=partial_ratio, tp_plan="SPLIT_PARTIAL_FINAL")
+    # Fallback: SINGLE outer TP
+    return TpPlanSelection(partial_tp_price=None, partial_tp_ratio=0.0, tp_plan="SINGLE")
 
 
 # ── TP plan unchanged check ─────────────────────────────────────────────

@@ -22,8 +22,6 @@ from src.strategies.boll_cvd_reclaim_strategy import BollCvdReclaimStrategy, Bol
 def strategy(**overrides) -> BollCvdReclaimStrategy:
     values = dict(
         three_stage_runner_enabled=True,
-        split_tp_enabled=True,
-        split_tp_min_layers=4,
         breakeven_fee_buffer_pct=0.001,
         tp_min_net_profit_pct=0.002,
         entry_rr_target="FINAL_TP",
@@ -1132,7 +1130,7 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
 
     def test_force_tp_reconcile_single_tp_mode_works(self) -> None:
         """Force reconcile works with SINGLE tp_plan (no multi-stage)."""
-        strat = strategy(three_stage_runner_enabled=False, split_tp_enabled=False)
+        strat = strategy(three_stage_runner_enabled=False)
         strat.state = StrategyPositionState(
             side="SHORT",
             layers=1,

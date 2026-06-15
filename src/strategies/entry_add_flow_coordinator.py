@@ -166,8 +166,6 @@ class EntryAddFlowCoordinator:
             tp_price, _tp_src = strategy._select_three_stage_tp2_outer(side, boll)
         if tp_mode != "MIDDLE":
             reason = f"{reason} + 中轨净利润不足阈值，TP切换到{tp_mode}"
-        if tp_plan == "SPLIT_PARTIAL_FINAL":
-            reason = f"{reason} + 总层数>= {strategy.config.split_tp_min_layers}，启用分批止盈"
         if tp_plan == "MIDDLE_RUNNER":
             reason = f"{reason} + 中轨先平{partial_tp_ratio * 100:.0f}%，剩余runner到外轨"
         if tp_plan == "THREE_STAGE_RUNNER":

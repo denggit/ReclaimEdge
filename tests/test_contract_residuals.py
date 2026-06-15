@@ -82,7 +82,7 @@ def test_split_tp_build_specs_exact_sum_to_core_contracts() -> None:
     """Split TP via _build_take_profit_order_specs: partial + final must exactly sum to core."""
     trader = make_trader(position_contracts=Decimal("10.01"))
     intent = make_intent(
-        tp_plan="SPLIT_PARTIAL_FINAL",
+        tp_plan="MIDDLE_RUNNER",
         partial_tp_price=3060.0,
         partial_tp_ratio=0.60,
     )
@@ -91,23 +91,23 @@ def test_split_tp_build_specs_exact_sum_to_core_contracts() -> None:
     total = sum(contracts for _, contracts, _ in specs)
 
     assert total == Decimal("10.01"), (
-        f"partial + final must equal 10.01, got total={total} specs={specs}"
+        f"middle + runner must equal 10.01, got total={total} specs={specs}"
     )
     # Should not fallback to single (which returns only "final")
     labels = [label for label, _, _ in specs]
-    assert "partial" in labels, f"should have partial TP, got labels={labels}"
-    assert "final" in labels, f"should have final TP, got labels={labels}"
-    # Verify no 0.01 residual: partial should be round_down(10.01*0.6) = 6.00
-    partial = next(c for l, c, _ in specs if l == "partial")
-    assert partial == Decimal("6.00"), f"partial should be 6.00, got {partial}"
-    final = next(c for l, c, _ in specs if l == "final")
-    assert final == Decimal("4.01"), f"final should be 4.01, got {final}"
+    assert "middle" in labels, f"should have middle TP, got labels={labels}"
+    assert "runner" in labels, f"should have runner TP, got labels={labels}"
+    # Verify no 0.01 residual: middle should be round_down(10.01*0.6) = 6.00
+    middle = next(c for l, c, _ in specs if l == "middle")
+    assert middle == Decimal("6.00"), f"middle should be 6.00, got {middle}"
+    runner = next(c for l, c, _ in specs if l == "runner")
+    assert runner == Decimal("4.01"), f"runner should be 4.01, got {runner}"
 
 
 def test_split_partial_consumed_builds_only_final_tp() -> None:
     trader = make_trader(position_contracts=Decimal("4.01"))
     intent = make_intent(
-        tp_plan="SPLIT_PARTIAL_FINAL",
+        tp_plan="MIDDLE_RUNNER",
         partial_tp_price=3060.0,
         partial_tp_ratio=0.60,
         partial_tp_consumed=True,

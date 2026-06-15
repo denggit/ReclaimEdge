@@ -412,35 +412,6 @@ class TestThreeStageEnabledProfitInsufficient:
         assert s.state.tp_plan == "SINGLE"
 
 
-# ── 8. split fallback uses valid outer ─────────────────────────────────
-
-class TestSplitFallbackUsesValidOuter:
-    def test_split_partial_middle_insufficient_uses_outer_profit_fallback(self):
-        """SPLIT_PARTIAL_FINAL with partial not consumed → outer with profit fallback."""
-        s = _strategy(tp_min_net_profit_pct=0.05)
-        _setup_position_state(
-            s, side="LONG", layers=2,
-            avg_entry_price=100.0, breakeven_price=100.5,
-            net_remaining_breakeven_price=100.5,
-        )
-        s.state.tp_plan = "SPLIT_PARTIAL_FINAL"
-        s.state.partial_tp_consumed = False
-
-        # TP_BOLL upper = 104.0, structure upper = 107.0
-        # Required = 100.5 * 1.05 = 105.525
-        # TP_BOLL upper insufficient → structure upper (107.0) is sufficient
-        boll = _boll_with_tp(
-            middle=100.0, upper=107.0, lower=90.0,
-            tp_middle=102.0, tp_upper=104.0, tp_lower=92.0,
-            candle_ts_ms=2000,
-        )
-        cvd = _cvd()
-        result = s._maybe_update_tp(101.0, 2000, boll, cvd)
-        assert result is not None
-        assert result.intent_type == "UPDATE_TP"
-        assert s.state.tp_plan == "SINGLE"
-
-
 # ── 9. middle runner active final TP uses valid outer ──────────────────
 
 class TestMiddleRunnerActiveFinalTp:

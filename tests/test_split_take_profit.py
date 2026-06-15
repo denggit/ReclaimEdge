@@ -15,7 +15,6 @@ from src.monitors.boll_band_breakout_monitor import BollSnapshot
 from src.position_management.runner_live_helpers import middle_runner_size_mismatch_needs_degraded_protection
 from src.position_management.tp_progress import (
     mark_middle_runner_active_if_position_reduced,
-    mark_partial_tp_consumed_if_position_reduced,
 )
 from src.reporting.trade_journal import LiveTradeJournal
 from src.risk.simple_position_sizer import PositionSize, SimplePositionSizer, SimplePositionSizerConfig
@@ -31,10 +30,6 @@ from src.strategies.boll_cvd_reclaim_strategy import (
 
 def strategy(**config_overrides) -> BollCvdReclaimStrategy:
     config_values = dict(
-        split_tp_min_layers=4,
-        split_tp_path_ratio=0.8,
-        split_tp_partial_ratio=0.5,
-        split_tp_min_profit_pct=0.004,
         entry_rr_target="FINAL_TP",
     )
     config_values.update(config_overrides)
@@ -117,7 +112,6 @@ class SplitTakeProfitStrategyTest(unittest.TestCase):
             config = BollCvdReclaimStrategyConfig.from_env()
         self.assertFalse(config.middle_runner_enabled)
         self.assertEqual(config.middle_runner_first_close_ratio, 0.8)
-        self.assertTrue(config.split_tp_enabled)
 
         with patch.dict(
                 os.environ,
@@ -126,7 +120,6 @@ class SplitTakeProfitStrategyTest(unittest.TestCase):
                     "MIDDLE_RUNNER_FIRST_CLOSE_RATIO": "0.99",
                     "MIDDLE_RUNNER_EXTENSION_TRIGGER_RATIO": "0.6",
                     "NEAR_TP_ENABLED": "false",
-                    "SPLIT_TP_ENABLED": "false",
                 },
                 clear=True,
         ):
@@ -134,7 +127,6 @@ class SplitTakeProfitStrategyTest(unittest.TestCase):
         self.assertTrue(config.middle_runner_enabled)
         self.assertEqual(config.middle_runner_first_close_ratio, 0.95)
         self.assertEqual(config.middle_runner_extension_trigger_ratio, 0.6)
-        self.assertFalse(config.split_tp_enabled)
 
         with patch.dict(os.environ, {"MIDDLE_RUNNER_FIRST_CLOSE_RATIO": "0.01"}, clear=True):
             config = BollCvdReclaimStrategyConfig.from_env()
@@ -189,104 +181,6 @@ class SplitTakeProfitStrategyTest(unittest.TestCase):
         self.assertEqual(mode, "MIDDLE")
         self.assertAlmostEqual(tp_price, 99.69)
 
-    def test_long_split_tp_uses_upper_when_final_tp_switches_to_upper(self) -> None:
-        strat = strategy(breakeven_fee_buffer_pct=0.001, tp_min_net_profit_pct=0.002)
-        strat.state.avg_entry_price = 100.0
-
-        tp_price, mode = strat._select_tp_price("LONG", boll(middle=100.25, upper=110.0))
-        partial_tp, partial_ratio, plan = strat._select_tp_plan("LONG", tp_price, 4)
-
-        self.assertEqual(mode, "UPPER")
-        # Middle profit insufficient → SPLIT is blocked; SINGLE only
-        self.assertEqual(plan, "SINGLE")
-        self.assertIsNone(partial_tp)
-        self.assertEqual(partial_ratio, 0.0)
-
-    def test_short_split_tp_uses_lower_when_final_tp_switches_to_lower(self) -> None:
-        strat = strategy(breakeven_fee_buffer_pct=0.001, tp_min_net_profit_pct=0.002)
-        strat.state.avg_entry_price = 100.0
-
-        tp_price, mode = strat._select_tp_price("SHORT", boll(middle=99.75, lower=90.0))
-        partial_tp, partial_ratio, plan = strat._select_tp_plan("SHORT", tp_price, 4)
-
-        self.assertEqual(mode, "LOWER")
-        # Middle profit insufficient → SPLIT is blocked; SINGLE only
-        self.assertEqual(plan, "SINGLE")
-        self.assertIsNone(partial_tp)
-        self.assertEqual(partial_ratio, 0.0)
-
-    def test_long_split_tp_uses_80_pct_path_when_min_profit_is_inside_final_tp(self) -> None:
-        strat = strategy()
-        strat.state.avg_entry_price = 100.0
-
-        partial_tp, partial_ratio, plan = strat._select_tp_plan("LONG", 110.0, 4, tp_mode="MIDDLE",
-                                                                boll=boll(middle=101.0, upper=110.0))
-
-        self.assertEqual(plan, "SPLIT_PARTIAL_FINAL")
-        self.assertEqual(partial_ratio, 0.5)
-        self.assertAlmostEqual(partial_tp or 0, 108.0)
-
-    def test_long_does_not_split_when_min_profit_would_exceed_final_tp(self) -> None:
-        strat = strategy()
-        strat.state.avg_entry_price = 100.0
-
-        partial_tp, partial_ratio, plan = strat._select_tp_plan("LONG", 100.3, 4)
-
-        self.assertEqual(plan, "SINGLE")
-        self.assertEqual(partial_ratio, 0.0)
-        self.assertIsNone(partial_tp)
-
-    def test_short_split_tp_uses_80_pct_path_when_min_profit_is_inside_final_tp(self) -> None:
-        strat = strategy()
-        strat.state.avg_entry_price = 100.0
-
-        partial_tp, partial_ratio, plan = strat._select_tp_plan("SHORT", 90.0, 4, tp_mode="MIDDLE",
-                                                                boll=boll(middle=99.0, upper=110.0, lower=90.0))
-
-        self.assertEqual(plan, "SPLIT_PARTIAL_FINAL")
-        self.assertEqual(partial_ratio, 0.5)
-        self.assertAlmostEqual(partial_tp or 0, 92.0)
-
-    def test_short_does_not_split_when_min_profit_would_exceed_final_tp(self) -> None:
-        strat = strategy()
-        strat.state.avg_entry_price = 100.0
-
-        partial_tp, partial_ratio, plan = strat._select_tp_plan("SHORT", 99.7, 4)
-
-        self.assertEqual(plan, "SINGLE")
-        self.assertEqual(partial_ratio, 0.0)
-        self.assertIsNone(partial_tp)
-
-    def test_partial_tp_consumed_prevents_repeated_split(self) -> None:
-        strat = strategy()
-        strat.state.avg_entry_price = 100.0
-        strat.state.partial_tp_consumed = True
-
-        partial_tp, partial_ratio, plan = strat._select_tp_plan("LONG", 110.0, 4)
-
-        self.assertEqual(plan, "SINGLE")
-        self.assertEqual(partial_ratio, 0.0)
-        self.assertIsNone(partial_tp)
-
-    def test_layers_below_threshold_keep_single_tp(self) -> None:
-        strat = strategy()
-        strat.state.avg_entry_price = 100.0
-
-        partial_tp, partial_ratio, plan = strat._select_tp_plan("LONG", 110.0, 3)
-
-        self.assertEqual(plan, "SINGLE")
-        self.assertEqual(partial_ratio, 0.0)
-        self.assertIsNone(partial_tp)
-
-    def test_split_tp_enabled_false_keeps_single_tp(self) -> None:
-        strat = strategy(split_tp_enabled=False)
-        strat.state.avg_entry_price = 100.0
-
-        partial_tp, partial_ratio, plan = strat._select_tp_plan("LONG", 110.0, 4)
-
-        self.assertEqual(plan, "SINGLE")
-        self.assertEqual(partial_ratio, 0.0)
-        self.assertIsNone(partial_tp)
 
     def test_open_position_initializes_net_remaining_breakeven_long(self) -> None:
         strat = strategy(breakeven_fee_buffer_pct=0.001)
@@ -739,72 +633,6 @@ class SplitTakeProfitStrategyTest(unittest.TestCase):
         self.assertTrue(strat.state.middle_runner_active, "middle_runner_active must be preserved")
         self.assertIsNotNone(strat.state.middle_runner_protective_sl_price)
 
-    def test_split_partial_disabled_when_middle_profit_insufficient(self) -> None:
-        """SPLIT with partial not consumed must fall back to SINGLE outer when middle profit insufficient."""
-        strat = strategy(breakeven_fee_buffer_pct=0.001, tp_min_net_profit_pct=0.002, split_tp_enabled=True,
-                         split_tp_min_layers=2)
-        strat.state = StrategyPositionState(
-            side="LONG",
-            layers=2,
-            total_entry_qty=1.0,
-            total_entry_notional=100.0,
-            avg_entry_price=100.0,
-            net_remaining_breakeven_price=100.0,
-            tp_price=110.0,
-            tp_mode="MIDDLE",
-            tp_plan="SPLIT_PARTIAL_FINAL",
-            partial_tp_price=108.0,
-            partial_tp_ratio=0.5,
-            partial_tp_consumed=False,
-            last_tp_update_candle_ts_ms=1_000,
-        )
-
-        # middle=100.1: required_middle = 100.0 * 1.002 = 100.2 > 100.1 → insufficient
-        got = strat._maybe_update_tp(99.0, 2_000, boll(middle=100.1, upper=103.0, lower=97.0, candle_ts_ms=2_000),
-                                     cvd())
-
-        self.assertIsNotNone(got, "Must return UPDATE_TP when middle profit insufficient")
-        self.assertEqual(got.intent_type, "UPDATE_TP")
-        self.assertEqual(got.tp_plan, "SINGLE")
-        self.assertAlmostEqual(got.tp_price, 103.0)
-        self.assertIsNone(got.partial_tp_price)
-        self.assertEqual(got.partial_tp_ratio, 0.0)
-
-    def test_split_partial_disabled_when_middle_profit_insufficient_is_not_reenabled(self) -> None:
-        """SPLIT fallback to SINGLE must not be re-enabled by subsequent TP-plan selection."""
-        strat = strategy(breakeven_fee_buffer_pct=0.001, tp_min_net_profit_pct=0.002, split_tp_enabled=True,
-                         split_tp_min_layers=2, three_stage_runner_enabled=False)
-        strat.state = StrategyPositionState(
-            side="LONG",
-            layers=2,
-            total_entry_qty=1.0,
-            total_entry_notional=100.0,
-            avg_entry_price=100.0,
-            net_remaining_breakeven_price=100.0,
-            tp_price=110.0,
-            tp_mode="MIDDLE",
-            tp_plan="SPLIT_PARTIAL_FINAL",
-            partial_tp_price=108.0,
-            partial_tp_ratio=0.5,
-            partial_tp_consumed=False,
-            last_tp_update_candle_ts_ms=1_000,
-        )
-
-        # middle=100.1: required_middle = 100.0 * 1.002 = 100.2 > 100.1 → insufficient
-        got = strat._maybe_update_tp(99.0, 2_000, boll(middle=100.1, upper=103.0, lower=97.0, candle_ts_ms=2_000),
-                                     cvd())
-
-        self.assertIsNotNone(got, "Must return UPDATE_TP when middle profit insufficient")
-        self.assertEqual(got.intent_type, "UPDATE_TP")
-        self.assertEqual(got.tp_plan, "SINGLE", "Must be locked to SINGLE, not re-enabled to SPLIT or other")
-        self.assertIsNone(got.partial_tp_price, "Partial TP must be cleared when fallback locked")
-        self.assertEqual(got.partial_tp_ratio, 0.0)
-        self.assertAlmostEqual(got.tp_price, 103.0)
-        # Verify state is consistent
-        self.assertEqual(strat.state.tp_plan, "SINGLE")
-        self.assertIsNone(strat.state.partial_tp_price)
-        self.assertEqual(strat.state.partial_tp_ratio, 0.0)
-
 
 class SplitTakeProfitTraderTest(unittest.IsolatedAsyncioTestCase):
     def make_trader(self) -> Trader:
@@ -826,14 +654,6 @@ class SplitTakeProfitTraderTest(unittest.IsolatedAsyncioTestCase):
         trader._tp_sl_manager = TpSlExecutionManager(trader, trading_client=trader.trading_client)  # type: ignore[arg-type]
         return trader
 
-    def test_build_split_order_specs_rounds_half_position(self) -> None:
-        trader = self.make_trader()
-        specs = trader._build_take_profit_order_specs(
-            intent(partial_tp_price=108.0, partial_tp_ratio=0.5, tp_plan="SPLIT_PARTIAL_FINAL")
-        )
-
-        self.assertEqual(specs, [("partial", Decimal("2.00"), 108.0), ("final", Decimal("2.00"), 110.0)])
-
     def test_build_middle_runner_order_specs_uses_first_and_runner_labels(self) -> None:
         trader = self.make_trader()
         specs = trader._build_take_profit_order_specs(
@@ -842,111 +662,8 @@ class SplitTakeProfitTraderTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(specs, [("middle", Decimal("3.20"), 105.0), ("runner", Decimal("0.80"), 110.0)])
 
-    async def test_replace_take_profit_places_two_reduce_only_orders_for_split_plan(self) -> None:
-        trader = self.make_trader()
-        posted: list[dict] = []
-
-        async def fetch_position_snapshot(self) -> PositionSnapshot:  # type: ignore[no-untyped-def]
-            return PositionSnapshot("LONG", Decimal("4"), 100.0, 0.4, Decimal("4"))
-
-        async def fetch_pending_orders(self) -> list[dict]:  # type: ignore[no-untyped-def]
-            return []
-
-        async def fetch_broker_open_orders(self):  # type: ignore[no-untyped-def]
-            return ()
-
-        async def request(self, method: str, endpoint: str, payload=None):  # type: ignore[no-untyped-def]
-            posted.append(dict(payload or {}))
-            return {"code": "0", "data": [{"ordId": f"tp-{len(posted)}"}]}
-
-        trader.fetch_position_snapshot = MethodType(fetch_position_snapshot, trader)  # type: ignore[method-assign]
-        trader.fetch_pending_orders = MethodType(fetch_pending_orders, trader)  # type: ignore[method-assign]
-        trader.fetch_broker_open_orders = MethodType(fetch_broker_open_orders, trader)  # type: ignore[method-assign]
-        trader.request = MethodType(request, trader)  # type: ignore[method-assign]
-
-        result = await trader.replace_take_profit(
-            intent(partial_tp_price=108.0, partial_tp_ratio=0.5, tp_plan="SPLIT_PARTIAL_FINAL")
-        )
-
-        self.assertTrue(result.ok)
-        self.assertEqual(result.tp_order_ids, ("tp-1", "tp-2"))
-        self.assertEqual(result.tp_order_id, "tp-1,tp-2")
-        self.assertEqual(result.tp_price, "partial:108.00,final:110.00")
-        self.assertEqual([item["sz"] for item in posted], ["2", "2"])
-        self.assertEqual([item["px"] for item in posted], ["108.00", "110.00"])
-        self.assertTrue(all(item["reduceOnly"] == "true" for item in posted))
-
 
 class SplitTakeProfitLifecycleTest(unittest.TestCase):
-    def test_mark_partial_tp_consumed_when_position_reduced_enough(self) -> None:
-        strat = strategy()
-        strat.state = StrategyPositionState(
-            side="LONG",
-            layers=4,
-            total_entry_qty=1.0,
-            total_entry_notional=100.0,
-            avg_entry_price=100.0,
-            partial_tp_price=108.0,
-            partial_tp_ratio=0.5,
-            tp_plan="SPLIT_PARTIAL_FINAL",
-        )
-        position = PositionSnapshot("LONG", Decimal("5"), 100.0, 0.5, Decimal("5"))
-
-        consumed = mark_partial_tp_consumed_if_position_reduced(strat, position)
-
-        self.assertTrue(consumed)
-        self.assertTrue(strat.state.partial_tp_consumed)
-        self.assertEqual(strat.state.tp_plan, "SINGLE")
-        self.assertIsNone(strat.state.partial_tp_price)
-        self.assertEqual(strat.state.partial_tp_ratio, 0.0)
-
-    def test_does_not_mark_partial_consumed_for_small_rounding_difference(self) -> None:
-        strat = strategy()
-        strat.state = StrategyPositionState(
-            side="LONG",
-            layers=4,
-            total_entry_qty=1.0,
-            total_entry_notional=100.0,
-            avg_entry_price=100.0,
-            partial_tp_price=108.0,
-            partial_tp_ratio=0.5,
-            tp_plan="SPLIT_PARTIAL_FINAL",
-        )
-        position = PositionSnapshot("LONG", Decimal("9.98"), 100.0, 0.998, Decimal("9.98"))
-
-        consumed = mark_partial_tp_consumed_if_position_reduced(strat, position)
-
-        self.assertFalse(consumed)
-        self.assertFalse(strat.state.partial_tp_consumed)
-        self.assertEqual(strat.state.tp_plan, "SPLIT_PARTIAL_FINAL")
-
-    def test_record_flat_accepts_split_fields(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            journal = LiveTradeJournal(Path(tmp) / "live_trade_events.jsonl")
-            journal.record_flat(
-                position_id="pos-1",
-                symbol="ETH-USDT-SWAP",
-                side="LONG",
-                cash_before_position=100.0,
-                cash_after=101.0,
-                equity_after=101.0,
-                reason="test",
-                layers=4,
-                avg_entry_price=100.0,
-                last_tp_price=110.0,
-                last_partial_tp_price=108.0,
-                last_tp_plan="SPLIT_PARTIAL_FINAL",
-                partial_tp_consumed=True,
-            )
-
-            events = journal.load_events()
-
-        self.assertEqual(len(events), 1)
-        payload = events[0].payload
-        self.assertEqual(payload["last_partial_tp_price"], 108.0)
-        self.assertEqual(payload["last_tp_plan"], "SPLIT_PARTIAL_FINAL")
-        self.assertTrue(payload["partial_tp_consumed"])
-
     def test_mark_middle_runner_active_when_position_reduced_to_keep_ratio(self) -> None:
         strat = strategy(middle_runner_enabled=True)
         strat.state = StrategyPositionState(

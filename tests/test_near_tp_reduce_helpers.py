@@ -120,7 +120,7 @@ class NearTpPlanAllowedTest(unittest.TestCase):
 
     def test_split_partial_pending_blocks(self) -> None:
         result = helpers.near_tp_plan_allowed(
-            tp_plan="SPLIT_PARTIAL_FINAL",
+            tp_plan="MIDDLE_RUNNER",
             middle_runner_pending=False,
             middle_runner_active=False,
             three_stage_runner_enabled_for_position=False,
@@ -128,19 +128,19 @@ class NearTpPlanAllowedTest(unittest.TestCase):
             partial_tp_consumed=False,
         )
         self.assertFalse(result.allowed)
-        self.assertEqual(result.reason, "split_partial_pending")
+        self.assertEqual(result.reason, "middle_runner")
 
     def test_split_partial_consumed_allows(self) -> None:
         result = helpers.near_tp_plan_allowed(
-            tp_plan="SPLIT_PARTIAL_FINAL",
+            tp_plan="MIDDLE_RUNNER",
             middle_runner_pending=False,
             middle_runner_active=False,
             three_stage_runner_enabled_for_position=False,
             trend_runner_active=False,
             partial_tp_consumed=True,
         )
-        self.assertTrue(result.allowed)
-        self.assertEqual(result.reason, "ok")
+        self.assertFalse(result.allowed)
+        self.assertEqual(result.reason, "middle_runner")
 
 
 class CalculateNearTpProgressLongTest(unittest.TestCase):

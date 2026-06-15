@@ -218,28 +218,14 @@ class NearTpStrategyTest(unittest.TestCase):
         self.assertEqual(result.side, "SHORT")
         self.assertAlmostEqual(result.near_tp_protective_sl_price or 0, 99.9)
 
-    def test_split_partial_not_consumed_blocks_near_tp(self) -> None:
+    def test_middle_runner_blocks_near_tp(self) -> None:
         strat = strategy()
-        strat.state = seeded_long_state(tp_plan="SPLIT_PARTIAL_FINAL", partial_tp_consumed=False)
+        strat.state = seeded_long_state(tp_plan="MIDDLE_RUNNER", partial_tp_consumed=False)
 
         result = strat._maybe_near_tp_reduce(108.8, 1_000, boll(), cvd())
 
         self.assertIsNone(result)
         self.assertFalse(strat.state.near_tp_armed)
-
-    def test_split_partial_consumed_allows_near_tp(self) -> None:
-        strat = strategy()
-        strat.state = seeded_long_state(
-            tp_plan="SPLIT_PARTIAL_FINAL",
-            partial_tp_consumed=True,
-            near_tp_armed=True,
-            near_tp_best_price=109.0,
-        )
-
-        result = strat._maybe_near_tp_reduce(106.0, 2_000, boll(), cvd())
-
-        self.assertIsNotNone(result)
-        self.assertEqual(result.intent_type, "NEAR_TP_REDUCE")
 
     def test_near_tp_protected_blocks_repeat_reduce(self) -> None:
         strat = strategy()
@@ -248,7 +234,7 @@ class NearTpStrategyTest(unittest.TestCase):
         self.assertIsNone(strat._maybe_near_tp_reduce(106.0, 2_000, boll(), cvd()))
 
     def test_near_tp_protected_tp_update_stays_single_final_tp(self) -> None:
-        strat = strategy(split_tp_min_layers=4)
+        strat = strategy()
         strat.state = seeded_long_state(
             layers=4,
             tp_price=105.0,
@@ -433,7 +419,7 @@ class NearTpTraderTest(unittest.IsolatedAsyncioTestCase):
         trader = RecordingTrader()
 
         await trader.execute_near_tp_reduce(
-            intent(partial_tp_price=108.0, partial_tp_ratio=0.5, tp_plan="SPLIT_PARTIAL_FINAL"))
+            intent(partial_tp_price=108.0, partial_tp_ratio=0.5, tp_plan="MIDDLE_RUNNER"))
 
         tp_orders = [payload for _m, endpoint, payload in trader.requests if
                      endpoint == "/api/v5/trade/order" and payload.get("ordType") == "limit"]

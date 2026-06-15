@@ -412,7 +412,6 @@ class EntryAddFlowCoordinatorSuccessfulLongAddTest(unittest.TestCase):
     def _strategy_with_degraded_three_stage(self, first_ts: int) -> BollCvdReclaimStrategy:
         strat = _strategy(
             three_stage_runner_enabled=True,
-            split_tp_enabled=False,
             breakeven_fee_buffer_pct=0.0,
             tp_min_net_profit_pct=0.001,
         )
@@ -518,20 +517,10 @@ class EntryAddFlowCoordinatorSuccessfulShortAddTest(unittest.TestCase):
 # ── open_position plan branches ─────────────────────────────────────────
 
 class EntryAddFlowCoordinatorOpenPositionPlanTest(unittest.TestCase):
-    """open_position TP plan branches (SPLIT, MIDDLE, THREE-STAGE)."""
-
-    def test_split_tp_appends_split_reason(self) -> None:
-        strat = _strategy(split_tp_enabled=True, split_tp_min_layers=1)
-        boll = _boll()
-        cvd = _cvd()
-        coord = _coordinator(strat)
-        intent = coord.open_position("LONG", "OPEN_LONG", 1900.0, 1000, boll, cvd, "base")
-        self.assertIsNotNone(intent)
-        if strat.state.tp_plan == "SPLIT_PARTIAL_FINAL":
-            self.assertIn("启用分批止盈", intent.reason)
+    """open_position TP plan branches (MIDDLE, THREE-STAGE)."""
 
     def test_middle_runner_plan_calls_set_middle_runner_planned(self) -> None:
-        strat = _strategy(middle_runner_enabled=True, split_tp_enabled=False)
+        strat = _strategy(middle_runner_enabled=True)
         boll = _boll()
         cvd = _cvd()
         # Position the strategy so middle runner can be selected
@@ -544,7 +533,7 @@ class EntryAddFlowCoordinatorOpenPositionPlanTest(unittest.TestCase):
             self.assertTrue(strat.state.middle_runner_enabled_for_position)
 
     def test_three_stage_runner_plan_calls_set_three_stage_runner_planned(self) -> None:
-        strat = _strategy(three_stage_runner_enabled=True, split_tp_enabled=False)
+        strat = _strategy(three_stage_runner_enabled=True)
         boll = _boll()
         cvd = _cvd()
         coord = _coordinator(strat)

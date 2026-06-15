@@ -358,24 +358,24 @@ class BuildTakeProfitOrderSpecsTest(unittest.TestCase):
         self.assertEqual(self._specs(d), [("final", Decimal("10"), 100.0)])
         self.assertIsNone(d.fallback_reason)
 
-    # ── SPLIT_PARTIAL_FINAL ──
+    # ── MIDDLE_RUNNER: edge cases (converted from SPLIT_PARTIAL_FINAL) ──
     def test_split_partial_final_valid(self) -> None:
         d = self._call(
-            tp_plan="SPLIT_PARTIAL_FINAL",
+            tp_plan="MIDDLE_RUNNER",
             partial_tp_price=90.0,
             partial_tp_ratio=Decimal("0.6"),
             final_tp_price=100.0,
         )
         self.assertEqual(
             self._specs(d),
-            [("partial", Decimal("6.00"), 90.0), ("final", Decimal("4.00"), 100.0)],
+            [("middle", Decimal("6.00"), 90.0), ("runner", Decimal("4.00"), 100.0)],
         )
         self.assertIsNone(d.fallback_reason)
 
     def test_split_size_too_small_partial(self) -> None:
         d = self._call(
             position_contracts=Decimal("0.01"),
-            tp_plan="SPLIT_PARTIAL_FINAL",
+            tp_plan="MIDDLE_RUNNER",
             partial_tp_price=90.0,
             partial_tp_ratio=Decimal("0.5"),
             final_tp_price=100.0,
@@ -392,7 +392,7 @@ class BuildTakeProfitOrderSpecsTest(unittest.TestCase):
     def test_split_size_too_small_final(self) -> None:
         d = self._call(
             position_contracts=Decimal("0.019"),
-            tp_plan="SPLIT_PARTIAL_FINAL",
+            tp_plan="MIDDLE_RUNNER",
             partial_tp_price=90.0,
             partial_tp_ratio=Decimal("0.99"),
             final_tp_price=100.0,
@@ -402,7 +402,7 @@ class BuildTakeProfitOrderSpecsTest(unittest.TestCase):
 
     def test_split_invalid_ratio_zero(self) -> None:
         d = self._call(
-            tp_plan="SPLIT_PARTIAL_FINAL",
+            tp_plan="MIDDLE_RUNNER",
             partial_tp_price=90.0,
             partial_tp_ratio=Decimal("0"),
             final_tp_price=100.0,
@@ -412,7 +412,7 @@ class BuildTakeProfitOrderSpecsTest(unittest.TestCase):
 
     def test_split_invalid_ratio_one(self) -> None:
         d = self._call(
-            tp_plan="SPLIT_PARTIAL_FINAL",
+            tp_plan="MIDDLE_RUNNER",
             partial_tp_price=90.0,
             partial_tp_ratio=Decimal("1"),
             final_tp_price=100.0,
@@ -422,7 +422,7 @@ class BuildTakeProfitOrderSpecsTest(unittest.TestCase):
 
     def test_split_partial_price_none(self) -> None:
         d = self._call(
-            tp_plan="SPLIT_PARTIAL_FINAL",
+            tp_plan="MIDDLE_RUNNER",
             partial_tp_price=None,
             partial_tp_ratio=Decimal("0.5"),
             final_tp_price=100.0,
@@ -456,7 +456,7 @@ class BuildTakeProfitOrderSpecsTest(unittest.TestCase):
 
     def test_partial_consumed_returns_final_only(self) -> None:
         d = self._call(
-            tp_plan="SPLIT_PARTIAL_FINAL",
+            tp_plan="MIDDLE_RUNNER",
             partial_tp_consumed=True,
             partial_tp_price=90.0,
             partial_tp_ratio=Decimal("0.5"),

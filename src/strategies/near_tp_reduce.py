@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 PositionSide = Literal["LONG", "SHORT"]
-TpPlan = Literal["SINGLE", "SPLIT_PARTIAL_FINAL", "MIDDLE_RUNNER", "THREE_STAGE_RUNNER"]
+TpPlan = Literal["SINGLE", "MIDDLE_RUNNER", "THREE_STAGE_RUNNER"]
 
 
 @dataclass(frozen=True)
@@ -115,14 +115,11 @@ def near_tp_plan_allowed(
 
     - Middle Runner (pending or active) disables Near TP.
     - Three-Stage Runner enabled or Trend Runner active disables Near TP.
-    - SPLIT_PARTIAL_FINAL with partial not yet consumed disables Near TP.
     """
     if tp_plan == "MIDDLE_RUNNER" or middle_runner_pending or middle_runner_active:
         return NearTpGateDecision(allowed=False, reason="middle_runner")
     if tp_plan == "THREE_STAGE_RUNNER" or three_stage_runner_enabled_for_position or trend_runner_active:
         return NearTpGateDecision(allowed=False, reason="three_stage_or_trend_runner")
-    if tp_plan == "SPLIT_PARTIAL_FINAL" and not partial_tp_consumed:
-        return NearTpGateDecision(allowed=False, reason="split_partial_pending")
     return NearTpGateDecision(allowed=True, reason="ok")
 
 

@@ -50,8 +50,6 @@ def restore_strategy_from_saved_state(
         saved_state: Any,
 ) -> None:
     tp_plan = getattr(saved_state, "tp_plan", "SINGLE")
-    if tp_plan == "SPLIT_50_50":
-        tp_plan = "SPLIT_PARTIAL_FINAL"
     strategy.state = StrategyPositionState(
         side=saved_state.side,
         layers=saved_state.layers,

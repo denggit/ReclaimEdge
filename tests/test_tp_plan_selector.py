@@ -688,13 +688,6 @@ class TestSelectTpPlan:
             three_stage_tp1_ratio=0.4,
             three_stage_runner_enabled=False,
             middle_runner_plan_allowed=False,
-            split_tp_enabled=True,
-            split_tp_min_layers=3,
-            partial_tp_consumed=False,
-            avg_entry=100.0,
-            split_tp_partial_ratio=0.5,
-            split_tp_path_ratio=0.5,
-            split_tp_min_profit_pct=0.005,
         )
         kwargs.update(overrides)
         return kwargs
@@ -775,104 +768,16 @@ class TestSelectTpPlan:
         sel = select_tp_plan(**self._default_kwargs(tp_mode="UPPER"))
         assert sel.tp_plan == "SINGLE"
 
-    def test_split_disabled_returns_single(self):
-        sel = select_tp_plan(**self._default_kwargs(split_tp_enabled=False))
-        assert sel.tp_plan == "SINGLE"
-
-    def test_layers_insufficient_returns_single(self):
-        sel = select_tp_plan(**self._default_kwargs(layers=2, split_tp_min_layers=3))
-        assert sel.tp_plan == "SINGLE"
-
-    def test_partial_tp_consumed_returns_single(self):
-        sel = select_tp_plan(**self._default_kwargs(partial_tp_consumed=True))
-        assert sel.tp_plan == "SINGLE"
-
-    def test_split_long_valid_returns_split_partial_final(self):
+    def test_no_split_plan_generated(self):
+        """When no runner plan is allowed, SINGLE is the only fallback."""
         sel = select_tp_plan(**self._default_kwargs(
-            side="LONG", final_tp=110.0, avg_entry=100.0,
-        ))
-        assert sel.tp_plan == "SPLIT_PARTIAL_FINAL"
-        # path_tp = 100 + (110 - 100) * 0.5 = 105.0
-        # min_tp = 100 * (1 + 0.005) = 100.5
-        # partial_tp = max(105.0, 100.5) = 105.0
-        assert sel.partial_tp_price == 105.0
-        assert sel.partial_tp_ratio == 0.5
-
-    def test_split_short_valid_returns_split_partial_final(self):
-        sel = select_tp_plan(**self._default_kwargs(
-            side="SHORT", final_tp=90.0, avg_entry=100.0,
-        ))
-        assert sel.tp_plan == "SPLIT_PARTIAL_FINAL"
-        # path_tp = 100 - (100 - 90) * 0.5 = 95.0
-        # min_tp = 100 * (1 - 0.005) = 99.5
-        # partial_tp = min(95.0, 99.5) = 95.0
-        assert sel.partial_tp_price == 95.0
-        assert sel.partial_tp_ratio == 0.5
-
-    def test_split_long_final_tp_too_close_to_entry_returns_single(self):
-        # final_tp <= min_tp → SINGLE
-        sel = select_tp_plan(**self._default_kwargs(
-            side="LONG", final_tp=100.3, avg_entry=100.0,
-            split_tp_min_profit_pct=0.005,  # min_tp = 100.5
+            three_stage_runner_plan_allowed=False,
+            three_stage_runner_enabled=False,
+            middle_runner_plan_allowed=False,
         ))
         assert sel.tp_plan == "SINGLE"
-
-    def test_split_long_partial_tp_exceeds_final_returns_single(self):
-        # partial_tp >= final_tp → SINGLE
-        sel = select_tp_plan(**self._default_kwargs(
-            side="LONG", final_tp=101.0, avg_entry=100.0,
-            split_tp_min_profit_pct=0.0,  # min_tp = 100.0
-            split_tp_path_ratio=0.99,  # path_tp = 100 + (101-100)*0.99 = 100.99
-        ))
-        # partial_tp = max(100.99, 100.0) = 100.99
-        # partial_tp < 101.0 → valid → SPLIT
-        assert sel.tp_plan == "SPLIT_PARTIAL_FINAL"
-
-    def test_split_short_final_tp_too_close_to_entry_returns_single(self):
-        sel = select_tp_plan(**self._default_kwargs(
-            side="SHORT", final_tp=99.7, avg_entry=100.0,
-            split_tp_min_profit_pct=0.005,  # min_tp = 99.5, final_tp=99.7 >= 99.5 → SINGLE
-        ))
-        assert sel.tp_plan == "SINGLE"
-
-    def test_invalid_partial_ratio_returns_single(self):
-        sel = select_tp_plan(**self._default_kwargs(
-            split_tp_partial_ratio=0.0,  # clamp → 0.0, <= 0 → invalid
-        ))
-        assert sel.tp_plan == "SINGLE"
-
-        sel2 = select_tp_plan(**self._default_kwargs(
-            split_tp_partial_ratio=1.0,  # clamp → 1.0, >= 1 → invalid
-        ))
-        assert sel2.tp_plan == "SINGLE"
-
-    def test_invalid_path_ratio_returns_single(self):
-        sel = select_tp_plan(**self._default_kwargs(
-            split_tp_path_ratio=0.0,
-        ))
-        assert sel.tp_plan == "SINGLE"
-
-    def test_avg_entry_zero_returns_single(self):
-        sel = select_tp_plan(**self._default_kwargs(avg_entry=0.0))
-        assert sel.tp_plan == "SINGLE"
-
-    def test_final_tp_zero_returns_single(self):
-        sel = select_tp_plan(**self._default_kwargs(final_tp=0.0))
-        assert sel.tp_plan == "SINGLE"
-
-    def test_long_split_min_profit_uses_abs_value(self):
-        """split_tp_min_profit_pct uses abs(), negative values work same."""
-        sel1 = select_tp_plan(**self._default_kwargs(
-            side="LONG", final_tp=110.0, avg_entry=100.0,
-            split_tp_min_profit_pct=0.005,
-        ))
-        sel2 = select_tp_plan(**self._default_kwargs(
-            side="LONG", final_tp=110.0, avg_entry=100.0,
-            split_tp_min_profit_pct=-0.005,
-        ))
-        assert sel1.tp_plan == sel2.tp_plan
-        assert sel1.partial_tp_price == sel2.partial_tp_price
-
+        assert sel.partial_tp_price is None
+        assert sel.partial_tp_ratio == 0.0
 
 # ═══════════════════════════════════════════════════════════════════════
 # 11. tp_plan_unchanged
@@ -925,9 +830,9 @@ class TestTpPlanUnchanged:
             current_partial_tp_price=None,
             current_partial_tp_ratio=0.0,
             new_tp_price=100.0,
-            new_partial_tp_price=None,
-            new_partial_tp_ratio=0.0,
-            new_tp_plan="SPLIT_PARTIAL_FINAL",
+            new_partial_tp_price=101.0,
+            new_partial_tp_ratio=0.5,
+            new_tp_plan="MIDDLE_RUNNER",
         )
         assert decision.unchanged is False
 
@@ -947,25 +852,25 @@ class TestTpPlanUnchanged:
     def test_one_partial_none_mismatch_returns_false(self):
         decision = tp_plan_unchanged(
             current_tp_price=100.0,
-            current_tp_plan="SPLIT_PARTIAL_FINAL",
+            current_tp_plan="MIDDLE_RUNNER",
             current_partial_tp_price=None,
             current_partial_tp_ratio=0.5,
             new_tp_price=100.0,
             new_partial_tp_price=101.0,
             new_partial_tp_ratio=0.5,
-            new_tp_plan="SPLIT_PARTIAL_FINAL",
+            new_tp_plan="MIDDLE_RUNNER",
         )
         assert decision.unchanged is False
 
         decision2 = tp_plan_unchanged(
             current_tp_price=100.0,
-            current_tp_plan="SPLIT_PARTIAL_FINAL",
+            current_tp_plan="MIDDLE_RUNNER",
             current_partial_tp_price=101.0,
             current_partial_tp_ratio=0.5,
             new_tp_price=100.0,
             new_partial_tp_price=None,
             new_partial_tp_ratio=0.5,
-            new_tp_plan="SPLIT_PARTIAL_FINAL",
+            new_tp_plan="MIDDLE_RUNNER",
         )
         assert decision2.unchanged is False
 
@@ -985,26 +890,26 @@ class TestTpPlanUnchanged:
     def test_partial_prices_close_enough_returns_true(self):
         decision = tp_plan_unchanged(
             current_tp_price=100.0,
-            current_tp_plan="SPLIT_PARTIAL_FINAL",
+            current_tp_plan="MIDDLE_RUNNER",
             current_partial_tp_price=101.0,
             current_partial_tp_ratio=0.5,
             new_tp_price=100.0,
             new_partial_tp_price=101.00005,  # diff < 0.0001 relative
             new_partial_tp_ratio=0.5,
-            new_tp_plan="SPLIT_PARTIAL_FINAL",
+            new_tp_plan="MIDDLE_RUNNER",
         )
         assert decision.unchanged is True
 
     def test_partial_prices_differ_too_much_returns_false(self):
         decision = tp_plan_unchanged(
             current_tp_price=100.0,
-            current_tp_plan="SPLIT_PARTIAL_FINAL",
+            current_tp_plan="MIDDLE_RUNNER",
             current_partial_tp_price=101.0,
             current_partial_tp_ratio=0.5,
             new_tp_price=100.0,
             new_partial_tp_price=102.0,
             new_partial_tp_ratio=0.5,
-            new_tp_plan="SPLIT_PARTIAL_FINAL",
+            new_tp_plan="MIDDLE_RUNNER",
         )
         assert decision.unchanged is False
 
