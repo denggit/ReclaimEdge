@@ -457,10 +457,10 @@ def test_smoke_test_does_not_contain_position_side_dict_key() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_smoke_test_contains_hard_max_position_notional() -> None:
-    """Script must reference BINANCE_LIVE_HARD_MAX_POSITION_NOTIONAL_USDT."""
+def test_smoke_test_does_not_contain_hard_max_position_notional() -> None:
+    """Script must NOT reference BINANCE_LIVE_HARD_MAX_POSITION_NOTIONAL_USDT (removed)."""
     text = _read_smoke_test_text()
-    assert "BINANCE_LIVE_HARD_MAX_POSITION_NOTIONAL_USDT" in text
+    assert "BINANCE_LIVE_HARD_MAX_POSITION_NOTIONAL_USDT" not in text
 
 
 def test_smoke_test_contains_preflight_max_position() -> None:

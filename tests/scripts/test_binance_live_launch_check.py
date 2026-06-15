@@ -3,22 +3,21 @@
 """
 @Author     : Zijun Deng
 @Date       : 2026/06/15
-@File       : test_binance_small_live_launch_check.py
-@Description: Unit tests for scripts/binance_small_live_launch_check.py
+@File       : test_binance_live_launch_check.py
+@Description: Unit tests for scripts/binance_live_launch_check.py
 
 Covers:
   1. Happy path — all env ready, no state file → exit 0
-  2. Wrong exchange (EXCHANGE=okx) → exit 3
-  3. Preflight blocked (EXCHANGE=binance only) → exit 2
-  4. Order notional too high → exit 2
-  5. Position notional too high → exit 2
-  6. Sidecar enabled default block → exit 2
-  7. Sidecar allow via CLI → exit 0 with warning
-  8. Local state has old position default block → exit 2
-  9. Allow existing local position without startup_force_tp_reconcile → exit 2
-  10. Allow existing local position with startup_force_tp_reconcile=true → exit 0
-  11. JSON output for ready and blocked paths
-  12. Source-level no side effects
+  2. High notional values (100/500) pass without blocking
+  3. Wrong exchange (EXCHANGE=okx) → exit 3
+  4. Preflight blocked (EXCHANGE=binance only) → exit 2
+  5. Sidecar enabled default block → exit 2
+  6. Sidecar allow via CLI → exit 0 with warning
+  7. Local state has old position default block → exit 2
+  8. Allow existing local position without startup_force_tp_reconcile → exit 2
+  9. Allow existing local position with startup_force_tp_reconcile=true → exit 0
+  10. JSON output for ready and blocked paths
+  11. Source-level no side effects
 """
 
 from __future__ import annotations
@@ -29,13 +28,15 @@ from pathlib import Path
 
 import pytest
 
-from scripts.binance_small_live_launch_check import main
+from scripts.binance_live_launch_check import main
 
 
 # ======================================================================
 # Helpers
 # ======================================================================
 
+# Note: 100 / 500 notional values — script no longer hard-blocks large notional.
+# The user decides their own risk tolerance via LIVE_MAX_ORDER/POSITION_NOTIONAL_USDT.
 READY_ENV: dict[str, str] = {
     "EXCHANGE": "binance",
     "EXCHANGE_API_KEY": "test-key",
@@ -43,8 +44,8 @@ READY_ENV: dict[str, str] = {
     "LIVE_ENABLED": "true",
     "LIVE_ALLOW_ORDERS": "true",
     "LIVE_CONFIRMATION": "I_UNDERSTAND_EXCHANGE_LIVE_TRADING",
-    "LIVE_MAX_ORDER_NOTIONAL_USDT": "10",
-    "LIVE_MAX_POSITION_NOTIONAL_USDT": "20",
+    "LIVE_MAX_ORDER_NOTIONAL_USDT": "100",
+    "LIVE_MAX_POSITION_NOTIONAL_USDT": "500",
     "LIVE_LEVERAGE": "20",
     "SIDECAR_ENABLED": "false",
 }
@@ -114,7 +115,7 @@ def _make_state_file(overrides: dict | None = None) -> Path:
 
 
 class TestHappyPath:
-    """All env ready, truly missing state file → exit 0, BINANCE_SMALL_LIVE_LAUNCH_READY."""
+    """All env ready, truly missing state file → exit 0, BINANCE_LIVE_LAUNCH_READY."""
 
     def test_ready_returns_0(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
@@ -126,7 +127,7 @@ class TestHappyPath:
         rc = main(argv=["--state-path", str(state_path)])
         captured = capsys.readouterr()
         assert rc == 0, f"Expected exit 0, got {rc}. stdout={captured.out}"
-        assert "BINANCE_SMALL_LIVE_LAUNCH_READY" in captured.out
+        assert "BINANCE_LIVE_LAUNCH_READY" in captured.out
 
     def test_ready_output_includes_symbol(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
@@ -200,8 +201,8 @@ class TestHappyPath:
         rc = main(argv=["--state-path", str(state_path)])
         captured = capsys.readouterr()
         assert rc == 0
-        assert "max_order_notional_usdt=10" in captured.out
-        assert "max_position_notional_usdt=20" in captured.out
+        assert "max_order_notional_usdt=100" in captured.out
+        assert "max_position_notional_usdt=500" in captured.out
 
     def test_ready_output_includes_sizing(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
@@ -241,7 +242,42 @@ class TestHappyPath:
 
 
 # ======================================================================
-# 2. Wrong exchange
+# 2. High notional values pass (no hard caps)
+# ======================================================================
+
+
+class TestHighNotionalPasses:
+    """Notional values above old small-live caps (100/500) pass without blocking."""
+
+    def test_high_notional_returns_0(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+    ) -> None:
+        """100 / 500 should pass — script no longer hard-blocks large notional."""
+        _set_env(monkeypatch, dict(READY_ENV))
+        state_path = tmp_path / "missing_live_state.json"
+        rc = main(argv=["--state-path", str(state_path)])
+        captured = capsys.readouterr()
+        assert rc == 0, f"Expected exit 0, got {rc}. stdout={captured.out}"
+        assert "BINANCE_LIVE_LAUNCH_READY" in captured.out
+        assert "max_order_notional_usdt=100" in captured.out
+        assert "max_position_notional_usdt=500" in captured.out
+
+    def test_high_notional_no_blocking_reason(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+    ) -> None:
+        """No LIVE_MAX_ORDER_NOTIONAL_TOO_HIGH or similar blocking reason appears."""
+        _set_env(monkeypatch, dict(READY_ENV))
+        state_path = tmp_path / "missing_live_state.json"
+        rc = main(argv=["--state-path", str(state_path)])
+        captured = capsys.readouterr()
+        assert rc == 0
+        assert "TOO_HIGH" not in captured.out
+
+
+# ======================================================================
+# 3. Wrong exchange
 # ======================================================================
 
 
@@ -255,7 +291,7 @@ class TestWrongExchange:
         rc = main(argv=[])
         captured = capsys.readouterr()
         assert rc == 3, f"Expected exit 3, got {rc}. stdout={captured.out}"
-        assert "BINANCE_SMALL_LIVE_WRONG_EXCHANGE" in captured.out
+        assert "BINANCE_LIVE_WRONG_EXCHANGE" in captured.out
 
     def test_okx_exchange_shows_exchange_name(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
@@ -273,11 +309,11 @@ class TestWrongExchange:
         rc = main(argv=[])
         captured = capsys.readouterr()
         assert rc == 3
-        assert "BINANCE_SMALL_LIVE_WRONG_EXCHANGE" in captured.out
+        assert "BINANCE_LIVE_WRONG_EXCHANGE" in captured.out
 
 
 # ======================================================================
-# 3. Preflight blocked
+# 4. Preflight blocked
 # ======================================================================
 
 
@@ -291,7 +327,7 @@ class TestPreflightBlocked:
         rc = main(argv=[])
         captured = capsys.readouterr()
         assert rc == 2, f"Expected exit 2, got {rc}. stdout={captured.out}"
-        assert "BINANCE_SMALL_LIVE_PREFLIGHT_BLOCKED" in captured.out
+        assert "BINANCE_LIVE_PREFLIGHT_BLOCKED" in captured.out
 
     def test_preflight_blocked_includes_reasons(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
@@ -305,145 +341,7 @@ class TestPreflightBlocked:
 
 
 # ======================================================================
-# 4. Order notional too high
-# ======================================================================
-
-
-class TestOrderNotionalTooHigh:
-    """LIVE_MAX_ORDER_NOTIONAL_USDT exceeds small live cap → exit 2.
-
-    Uses a value (22) that passes the preflight hard cap (25) but exceeds
-    the default small-live cap (20).
-    """
-
-    def test_order_notional_too_high_returns_2(
-        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
-        tmp_path: Path,
-    ) -> None:
-        env = dict(READY_ENV)
-        env["LIVE_MAX_ORDER_NOTIONAL_USDT"] = "22"
-        _set_env(monkeypatch, env)
-        state_path = tmp_path / "missing_live_state.json"
-        rc = main(argv=["--state-path", str(state_path)])
-        captured = capsys.readouterr()
-        assert rc == 2, f"Expected exit 2, got {rc}. stdout={captured.out}"
-        assert "LIVE_MAX_ORDER_NOTIONAL_TOO_HIGH" in captured.out
-
-    def test_order_notional_too_high_blocked_output(
-        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
-        tmp_path: Path,
-    ) -> None:
-        env = dict(READY_ENV)
-        env["LIVE_MAX_ORDER_NOTIONAL_USDT"] = "22"
-        _set_env(monkeypatch, env)
-        state_path = tmp_path / "missing_live_state.json"
-        rc = main(argv=["--state-path", str(state_path)])
-        captured = capsys.readouterr()
-        assert rc == 2
-        assert "BINANCE_SMALL_LIVE_LAUNCH_BLOCKED" in captured.out
-
-    def test_order_notional_within_limit_passes(
-        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
-        tmp_path: Path,
-    ) -> None:
-        env = dict(READY_ENV)
-        env["LIVE_MAX_ORDER_NOTIONAL_USDT"] = "15"
-        _set_env(monkeypatch, env)
-        state_path = tmp_path / "missing_live_state.json"
-        rc = main(argv=["--state-path", str(state_path)])
-        captured = capsys.readouterr()
-        assert rc == 0, f"Expected exit 0, got {rc}. stdout={captured.out}"
-        assert "BINANCE_SMALL_LIVE_LAUNCH_READY" in captured.out
-
-    def test_order_notional_cli_override_allows_higher(
-        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
-        tmp_path: Path,
-    ) -> None:
-        """22 > default cap (20) but passes with --max-allowed-order-notional 25."""
-        env = dict(READY_ENV)
-        env["LIVE_MAX_ORDER_NOTIONAL_USDT"] = "22"
-        _set_env(monkeypatch, env)
-        state_path = tmp_path / "missing_live_state.json"
-        rc = main(
-            argv=[
-                "--state-path", str(state_path),
-                "--max-allowed-order-notional", "25",
-            ]
-        )
-        captured = capsys.readouterr()
-        assert rc == 0, f"Expected exit 0, got {rc}. stdout={captured.out}"
-        assert "BINANCE_SMALL_LIVE_LAUNCH_READY" in captured.out
-
-
-# ======================================================================
-# 5. Position notional too high
-# ======================================================================
-
-
-class TestPositionNotionalTooHigh:
-    """LIVE_MAX_POSITION_NOTIONAL_USDT exceeds small live cap → exit 2.
-
-    Uses CLI override to make the small-live cap stricter than the preflight
-    cap, so the small-live check triggers before the preflight would.
-    """
-
-    def test_position_notional_too_high_returns_2(
-        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
-        tmp_path: Path,
-    ) -> None:
-        env = dict(READY_ENV)
-        env["LIVE_MAX_POSITION_NOTIONAL_USDT"] = "30"
-        _set_env(monkeypatch, env)
-        state_path = tmp_path / "missing_live_state.json"
-        rc = main(
-            argv=[
-                "--state-path", str(state_path),
-                "--max-allowed-position-notional", "25",
-            ]
-        )
-        captured = capsys.readouterr()
-        assert rc == 2, f"Expected exit 2, got {rc}. stdout={captured.out}"
-        assert "LIVE_MAX_POSITION_NOTIONAL_TOO_HIGH" in captured.out
-
-    def test_position_notional_too_high_blocked_output(
-        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
-        tmp_path: Path,
-    ) -> None:
-        env = dict(READY_ENV)
-        env["LIVE_MAX_POSITION_NOTIONAL_USDT"] = "30"
-        _set_env(monkeypatch, env)
-        state_path = tmp_path / "missing_live_state.json"
-        rc = main(
-            argv=[
-                "--state-path", str(state_path),
-                "--max-allowed-position-notional", "25",
-            ]
-        )
-        captured = capsys.readouterr()
-        assert rc == 2
-        assert "BINANCE_SMALL_LIVE_LAUNCH_BLOCKED" in captured.out
-
-    def test_position_notional_cli_override_allows_higher(
-        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
-        tmp_path: Path,
-    ) -> None:
-        env = dict(READY_ENV)
-        env["LIVE_MAX_POSITION_NOTIONAL_USDT"] = "30"
-        _set_env(monkeypatch, env)
-        state_path = tmp_path / "missing_live_state.json"
-        rc = main(
-            argv=[
-                "--state-path", str(state_path),
-                "--max-allowed-position-notional", "35",
-            ]
-        )
-        captured = capsys.readouterr()
-        assert rc == 0, f"Expected exit 0, got {rc}. stdout={captured.out}"
-        assert "BINANCE_SMALL_LIVE_LAUNCH_READY" in captured.out
-
-
-# ======================================================================
-# 6. Sidecar default block
+# 5. Sidecar default block
 # ======================================================================
 
 
@@ -474,11 +372,11 @@ class TestSidecarDefaultBlock:
         rc = main(argv=["--state-path", str(state_path)])
         captured = capsys.readouterr()
         assert rc == 2
-        assert "BINANCE_SMALL_LIVE_LAUNCH_BLOCKED" in captured.out
+        assert "BINANCE_LIVE_LAUNCH_BLOCKED" in captured.out
 
 
 # ======================================================================
-# 7. Sidecar allow via CLI → exit 0 with warning
+# 6. Sidecar allow via CLI → exit 0 with warning
 # ======================================================================
 
 
@@ -509,7 +407,7 @@ class TestSidecarAllow:
         rc = main(argv=["--state-path", str(state_path), "--allow-sidecar"])
         captured = capsys.readouterr()
         assert rc == 0
-        assert "BINANCE_SMALL_LIVE_LAUNCH_READY" in captured.out
+        assert "BINANCE_LIVE_LAUNCH_READY" in captured.out
 
     def test_sidecar_disabled_no_warning(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
@@ -526,7 +424,7 @@ class TestSidecarAllow:
 
 
 # ======================================================================
-# 8. Local state has old position — default block
+# 7. Local state has old position — default block
 # ======================================================================
 
 
@@ -570,7 +468,7 @@ class TestLocalStateHasOpenPosition:
             rc = main(argv=["--state-path", str(state_path)])
             captured = capsys.readouterr()
             assert rc == 2
-            assert "BINANCE_SMALL_LIVE_LAUNCH_BLOCKED" in captured.out
+            assert "BINANCE_LIVE_LAUNCH_BLOCKED" in captured.out
         finally:
             state_path.unlink(missing_ok=True)
 
@@ -606,7 +504,7 @@ class TestLocalStateHasOpenPosition:
 
 
 # ======================================================================
-# 9. Allow existing local position but no startup_force_tp_reconcile
+# 8. Allow existing local position but no startup_force_tp_reconcile
 # ======================================================================
 
 
@@ -641,7 +539,7 @@ class TestAllowExistingPositionNoReconcile:
 
 
 # ======================================================================
-# 10. Allow existing local position with startup_force_tp_reconcile=true
+# 9. Allow existing local position with startup_force_tp_reconcile=true
 # ======================================================================
 
 
@@ -670,13 +568,13 @@ class TestAllowExistingPositionWithReconcile:
             )
             captured = capsys.readouterr()
             assert rc == 0, f"Expected exit 0, got {rc}. stdout={captured.out}"
-            assert "BINANCE_SMALL_LIVE_LAUNCH_READY" in captured.out
+            assert "BINANCE_LIVE_LAUNCH_READY" in captured.out
         finally:
             state_path.unlink(missing_ok=True)
 
 
 # ======================================================================
-# 11. JSON output
+# 10. JSON output
 # ======================================================================
 
 
@@ -697,7 +595,7 @@ class TestJsonOutput:
         assert data["exchange"] == "binance"
         assert data["symbol"] == "ETHUSDT"
         assert data["preflight_ok"] is True
-        assert data["checks"]["small_live_caps_ok"] is True
+        assert data["checks"]["live_preflight_ok"] is True
         assert data["checks"]["sidecar_ok"] is True
         assert data["checks"]["local_state_ok"] is True
         assert data["checks"]["trader_sizing_ok"] is True
@@ -735,8 +633,9 @@ class TestJsonOutput:
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
         tmp_path: Path,
     ) -> None:
+        """Sidecar block produces valid blocked JSON."""
         env = dict(READY_ENV)
-        env["LIVE_MAX_ORDER_NOTIONAL_USDT"] = "22"
+        env["SIDECAR_ENABLED"] = "true"
         _set_env(monkeypatch, env)
         state_path = tmp_path / "missing_live_state.json"
         rc = main(argv=["--state-path", str(state_path), "--json"])
@@ -746,7 +645,7 @@ class TestJsonOutput:
         assert data["status"] == "blocked"
         assert data["exchange"] == "binance"
         assert data["symbol"] == "ETHUSDT"
-        assert "LIVE_MAX_ORDER_NOTIONAL_TOO_HIGH" in data["blocking_reasons"]
+        assert "SIDECAR_ENABLED_FOR_FIRST_BINANCE_LIVE" in data["blocking_reasons"]
 
     def test_json_wrong_exchange(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
@@ -758,7 +657,7 @@ class TestJsonOutput:
         data = json.loads(captured.out)
         assert data["status"] == "wrong_exchange"
         assert data["exchange"] == "okx"
-        assert data["error"] == "BINANCE_SMALL_LIVE_WRONG_EXCHANGE"
+        assert data["error"] == "BINANCE_LIVE_WRONG_EXCHANGE"
 
     def test_json_config_error(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
@@ -770,7 +669,7 @@ class TestJsonOutput:
         data = json.loads(captured.out)
         assert data["status"] == "config_error"
         assert data["exchange"] == "binance"
-        assert "BINANCE_SMALL_LIVE_CONFIG_ERROR" in data["error"]
+        assert "BINANCE_LIVE_CONFIG_ERROR" in data["error"]
 
     def test_json_blocked_includes_warnings(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
@@ -810,7 +709,7 @@ class TestJsonOutput:
 
 
 # ======================================================================
-# 12. Missing state file passes
+# 11. Missing state file passes
 # ======================================================================
 
 
@@ -831,7 +730,7 @@ class TestMissingStatePasses:
 
 
 # ======================================================================
-# 13. Empty state file blocks
+# 12. Empty state file blocks
 # ======================================================================
 
 
@@ -852,7 +751,7 @@ class TestEmptyStateBlocks:
 
 
 # ======================================================================
-# 14. Corrupted JSON blocks
+# 13. Corrupted JSON blocks
 # ======================================================================
 
 
@@ -888,7 +787,7 @@ class TestCorruptedJsonBlocks:
 
 
 # ======================================================================
-# 15. Unreadable state cannot be bypassed
+# 14. Unreadable state cannot be bypassed
 # ======================================================================
 
 
@@ -914,7 +813,7 @@ class TestUnreadableStateCannotBeBypassed:
 
 
 # ======================================================================
-# 16. Unsupported exchange (EXCHANGE=abc) → wrong exchange
+# 15. Unsupported exchange (EXCHANGE=abc) → wrong exchange
 # ======================================================================
 
 
@@ -928,7 +827,7 @@ class TestUnsupportedExchangeWrongExchange:
         rc = main(argv=[])
         captured = capsys.readouterr()
         assert rc == 3, f"Expected exit 3, got {rc}. stdout={captured.out}"
-        assert "BINANCE_SMALL_LIVE_WRONG_EXCHANGE" in captured.out
+        assert "BINANCE_LIVE_WRONG_EXCHANGE" in captured.out
 
     def test_unsupported_exchange_abc_json(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
@@ -940,7 +839,7 @@ class TestUnsupportedExchangeWrongExchange:
         data = json.loads(captured.out)
         assert data["status"] == "wrong_exchange"
         assert data["exchange"] == "abc"
-        assert data["error"] == "BINANCE_SMALL_LIVE_WRONG_EXCHANGE"
+        assert data["error"] == "BINANCE_LIVE_WRONG_EXCHANGE"
 
     def test_bybit_exchange_returns_3(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
@@ -949,11 +848,11 @@ class TestUnsupportedExchangeWrongExchange:
         rc = main(argv=[])
         captured = capsys.readouterr()
         assert rc == 3, f"Expected exit 3, got {rc}. stdout={captured.out}"
-        assert "BINANCE_SMALL_LIVE_WRONG_EXCHANGE" in captured.out
+        assert "BINANCE_LIVE_WRONG_EXCHANGE" in captured.out
 
 
 # ======================================================================
-# 17. Source-level no side effects
+# 16. Source-level no side effects
 # ======================================================================
 
 
@@ -961,7 +860,7 @@ class TestSourceLevelNoSideEffects:
     """The script source must NOT contain any forbidden method calls."""
 
     SCRIPT_SOURCE: str = Path(
-        "scripts/binance_small_live_launch_check.py"
+        "scripts/binance_live_launch_check.py"
     ).read_text(encoding="utf-8")
 
     FORBIDDEN_TOKENS: tuple[str, ...] = (
@@ -987,7 +886,7 @@ class TestSourceLevelNoSideEffects:
             for token in self.FORBIDDEN_TOKENS:
                 if token in stripped:
                     violations.append(
-                        f"scripts/binance_small_live_launch_check.py:{i}: {stripped}"
+                        f"scripts/binance_live_launch_check.py:{i}: {stripped}"
                     )
         assert not violations, (
             "Script must not contain forbidden method calls:\n"
@@ -1002,7 +901,7 @@ class TestSourceLevelNoSideEffects:
                 continue
             if "import" in stripped and "websocket" in stripped.lower():
                 pytest.fail(
-                    f"scripts/binance_small_live_launch_check.py:{i}: "
+                    f"scripts/binance_live_launch_check.py:{i}: "
                     f"must not import websocket: {stripped}"
                 )
 
@@ -1014,7 +913,7 @@ class TestSourceLevelNoSideEffects:
                 continue
             if "import" in stripped and "aiohttp" in stripped.lower():
                 pytest.fail(
-                    f"scripts/binance_small_live_launch_check.py:{i}: "
+                    f"scripts/binance_live_launch_check.py:{i}: "
                     f"must not import aiohttp: {stripped}"
                 )
 
@@ -1026,6 +925,6 @@ class TestSourceLevelNoSideEffects:
                 continue
             if "run_boll_cvd_live" in stripped:
                 pytest.fail(
-                    f"scripts/binance_small_live_launch_check.py:{i}: "
+                    f"scripts/binance_live_launch_check.py:{i}: "
                     f"must not reference run_boll_cvd_live: {stripped}"
                 )

@@ -399,7 +399,8 @@ class TestBlockingMaxOrderNotional:
         )
         assert "binance_live_max_order_notional_invalid" in report.blocking_reasons
 
-    def test_too_high_blocked(self) -> None:
+    def test_high_value_passes(self) -> None:
+        """LIVE_MAX_ORDER_NOTIONAL_USDT=100 passes (no hard upper bound)."""
         report = build_binance_live_preflight_report(
             {
                 "EXCHANGE": "binance",
@@ -407,13 +408,16 @@ class TestBlockingMaxOrderNotional:
                 "LIVE_ENABLED": "true",
                 "LIVE_ALLOW_ORDERS": "true",
                 "LIVE_CONFIRMATION": BINANCE_LIVE_CONFIRMATION_PHRASE,
-                "LIVE_MAX_ORDER_NOTIONAL_USDT": "26",
-            }
+                "LIVE_MAX_ORDER_NOTIONAL_USDT": "100",
+                "LIVE_MAX_POSITION_NOTIONAL_USDT": "25",
+                "LIVE_LEVERAGE": "10",
+            },
+            orders_globally_enabled=True,
         )
-        assert "binance_live_max_order_notional_invalid" in report.blocking_reasons
+        assert "binance_live_max_order_notional_invalid" not in report.blocking_reasons
 
-    def test_at_hard_cap_valid(self) -> None:
-        """LIVE_MAX_ORDER_NOTIONAL_USDT=25 is valid (at the hard cap)."""
+    def test_valid_order_notional_passes(self) -> None:
+        """LIVE_MAX_ORDER_NOTIONAL_USDT=25 is valid (any positive value works)."""
         report = build_binance_live_preflight_report(
             {
                 "EXCHANGE": "binance",
@@ -472,7 +476,8 @@ class TestBlockingMaxPositionNotional:
         )
         assert "binance_live_max_position_notional_invalid" in report.blocking_reasons
 
-    def test_too_high_blocked(self) -> None:
+    def test_high_value_passes(self) -> None:
+        """LIVE_MAX_POSITION_NOTIONAL_USDT=500 passes (no hard upper bound)."""
         report = build_binance_live_preflight_report(
             {
                 "EXCHANGE": "binance",
@@ -481,13 +486,15 @@ class TestBlockingMaxPositionNotional:
                 "LIVE_ALLOW_ORDERS": "true",
                 "LIVE_CONFIRMATION": BINANCE_LIVE_CONFIRMATION_PHRASE,
                 "LIVE_MAX_ORDER_NOTIONAL_USDT": "5",
-                "LIVE_MAX_POSITION_NOTIONAL_USDT": "31",
-            }
+                "LIVE_MAX_POSITION_NOTIONAL_USDT": "500",
+                "LIVE_LEVERAGE": "10",
+            },
+            orders_globally_enabled=True,
         )
-        assert "binance_live_max_position_notional_invalid" in report.blocking_reasons
+        assert "binance_live_max_position_notional_invalid" not in report.blocking_reasons
 
-    def test_at_hard_cap_valid(self) -> None:
-        """LIVE_MAX_POSITION_NOTIONAL_USDT=30 is valid (at hard cap)."""
+    def test_valid_position_notional_passes(self) -> None:
+        """LIVE_MAX_POSITION_NOTIONAL_USDT=30 is valid (any positive value works)."""
         report = build_binance_live_preflight_report(
             {
                 "EXCHANGE": "binance",

@@ -3,18 +3,18 @@
 """
 @Author     : Zijun Deng
 @Date       : 2026/06/15
-@File       : binance_small_live_launch_check.py
-@Description: Binance small live launch checklist — final pre-launch safety gate.
+@File       : binance_live_launch_check.py
+@Description: Binance live launch checklist — final pre-launch safety gate.
 
 This script is a **read-only** check run BEFORE the main live trading launcher.
-It validates env, preflight, notional caps, sidecar, local state, and trader
-sizing.  Any dangerous configuration is blocked.
+It validates env, preflight, sidecar, local state, and trader sizing.  Any
+dangerous configuration is blocked.
 
 Usage::
 
-    PYTHONPATH=. python scripts/binance_small_live_launch_check.py
-    PYTHONPATH=. python scripts/binance_small_live_launch_check.py --json
-    PYTHONPATH=. python scripts/binance_small_live_launch_check.py --allow-sidecar
+    PYTHONPATH=. python scripts/binance_live_launch_check.py
+    PYTHONPATH=. python scripts/binance_live_launch_check.py --json
+    PYTHONPATH=. python scripts/binance_live_launch_check.py --allow-sidecar
 
 Rules enforced
 --------------
@@ -44,13 +44,6 @@ from src.exchanges.runtime_adapter_factory import create_exchange_runtime_adapte
 from src.exchanges.runtime_config import load_unified_runtime_config
 from src.reporting.live_state_store import DEFAULT_STATE_PATH, LivePositionState, LiveStateStore
 
-# ---------------------------------------------------------------------------
-# Default hard caps for small live
-# ---------------------------------------------------------------------------
-
-SMALL_LIVE_MAX_ALLOWED_ORDER_NOTIONAL_USDT: int = 20
-SMALL_LIVE_MAX_ALLOWED_POSITION_NOTIONAL_USDT: int = 50
-
 _TRUTHY: frozenset[str] = frozenset({"1", "true", "yes", "y", "on"})
 
 
@@ -75,32 +68,14 @@ class LocalStateStatus:
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    """Parse CLI arguments for the small live launch checklist."""
+    """Parse CLI arguments for the Binance live launch checklist."""
     parser = argparse.ArgumentParser(
-        description="Binance small live launch checklist — read-only safety gate",
+        description="Binance live launch checklist — read-only safety gate",
     )
     parser.add_argument(
         "--state-path",
         default=str(DEFAULT_STATE_PATH),
         help="Path to live_state.json (default: data/trade_journal/live_state.json)",
-    )
-    parser.add_argument(
-        "--max-allowed-order-notional",
-        type=int,
-        default=SMALL_LIVE_MAX_ALLOWED_ORDER_NOTIONAL_USDT,
-        help=(
-            "Max allowed order notional USDT "
-            f"(default: {SMALL_LIVE_MAX_ALLOWED_ORDER_NOTIONAL_USDT})"
-        ),
-    )
-    parser.add_argument(
-        "--max-allowed-position-notional",
-        type=int,
-        default=SMALL_LIVE_MAX_ALLOWED_POSITION_NOTIONAL_USDT,
-        help=(
-            "Max allowed position notional USDT "
-            f"(default: {SMALL_LIVE_MAX_ALLOWED_POSITION_NOTIONAL_USDT})"
-        ),
     )
     parser.add_argument(
         "--allow-sidecar",
@@ -209,33 +184,6 @@ def load_local_state_status(path: Path) -> LocalStateStatus:
 # ---------------------------------------------------------------------------
 
 
-def check_small_live_caps(
-    env: Mapping[str, str],
-    args: argparse.Namespace,
-) -> list[str]:
-    """Check that live notional caps do not exceed small-live limits.
-
-    Reads the resolved env values (LIVE_* primary with BINANCE_* fallback)
-    and compares them against the CLI-overridable hard caps.
-    """
-    preflight_config = load_binance_live_preflight_config(env)
-    blocking: list[str] = []
-
-    max_order = preflight_config.max_order_notional_usdt
-    max_position = preflight_config.max_position_notional_usdt
-
-    max_allowed_order = Decimal(str(args.max_allowed_order_notional))
-    max_allowed_position = Decimal(str(args.max_allowed_position_notional))
-
-    if max_order is not None and max_order > max_allowed_order:
-        blocking.append("LIVE_MAX_ORDER_NOTIONAL_TOO_HIGH")
-
-    if max_position is not None and max_position > max_allowed_position:
-        blocking.append("LIVE_MAX_POSITION_NOTIONAL_TOO_HIGH")
-
-    return blocking
-
-
 def check_sidecar(
     env: Mapping[str, str],
     allow_sidecar: bool,
@@ -327,7 +275,7 @@ def _emit_blocked(
             )
         )
     else:
-        print("BINANCE_SMALL_LIVE_LAUNCH_BLOCKED")
+        print("BINANCE_LIVE_LAUNCH_BLOCKED")
         print(f"exchange={exchange}")
         print(f"symbol={symbol}")
         print(f"blocking_reasons={blocking_reasons}")
@@ -355,7 +303,7 @@ def _emit_preflight_blocked(
             )
         )
     else:
-        print("BINANCE_SMALL_LIVE_PREFLIGHT_BLOCKED")
+        print("BINANCE_LIVE_PREFLIGHT_BLOCKED")
         print(f"exchange={exchange}")
         print(f"symbol={symbol}")
         print(f"blocking_reasons={blocking_reasons}")
@@ -367,7 +315,6 @@ def _emit_ready(
     preflight_config: Any,
     sidecar_enabled: bool,
     local_state: LocalStateStatus,
-    cap_blocking: list[str],
     sidecar_blocking: list[str],
     sizing_blocking: list[str],
     sizing_runtime: dict[str, str],
@@ -384,7 +331,7 @@ def _emit_ready(
         display_state = local_state.status
 
     checks: dict[str, bool] = {
-        "small_live_caps_ok": len(cap_blocking) == 0,
+        "live_preflight_ok": True,
         "sidecar_ok": len(sidecar_blocking) == 0,
         "local_state_ok": True,  # already passed
         "trader_sizing_ok": len(sizing_blocking) == 0,
@@ -411,7 +358,7 @@ def _emit_ready(
             )
         )
     else:
-        print("BINANCE_SMALL_LIVE_LAUNCH_READY")
+        print("BINANCE_LIVE_LAUNCH_READY")
         print(f"exchange={exchange}")
         print(f"symbol={symbol}")
         print(f"trade_asset={config.trade_asset}")
@@ -442,7 +389,7 @@ def _emit_ready(
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Run the Binance small live launch checklist.
+    """Run the Binance live launch checklist.
 
     Returns
     -------
@@ -472,12 +419,12 @@ def main(argv: list[str] | None = None) -> int:
                         {
                             "status": "wrong_exchange",
                             "exchange": exchange_value,
-                            "error": "BINANCE_SMALL_LIVE_WRONG_EXCHANGE",
+                            "error": "BINANCE_LIVE_WRONG_EXCHANGE",
                         }
                     )
                 )
             else:
-                print("BINANCE_SMALL_LIVE_WRONG_EXCHANGE")
+                print("BINANCE_LIVE_WRONG_EXCHANGE")
                 print(f"exchange={exchange_value}")
             return 3
 
@@ -488,12 +435,12 @@ def main(argv: list[str] | None = None) -> int:
                     {
                         "status": "config_error",
                         "exchange": exchange_value,
-                        "error": f"BINANCE_SMALL_LIVE_CONFIG_ERROR: {exc}",
+                        "error": f"BINANCE_LIVE_CONFIG_ERROR: {exc}",
                     }
                 )
             )
         else:
-            print("BINANCE_SMALL_LIVE_CONFIG_ERROR")
+            print("BINANCE_LIVE_CONFIG_ERROR")
             print(f"error={exc}")
         return 1
 
@@ -508,12 +455,12 @@ def main(argv: list[str] | None = None) -> int:
                     {
                         "status": "wrong_exchange",
                         "exchange": exchange,
-                        "error": "BINANCE_SMALL_LIVE_WRONG_EXCHANGE",
+                        "error": "BINANCE_LIVE_WRONG_EXCHANGE",
                     }
                 )
             )
         else:
-            print("BINANCE_SMALL_LIVE_WRONG_EXCHANGE")
+            print("BINANCE_LIVE_WRONG_EXCHANGE")
             print(f"exchange={exchange}")
         return 3
 
@@ -529,16 +476,12 @@ def main(argv: list[str] | None = None) -> int:
 
     preflight_config = preflight.config
 
-    # ── 4. Small live notional caps ─────────────────────────────────────
-    cap_blocking: list[str] = check_small_live_caps(env, args)
-    blocking_reasons.extend(cap_blocking)
-
-    # ── 5. Sidecar check ────────────────────────────────────────────────
+    # ── 4. Sidecar check ────────────────────────────────────────────────
     sidecar_blocking, sidecar_warnings = check_sidecar(env, args.allow_sidecar)
     blocking_reasons.extend(sidecar_blocking)
     warnings.extend(sidecar_warnings)
 
-    # ── 6. Local state check ────────────────────────────────────────────
+    # ── 5. Local state check ────────────────────────────────────────────
     state_path = Path(args.state_path)
     local_state = load_local_state_status(state_path)
 
@@ -561,7 +504,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
-    # ── 7. Create runtime adapters (no network) ─────────────────────────
+    # ── 6. Create runtime adapters (no network) ─────────────────────────
     try:
         adapters = create_exchange_runtime_adapters(config, env)
     except Exception as exc:
@@ -579,7 +522,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
-    # ── 8. Trader sizing check ─────────────────────────────────────────
+    # ── 7. Trader sizing check ─────────────────────────────────────────
     sizing_blocking, sizing_runtime = check_trader_sizing(trader)
     if sizing_blocking:
         blocking_reasons.extend(sizing_blocking)
@@ -588,7 +531,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
-    # ── 9. All checks passed ────────────────────────────────────────────
+    # ── 8. All checks passed ────────────────────────────────────────────
     sidecar_raw: str = env.get("SIDECAR_ENABLED", "").strip().lower()
     sidecar_enabled: bool = sidecar_raw in _TRUTHY
 
@@ -598,7 +541,6 @@ def main(argv: list[str] | None = None) -> int:
         preflight_config,
         sidecar_enabled,
         local_state,
-        cap_blocking,
         sidecar_blocking,
         sizing_blocking,
         sizing_runtime,

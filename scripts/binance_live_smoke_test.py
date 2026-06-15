@@ -118,8 +118,6 @@ from src.exchanges.models import (
     ExchangeName,
 )
 from src.exchanges.binance.live_preflight import (
-    BINANCE_LIVE_HARD_MAX_ORDER_NOTIONAL_USDT,
-    BINANCE_LIVE_HARD_MAX_POSITION_NOTIONAL_USDT,
     BINANCE_LIVE_HARD_MAX_LEVERAGE,
     build_binance_live_preflight_report,
     format_binance_live_blocked_message,
@@ -376,32 +374,16 @@ def require_requested_notional_cap(
     preflight_max_order_notional: Decimal,
     preflight_max_position_notional: Decimal,
 ) -> None:
-    """Ensure the smoke max notional does not exceed any limit.
+    """Ensure the smoke max notional does not exceed user-configured limits.
 
     Checks:
-    1. smoke_max_notional <= BINANCE_LIVE_HARD_MAX_ORDER_NOTIONAL_USDT (hard order cap)
-    2. smoke_max_notional <= preflight_max_order_notional (user-set order cap)
-    3. smoke_max_notional <= BINANCE_LIVE_HARD_MAX_POSITION_NOTIONAL_USDT (hard position cap)
-    4. smoke_max_notional <= preflight_max_position_notional (user-set position cap)
+    1. smoke_max_notional <= preflight_max_order_notional (user-set order cap)
+    2. smoke_max_notional <= preflight_max_position_notional (user-set position cap)
     """
-    if smoke_max_notional > BINANCE_LIVE_HARD_MAX_ORDER_NOTIONAL_USDT:
-        print(
-            f"ERROR: max notional {smoke_max_notional} exceeds "
-            f"hard order cap {BINANCE_LIVE_HARD_MAX_ORDER_NOTIONAL_USDT}",
-            file=sys.stderr,
-        )
-        raise SystemExit(1)
     if smoke_max_notional > preflight_max_order_notional:
         print(
             f"ERROR: max notional {smoke_max_notional} exceeds "
             f"preflight max order notional {preflight_max_order_notional}",
-            file=sys.stderr,
-        )
-        raise SystemExit(1)
-    if smoke_max_notional > BINANCE_LIVE_HARD_MAX_POSITION_NOTIONAL_USDT:
-        print(
-            f"ERROR: max notional {smoke_max_notional} exceeds "
-            f"hard position cap {BINANCE_LIVE_HARD_MAX_POSITION_NOTIONAL_USDT}",
             file=sys.stderr,
         )
         raise SystemExit(1)
@@ -415,10 +397,8 @@ def require_requested_notional_cap(
     print(
         f"[preflight] notional cap OK | "
         f"smoke_max={smoke_max_notional} <= "
-        f"order_cap={preflight_max_order_notional} <= "
-        f"hard_order={BINANCE_LIVE_HARD_MAX_ORDER_NOTIONAL_USDT} | "
-        f"position_cap={preflight_max_position_notional} <= "
-        f"hard_position={BINANCE_LIVE_HARD_MAX_POSITION_NOTIONAL_USDT}"
+        f"order_cap={preflight_max_order_notional} | "
+        f"position_cap={preflight_max_position_notional}"
     )
 
 
@@ -428,32 +408,16 @@ def require_calculated_notional_cap(
     preflight_max_order_notional: Decimal,
     preflight_max_position_notional: Decimal,
 ) -> None:
-    """Ensure the calculated notional (after step rounding) does not exceed any cap.
+    """Ensure the calculated notional (after step rounding) does not exceed user-configured caps.
 
     Checks:
-    1. calculated_notional <= BINANCE_LIVE_HARD_MAX_ORDER_NOTIONAL_USDT (hard order cap)
-    2. calculated_notional <= preflight_max_order_notional (user-set order cap)
-    3. calculated_notional <= BINANCE_LIVE_HARD_MAX_POSITION_NOTIONAL_USDT (hard position cap)
-    4. calculated_notional <= preflight_max_position_notional (user-set position cap)
+    1. calculated_notional <= preflight_max_order_notional (user-set order cap)
+    2. calculated_notional <= preflight_max_position_notional (user-set position cap)
     """
-    if calculated_notional > BINANCE_LIVE_HARD_MAX_ORDER_NOTIONAL_USDT:
-        print(
-            f"ERROR: calculated notional {calculated_notional} exceeds "
-            f"hard order cap {BINANCE_LIVE_HARD_MAX_ORDER_NOTIONAL_USDT}",
-            file=sys.stderr,
-        )
-        raise SystemExit(1)
     if calculated_notional > preflight_max_order_notional:
         print(
             f"ERROR: calculated notional {calculated_notional} exceeds "
             f"preflight max order notional {preflight_max_order_notional}",
-            file=sys.stderr,
-        )
-        raise SystemExit(1)
-    if calculated_notional > BINANCE_LIVE_HARD_MAX_POSITION_NOTIONAL_USDT:
-        print(
-            f"ERROR: calculated notional {calculated_notional} exceeds "
-            f"hard position cap {BINANCE_LIVE_HARD_MAX_POSITION_NOTIONAL_USDT}",
             file=sys.stderr,
         )
         raise SystemExit(1)
@@ -1655,16 +1619,20 @@ async def main() -> int:
     # --- notional cap enforcement (no network) ---
     from src.exchanges.binance.live_preflight import load_binance_live_preflight_config
     preflight_cfg = load_binance_live_preflight_config(os.environ)
-    preflight_max_order = (
-        preflight_cfg.max_order_notional_usdt
-        if preflight_cfg.max_order_notional_usdt is not None
-        else BINANCE_LIVE_HARD_MAX_ORDER_NOTIONAL_USDT
-    )
-    preflight_max_position = (
-        preflight_cfg.max_position_notional_usdt
-        if preflight_cfg.max_position_notional_usdt is not None
-        else BINANCE_LIVE_HARD_MAX_POSITION_NOTIONAL_USDT
-    )
+    preflight_max_order = preflight_cfg.max_order_notional_usdt
+    if preflight_max_order is None:
+        print(
+            "ERROR: LIVE_MAX_ORDER_NOTIONAL_USDT must be configured for smoke test",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    preflight_max_position = preflight_cfg.max_position_notional_usdt
+    if preflight_max_position is None:
+        print(
+            "ERROR: LIVE_MAX_POSITION_NOTIONAL_USDT must be configured for smoke test",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
     require_requested_notional_cap(
         smoke_max_notional=max_notional,
         preflight_max_order_notional=preflight_max_order,

@@ -36,8 +36,6 @@ _ACCEPTED_CONFIRMATION_PHRASES: frozenset[str] = frozenset({
     BINANCE_LIVE_CONFIRMATION_PHRASE,
 })
 
-BINANCE_LIVE_HARD_MAX_ORDER_NOTIONAL_USDT: Decimal = Decimal("25")
-BINANCE_LIVE_HARD_MAX_POSITION_NOTIONAL_USDT: Decimal = Decimal("30")
 BINANCE_LIVE_HARD_MAX_LEVERAGE: int = 20
 
 # ---------------------------------------------------------------------------
@@ -278,18 +276,12 @@ def build_binance_live_preflight_report(
     if config.confirmation not in _ACCEPTED_CONFIRMATION_PHRASES:
         blocking.append("binance_live_confirmation_missing_or_invalid")
 
-    # ── Gate 6: BINANCE_LIVE_MAX_ORDER_NOTIONAL_USDT ────────────────────
-    if config.max_order_notional_usdt is None or not (
-        Decimal("0") < config.max_order_notional_usdt <= BINANCE_LIVE_HARD_MAX_ORDER_NOTIONAL_USDT
-    ):
+    # ── Gate 6: LIVE_MAX_ORDER_NOTIONAL_USDT — must exist and be > 0 ─────
+    if config.max_order_notional_usdt is None or not (config.max_order_notional_usdt > Decimal("0")):
         blocking.append("binance_live_max_order_notional_invalid")
 
-    # ── Gate 7: BINANCE_LIVE_MAX_POSITION_NOTIONAL_USDT ─────────────────
-    if config.max_position_notional_usdt is None or not (
-        Decimal("0")
-        < config.max_position_notional_usdt
-        <= BINANCE_LIVE_HARD_MAX_POSITION_NOTIONAL_USDT
-    ):
+    # ── Gate 7: LIVE_MAX_POSITION_NOTIONAL_USDT — must exist and be > 0 ──
+    if config.max_position_notional_usdt is None or not (config.max_position_notional_usdt > Decimal("0")):
         blocking.append("binance_live_max_position_notional_invalid")
 
     # ── Gate 8: BINANCE_LIVE_LEVERAGE ───────────────────────────────────
