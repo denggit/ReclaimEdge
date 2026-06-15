@@ -60,6 +60,7 @@ class BinancePrivateClient:
         api_key: str,
         api_secret: str,
         transport: BinanceHttpTransport | None = None,
+        transport_factory: Callable[[], BinanceHttpTransport] | None = None,
         base_url: str = BINANCE_USDM_BASE_URL,
         recv_window: int = 5000,
         timestamp_factory: Callable[[], int] | None = None,
@@ -72,6 +73,7 @@ class BinancePrivateClient:
         self._api_key = api_key
         self._api_secret = api_secret
         self._transport = transport
+        self._transport_factory = transport_factory
         self._base_url = base_url
         self._recv_window = recv_window
         self._timestamp_factory = timestamp_factory
@@ -83,9 +85,13 @@ class BinancePrivateClient:
     async def start(self) -> None:
         """Ensure the transport is ready.
 
-        When no transport was injected, create a real aiohttp transport.
+        When no transport was injected, create one via *transport_factory*
+        (if provided) or a real ``AiohttpBinanceTransport``.
         """
         if self._transport is not None:
+            return
+        if self._transport_factory is not None:
+            self._transport = self._transport_factory()
             return
         # Lazy import so aiohttp is only loaded when actually needed.
         from src.exchanges.binance.aiohttp_transport import (  # pylint: disable=import-outside-toplevel
@@ -126,7 +132,13 @@ class BinancePrivateClient:
         path: str,
         params: Mapping[str, Any] | None,
     ) -> Any:
-        """Build a signed request, send it, validate, and return the payload."""
+        """Build a signed request, send it, validate, and return the payload.
+
+        Auto-starts the transport if not already initialised so that callers
+        never need to call ``start()`` explicitly.
+        """
+        if self._transport is None:
+            await self.start()
         if self._transport is None:
             raise RuntimeError(
                 "BinancePrivateClient transport is not ready — call start() first"

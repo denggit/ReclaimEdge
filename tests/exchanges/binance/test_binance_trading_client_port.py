@@ -107,6 +107,68 @@ def _make_trading_client(
 
 
 # ---------------------------------------------------------------------------
+# constructor validation
+# ---------------------------------------------------------------------------
+
+
+def test_constructor_rejects_empty_symbol() -> None:
+    with pytest.raises(ValueError, match="symbol"):
+        BinanceTradingClient(
+            symbol="", margin_asset="USDT",
+            api_key="k", api_secret="s", leverage=20,
+            private_client=BinancePrivateClient(
+                api_key="k", api_secret="s", transport=FakeTransport({}),
+            ),
+        )
+
+
+def test_constructor_rejects_empty_margin_asset() -> None:
+    with pytest.raises(ValueError, match="margin_asset"):
+        BinanceTradingClient(
+            symbol="ETHUSDT", margin_asset="",
+            api_key="k", api_secret="s", leverage=20,
+            private_client=BinancePrivateClient(
+                api_key="k", api_secret="s", transport=FakeTransport({}),
+            ),
+        )
+
+
+def test_constructor_rejects_non_positive_leverage() -> None:
+    with pytest.raises(ValueError, match="leverage"):
+        BinanceTradingClient(
+            symbol="ETHUSDT", margin_asset="USDT",
+            api_key="k", api_secret="s", leverage=0,
+            private_client=BinancePrivateClient(
+                api_key="k", api_secret="s", transport=FakeTransport({}),
+            ),
+        )
+
+
+def test_constructor_rejects_cross_margin_mode() -> None:
+    with pytest.raises(ValueError, match="margin_mode"):
+        BinanceTradingClient(
+            symbol="ETHUSDT", margin_asset="USDT",
+            api_key="k", api_secret="s", leverage=20,
+            margin_mode="cross",
+            private_client=BinancePrivateClient(
+                api_key="k", api_secret="s", transport=FakeTransport({}),
+            ),
+        )
+
+
+def test_constructor_rejects_hedge_position_mode() -> None:
+    with pytest.raises(ValueError, match="position_mode"):
+        BinanceTradingClient(
+            symbol="ETHUSDT", margin_asset="USDT",
+            api_key="k", api_secret="s", leverage=20,
+            position_mode="hedge",
+            private_client=BinancePrivateClient(
+                api_key="k", api_secret="s", transport=FakeTransport({}),
+            ),
+        )
+
+
+# ---------------------------------------------------------------------------
 # configure_instrument
 # ---------------------------------------------------------------------------
 
@@ -310,6 +372,19 @@ async def test_fetch_order_status_by_client_order_id() -> None:
 
 
 @pytest.mark.asyncio
+async def test_fetch_order_status_partially_filled() -> None:
+    """PARTIALLY_FILLED must map to PARTIALLY_FILLED, not OPEN."""
+    fake = FakeTransport({
+        "symbol": "ETHUSDT", "orderId": 999, "clientOrderId": "cid-partial",
+        "status": "PARTIALLY_FILLED", "executedQty": "0.3", "avgPrice": "2999.00",
+    })
+    client = _make_trading_client(transport=fake)
+    snap = await client.fetch_order_status(order_id="999")
+    assert snap.status == "PARTIALLY_FILLED"
+    assert snap.filled_qty == Decimal("0.3")
+
+
+@pytest.mark.asyncio
 async def test_fetch_order_status_no_id_raises() -> None:
     client = _make_trading_client(transport=FakeTransport({}))
     with pytest.raises(ValueError, match="at least one of"):
@@ -429,6 +504,63 @@ async def test_place_market_order_business_rejection_returns_ok_false() -> None:
     )
     assert result.ok is False
     assert "Margin is insufficient" in result.message
+
+
+@pytest.mark.asyncio
+async def test_place_market_order_auth_error_raises() -> None:
+    """AUTH_ERROR must propagate — never swallowed into ok=False."""
+    fake = FakeTransport(
+        {"code": -2015, "msg": "Invalid API-key."},
+        status_code=401,
+    )
+    client = _make_trading_client(transport=fake)
+    with pytest.raises(ExchangeError) as exc_info:
+        await client.place_market_order(
+            side="BUY", qty=Decimal("1"), reduce_only=False, client_order_id="cid",
+        )
+    assert exc_info.value.kind == ExchangeErrorKind.AUTH_ERROR
+
+
+@pytest.mark.asyncio
+async def test_place_market_order_rate_limited_raises() -> None:
+    """RATE_LIMITED must propagate — never swallowed into ok=False."""
+    fake = FakeTransport(
+        {"code": -1003, "msg": "Too many requests."},
+        status_code=429,
+    )
+    client = _make_trading_client(transport=fake)
+    with pytest.raises(ExchangeError) as exc_info:
+        await client.place_market_order(
+            side="BUY", qty=Decimal("1"), reduce_only=False, client_order_id="cid",
+        )
+    assert exc_info.value.kind == ExchangeErrorKind.RATE_LIMITED
+
+
+@pytest.mark.asyncio
+async def test_place_limit_order_auth_error_raises() -> None:
+    fake = FakeTransport({"code": -2015, "msg": "Invalid API-key."}, status_code=401)
+    client = _make_trading_client(transport=fake)
+    with pytest.raises(ExchangeError) as exc_info:
+        await client.place_limit_order(
+            side="SELL", qty=Decimal("1"), price=Decimal("3000"),
+            reduce_only=True, client_order_id="cid",
+        )
+    assert exc_info.value.kind == ExchangeErrorKind.AUTH_ERROR
+
+
+@pytest.mark.asyncio
+async def test_place_stop_market_order_insufficient_balance_returns_ok_false() -> None:
+    """INSUFFICIENT_BALANCE should be caught and return ok=False."""
+    fake = FakeTransport(
+        {"code": -2019, "msg": "Margin is insufficient."},
+        status_code=200,
+    )
+    client = _make_trading_client(transport=fake)
+    result = await client.place_stop_market_order(
+        side="SELL", qty=Decimal("1"), trigger_price=Decimal("2800"),
+        reduce_only=True, client_order_id="cid",
+    )
+    assert result.ok is False
 
 
 # ---------------------------------------------------------------------------

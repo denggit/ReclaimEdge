@@ -54,6 +54,20 @@ from src.execution.trading_client_port import (
 
 _BINANCE_STOP_ORDER_TYPES = frozenset({"STOP_MARKET", "TAKE_PROFIT_MARKET"})
 
+# ---------------------------------------------------------------------------
+# Order placement error triage
+# ---------------------------------------------------------------------------
+
+# ExchangeError kinds that represent business-level order rejections and
+# should be returned as OrderResult(ok=False) rather than re-raised.
+_ORDER_REJECTION_KINDS: frozenset[ExchangeErrorKind] = frozenset({
+    ExchangeErrorKind.INSUFFICIENT_BALANCE,
+    ExchangeErrorKind.INVALID_ORDER_SIZE,
+    ExchangeErrorKind.INVALID_PRICE,
+    ExchangeErrorKind.REDUCE_ONLY_REJECTED,
+    ExchangeErrorKind.EXCHANGE_REJECTED,
+})
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -137,10 +151,22 @@ class BinanceTradingClient(TradingClientPort):
     ) -> None:
         if not symbol:
             raise ValueError("symbol must not be empty")
+        if not margin_asset:
+            raise ValueError("margin_asset must not be empty")
         if not api_key:
             raise ValueError("api_key must not be empty")
         if not api_secret:
             raise ValueError("api_secret must not be empty")
+        if leverage <= 0:
+            raise ValueError(f"leverage must be positive, got {leverage}")
+        if margin_mode.lower() != "isolated":
+            raise ValueError(
+                f"Only isolated margin_mode is supported, got {margin_mode!r}"
+            )
+        if position_mode.lower() != "net":
+            raise ValueError(
+                f"Only net position_mode is supported, got {position_mode!r}"
+            )
 
         self._symbol = symbol
         self._margin_asset = margin_asset
@@ -478,6 +504,10 @@ class BinanceTradingClient(TradingClientPort):
         try:
             payload = await self._client.post(BINANCE_USDM_ORDER_PATH, params)
         except ExchangeError as exc:
+            # Only business-level rejections become OrderResult(ok=False).
+            # Auth / network / rate-limit / unknown errors must propagate.
+            if exc.kind not in _ORDER_REJECTION_KINDS:
+                raise
             return OrderResult(
                 ok=False,
                 client_order_id=client_order_id,

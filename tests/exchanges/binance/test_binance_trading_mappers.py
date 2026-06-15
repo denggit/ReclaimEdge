@@ -59,8 +59,8 @@ def test_map_status_new_is_open() -> None:
     assert map_binance_status_to_port_status("NEW") == "OPEN"
 
 
-def test_map_status_partially_filled_is_open() -> None:
-    assert map_binance_status_to_port_status("PARTIALLY_FILLED") == "OPEN"
+def test_map_status_partially_filled_is_partially_filled() -> None:
+    assert map_binance_status_to_port_status("PARTIALLY_FILLED") == "PARTIALLY_FILLED"
 
 
 def test_map_status_filled() -> None:
@@ -117,10 +117,33 @@ def test_map_balance_zero() -> None:
     assert snap.available == Decimal("0")
 
 
-def test_map_balance_missing_fields() -> None:
+def test_map_balance_missing_required_field_raises() -> None:
     raw: dict = {}
+    with pytest.raises(ValueError, match="balance"):
+        map_binance_balance_to_snapshot(raw, margin_asset="USDT")
+
+
+def test_map_balance_balance_is_required() -> None:
+    raw = {"asset": "USDT", "availableBalance": "400"}
+    with pytest.raises(ValueError, match="balance"):
+        map_binance_balance_to_snapshot(raw, margin_asset="USDT")
+
+
+def test_map_balance_invalid_balance_raises() -> None:
+    raw = {"asset": "USDT", "balance": "not-a-number"}
+    with pytest.raises(ValueError, match="balance"):
+        map_binance_balance_to_snapshot(raw, margin_asset="USDT")
+
+
+def test_map_balance_invalid_available_raises() -> None:
+    raw = {"asset": "USDT", "balance": "500", "availableBalance": "abc"}
+    with pytest.raises(ValueError, match="availableBalance"):
+        map_binance_balance_to_snapshot(raw, margin_asset="USDT")
+
+
+def test_map_balance_available_optional_none() -> None:
+    raw = {"asset": "USDT", "balance": "500"}
     snap = map_binance_balance_to_snapshot(raw, margin_asset="USDT")
-    assert snap.total == Decimal("0")
     assert snap.available is None
 
 
@@ -197,6 +220,18 @@ def test_map_position_raw_preserved() -> None:
     raw = {"symbol": "ETHUSDT", "positionAmt": "0.5"}
     snap = map_binance_position_to_snapshot(raw)
     assert snap.raw == raw
+
+
+def test_map_position_missing_amt_raises() -> None:
+    raw = {"symbol": "ETHUSDT"}
+    with pytest.raises(ValueError, match="positionAmt"):
+        map_binance_position_to_snapshot(raw)
+
+
+def test_map_position_invalid_amt_raises() -> None:
+    raw = {"symbol": "ETHUSDT", "positionAmt": "xyz"}
+    with pytest.raises(ValueError, match="positionAmt"):
+        map_binance_position_to_snapshot(raw)
 
 
 # ---------------------------------------------------------------------------
@@ -281,6 +316,24 @@ def test_map_order_raw_preserved() -> None:
     assert snap.raw == raw
 
 
+def test_map_order_missing_qty_raises() -> None:
+    raw = {"symbol": "ETHUSDT", "orderId": 1, "side": "BUY"}
+    with pytest.raises(ValueError, match="origQty"):
+        map_binance_order_to_snapshot(raw)
+
+
+def test_map_order_invalid_qty_raises() -> None:
+    raw = {"symbol": "ETHUSDT", "orderId": 1, "side": "BUY", "origQty": "bad"}
+    with pytest.raises(ValueError, match="origQty"):
+        map_binance_order_to_snapshot(raw)
+
+
+def test_map_order_invalid_optional_price_raises() -> None:
+    raw = {"symbol": "ETHUSDT", "orderId": 1, "side": "BUY", "origQty": "1", "price": "abc"}
+    with pytest.raises(ValueError, match="price"):
+        map_binance_order_to_snapshot(raw)
+
+
 # ---------------------------------------------------------------------------
 # order status mapper
 # ---------------------------------------------------------------------------
@@ -320,7 +373,7 @@ def test_map_order_status_partial() -> None:
         "avgPrice": "2999.00",
     }
     snap = map_binance_order_to_status_snapshot(raw)
-    assert snap.status == "OPEN"
+    assert snap.status == "PARTIALLY_FILLED"
 
 
 def test_map_order_status_canceled() -> None:

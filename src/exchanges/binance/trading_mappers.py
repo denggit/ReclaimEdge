@@ -29,23 +29,25 @@ from src.execution.trading_client_port import (
 # ---------------------------------------------------------------------------
 
 
-def _safe_decimal(value: Any) -> Decimal:
-    """Convert *value* to Decimal.  Returns Decimal("0") on empty / None / error."""
+def _required_decimal(value: Any, field_name: str) -> Decimal:
+    """Convert *value* to Decimal.  Raises ValueError on missing / invalid input."""
     if value is None:
-        return Decimal("0")
+        raise ValueError(f"Missing required decimal field: {field_name}")
     if isinstance(value, Decimal):
         return value
     text = str(value).strip()
     if text == "":
-        return Decimal("0")
+        raise ValueError(f"Missing required decimal field: {field_name}")
     try:
         return Decimal(text)
-    except Exception:
-        return Decimal("0")
+    except Exception as exc:
+        raise ValueError(
+            f"Invalid decimal field {field_name}={value!r}"
+        ) from exc
 
 
-def _safe_decimal_or_none(value: Any) -> Decimal | None:
-    """Convert *value* to Decimal, returning None for empty / None values."""
+def _optional_decimal(value: Any, field_name: str) -> Decimal | None:
+    """Convert *value* to Decimal.  Returns None for empty/None.  Raises on invalid."""
     if value is None:
         return None
     if isinstance(value, Decimal):
@@ -55,8 +57,10 @@ def _safe_decimal_or_none(value: Any) -> Decimal | None:
         return None
     try:
         return Decimal(text)
-    except Exception:
-        return None
+    except Exception as exc:
+        raise ValueError(
+            f"Invalid decimal field {field_name}={value!r}"
+        ) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -77,7 +81,8 @@ def map_binance_status_to_port_status(raw_status: Any) -> str:
 
     Mapping
     -------
-    NEW / PARTIALLY_FILLED -> OPEN
+    NEW                    -> OPEN
+    PARTIALLY_FILLED       -> PARTIALLY_FILLED
     FILLED                 -> FILLED
     CANCELED / CANCELLED   -> CANCELED
     REJECTED               -> REJECTED
@@ -87,7 +92,7 @@ def map_binance_status_to_port_status(raw_status: Any) -> str:
     text = str(raw_status or "").strip().upper()
     mapping: dict[str, str] = {
         "NEW": "OPEN",
-        "PARTIALLY_FILLED": "OPEN",
+        "PARTIALLY_FILLED": "PARTIALLY_FILLED",
         "FILLED": "FILLED",
         "CANCELED": "CANCELED",
         "CANCELLED": "CANCELED",
@@ -115,8 +120,8 @@ def map_binance_balance_to_snapshot(
     """
     return BalanceSnapshot(
         asset=str(raw.get("asset", margin_asset)),
-        total=_safe_decimal(raw.get("balance")),
-        available=_safe_decimal_or_none(raw.get("availableBalance")),
+        total=_required_decimal(raw.get("balance"), "balance"),
+        available=_optional_decimal(raw.get("availableBalance"), "availableBalance"),
         raw=dict(raw),
     )
 
@@ -136,7 +141,7 @@ def map_binance_position_to_snapshot(
         positionAmt < 0  -> SHORT
         positionAmt == 0 -> no position (side=None)
     """
-    position_amt = _safe_decimal(raw.get("positionAmt"))
+    position_amt = _required_decimal(raw.get("positionAmt"), "positionAmt")
 
     if position_amt == 0:
         return PositionSnapshot(
@@ -151,7 +156,7 @@ def map_binance_position_to_snapshot(
     return PositionSnapshot(
         side=side,
         qty=abs(position_amt),
-        avg_entry_price=_safe_decimal_or_none(raw.get("entryPrice")),
+        avg_entry_price=_optional_decimal(raw.get("entryPrice"), "entryPrice"),
         raw=dict(raw),
     )
 
@@ -178,13 +183,14 @@ def map_binance_order_to_snapshot(
 
     side = map_binance_side_to_port_side(raw.get("side"))
 
-    qty = _safe_decimal(
-        raw.get("origQty") if raw.get("origQty") is not None else raw.get("quantity")
+    qty = _required_decimal(
+        raw.get("origQty") if raw.get("origQty") is not None else raw.get("quantity"),
+        "origQty",
     )
 
-    price = _safe_decimal_or_none(raw.get("price"))
+    price = _optional_decimal(raw.get("price"), "price")
 
-    stop_price = _safe_decimal_or_none(raw.get("stopPrice"))
+    stop_price = _optional_decimal(raw.get("stopPrice"), "stopPrice")
     trigger_price: Decimal | None = None
     if stop_price is not None and stop_price > 0:
         trigger_price = stop_price
@@ -231,8 +237,8 @@ def map_binance_order_to_status_snapshot(
 
     status = map_binance_status_to_port_status(raw.get("status"))
 
-    filled_qty = _safe_decimal_or_none(raw.get("executedQty"))
-    avg_fill_price = _safe_decimal_or_none(raw.get("avgPrice"))
+    filled_qty = _optional_decimal(raw.get("executedQty"), "executedQty")
+    avg_fill_price = _optional_decimal(raw.get("avgPrice"), "avgPrice")
 
     return OrderStatusSnapshot(
         order_id=order_id,
@@ -266,11 +272,12 @@ def map_binance_algo_order_to_snapshot(
 
     side = map_binance_side_to_port_side(raw.get("side"))
 
-    qty = _safe_decimal(
-        raw.get("origQty") if raw.get("origQty") is not None else raw.get("quantity")
+    qty = _required_decimal(
+        raw.get("origQty") if raw.get("origQty") is not None else raw.get("quantity"),
+        "origQty",
     )
 
-    stop_price = _safe_decimal_or_none(raw.get("stopPrice"))
+    stop_price = _optional_decimal(raw.get("stopPrice"), "stopPrice")
     trigger_price: Decimal | None = None
     if stop_price is not None and stop_price > 0:
         trigger_price = stop_price

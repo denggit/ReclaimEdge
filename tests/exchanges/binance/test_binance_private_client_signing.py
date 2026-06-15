@@ -234,13 +234,31 @@ async def test_success_response_returns_payload() -> None:
 
 
 @pytest.mark.asyncio
-async def test_transport_not_started_raises() -> None:
+async def test_auto_start_uses_transport_factory() -> None:
+    """When no transport is injected but transport_factory is, auto-start uses it."""
+    fake = FakeTransport({"ok": True})
     client = BinancePrivateClient(
         api_key="key",
         api_secret="secret",
+        transport_factory=lambda: fake,
     )
-    with pytest.raises(RuntimeError, match="transport"):
-        await client.get("/fapi/v1/test", {})
+    result = await client.get("/fapi/v1/test", {})
+    assert result == {"ok": True}
+    assert len(fake.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_auto_start_with_existing_transport_is_noop() -> None:
+    """When transport is already injected, auto-start does not replace it."""
+    fake = FakeTransport({"ok": True})
+    client = BinancePrivateClient(
+        api_key="key",
+        api_secret="secret",
+        transport=fake,
+    )
+    await client.get("/fapi/v1/test", {})
+    # Transport should be the same instance we injected
+    assert client._transport is fake
 
 
 # ---------------------------------------------------------------------------
