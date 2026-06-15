@@ -192,6 +192,26 @@ def load_unified_runtime_config(
         )
 
     # -- credentials ----------------------------------------------------------
+    # Unified EXCHANGE_API_* takes priority.  Legacy OKX_* vars serve as
+    # fallback for backward compatibility.  The fallback chain is:
+    #   EXCHANGE_API_KEY         > OKX_API_KEY
+    #   EXCHANGE_API_SECRET      > OKX_SECRET_KEY   > OKX_API_SECRET
+    #   EXCHANGE_API_PASSPHRASE  > OKX_PASSPHASE    > OKX_PASSPHRASE
+
+    api_key = str(
+        values.get("EXCHANGE_API_KEY", "")
+        or values.get("OKX_API_KEY", "")
+    )
+    api_secret = str(
+        values.get("EXCHANGE_API_SECRET", "")
+        or values.get("OKX_SECRET_KEY", "")
+        or values.get("OKX_API_SECRET", "")
+    )
+    api_passphrase = str(
+        values.get("EXCHANGE_API_PASSPHRASE", "")
+        or values.get("OKX_PASSPHASE", "")
+        or values.get("OKX_PASSPHRASE", "")
+    )
 
     return ExchangeRuntimeConfig(
         exchange=exchange,
@@ -202,9 +222,9 @@ def load_unified_runtime_config(
         margin_mode=margin_mode,
         position_mode=position_mode,
         kline_interval=kline_interval,
-        api_key=str(values.get("EXCHANGE_API_KEY", "")),
-        api_secret=str(values.get("EXCHANGE_API_SECRET", "")),
-        api_passphrase=str(values.get("EXCHANGE_API_PASSPHRASE", "")),
+        api_key=api_key,
+        api_secret=api_secret,
+        api_passphrase=api_passphrase,
     )
 
 

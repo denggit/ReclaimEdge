@@ -37,6 +37,7 @@ FORBIDDEN_OKX_ENV_FILES = [
     "src/strategies/boll_cvd_reclaim_strategy.py",
     "src/strategies/boll_cvd_shock_reclaim_strategy.py",
     "src/live/account_sync/flat_balance.py",
+    "src/live/runtime_factory.py",
 ]
 
 OKX_LEGACY_ENV_VARS = ["OKX_INST_ID", "OKX_BAR", "OKX_TD_MODE", "OKX_POS_SIDE_MODE"]

@@ -26,40 +26,78 @@ import config.env_loader
 
 
 RUNTIME_FACTORY_PATH = Path(__file__).resolve().parents[2] / "src" / "live" / "runtime_factory.py"
+OKX_RUNTIME_ADAPTER_PATH = (
+    Path(__file__).resolve().parents[2] / "src" / "exchanges" / "okx" / "runtime_adapter.py"
+)
+OKX_RUNTIME_ADAPTER_SOURCE = OKX_RUNTIME_ADAPTER_PATH.read_text(encoding="utf-8")
 RUNTIME_FACTORY_SOURCE = RUNTIME_FACTORY_PATH.read_text(encoding="utf-8")
 
 
 class TestTraderErrorMessageContainsUnifiedVarNames:
-    """The runtime_factory ValueError message must mention both unified and legacy vars."""
+    """The OKX runtime_adapter ValueError message must mention both unified and legacy vars."""
 
     def test_error_message_contains_exchange_api_key(self) -> None:
-        assert "EXCHANGE_API_KEY" in RUNTIME_FACTORY_SOURCE, (
-            "runtime_factory error message must mention EXCHANGE_API_KEY"
+        assert "EXCHANGE_API_KEY" in OKX_RUNTIME_ADAPTER_SOURCE, (
+            "okx runtime_adapter error message must mention EXCHANGE_API_KEY"
         )
 
     def test_error_message_contains_exchange_api_secret(self) -> None:
-        assert "EXCHANGE_API_SECRET" in RUNTIME_FACTORY_SOURCE, (
-            "runtime_factory error message must mention EXCHANGE_API_SECRET"
+        assert "EXCHANGE_API_SECRET" in OKX_RUNTIME_ADAPTER_SOURCE, (
+            "okx runtime_adapter error message must mention EXCHANGE_API_SECRET"
         )
 
     def test_error_message_contains_exchange_api_passphrase(self) -> None:
-        assert "EXCHANGE_API_PASSPHRASE" in RUNTIME_FACTORY_SOURCE, (
-            "runtime_factory error message must mention EXCHANGE_API_PASSPHRASE"
+        assert "EXCHANGE_API_PASSPHRASE" in OKX_RUNTIME_ADAPTER_SOURCE, (
+            "okx runtime_adapter error message must mention EXCHANGE_API_PASSPHRASE"
         )
 
     def test_error_message_contains_legacy_okx_api_key(self) -> None:
-        assert "OKX_API_KEY" in RUNTIME_FACTORY_SOURCE, (
-            "runtime_factory error message must mention legacy OKX_API_KEY"
+        assert "OKX_API_KEY" in OKX_RUNTIME_ADAPTER_SOURCE, (
+            "okx runtime_adapter error message must mention legacy OKX_API_KEY"
         )
 
     def test_error_message_contains_legacy_okx_secret_key(self) -> None:
-        assert "OKX_SECRET_KEY" in RUNTIME_FACTORY_SOURCE, (
-            "runtime_factory error message must mention legacy OKX_SECRET_KEY"
+        assert "OKX_SECRET_KEY" in OKX_RUNTIME_ADAPTER_SOURCE, (
+            "okx runtime_adapter error message must mention legacy OKX_SECRET_KEY"
         )
 
     def test_error_message_contains_legacy_okx_passphase(self) -> None:
-        assert "OKX_PASSPHASE" in RUNTIME_FACTORY_SOURCE, (
-            "runtime_factory error message must mention legacy OKX_PASSPHASE"
+        assert "OKX_PASSPHASE" in OKX_RUNTIME_ADAPTER_SOURCE, (
+            "okx runtime_adapter error message must mention legacy OKX_PASSPHRASE"
+        )
+
+
+class TestRuntimeFactoryDoesNotImportOkxConfig:
+    """runtime_factory.py must NOT import OKX_CONFIG or any Okx* concrete class."""
+
+    def test_no_okx_config_import(self) -> None:
+        assert "from config.env_loader import OKX_CONFIG" not in RUNTIME_FACTORY_SOURCE, (
+            "runtime_factory.py must NOT import OKX_CONFIG"
+        )
+
+    def test_no_okx_private_client_import(self) -> None:
+        assert "from src.execution.okx_private_client import" not in RUNTIME_FACTORY_SOURCE, (
+            "runtime_factory.py must NOT import OkxPrivateClient"
+        )
+
+    def test_no_okx_trading_client_import(self) -> None:
+        assert "from src.execution.okx_trading_client import" not in RUNTIME_FACTORY_SOURCE, (
+            "runtime_factory.py must NOT import OkxTradingClient"
+        )
+
+    def test_no_okx_market_data_client_import(self) -> None:
+        assert "from src.data_feed.okx_market_data_client import" not in RUNTIME_FACTORY_SOURCE, (
+            "runtime_factory.py must NOT import OkxMarketDataClient"
+        )
+
+    def test_no_okx_broker_client_import(self) -> None:
+        assert "from src.exchanges.okx.client import OkxBrokerClient" not in RUNTIME_FACTORY_SOURCE, (
+            "runtime_factory.py must NOT import OkxBrokerClient"
+        )
+
+    def test_no_okx_broker_semantic_executor_import(self) -> None:
+        assert "from src.exchanges.okx.semantic_executor import" not in RUNTIME_FACTORY_SOURCE, (
+            "runtime_factory.py must NOT import OkxBrokerSemanticExecutor"
         )
 
 
