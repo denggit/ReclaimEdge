@@ -2,12 +2,16 @@
 
 Covers:
 1. cvd.size → cvd.buy_volume + cvd.sell_volume
-2. UPDATE_TREND_SL "new first, old later" order
-3. State pollution: intent generation does NOT modify strategy state
-4. State updated ONLY on execution success
-5. State unchanged on UPDATE_TREND_SL failure
-6. Metrics baseline missing does NOT auto-pass
-7. Real pre-breakout baseline passed to metrics tracker
+2. Range expansion uses cvd.burst_move_ratio
+3. Volume expansion uses cvd.burst_volume_ratio
+4. Baseline missing → expansion stays False
+5. Sustained volume uses 10-second subwindows
+6. Direction switch resets metrics tracker
+7. Inside reclaim does NOT reset metrics tracker
+8. UPDATE_TREND_SL "new first, old later" order
+9. State pollution: intent generation does NOT modify strategy state
+10. State updated ONLY on execution success
+11. State unchanged on UPDATE_TREND_SL failure
 """
 
 from __future__ import annotations
@@ -139,6 +143,26 @@ def _make_strategy(config=None, **config_overrides):
     return BollCvdReclaimStrategy(config, _make_sizer())
 
 
+def _make_tracker(**kwargs):
+    """Build TrendBreakoutMetricsTracker with defaults suitable for testing."""
+    from src.strategies.trend_breakout_metrics import TrendBreakoutMetricsTracker
+
+    defaults = dict(
+        range_expansion_ratio_min=3.0,
+        volume_expansion_ratio_min=3.0,
+        outside_occupancy_min_ratio=0.70,
+        min_new_extreme_count=2,
+        max_inside_reclaim_seconds=3,
+        confirm_min_seconds=60,
+        volume_subwindow_seconds=10,
+        volume_subwindow_pass_count=4,
+        volume_subwindow_ratio_min=2.0,
+        volume_persistence_window_seconds=60,
+    )
+    defaults.update(kwargs)
+    return TrendBreakoutMetricsTracker(**defaults)
+
+
 # ======================================================================
 # 1. cvd.size removal tests
 # ======================================================================
@@ -216,245 +240,620 @@ class TestRouteRegimeDoesNotCrashOnRealCvdSnapshot:
 
 
 # ======================================================================
-# 2. Pre-breakout baseline tests
+# 2. Direction property on metrics tracker
 # ======================================================================
 
 
-class TestPreBreakoutBaselinePassedToMetricsTracker:
-    """Verify pre_breakout_range and pre_breakout_volume are passed to anchor()."""
+class TestMetricsTrackerDirection:
+    """TrendBreakoutMetricsTracker.direction returns current breakout direction."""
 
-    def test_anchor_receives_pre_breakout_range_from_cvd(self):
-        from src.strategies.trend_breakout_metrics import TrendBreakoutMetricsTracker
+    def test_direction_returns_none_when_not_initialised(self):
+        tracker = _make_tracker()
+        assert tracker.direction is None
 
-        tracker = TrendBreakoutMetricsTracker()
-
+    def test_direction_returns_up_after_up_anchor(self):
+        tracker = _make_tracker()
         tracker.anchor(
-            ts_ms=1000000,
-            price=3000.0,
-            fast_cvd=0.01,
-            cumulative_buy_volume=5000.0,
-            cumulative_sell_volume=4000.0,
-            direction="UP",
-            boll_upper=3100.0,
-            boll_lower=2900.0,
-            pre_breakout_range=0.005,  # 0.5%
-            pre_breakout_volume=100.0,
+            ts_ms=1000000, price=3200.0, fast_cvd=0.01,
+            cumulative_buy_volume=5000.0, cumulative_sell_volume=4000.0,
+            direction="UP", boll_upper=3100.0, boll_lower=2900.0,
         )
+        assert tracker.direction == "UP"
 
-        assert tracker.initialised
-        assert tracker._m._pre_breakout_range == 0.005
-        assert tracker._m._pre_breakout_volume == 100.0
-
-    def test_anchor_defaults_to_zero_baseline(self):
-        from src.strategies.trend_breakout_metrics import TrendBreakoutMetricsTracker
-
-        tracker = TrendBreakoutMetricsTracker()
-
+    def test_direction_returns_down_after_down_anchor(self):
+        tracker = _make_tracker()
         tracker.anchor(
-            ts_ms=1000000,
-            price=3000.0,
-            fast_cvd=0.01,
-            cumulative_buy_volume=5000.0,
-            cumulative_sell_volume=4000.0,
-            direction="UP",
-            boll_upper=3100.0,
-            boll_lower=2900.0,
-            # pre_breakout_range and pre_breakout_volume default to 0
+            ts_ms=1000000, price=2800.0, fast_cvd=0.01,
+            cumulative_buy_volume=5000.0, cumulative_sell_volume=4000.0,
+            direction="DOWN", boll_upper=3100.0, boll_lower=2900.0,
         )
+        assert tracker.direction == "DOWN"
 
-        # Default values should be 0
-        assert tracker._m._pre_breakout_range == 0.0
-        assert tracker._m._pre_breakout_volume == 0.0
+    def test_direction_resets_to_none_after_reset(self):
+        tracker = _make_tracker()
+        tracker.anchor(
+            ts_ms=1000000, price=3200.0, fast_cvd=0.01,
+            cumulative_buy_volume=5000.0, cumulative_sell_volume=4000.0,
+            direction="UP", boll_upper=3100.0, boll_lower=2900.0,
+        )
+        tracker.reset()
+        assert tracker.direction is None
 
 
 # ======================================================================
-# 3. Metrics baseline missing → NOT auto-pass
+# 3. Range expansion uses burst_move_ratio
 # ======================================================================
 
 
-class TestMetricsNoBaselineNoAutoPass:
-    """Without pre-breakout baseline, metrics must NOT auto-pass."""
+class TestRangeExpansionUsesBurstMoveRatio:
+    """Range expansion is now driven by cvd.burst_move_ratio, not band_range."""
 
-    def _make_tracker(self, **kwargs):
-        from src.strategies.trend_breakout_metrics import TrendBreakoutMetricsTracker
-
-        return TrendBreakoutMetricsTracker(
-            range_expansion_ratio_min=3.0,
-            volume_expansion_ratio_min=3.0,
-            confirm_min_seconds=kwargs.get("confirm_min_seconds", 60),
-        )
-
-    def test_range_expansion_false_when_no_baseline(self):
-        """pre_breakout_range=0 even after 60+s → range_expansion_passed=False."""
-        tracker = self._make_tracker()
+    def test_range_expansion_passed_when_burst_move_ratio_sufficient(self):
+        """burst_move_ratio >= 3.0 with baseline → range_expansion_passed=True."""
+        tracker = _make_tracker(range_expansion_ratio_min=3.0)
         tracker.anchor(
-            ts_ms=1000000,
-            price=3000.0,
-            fast_cvd=0.01,
-            cumulative_buy_volume=5000.0,
-            cumulative_sell_volume=4000.0,
-            direction="UP",
-            boll_upper=3100.0,
-            boll_lower=2900.0,
-            pre_breakout_range=0.0,
-            pre_breakout_volume=100.0,
+            ts_ms=1000000, price=3200.0, fast_cvd=0.01,
+            cumulative_buy_volume=5000.0, cumulative_sell_volume=4000.0,
+            direction="UP", boll_upper=3100.0, boll_lower=2900.0,
         )
 
         m = tracker.update(
-            ts_ms=2000000,  # 1000s after anchor
-            price=3200.0,
+            ts_ms=1010000,
+            price=3250.0,
             fast_cvd=0.02,
             cumulative_buy_volume=6000.0,
             cumulative_sell_volume=4500.0,
             boll_upper=3300.0,
             boll_middle=3100.0,
             boll_lower=2900.0,
-            band_range=0.05,  # 5% band
-            tick_volume=10.0,
+            burst_move_ratio=4.0,  # ≥ 3.0
+            baseline_range_pct=0.005,  # > 0
+        )
+
+        assert m.range_expansion_passed is True
+
+    def test_range_expansion_not_passed_when_burst_move_ratio_insufficient(self):
+        """burst_move_ratio < 3.0 → range_expansion_passed=False."""
+        tracker = _make_tracker(range_expansion_ratio_min=3.0)
+        tracker.anchor(
+            ts_ms=1000000, price=3200.0, fast_cvd=0.01,
+            cumulative_buy_volume=5000.0, cumulative_sell_volume=4000.0,
+            direction="UP", boll_upper=3100.0, boll_lower=2900.0,
+        )
+
+        m = tracker.update(
+            ts_ms=1010000,
+            price=3150.0,
+            fast_cvd=0.015,
+            cumulative_buy_volume=5500.0,
+            cumulative_sell_volume=4200.0,
+            boll_upper=3300.0,
+            boll_middle=3100.0,
+            boll_lower=2900.0,
+            burst_move_ratio=1.5,  # < 3.0
+            baseline_range_pct=0.005,  # > 0
+        )
+
+        assert m.range_expansion_passed is False
+
+    def test_range_expansion_false_when_baseline_range_missing(self):
+        """baseline_range_pct=0 → range_expansion_passed=False regardless of burst."""
+        tracker = _make_tracker(range_expansion_ratio_min=3.0)
+        tracker.anchor(
+            ts_ms=1000000, price=3200.0, fast_cvd=0.01,
+            cumulative_buy_volume=5000.0, cumulative_sell_volume=4000.0,
+            direction="UP", boll_upper=3100.0, boll_lower=2900.0,
+        )
+
+        m = tracker.update(
+            ts_ms=1010000,
+            price=3250.0,
+            fast_cvd=0.02,
+            cumulative_buy_volume=6000.0,
+            cumulative_sell_volume=4500.0,
+            boll_upper=3300.0,
+            boll_middle=3100.0,
+            boll_lower=2900.0,
+            burst_move_ratio=5.0,  # well above threshold
+            baseline_range_pct=0.0,  # no baseline → blocked
         )
 
         assert m.range_expansion_passed is False, (
-            "range_expansion_passed must be False when pre_breakout_range=0"
+            "range_expansion_passed must be False when baseline_range_pct=0"
         )
 
-    def test_volume_expansion_false_when_no_baseline(self):
-        """pre_breakout_volume=0 even after 60+s → volume_expansion_passed=False."""
-        tracker = self._make_tracker()
+    def test_no_band_range_in_source(self):
+        """Update method must NOT reference band_range in its source."""
+        import inspect
+        from src.strategies.trend_breakout_metrics import TrendBreakoutMetricsTracker
+
+        source = inspect.getsource(TrendBreakoutMetricsTracker.update)
+        # The old band_range / pre_breakout_range mixing must be removed
+        assert "band_range / m._pre_breakout_range" not in source, (
+            "band_range / pre_breakout_range mixing must be removed"
+        )
+
+
+# ======================================================================
+# 4. Volume expansion uses burst_volume_ratio
+# ======================================================================
+
+
+class TestVolumeExpansionUsesBurstVolumeRatio:
+    """Volume expansion is now driven by cvd.burst_volume_ratio."""
+
+    def test_volume_expansion_passed_when_burst_volume_ratio_sufficient(self):
+        """burst_volume_ratio >= 3.0 with baseline → volume_expansion_passed=True."""
+        tracker = _make_tracker(volume_expansion_ratio_min=3.0)
         tracker.anchor(
-            ts_ms=1000000,
-            price=3000.0,
-            fast_cvd=0.01,
-            cumulative_buy_volume=5000.0,
-            cumulative_sell_volume=4000.0,
-            direction="UP",
-            boll_upper=3100.0,
-            boll_lower=2900.0,
-            pre_breakout_range=0.005,
-            pre_breakout_volume=0.0,  # no baseline volume
+            ts_ms=1000000, price=3200.0, fast_cvd=0.01,
+            cumulative_buy_volume=5000.0, cumulative_sell_volume=4000.0,
+            direction="UP", boll_upper=3100.0, boll_lower=2900.0,
         )
 
         m = tracker.update(
-            ts_ms=2000000,  # 1000s after anchor
-            price=3200.0,
+            ts_ms=1010000,
+            price=3250.0,
             fast_cvd=0.02,
             cumulative_buy_volume=6000.0,
             cumulative_sell_volume=4500.0,
             boll_upper=3300.0,
             boll_middle=3100.0,
             boll_lower=2900.0,
-            band_range=0.05,
-            tick_volume=50.0,  # plenty of episode volume
+            burst_volume_ratio=4.0,  # ≥ 3.0
+            baseline_volume=100.0,  # > 0
+        )
+
+        assert m.volume_expansion_passed is True
+
+    def test_volume_expansion_not_passed_when_burst_volume_ratio_insufficient(self):
+        """burst_volume_ratio < 3.0 → volume_expansion_passed=False."""
+        tracker = _make_tracker(volume_expansion_ratio_min=3.0)
+        tracker.anchor(
+            ts_ms=1000000, price=3200.0, fast_cvd=0.01,
+            cumulative_buy_volume=5000.0, cumulative_sell_volume=4000.0,
+            direction="UP", boll_upper=3100.0, boll_lower=2900.0,
+        )
+
+        m = tracker.update(
+            ts_ms=1010000,
+            price=3150.0,
+            fast_cvd=0.015,
+            cumulative_buy_volume=5500.0,
+            cumulative_sell_volume=4200.0,
+            boll_upper=3300.0,
+            boll_middle=3100.0,
+            boll_lower=2900.0,
+            burst_volume_ratio=1.0,  # < 3.0
+            baseline_volume=100.0,  # > 0
+        )
+
+        assert m.volume_expansion_passed is False
+
+    def test_volume_expansion_false_when_baseline_volume_missing(self):
+        """baseline_volume=0 → volume_expansion_passed=False regardless of burst."""
+        tracker = _make_tracker(volume_expansion_ratio_min=3.0)
+        tracker.anchor(
+            ts_ms=1000000, price=3200.0, fast_cvd=0.01,
+            cumulative_buy_volume=5000.0, cumulative_sell_volume=4000.0,
+            direction="UP", boll_upper=3100.0, boll_lower=2900.0,
+        )
+
+        m = tracker.update(
+            ts_ms=1010000,
+            price=3250.0,
+            fast_cvd=0.02,
+            cumulative_buy_volume=6000.0,
+            cumulative_sell_volume=4500.0,
+            boll_upper=3300.0,
+            boll_middle=3100.0,
+            boll_lower=2900.0,
+            burst_volume_ratio=5.0,  # well above threshold
+            baseline_volume=0.0,  # no baseline → blocked
         )
 
         assert m.volume_expansion_passed is False, (
-            "volume_expansion_passed must be False when pre_breakout_volume=0"
+            "volume_expansion_passed must be False when baseline_volume=0"
         )
 
-    def test_sustained_volume_false_when_volume_not_passed(self):
-        """sustained_volume_passed is False when volume_expansion_passed=False."""
-        tracker = self._make_tracker()
+
+# ======================================================================
+# 5. Sustained volume — 10-second subwindow logic
+# ======================================================================
+
+
+class TestSustainedVolumeSubwindows:
+    """Sustained volume requires multiple 10-second subwindows passing threshold."""
+
+    def test_sustained_volume_false_when_baseline_volume_rate_zero(self):
+        """baseline_volume_rate=0 → sustained_volume_passed=False."""
+        tracker = _make_tracker()
         tracker.anchor(
-            ts_ms=1000000,
-            price=3000.0,
-            fast_cvd=0.01,
-            cumulative_buy_volume=5000.0,
-            cumulative_sell_volume=4000.0,
-            direction="UP",
-            boll_upper=3100.0,
-            boll_lower=2900.0,
-            pre_breakout_range=0.005,
-            pre_breakout_volume=0.0,
+            ts_ms=1000000, price=3200.0, fast_cvd=0.01,
+            cumulative_buy_volume=5000.0, cumulative_sell_volume=4000.0,
+            direction="UP", boll_upper=3100.0, boll_lower=2900.0,
         )
 
         m = tracker.update(
-            ts_ms=1100000,  # 100s after anchor (> confirm_min)
-            price=3200.0,
-            fast_cvd=0.02,
-            cumulative_buy_volume=6000.0,
-            cumulative_sell_volume=4500.0,
-            boll_upper=3300.0,
-            boll_middle=3100.0,
-            boll_lower=2900.0,
-            band_range=0.05,
-            tick_volume=50.0,
+            ts_ms=1010000, price=3250.0, fast_cvd=0.02,
+            cumulative_buy_volume=6000.0, cumulative_sell_volume=4500.0,
+            boll_upper=3300.0, boll_middle=3100.0, boll_lower=2900.0,
+            baseline_volume_rate=0.0,  # zero rate → blocked
+            tick_volume=25.0,
         )
+
+        assert m.sustained_volume_passed is False
+
+    def test_sustained_volume_passes_with_four_passing_windows(self):
+        """4 subwindows with ratio ≥ 2.0 within 60s → sustained_volume_passed=True."""
+        tracker = _make_tracker(
+            volume_subwindow_seconds=10,
+            volume_subwindow_pass_count=4,
+            volume_subwindow_ratio_min=2.0,
+            volume_persistence_window_seconds=60,
+        )
+        tracker.anchor(
+            ts_ms=1000000, price=3200.0, fast_cvd=0.01,
+            cumulative_buy_volume=5000.0, cumulative_sell_volume=4000.0,
+            direction="UP", boll_upper=3100.0, boll_lower=2900.0,
+        )
+
+        # baseline_volume_rate=1.0 → baseline_window_volume = 1.0 * 10 = 10.0
+        # tick_volume=25.0 → window_volume_ratio = 25.0 / 10.0 = 2.5 ≥ 2.0
+        # Each update is 10s apart → creates separate 10s windows
+        base_ts = 1000000
+        for i in range(6):
+            ts = base_ts + i * 10000  # each 10s later
+            m = tracker.update(
+                ts_ms=ts, price=3200.0 + i * 10, fast_cvd=0.02,
+                cumulative_buy_volume=6000.0 + i * 100,
+                cumulative_sell_volume=4500.0 + i * 50,
+                boll_upper=3300.0, boll_middle=3100.0, boll_lower=2900.0,
+                baseline_volume_rate=1.0,
+                tick_volume=25.0,
+            )
+
+        # After 6 windows, 6 should pass → sustained_volume_passed=True
+        assert m.sustained_volume_passed is True, (
+            f"Expected sustained_volume_passed=True after 6 passing windows, "
+            f"got {m.sustained_volume_passed}"
+        )
+
+    def test_sustained_volume_fails_with_insufficient_passing_windows(self):
+        """Only 3 windows with ratio ≥ 2.0 within 60s → sustained_volume_passed=False."""
+        tracker = _make_tracker(
+            volume_subwindow_seconds=10,
+            volume_subwindow_pass_count=4,
+            volume_subwindow_ratio_min=2.0,
+            volume_persistence_window_seconds=60,
+        )
+        tracker.anchor(
+            ts_ms=1000000, price=3200.0, fast_cvd=0.01,
+            cumulative_buy_volume=5000.0, cumulative_sell_volume=4000.0,
+            direction="UP", boll_upper=3100.0, boll_lower=2900.0,
+        )
+
+        # baseline_volume_rate=1.0 → baseline_window_volume = 10.0
+        # tick_volume=5.0 → window_volume_ratio = 5.0 / 10.0 = 0.5 < 2.0
+        # None of these windows pass
+        base_ts = 1000000
+        for i in range(6):
+            ts = base_ts + i * 10000
+            m = tracker.update(
+                ts_ms=ts, price=3200.0 + i * 2, fast_cvd=0.02,
+                cumulative_buy_volume=6000.0 + i * 10,
+                cumulative_sell_volume=4500.0 + i * 5,
+                boll_upper=3300.0, boll_middle=3100.0, boll_lower=2900.0,
+                baseline_volume_rate=1.0,
+                tick_volume=5.0,  # low volume → ratio 0.5 < 2.0
+            )
 
         assert m.sustained_volume_passed is False, (
-            "sustained_volume_passed must be False when volume_expansion is not passed"
+            "sustained_volume_passed must be False when < 4 windows pass threshold"
         )
 
-    def test_sustained_volume_false_before_confirm_min(self):
-        """sustained_volume_passed is False before confirm_min_seconds."""
-        tracker = self._make_tracker(confirm_min_seconds=120)
-
-        # Setup with baseline so volume can be confirmed
+    def test_sustained_volume_respects_persistence_window(self):
+        """Windows outside persistence_window_seconds are pruned."""
+        tracker = _make_tracker(
+            volume_subwindow_seconds=10,
+            volume_subwindow_pass_count=4,
+            volume_subwindow_ratio_min=2.0,
+            volume_persistence_window_seconds=60,
+        )
         tracker.anchor(
-            ts_ms=1000000,
-            price=3000.0,
-            fast_cvd=0.01,
-            cumulative_buy_volume=5000.0,
-            cumulative_sell_volume=4000.0,
-            direction="UP",
-            boll_upper=3100.0,
-            boll_lower=2900.0,
-            pre_breakout_range=0.005,
-            pre_breakout_volume=10.0,
+            ts_ms=1000000, price=3200.0, fast_cvd=0.01,
+            cumulative_buy_volume=5000.0, cumulative_sell_volume=4000.0,
+            direction="UP", boll_upper=3100.0, boll_lower=2900.0,
         )
 
-        # First update: volume expansion passes, but not enough time yet
-        m = tracker.update(
-            ts_ms=1030000,  # 30s after anchor (< 120s confirm_min)
-            price=3200.0,
-            fast_cvd=0.02,
-            cumulative_buy_volume=6000.0,
-            cumulative_sell_volume=4500.0,
-            boll_upper=3300.0,
-            boll_middle=3100.0,
-            boll_lower=2900.0,
-            band_range=0.05,
-            tick_volume=100.0,  # high volume → volume expansion passes
-        )
-
-        # Even if volume expansion passed, sustained must wait for confirm_min
-        if m.volume_expansion_passed:
-            assert m.sustained_volume_passed is False, (
-                "sustained_volume_passed must be False before confirm_min_seconds"
+        # First 3 windows: high volume (passing)
+        # Then skip past 60s, then 3 more windows: low volume (not passing)
+        # Old windows should be pruned → only 3 recent non-passing → False
+        base_ts = 1000000
+        # Windows at t=0s, 10s, 20s with high volume
+        for i in range(3):
+            ts = base_ts + i * 10000
+            tracker.update(
+                ts_ms=ts, price=3200.0 + i * 10, fast_cvd=0.02,
+                cumulative_buy_volume=6000.0 + i * 100,
+                cumulative_sell_volume=4500.0 + i * 50,
+                boll_upper=3300.0, boll_middle=3100.0, boll_lower=2900.0,
+                baseline_volume_rate=1.0,
+                tick_volume=25.0,  # high volume → ratio 2.5 ≥ 2.0
             )
 
-    def test_sustained_volume_true_after_confirm_with_expansion(self):
-        """sustained_volume_passed becomes True after confirm_min with volume expansion."""
-        tracker = self._make_tracker(confirm_min_seconds=30)
+        # Jump forward 70s — old windows expire
+        ts_jump = base_ts + 70000  # +70s
+        for i in range(3):
+            ts = ts_jump + i * 10000
+            m = tracker.update(
+                ts_ms=ts, price=3200.0 + i * 2, fast_cvd=0.02,
+                cumulative_buy_volume=6000.0 + i * 10,
+                cumulative_sell_volume=4500.0 + i * 5,
+                boll_upper=3300.0, boll_middle=3100.0, boll_lower=2900.0,
+                baseline_volume_rate=1.0,
+                tick_volume=5.0,  # low volume
+            )
 
-        tracker.anchor(
-            ts_ms=1000000,
-            price=3000.0,
-            fast_cvd=0.01,
-            cumulative_buy_volume=5000.0,
-            cumulative_sell_volume=4000.0,
-            direction="UP",
-            boll_upper=3100.0,
-            boll_lower=2900.0,
-            pre_breakout_range=0.005,
-            pre_breakout_volume=10.0,
+        # Only 3 recent low-volume windows → sustained_volume_passed=False
+        assert m.sustained_volume_passed is False, (
+            "sustained_volume_passed must be False after old windows expire"
         )
 
-        m = tracker.update(
-            ts_ms=1050000,  # 50s after anchor (> 30s confirm_min)
-            price=3200.0,
-            fast_cvd=0.02,
-            cumulative_buy_volume=6000.0,
-            cumulative_sell_volume=4500.0,
-            boll_upper=3300.0,
-            boll_middle=3100.0,
-            boll_lower=2900.0,
-            band_range=0.05,
+    def test_volume_windows_cleared_on_reset(self):
+        """reset() must clear accumulated volume windows."""
+        tracker = _make_tracker(volume_subwindow_pass_count=1)
+        tracker.anchor(
+            ts_ms=1000000, price=3200.0, fast_cvd=0.01,
+            cumulative_buy_volume=5000.0, cumulative_sell_volume=4000.0,
+            direction="UP", boll_upper=3100.0, boll_lower=2900.0,
+        )
+
+        tracker.update(
+            ts_ms=1010000, price=3250.0, fast_cvd=0.02,
+            cumulative_buy_volume=6000.0, cumulative_sell_volume=4500.0,
+            boll_upper=3300.0, boll_middle=3100.0, boll_lower=2900.0,
+            baseline_volume_rate=1.0, tick_volume=25.0,
+        )
+
+        tracker.reset()
+        assert tracker._volume_windows == [], (
+            "Volume windows must be cleared on reset"
+        )
+
+
+# ======================================================================
+# 6. Direction switch resets metrics tracker
+# ======================================================================
+
+
+class TestDirectionSwitchResetsMetrics:
+    """When breakout direction switches, old metrics must be reset."""
+
+    def test_up_to_down_switch_resets_and_reanchors(self):
+        """UP episode → DOWN breakout: reset old UP metrics, anchor new DOWN."""
+        tracker = _make_tracker()
+        tracker.anchor(
+            ts_ms=1000000, price=3200.0, fast_cvd=0.01,
+            cumulative_buy_volume=5000.0, cumulative_sell_volume=4000.0,
+            direction="UP", boll_upper=3100.0, boll_lower=2900.0,
+        )
+        assert tracker.direction == "UP"
+        assert tracker.initialised
+
+        # Simulate direction switch by reset + re-anchor
+        tracker.reset()
+        assert not tracker.initialised
+        assert tracker.direction is None
+
+        tracker.anchor(
+            ts_ms=2000000, price=2800.0, fast_cvd=-0.01,
+            cumulative_buy_volume=7000.0, cumulative_sell_volume=8000.0,
+            direction="DOWN", boll_upper=3100.0, boll_lower=2900.0,
+        )
+        assert tracker.direction == "DOWN"
+
+    def test_old_up_episode_volume_not_inherited_after_switch(self):
+        """After UP→DOWN switch, old UP episode buy_volume is not inherited."""
+        tracker = _make_tracker()
+        tracker.anchor(
+            ts_ms=1000000, price=3200.0, fast_cvd=0.01,
+            cumulative_buy_volume=5000.0, cumulative_sell_volume=4000.0,
+            direction="UP", boll_upper=3100.0, boll_lower=2900.0,
+        )
+
+        # Build up some UP episode volume
+        tracker.update(
+            ts_ms=1010000, price=3250.0, fast_cvd=0.02,
+            cumulative_buy_volume=6000.0, cumulative_sell_volume=4500.0,
+            boll_upper=3300.0, boll_middle=3100.0, boll_lower=2900.0,
             tick_volume=100.0,
         )
+        assert tracker.snapshot().episode_buy_volume > 0
 
-        if m.volume_expansion_passed:
-            assert m.sustained_volume_passed is True, (
-                "sustained_volume_passed should be True after confirm_min with expansion"
-            )
+        # Reset and re-anchor for DOWN
+        tracker.reset()
+        tracker.anchor(
+            ts_ms=2000000, price=2800.0, fast_cvd=-0.01,
+            cumulative_buy_volume=7000.0, cumulative_sell_volume=8000.0,
+            direction="DOWN", boll_upper=3100.0, boll_lower=2900.0,
+        )
+
+        m = tracker.snapshot()
+        # Episode volumes should start fresh from new anchor
+        assert m.episode_buy_volume == 0.0, (
+            "Episode buy volume must be reset after direction switch"
+        )
+        assert m.episode_sell_volume == 0.0, (
+            "Episode sell volume must be reset after direction switch"
+        )
+        # Extremes should be reset to anchor CVD
+        assert m.episode_cvd_max == -0.01
+        assert m.episode_cvd_min == -0.01
+
+    def test_direction_switch_clears_new_extreme_count(self):
+        """After direction switch, new_extreme_count starts from 0."""
+        tracker = _make_tracker()
+        tracker.anchor(
+            ts_ms=1000000, price=3200.0, fast_cvd=0.01,
+            cumulative_buy_volume=5000.0, cumulative_sell_volume=4000.0,
+            direction="UP", boll_upper=3100.0, boll_lower=2900.0,
+        )
+
+        # Build up extremes
+        tracker.update(
+            ts_ms=1010000, price=3300.0, fast_cvd=0.03,
+            cumulative_buy_volume=6000.0, cumulative_sell_volume=4500.0,
+            boll_upper=3300.0, boll_middle=3100.0, boll_lower=2900.0,
+        )
+        tracker.update(
+            ts_ms=1020000, price=3400.0, fast_cvd=0.04,
+            cumulative_buy_volume=6500.0, cumulative_sell_volume=4600.0,
+            boll_upper=3300.0, boll_middle=3100.0, boll_lower=2900.0,
+        )
+        assert tracker.snapshot().new_extreme_count > 0
+
+        # Reset and re-anchor for DOWN
+        tracker.reset()
+        tracker.anchor(
+            ts_ms=2000000, price=2800.0, fast_cvd=-0.01,
+            cumulative_buy_volume=7000.0, cumulative_sell_volume=8000.0,
+            direction="DOWN", boll_upper=3100.0, boll_lower=2900.0,
+        )
+        assert tracker.snapshot().new_extreme_count == 0, (
+            "new_extreme_count must be 0 after direction switch"
+        )
+
+    def test_route_regime_direction_switch_logs_and_resets(self):
+        """_route_regime must detect and reset on direction switch."""
+        strategy = _make_strategy()
+        boll = _boll_snapshot(upper=3100.0, lower=2900.0, middle=3000.0)
+
+        # First tick: UP breakout
+        cvd_up = _cvd_snapshot(price=3200.0, ts_ms=1000000)
+        strategy._route_regime(
+            price=3200.0, ts_ms=1000000, boll=boll, cvd=cvd_up,
+            mr_long_allowed=False, mr_short_allowed=False,
+        )
+        # Tracker should be initialised with UP
+        tracker = strategy._get_trend_metrics_tracker()
+        assert tracker is not None
+        assert tracker.direction == "UP"
+
+        # Second tick: DOWN breakout (direction switch)
+        cvd_down = _cvd_snapshot(price=2800.0, ts_ms=2000000)
+        strategy._route_regime(
+            price=2800.0, ts_ms=2000000, boll=boll, cvd=cvd_down,
+            mr_long_allowed=False, mr_short_allowed=False,
+        )
+        # Tracker should have been reset and re-anchored to DOWN
+        assert tracker.direction == "DOWN", (
+            f"Expected direction=DOWN after switch, got {tracker.direction}"
+        )
+
+
+# ======================================================================
+# 7. Inside reclaim does NOT reset metrics tracker
+# ======================================================================
+
+
+class TestInsideReclaimPreservesMetrics:
+    """When price returns inside band, metrics tracker is NOT reset."""
+
+    def test_inside_reclaim_does_not_reset_tracker(self):
+        """UP breakout metrics initialised, price back inside → not reset."""
+        tracker = _make_tracker()
+        tracker.anchor(
+            ts_ms=1000000, price=3200.0, fast_cvd=0.01,
+            cumulative_buy_volume=5000.0, cumulative_sell_volume=4000.0,
+            direction="UP", boll_upper=3100.0, boll_lower=2900.0,
+        )
+
+        # Price goes back inside band
+        m = tracker.update(
+            ts_ms=1010000,
+            price=3050.0,  # inside band (2900 < 3050 < 3100)
+            fast_cvd=0.015,
+            cumulative_buy_volume=5500.0,
+            cumulative_sell_volume=4200.0,
+            boll_upper=3100.0,
+            boll_middle=3000.0,
+            boll_lower=2900.0,
+        )
+
+        assert tracker.initialised, "Tracker must remain initialised after inside reclaim"
+        assert tracker.direction == "UP", "Direction must remain UP after inside reclaim"
+        assert m.price_reclaimed_inside is True, (
+            "price_reclaimed_inside should be True when price returns inside"
+        )
+
+    def test_inside_reclaim_seconds_updates(self):
+        """After reclaim, inside_reclaim_seconds accumulates while inside."""
+        tracker = _make_tracker()
+        tracker.anchor(
+            ts_ms=1000000, price=3200.0, fast_cvd=0.01,
+            cumulative_buy_volume=5000.0, cumulative_sell_volume=4000.0,
+            direction="UP", boll_upper=3100.0, boll_lower=2900.0,
+        )
+
+        # Price returns inside at t=1010s
+        tracker.update(
+            ts_ms=1010000, price=3050.0, fast_cvd=0.015,
+            cumulative_buy_volume=5500.0, cumulative_sell_volume=4200.0,
+            boll_upper=3100.0, boll_middle=3000.0, boll_lower=2900.0,
+        )
+
+        # Still inside at t=1050s → inside_reclaim_seconds should grow
+        m = tracker.update(
+            ts_ms=1050000, price=3060.0, fast_cvd=0.016,
+            cumulative_buy_volume=5600.0, cumulative_sell_volume=4300.0,
+            boll_upper=3100.0, boll_middle=3000.0, boll_lower=2900.0,
+        )
+
+        assert m.inside_reclaim_seconds > 0, (
+            f"inside_reclaim_seconds should be > 0, got {m.inside_reclaim_seconds}"
+        )
+
+    def test_route_regime_preserves_metrics_on_inside_reclaim(self):
+        """_route_regime must NOT reset tracker when price goes inside band."""
+        strategy = _make_strategy()
+        boll = _boll_snapshot(upper=3100.0, lower=2900.0, middle=3000.0)
+
+        # First: UP breakout
+        cvd_up = _cvd_snapshot(price=3200.0, ts_ms=1000000)
+        strategy._route_regime(
+            price=3200.0, ts_ms=1000000, boll=boll, cvd=cvd_up,
+            mr_long_allowed=False, mr_short_allowed=False,
+        )
+        tracker = strategy._get_trend_metrics_tracker()
+        assert tracker is not None
+        assert tracker.direction == "UP"
+
+        # Then: price returns inside band
+        cvd_inside = _cvd_snapshot(price=3050.0, ts_ms=2000000)
+        strategy._route_regime(
+            price=3050.0, ts_ms=2000000, boll=boll, cvd=cvd_inside,
+            mr_long_allowed=False, mr_short_allowed=False,
+        )
+
+        # Tracker must still be initialised and direction unchanged
+        assert tracker.initialised, "Tracker must still be initialised after inside reclaim"
+        assert tracker.direction == "UP", (
+            f"Direction must remain UP after inside reclaim, got {tracker.direction}"
+        )
+        m = tracker.snapshot()
+        assert m.price_reclaimed_inside is True, (
+            "price_reclaimed_inside should be True"
+        )
+
+
+# ======================================================================
+# 8. No hardcoded unconditional passes
+# ======================================================================
+
+
+class TestNoUnconditionalPass:
+    """Verify no metrics are unconditionally set to True."""
 
     def test_no_unconditional_true_in_metrics(self):
         """Source-code scan: updates must not set any metric to True unconditionally."""
@@ -463,7 +862,6 @@ class TestMetricsNoBaselineNoAutoPass:
 
         source = inspect.getsource(TrendBreakoutMetricsTracker.update)
         # sustained_volume_passed must not be set to True unconditionally
-        # (the old code had "m.sustained_volume_passed = True  # simplified")
         assert "simplified" not in source, (
             "No unconditional 'simplified: real check needs sub-windows' True pass allowed"
         )
@@ -471,90 +869,22 @@ class TestMetricsNoBaselineNoAutoPass:
         assert "m.range_expansion_passed = True" not in source, (
             "range_expansion_passed must not be set unconditionally True"
         )
+        # Must not contain old band_range division logic
+        assert "band_range /" not in source, (
+            "Old band_range division logic must be removed"
+        )
+        # Must use burst_move_ratio for range expansion
+        assert "burst_move_ratio" in source, (
+            "update() must reference burst_move_ratio for range expansion"
+        )
+        # Must use burst_volume_ratio for volume expansion
+        assert "burst_volume_ratio" in source, (
+            "update() must reference burst_volume_ratio for volume expansion"
+        )
 
 
 # ======================================================================
-# 4. Range expansion with baseline
-# ======================================================================
-
-
-class TestRangeExpansionWithBaseline:
-    """When baseline IS available, range expansion is computed correctly."""
-
-    def _make_tracker(self):
-        from src.strategies.trend_breakout_metrics import TrendBreakoutMetricsTracker
-
-        return TrendBreakoutMetricsTracker(
-            range_expansion_ratio_min=3.0,
-            volume_expansion_ratio_min=3.0,
-            confirm_min_seconds=60,
-        )
-
-    def test_range_expansion_passed_when_ratio_sufficient(self):
-        """band_range / pre_breakout_range >= 3.0 → range_expansion_passed=True."""
-        tracker = self._make_tracker()
-        tracker.anchor(
-            ts_ms=1000000,
-            price=3000.0,
-            fast_cvd=0.01,
-            cumulative_buy_volume=5000.0,
-            cumulative_sell_volume=4000.0,
-            direction="UP",
-            boll_upper=3100.0,
-            boll_lower=2900.0,
-            pre_breakout_range=0.01,  # 1%
-            pre_breakout_volume=100.0,
-        )
-
-        m = tracker.update(
-            ts_ms=1010000,
-            price=3200.0,
-            fast_cvd=0.02,
-            cumulative_buy_volume=6000.0,
-            cumulative_sell_volume=4500.0,
-            boll_upper=3300.0,
-            boll_middle=3100.0,
-            boll_lower=2900.0,
-            band_range=0.04,  # 4% → ratio = 4.0 ≥ 3.0
-            tick_volume=10.0,
-        )
-
-        assert m.range_expansion_passed is True
-
-    def test_range_expansion_not_passed_when_ratio_insufficient(self):
-        """band_range / pre_breakout_range < 3.0 → range_expansion_passed=False."""
-        tracker = self._make_tracker()
-        tracker.anchor(
-            ts_ms=1000000,
-            price=3000.0,
-            fast_cvd=0.01,
-            cumulative_buy_volume=5000.0,
-            cumulative_sell_volume=4000.0,
-            direction="UP",
-            boll_upper=3100.0,
-            boll_lower=2900.0,
-            pre_breakout_range=0.02,  # 2%
-            pre_breakout_volume=100.0,
-        )
-
-        m = tracker.update(
-            ts_ms=1010000,
-            price=3050.0,
-            fast_cvd=0.02,
-            cumulative_buy_volume=6000.0,
-            cumulative_sell_volume=4500.0,
-            boll_upper=3150.0,
-            boll_middle=3050.0,
-            boll_lower=2950.0,
-            band_range=0.02,  # 2% → ratio = 1.0 < 3.0
-            tick_volume=10.0,
-        )
-
-        assert m.range_expansion_passed is False
-
-
-# ======================================================================
-# 5. UPDATE_TREND_SL "new first, old later" order
+# 9. UPDATE_TREND_SL "new first, old later" order
 # ======================================================================
 
 
@@ -642,7 +972,6 @@ class TestUpdateTrendSLNewFirstOldLater:
         trader._tp_sl_manager = TpSlExecutionManager(trader, trading_client=trading_client)
 
         # Monkey-patch place_entry_protective_stop_with_retries on trader
-        # instance (same pattern as _make_trader in existing tests)
         trader.place_entry_protective_stop_with_retries = AsyncMock(
             return_value=(True, "entry-sl-1", "protective_sl_placed")
         )
@@ -853,7 +1182,7 @@ class TestUpdateTrendSLNewFirstOldLater:
 
 
 # ======================================================================
-# 6. State pollution: intent generation does NOT modify strategy state
+# 10. State pollution: intent generation does NOT modify strategy state
 # ======================================================================
 
 
@@ -959,7 +1288,7 @@ class TestTrendSLIntentDoesNotPolluteState:
 
 
 # ======================================================================
-# 7. Execution layer: state updated only on success
+# 11. Execution layer: state updated only on success
 # ======================================================================
 
 
@@ -1097,7 +1426,7 @@ class TestApplyUpdateTrendSLResult:
 
 
 # ======================================================================
-# 8. No hardcoded small risk parameters
+# 12. No hardcoded small risk parameters
 # ======================================================================
 
 
@@ -1147,4 +1476,3 @@ class TestNoHardcodedRiskParams:
         assert "shadow" not in source.lower(), (
             "Strategy must not contain shadow mode logic"
         )
-

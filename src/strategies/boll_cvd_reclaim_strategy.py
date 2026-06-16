@@ -1690,29 +1690,74 @@ class BollCvdReclaimStrategy:
             source="closed_or_frozen",
         ))
 
-        # ── Compute real trend episode metrics ─────────────────────────
-        direction = assessor._latest_breakout.direction if assessor._latest_breakout else None
-        currently_outside = price > boll.upper or price < boll.lower
+        # ── Compute current breakout direction from price vs BOLL bands ──
+        if price > boll.upper:
+            current_direction = "UP"
+        elif price < boll.lower:
+            current_direction = "DOWN"
+        else:
+            current_direction = None
 
-        # Initialise or update metrics tracker based on breakout state
-        if direction is not None and not metrics_tracker.initialised:
+        # ── Compute baseline volume rate for sustained volume tracking ──
+        # CVD baseline_volume is total volume over burst_baseline_seconds (default 60s)
+        baseline_volume_rate = (
+            cvd.baseline_volume / 60.0 if cvd.baseline_volume > 0 else 0.0
+        )
+        tick_volume = float(cvd.buy_volume + cvd.sell_volume)
+
+        # ── Initialise or update metrics tracker based on breakout state ─
+        if current_direction is not None and not metrics_tracker.initialised:
             metrics_tracker.anchor(
                 ts_ms=ts_ms,
                 price=price,
                 fast_cvd=cvd.fast_cvd,
                 cumulative_buy_volume=cvd.cumulative_buy_volume,
                 cumulative_sell_volume=cvd.cumulative_sell_volume,
-                direction=direction,
+                direction=current_direction,
                 boll_upper=boll.upper,
                 boll_lower=boll.lower,
                 pre_breakout_range=max(cvd.baseline_range_pct, 0.0),
                 pre_breakout_volume=max(cvd.baseline_volume, 0.0),
             )
-        elif direction is not None and metrics_tracker.initialised:
-            # Use percentage-based band range for consistent comparison
-            # with pre_breakout_range_pct (from cvd.baseline_range_pct).
-            band_range_pct = abs(boll.upper - boll.lower) / boll.middle if boll.middle > 0 else 0.0
-            tick_volume = float(cvd.buy_volume + cvd.sell_volume)
+        elif current_direction is not None and metrics_tracker.initialised:
+            if metrics_tracker.direction != current_direction:
+                # Direction switched — reset old episode, anchor new
+                logger.info(
+                    "TREND_METRICS_DIRECTION_SWITCH | old=%s new=%s price=%.4f ts_ms=%s",
+                    metrics_tracker.direction, current_direction, price, ts_ms,
+                )
+                metrics_tracker.reset()
+                metrics_tracker.anchor(
+                    ts_ms=ts_ms,
+                    price=price,
+                    fast_cvd=cvd.fast_cvd,
+                    cumulative_buy_volume=cvd.cumulative_buy_volume,
+                    cumulative_sell_volume=cvd.cumulative_sell_volume,
+                    direction=current_direction,
+                    boll_upper=boll.upper,
+                    boll_lower=boll.lower,
+                    pre_breakout_range=max(cvd.baseline_range_pct, 0.0),
+                    pre_breakout_volume=max(cvd.baseline_volume, 0.0),
+                )
+            else:
+                metrics_tracker.update(
+                    ts_ms=ts_ms,
+                    price=price,
+                    fast_cvd=cvd.fast_cvd,
+                    cumulative_buy_volume=cvd.cumulative_buy_volume,
+                    cumulative_sell_volume=cvd.cumulative_sell_volume,
+                    boll_upper=boll.upper,
+                    boll_middle=boll.middle,
+                    boll_lower=boll.lower,
+                    burst_move_ratio=cvd.burst_move_ratio,
+                    burst_volume_ratio=cvd.burst_volume_ratio,
+                    baseline_range_pct=cvd.baseline_range_pct,
+                    baseline_volume=cvd.baseline_volume,
+                    baseline_volume_rate=baseline_volume_rate,
+                    tick_volume=tick_volume,
+                )
+        elif current_direction is None and metrics_tracker.initialised:
+            # Inside reclaim — do NOT reset, continue updating
             metrics_tracker.update(
                 ts_ms=ts_ms,
                 price=price,
@@ -1722,23 +1767,11 @@ class BollCvdReclaimStrategy:
                 boll_upper=boll.upper,
                 boll_middle=boll.middle,
                 boll_lower=boll.lower,
-                band_range=band_range_pct,
-                tick_volume=tick_volume,
-            )
-        elif direction is None and metrics_tracker.initialised:
-            # Price reclaimed inside — still update metrics for inside tracking
-            band_range_pct = abs(boll.upper - boll.lower) / boll.middle if boll.middle > 0 else 0.0
-            tick_volume = float(cvd.buy_volume + cvd.sell_volume)
-            metrics_tracker.update(
-                ts_ms=ts_ms,
-                price=price,
-                fast_cvd=cvd.fast_cvd,
-                cumulative_buy_volume=cvd.cumulative_buy_volume,
-                cumulative_sell_volume=cvd.cumulative_sell_volume,
-                boll_upper=boll.upper,
-                boll_middle=boll.middle,
-                boll_lower=boll.lower,
-                band_range=band_range_pct,
+                burst_move_ratio=cvd.burst_move_ratio,
+                burst_volume_ratio=cvd.burst_volume_ratio,
+                baseline_range_pct=cvd.baseline_range_pct,
+                baseline_volume=cvd.baseline_volume,
+                baseline_volume_rate=baseline_volume_rate,
                 tick_volume=tick_volume,
             )
 
@@ -1757,11 +1790,11 @@ class BollCvdReclaimStrategy:
                 and episode_cvd_max == episode_cvd_min)
         )
 
-        if metrics_missing and direction is not None:
+        if metrics_missing and current_direction is not None:
             logger.info(
                 "TREND_METRICS_MISSING | reason=episode_volume_cvd_not_accumulated "
                 "direction=%s price=%.4f ts_ms=%s",
-                direction, price, ts_ms,
+                current_direction, price, ts_ms,
             )
             # Pass metrics as-is but mark not confirmed — TrendDetector will
             # not confirm without real CVD data.

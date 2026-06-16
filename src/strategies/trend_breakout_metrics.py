@@ -45,9 +45,6 @@ class TrendBreakoutMetrics:
     _outside_start_ts_ms: int = 0
     _total_outside_ms: int = 0
     _inside_start_ts_ms: int = 0
-    _pre_breakout_range: float = 0.0
-    _pre_breakout_volume: float = 0.0
-    _episode_volume: float = 0.0
 
 
 class TrendBreakoutMetricsTracker:
@@ -57,6 +54,15 @@ class TrendBreakoutMetricsTracker:
     and then updated on each tick with fresh CVD and BOLL band data.
 
     All metric computation is self-contained — no external state reads.
+
+    Range expansion and volume expansion are driven by CvdSnapshot burst
+    ratios (burst_move_ratio, burst_volume_ratio) rather than the old
+    BOLL-band-width / CVD-baseline-range mix.
+
+    Sustained volume uses a rolling 10-second subwindow accumulator:
+    within the last ``volume_persistence_window_seconds``, at least
+    ``volume_subwindow_pass_count`` subwindows must have
+    ``window_volume_ratio >= volume_subwindow_ratio_min``.
     """
 
     def __init__(
@@ -68,6 +74,11 @@ class TrendBreakoutMetricsTracker:
         min_new_extreme_count: int = 2,
         max_inside_reclaim_seconds: int = 3,
         confirm_min_seconds: int = 60,
+        # ── Sustained volume subwindow config ─────────────────────────
+        volume_subwindow_seconds: int = 10,
+        volume_subwindow_pass_count: int = 4,
+        volume_subwindow_ratio_min: float = 2.0,
+        volume_persistence_window_seconds: int = 60,
     ) -> None:
         self._range_expansion_ratio_min = range_expansion_ratio_min
         self._volume_expansion_ratio_min = volume_expansion_ratio_min
@@ -76,8 +87,18 @@ class TrendBreakoutMetricsTracker:
         self._max_inside_reclaim_seconds = max_inside_reclaim_seconds
         self._confirm_min_seconds = confirm_min_seconds
 
+        # ── Sustained volume config ───────────────────────────────────
+        self._volume_subwindow_seconds = volume_subwindow_seconds
+        self._volume_subwindow_pass_count = volume_subwindow_pass_count
+        self._volume_subwindow_ratio_min = volume_subwindow_ratio_min
+        self._volume_persistence_window_seconds = volume_persistence_window_seconds
+
         self._m = TrendBreakoutMetrics()
         self._initialised: bool = False
+
+        # ── Volume subwindow accumulator ──────────────────────────────
+        # Each entry: (window_start_ts_ms, window_volume, window_volume_ratio)
+        self._volume_windows: list[tuple[int, float, float]] = []
 
     # ------------------------------------------------------------------
     # Properties
@@ -90,6 +111,11 @@ class TrendBreakoutMetricsTracker:
     @property
     def initialised(self) -> bool:
         return self._initialised
+
+    @property
+    def direction(self) -> str | None:
+        """Current breakout direction being tracked ("UP", "DOWN", or None)."""
+        return self._m._breakout_direction
 
     # ------------------------------------------------------------------
     # Public API
@@ -124,11 +150,10 @@ class TrendBreakoutMetricsTracker:
             _price_outside=True,
             _outside_start_ts_ms=ts_ms,
             _total_outside_ms=0,
-            _pre_breakout_range=pre_breakout_range,
-            _pre_breakout_volume=pre_breakout_volume,
             episode_cvd_max=fast_cvd,
             episode_cvd_min=fast_cvd,
         )
+        self._volume_windows = []
         self._initialised = True
 
     def update(
@@ -142,7 +167,13 @@ class TrendBreakoutMetricsTracker:
         boll_upper: float,
         boll_middle: float,
         boll_lower: float,
-        band_range: float = 0.0,
+        # ── Burst expansion ratios (from CvdSnapshot) ─────────────────
+        burst_move_ratio: float = 0.0,
+        burst_volume_ratio: float = 0.0,
+        baseline_range_pct: float = 0.0,
+        baseline_volume: float = 0.0,
+        # ── Sustained volume input ────────────────────────────────────
+        baseline_volume_rate: float = 0.0,
         tick_volume: float = 0.0,
     ) -> TrendBreakoutMetrics:
         """Update metrics with one new tick and return the current snapshot.
@@ -161,7 +192,6 @@ class TrendBreakoutMetricsTracker:
         m.episode_sell_volume = max(0.0, cumulative_sell_volume - m._anchor_cumulative_sell_volume)
         m.episode_cvd_max = max(m.episode_cvd_max, fast_cvd)
         m.episode_cvd_min = min(m.episode_cvd_min, fast_cvd)
-        m._episode_volume += tick_volume
 
         # ── Outside / inside tracking ──────────────────────────────────
         currently_outside = self._is_price_outside(price, boll_upper, boll_lower)
@@ -189,34 +219,22 @@ class TrendBreakoutMetricsTracker:
             m.new_extreme_count += 1
             m._last_extreme_price = price
 
-        # ── Range expansion ────────────────────────────────────────────
-        elapsed_sec = max((ts_ms - m._anchor_ts_ms) / 1000.0, 0.001)
-        if m._pre_breakout_range > 0 and band_range > 0:
+        # ── Range expansion (from CvdSnapshot burst_move_ratio) ───────
+        if baseline_range_pct > 0:
             m.range_expansion_passed = (
-                band_range / m._pre_breakout_range >= self._range_expansion_ratio_min
+                burst_move_ratio >= self._range_expansion_ratio_min
             )
-        # else: no pre-breakout baseline → not passed (never auto-pass)
+        # else: no pre-breakout range baseline → stays False
 
-        # ── Volume expansion ───────────────────────────────────────────
-        episode_volume_rate = m._episode_volume / elapsed_sec
-        pre_breakout_volume_rate = (
-            m._pre_breakout_volume / max(elapsed_sec, 1.0)
-            if m._pre_breakout_volume > 0
-            else 0.0
-        )
-        if pre_breakout_volume_rate > 0:
+        # ── Volume expansion (from CvdSnapshot burst_volume_ratio) ────
+        if baseline_volume > 0:
             m.volume_expansion_passed = (
-                episode_volume_rate / pre_breakout_volume_rate >= self._volume_expansion_ratio_min
+                burst_volume_ratio >= self._volume_expansion_ratio_min
             )
-        # else: no pre-breakout volume baseline → not passed (never auto-pass)
+        # else: no pre-breakout volume baseline → stays False
 
-        # ── Sustained volume ───────────────────────────────────────────
-        # Conservative rule: volume expansion must already be confirmed
-        # AND the episode must have lasted at least confirm_min_seconds.
-        m.sustained_volume_passed = (
-            m.volume_expansion_passed
-            and elapsed_sec >= self._confirm_min_seconds
-        )
+        # ── Sustained volume — 10-second subwindow accumulator ────────
+        self._update_volume_windows(ts_ms, tick_volume, baseline_volume_rate)
 
         # ── Outside occupancy ──────────────────────────────────────────
         total_elapsed = max(ts_ms - m._anchor_ts_ms, 1)
@@ -229,6 +247,60 @@ class TrendBreakoutMetricsTracker:
 
         m._prev_price = price
         return m
+
+    # ------------------------------------------------------------------
+    # Sustained volume subwindow logic
+    # ------------------------------------------------------------------
+
+    def _update_volume_windows(
+        self,
+        ts_ms: int,
+        tick_volume: float,
+        baseline_volume_rate: float,
+    ) -> None:
+        """Accumulate tick volume into 10-second subwindows.
+
+        Within the last ``volume_persistence_window_seconds``, at least
+        ``volume_subwindow_pass_count`` subwindows must have
+        ``window_volume_ratio >= volume_subwindow_ratio_min`` for
+        sustained_volume_passed to be True.
+        """
+        if baseline_volume_rate <= 0:
+            self._m.sustained_volume_passed = False
+            return
+
+        # Determine which subwindow this tick belongs to
+        window_duration_ms = self._volume_subwindow_seconds * 1000
+        window_start = (ts_ms // window_duration_ms) * window_duration_ms
+
+        # Check if we need to start a new window
+        if not self._volume_windows or self._volume_windows[-1][0] != window_start:
+            self._volume_windows.append((window_start, 0.0, 0.0))
+
+        # Accumulate volume into current window
+        last_start, last_volume, _ = self._volume_windows[-1]
+        new_volume = last_volume + tick_volume
+        baseline_window_volume = baseline_volume_rate * self._volume_subwindow_seconds
+        window_volume_ratio = (
+            new_volume / baseline_window_volume if baseline_window_volume > 0 else 0.0
+        )
+        self._volume_windows[-1] = (last_start, new_volume, window_volume_ratio)
+
+        # Prune windows outside persistence window
+        cutoff_ts = ts_ms - self._volume_persistence_window_seconds * 1000
+        self._volume_windows = [
+            w for w in self._volume_windows if w[0] >= cutoff_ts
+        ]
+
+        # Count passing subwindows
+        passing_count = sum(
+            1 for w in self._volume_windows
+            if w[2] >= self._volume_subwindow_ratio_min
+        )
+
+        self._m.sustained_volume_passed = (
+            passing_count >= self._volume_subwindow_pass_count
+        )
 
     # ------------------------------------------------------------------
     # Helpers
@@ -246,3 +318,4 @@ class TrendBreakoutMetricsTracker:
         """Reset all tracking state."""
         self._m = TrendBreakoutMetrics()
         self._initialised = False
+        self._volume_windows = []
