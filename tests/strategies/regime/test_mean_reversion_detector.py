@@ -74,11 +74,12 @@ class TestTrendUpCandidateBlocksShort:
             trend_state=TrendState.TREND_UP_CANDIDATE,
             trend_failed=False,
             trend_failure_reason=None,
+            trend_blocks_mean_reversion=True,
             price_reclaimed_inside=True,
             price_new_extreme=True,
         )
         assert gate.allowed is False
-        assert "candidate_active" in gate.reason
+        assert "blocks_mean_reversion" in gate.reason
 
 
 class TestTrendUpConfirmedBlocksShort:
@@ -95,11 +96,12 @@ class TestTrendUpConfirmedBlocksShort:
             trend_state=TrendState.TREND_UP_CONFIRMED,
             trend_failed=False,
             trend_failure_reason=None,
+            trend_blocks_mean_reversion=True,
             price_reclaimed_inside=True,
             price_new_extreme=True,
         )
         assert gate.allowed is False
-        assert "confirmed" in gate.reason
+        assert "blocks_mean_reversion" in gate.reason
 
 
 class TestTrendUpFailedAllowsShort:
@@ -116,6 +118,7 @@ class TestTrendUpFailedAllowsShort:
             trend_state=TrendState.TREND_UP_CANDIDATE,
             trend_failed=True,
             trend_failure_reason="cvd_diverges_from_price",
+            trend_blocks_mean_reversion=False,
             price_reclaimed_inside=True,
             price_new_extreme=True,
         )
@@ -133,6 +136,7 @@ class TestTrendUpFailedAllowsShort:
             trend_state=TrendState.TREND_UP_CANDIDATE,
             trend_failed=True,
             trend_failure_reason="cvd_diverges_from_price",
+            trend_blocks_mean_reversion=False,
             price_reclaimed_inside=False,  # no reclaim
             price_new_extreme=True,
         )
@@ -154,11 +158,12 @@ class TestTrendDownCandidateBlocksLong:
             trend_state=TrendState.TREND_DOWN_CANDIDATE,
             trend_failed=False,
             trend_failure_reason=None,
+            trend_blocks_mean_reversion=True,
             price_reclaimed_inside=True,
             price_new_extreme=True,
         )
         assert gate.allowed is False
-        assert "candidate_active" in gate.reason
+        assert "blocks_mean_reversion" in gate.reason
 
     def test_failed_allows_long(self):
         detector = _make_detector()
@@ -171,6 +176,7 @@ class TestTrendDownCandidateBlocksLong:
             trend_state=TrendState.TREND_DOWN_CANDIDATE,
             trend_failed=True,
             trend_failure_reason="cvd_diverges_from_price",
+            trend_blocks_mean_reversion=False,
             price_reclaimed_inside=True,
             price_new_extreme=True,
         )
@@ -192,6 +198,7 @@ class TestNoTrendCandidateAllowsReversion:
             trend_state=TrendState.NO_TREND,
             trend_failed=False,
             trend_failure_reason=None,
+            trend_blocks_mean_reversion=False,
             price_reclaimed_inside=False,
             price_new_extreme=False,
         )
@@ -209,8 +216,123 @@ class TestNoTrendCandidateAllowsReversion:
             trend_state=TrendState.NO_TREND,
             trend_failed=False,
             trend_failure_reason=None,
+            trend_blocks_mean_reversion=False,
             price_reclaimed_inside=False,
             price_new_extreme=False,
         )
         assert gate.allowed is True
         assert gate.side == "LONG"
+
+
+# ── New tests ────────────────────────────────────────────────────────────
+
+
+class TestTrendBlocksMeanReversion:
+    """trend_blocks_mean_reversion=True blocks MR regardless of trend_state."""
+
+    def test_blocks_short_on_up_breakout(self):
+        detector = _make_detector()
+        bo = _breakout("UP")
+        cvd = _cvd_diverging_up()
+
+        gate = detector.evaluate(
+            breakout=bo,
+            anchored_cvd=cvd,
+            trend_state=TrendState.TREND_UP_CANDIDATE,
+            trend_failed=False,
+            trend_failure_reason=None,
+            trend_blocks_mean_reversion=True,
+            price_reclaimed_inside=True,
+            price_new_extreme=True,
+        )
+        assert gate.allowed is False
+        assert "blocks_mean_reversion" in gate.reason
+        assert gate.side == "SHORT"
+
+    def test_blocks_long_on_down_breakout(self):
+        detector = _make_detector()
+        bo = _breakout("DOWN")
+        cvd = _cvd_diverging_down()
+
+        gate = detector.evaluate(
+            breakout=bo,
+            anchored_cvd=cvd,
+            trend_state=TrendState.TREND_DOWN_CANDIDATE,
+            trend_failed=False,
+            trend_failure_reason=None,
+            trend_blocks_mean_reversion=True,
+            price_reclaimed_inside=True,
+            price_new_extreme=True,
+        )
+        assert gate.allowed is False
+        assert "blocks_mean_reversion" in gate.reason
+        assert gate.side == "LONG"
+
+
+class TestHistoricalCvdDivergence:
+    """cvd_divergence_seen allows reclaim tick without new extreme."""
+
+    def test_historical_divergence_allows_short_without_new_extreme(self):
+        detector = _make_detector()
+        bo = _breakout("UP")
+        cvd = _cvd_diverging_up()
+
+        # Reclaim tick: price is back inside, NOT a new extreme,
+        # but CVD divergence was seen during the outside phase
+        gate = detector.evaluate(
+            breakout=bo,
+            anchored_cvd=cvd,
+            trend_state=TrendState.TREND_UP_CANDIDATE,
+            trend_failed=True,
+            trend_failure_reason="fast_reclaim_with_cvd_divergence",
+            trend_blocks_mean_reversion=False,
+            price_reclaimed_inside=True,
+            price_new_extreme=False,  # reclaim tick is NOT new extreme
+            cvd_divergence_seen=True,  # but divergence was seen earlier
+        )
+        assert gate.allowed is True
+        assert gate.side == "SHORT"
+
+    def test_historical_divergence_allows_long_without_new_extreme(self):
+        detector = _make_detector()
+        bo = _breakout("DOWN")
+        cvd = _cvd_diverging_down()
+
+        gate = detector.evaluate(
+            breakout=bo,
+            anchored_cvd=cvd,
+            trend_state=TrendState.TREND_DOWN_CANDIDATE,
+            trend_failed=True,
+            trend_failure_reason="fast_reclaim_with_cvd_divergence",
+            trend_blocks_mean_reversion=False,
+            price_reclaimed_inside=True,
+            price_new_extreme=False,
+            cvd_divergence_seen=True,
+        )
+        assert gate.allowed is True
+        assert gate.side == "LONG"
+
+    def test_no_divergence_at_all_blocks(self):
+        detector = _make_detector()
+        bo = _breakout("UP")
+        # CVD NOT diverging — confirms trend
+        cvd = build_anchored_cvd_state(
+            anchor_ts_ms=10000, current_ts_ms=20000,
+            anchor_cvd=100.0, current_cvd=160.0,
+            episode_buy_volume=80.0, episode_sell_volume=20.0,
+            episode_cvd_max=160.0, episode_cvd_min=100.0,
+        )
+
+        gate = detector.evaluate(
+            breakout=bo,
+            anchored_cvd=cvd,
+            trend_state=TrendState.TREND_UP_CANDIDATE,
+            trend_failed=True,
+            trend_failure_reason="inside_reclaim_too_long",
+            trend_blocks_mean_reversion=False,
+            price_reclaimed_inside=True,
+            price_new_extreme=False,
+            cvd_divergence_seen=False,  # no divergence ever seen
+        )
+        assert gate.allowed is False
+        assert "cvd_not_diverging" in gate.reason

@@ -56,8 +56,8 @@ def _episode(
         upper_at_end=2100.0,
         middle_at_end=2000.0,
         lower_at_end=1900.0,
-        highest_high=2100.0,
-        lowest_low=1900.0,
+        highest_band_upper=2100.0,
+        lowest_band_lower=1900.0,
     )
 
 
@@ -123,6 +123,9 @@ class TestTrendUpConfirmed:
 
         result = _assess_pass(detector, bo, ep, cvd, current_ts_ms=bo.ts_ms + 70_000)
         assert result.is_confirmed is True
+        assert result.is_candidate is False
+        assert result.is_failed is False
+        assert result.blocks_mean_reversion is True
         assert result.trend_state == TrendState.TREND_UP_CONFIRMED
 
 
@@ -136,11 +139,13 @@ class TestTrendCandidateWaiting:
         cvd = _cvd_up_confirming(anchor_ts=10000, current_ts=10010)
 
         # Only 10ms after breakout — well under 60s
+        # Expansion passed → immediately becomes candidate, blocks MR
         result = _assess_pass(detector, bo, ep, cvd, current_ts_ms=10010)
         assert result.is_confirmed is False
-        assert result.is_candidate is False
-        # Still in POST_COMPRESSION_EXPANDING because min_seconds not passed
-        assert result.trend_state == TrendState.POST_COMPRESSION_EXPANDING
+        assert result.is_candidate is True
+        assert result.blocks_mean_reversion is True
+        assert result.trend_state == TrendState.TREND_UP_CANDIDATE
+        assert result.reason == "trend_candidate_waiting_min_seconds"
 
     def test_min_seconds_reached_but_occupancy_not_passed_stays_candidate(self):
         detector = _make_detector()
@@ -152,6 +157,7 @@ class TestTrendCandidateWaiting:
         result = _assess_pass(detector, bo, ep, cvd, current_ts_ms=bo.ts_ms + 70_000,
                               outside_occupancy_passed=False)
         assert result.is_failed is True
+        assert result.blocks_mean_reversion is False
         assert result.reason == "outside_occupancy_insufficient"
 
 
@@ -167,6 +173,7 @@ class TestTrendFailedInsideReclaim:
         result = _assess_pass(detector, bo, ep, cvd, current_ts_ms=bo.ts_ms + 70_000,
                               price_reclaimed_inside=True, inside_reclaim_seconds=5.0)
         assert result.is_failed is True
+        assert result.blocks_mean_reversion is False
         assert result.reason == "inside_reclaim_too_long"
 
 
@@ -187,22 +194,43 @@ class TestTrendFailedCvdDiverges:
 
         result = _assess_pass(detector, bo, ep, cvd, current_ts_ms=bo.ts_ms + 70_000)
         assert result.is_failed is True
+        assert result.blocks_mean_reversion is False
         assert "cvd_diverges" in result.reason
 
 
 class TestCompressionExpiredNoTrend:
-    """Test 5: compression expired → no trend."""
+    """Test 5: compression expired → behavior depends on active candidate."""
 
     def test_compression_expired(self):
+        """Compression expired while trend candidate was active → TREND_FAILED."""
         detector = _make_detector()
         bo = _breakout("UP", ts_ms=10000)
-        # Episode already expired (valid_until in the past)
+        # First, establish an active candidate
+        ep_active = _episode(valid_until_ts_ms=9_000_000_000)
+        cvd = _cvd_up_confirming(anchor_ts=10000, current_ts=10010)
+        # This sets state to TREND_UP_CANDIDATE
+        _assess_pass(detector, bo, ep_active, cvd, current_ts_ms=10010)
+
+        # Now call again with an expired episode — candidate was active → fail
+        ep_expired = _episode(valid_until_ts_ms=5000)
+        result = _assess_pass(detector, bo, ep_expired, cvd, current_ts_ms=bo.ts_ms + 70_000)
+        assert result.is_failed is True
+        assert result.blocks_mean_reversion is False
+        assert result.reason == "compression_expired"
+
+    def test_compression_expired_no_candidate(self):
+        """Compression expired but no active candidate → NO_TREND, not failed."""
+        detector = _make_detector()
+        bo = _breakout("UP", ts_ms=10000)
+        # Episode already expired (valid_until in the past), no prior candidate
         ep = _episode(valid_until_ts_ms=5000)
         cvd = _cvd_up_confirming()
 
         result = _assess_pass(detector, bo, ep, cvd, current_ts_ms=bo.ts_ms + 70_000)
-        assert result.is_failed is True
-        assert result.reason == "compression_expired"
+        assert result.is_failed is False
+        assert result.blocks_mean_reversion is False
+        assert result.trend_state == TrendState.NO_TREND
+        assert result.reason == "compression_expired_no_candidate"
 
 
 class TestCompressionEndedButStillValid:
@@ -221,6 +249,7 @@ class TestCompressionEndedButStillValid:
 
         result = _assess_pass(detector, bo, ep, cvd, current_ts_ms=100000 + 70_000)
         assert result.is_confirmed is True
+        assert result.blocks_mean_reversion is True
         assert result.trend_state == TrendState.TREND_UP_CONFIRMED
 
 
@@ -233,7 +262,11 @@ class TestNoCompressionEpisodeNoTrend:
         cvd = _cvd_up_confirming()
 
         result = _assess_pass(detector, bo, None, cvd, current_ts_ms=bo.ts_ms + 70_000)
-        assert result.is_failed is True
+        assert result.is_failed is False
+        assert result.is_candidate is False
+        assert result.is_confirmed is False
+        assert result.blocks_mean_reversion is False
+        assert result.trend_state == TrendState.NO_TREND
         assert result.reason == "no_recent_compression"
 
 
@@ -249,4 +282,165 @@ class TestMaxConfirmSecondsExceeded:
         # 200s after breakout → exceeds 180s max
         result = _assess_pass(detector, bo, ep, cvd, current_ts_ms=bo.ts_ms + 200_000)
         assert result.is_failed is True
+        assert result.blocks_mean_reversion is False
         assert result.reason == "confirm_max_seconds_exceeded"
+
+
+# ── New tests: boundary conditions ──────────────────────────────────────
+
+
+class TestTrendCandidateBlocksMeanReversion:
+    """Trend candidate in min_seconds window → blocks_mean_reversion=True."""
+
+    def test_up_candidate_blocks_mr_before_confirm(self):
+        detector = _make_detector()
+        bo = _breakout("UP", ts_ms=10000)
+        ep = _episode()
+        cvd = _cvd_up_confirming(anchor_ts=10000, current_ts=10030)
+
+        # 30s after breakout: expansion passed, CVD confirms, price still outside
+        result = _assess_pass(detector, bo, ep, cvd, current_ts_ms=bo.ts_ms + 30_000,
+                              new_extreme_count=1)
+        assert result.is_candidate is True
+        assert result.is_confirmed is False
+        assert result.is_failed is False
+        assert result.blocks_mean_reversion is True
+        assert result.trend_state == TrendState.TREND_UP_CANDIDATE
+        assert result.reason == "trend_candidate_waiting_min_seconds"
+
+    def test_down_candidate_blocks_mr_before_confirm(self):
+        detector = _make_detector()
+        bo = _breakout("DOWN", ts_ms=10000, price=1890.0,
+                       upper=2100.0, middle=2000.0, lower=1900.0)
+        ep = _episode()
+        # CVD confirming DOWN: sell dominant, CVD decreasing
+        cvd = build_anchored_cvd_state(
+            anchor_ts_ms=10000, current_ts_ms=10030,
+            anchor_cvd=200.0, current_cvd=140.0,
+            episode_buy_volume=20.0, episode_sell_volume=80.0,
+            episode_cvd_max=200.0, episode_cvd_min=140.0,
+        )
+
+        result = _assess_pass(detector, bo, ep, cvd, current_ts_ms=bo.ts_ms + 30_000,
+                              new_extreme_count=1)
+        assert result.is_candidate is True
+        assert result.is_confirmed is False
+        assert result.is_failed is False
+        assert result.blocks_mean_reversion is True
+        assert result.trend_state == TrendState.TREND_DOWN_CANDIDATE
+        assert result.reason == "trend_candidate_waiting_min_seconds"
+
+
+class TestFastReclaimBeforeMinSeconds:
+    """Fast reclaim + CVD divergence releases MR before 60 seconds."""
+
+    def test_up_fast_reclaim_releases_mr(self):
+        detector = _make_detector({"max_inside_reclaim_seconds": 3})
+        bo = _breakout("UP", ts_ms=10000, anchor_cvd=100.0)
+        ep = _episode()
+        # CVD diverging: price went up but CVD going down
+        cvd = build_anchored_cvd_state(
+            anchor_ts_ms=10000, current_ts_ms=10010,
+            anchor_cvd=100.0, current_cvd=85.0,
+            episode_buy_volume=30.0, episode_sell_volume=70.0,
+            episode_cvd_max=100.0, episode_cvd_min=85.0,
+        )
+
+        # 10s after breakout, inside reclaim > 3s, CVD diverges
+        result = _assess_pass(detector, bo, ep, cvd, current_ts_ms=bo.ts_ms + 10_000,
+                              price_reclaimed_inside=True, inside_reclaim_seconds=5.0,
+                              new_extreme_count=1)
+        assert result.is_failed is True
+        assert result.blocks_mean_reversion is False
+        assert result.reason == "fast_reclaim_with_cvd_divergence"
+
+    def test_down_fast_reclaim_releases_mr(self):
+        detector = _make_detector({"max_inside_reclaim_seconds": 3})
+        bo = _breakout("DOWN", ts_ms=10000, price=1890.0,
+                       upper=2100.0, middle=2000.0, lower=1900.0, anchor_cvd=200.0)
+        ep = _episode()
+        # CVD diverging: price went down but CVD going up
+        cvd = build_anchored_cvd_state(
+            anchor_ts_ms=10000, current_ts_ms=10010,
+            anchor_cvd=200.0, current_cvd=250.0,
+            episode_buy_volume=70.0, episode_sell_volume=30.0,
+            episode_cvd_max=250.0, episode_cvd_min=200.0,
+        )
+
+        result = _assess_pass(detector, bo, ep, cvd, current_ts_ms=bo.ts_ms + 10_000,
+                              price_reclaimed_inside=True, inside_reclaim_seconds=5.0,
+                              new_extreme_count=1)
+        assert result.is_failed is True
+        assert result.blocks_mean_reversion is False
+        assert result.reason == "fast_reclaim_with_cvd_divergence"
+
+
+class TestTrendCandidateNotConfirmedBeforeMinSeconds:
+    """Trend candidate active but not confirmed before min_seconds."""
+
+    def test_not_enough_time_not_confirmed(self):
+        detector = _make_detector()
+        bo = _breakout("UP", ts_ms=10000)
+        ep = _episode()
+        cvd = _cvd_up_confirming(anchor_ts=10000, current_ts=10030)
+
+        # 30s: all conditions good, but not enough time → candidate, not confirmed
+        result = _assess_pass(detector, bo, ep, cvd, current_ts_ms=bo.ts_ms + 30_000)
+        assert result.is_candidate is True
+        assert result.is_confirmed is False
+        assert result.is_failed is False
+        assert result.blocks_mean_reversion is True
+        assert result.reason == "trend_candidate_waiting_min_seconds"
+
+
+class TestTrendConfirmedAfterMinSeconds:
+    """60s+ and all conditions → confirmed trend."""
+
+    def test_up_confirmed_after_min_seconds(self):
+        detector = _make_detector()
+        bo = _breakout("UP", ts_ms=10000)
+        ep = _episode()
+        cvd = _cvd_up_confirming(anchor_ts=10000, current_ts=bo.ts_ms + 70_000)
+
+        result = _assess_pass(detector, bo, ep, cvd, current_ts_ms=bo.ts_ms + 70_000)
+        assert result.is_candidate is False
+        assert result.is_confirmed is True
+        assert result.is_failed is False
+        assert result.blocks_mean_reversion is True
+        assert result.trend_state == TrendState.TREND_UP_CONFIRMED
+        assert result.reason == "trend_confirmed"
+
+    def test_down_confirmed_after_min_seconds(self):
+        detector = _make_detector()
+        bo = _breakout("DOWN", ts_ms=10000, price=1890.0,
+                       upper=2100.0, middle=2000.0, lower=1900.0)
+        ep = _episode()
+        cvd = build_anchored_cvd_state(
+            anchor_ts_ms=10000, current_ts_ms=bo.ts_ms + 70_000,
+            anchor_cvd=200.0, current_cvd=140.0,
+            episode_buy_volume=20.0, episode_sell_volume=80.0,
+            episode_cvd_max=200.0, episode_cvd_min=140.0,
+        )
+
+        result = _assess_pass(detector, bo, ep, cvd, current_ts_ms=bo.ts_ms + 70_000)
+        assert result.is_candidate is False
+        assert result.is_confirmed is True
+        assert result.is_failed is False
+        assert result.blocks_mean_reversion is True
+        assert result.trend_state == TrendState.TREND_DOWN_CONFIRMED
+        assert result.reason == "trend_confirmed"
+
+
+class TestNoCompressionIsNotTrendFailed:
+    """no_recent_compression is NO_TREND, not TREND_FAILED."""
+
+    def test_no_compression_not_failed(self):
+        detector = _make_detector()
+        bo = _breakout("UP", ts_ms=10000)
+        cvd = _cvd_up_confirming()
+
+        result = _assess_pass(detector, bo, None, cvd, current_ts_ms=bo.ts_ms + 70_000)
+        assert result.is_failed is False
+        assert result.blocks_mean_reversion is False
+        assert result.trend_state == TrendState.NO_TREND
+        assert result.reason == "no_recent_compression"

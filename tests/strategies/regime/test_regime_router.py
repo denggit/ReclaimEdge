@@ -16,6 +16,7 @@ def _input(**kwargs) -> RouterInput:
         trend_candidate_direction=None,
         trend_failed=False,
         trend_failure_reason=None,
+        trend_blocks_mean_reversion=False,
         mr_long_allowed=False,
         mr_short_allowed=False,
         cooldown_side=None,
@@ -84,7 +85,7 @@ class TestTrendConfirmedOutput:
 
 
 class TestTrendCandidateActiveNoTrade:
-    """Test 3: trend candidate active but not confirmed → NO_TRADE."""
+    """Test 3: trend blocks mean-reversion → NO_TRADE."""
 
     def test_candidate_active_no_trade(self):
         result = router.route(_input(
@@ -92,11 +93,23 @@ class TestTrendCandidateActiveNoTrade:
             trend_candidate_active=True,
             trend_candidate_direction="LONG",
             trend_failed=False,
+            trend_blocks_mean_reversion=True,
             mr_short_allowed=True,  # MR is also possible, but candidate blocks it
             ts_ms=10000,
         ))
         assert result.decision_type == RegimeDecisionType.NO_TRADE
         assert "waiting_confirmation" in result.reason
+
+    def test_no_block_when_trend_not_blocking(self):
+        """When trend_blocks_mean_reversion=False, MR can proceed."""
+        result = router.route(_input(
+            trend_state=TrendState.TREND_FAILED,
+            trend_failed=True,
+            trend_blocks_mean_reversion=False,
+            mr_short_allowed=True,
+            ts_ms=10000,
+        ))
+        assert result.decision_type == RegimeDecisionType.MEAN_REVERSION_SHORT
 
 
 class TestTrendFailedAllowsMeanReversion:
@@ -235,3 +248,82 @@ class TestMeanReversionOnly:
             ts_ms=10000,
         ))
         assert result.decision_type == RegimeDecisionType.MEAN_REVERSION_LONG
+
+
+# ── New tests ────────────────────────────────────────────────────────────
+
+
+class TestCooldownBeforeConflict:
+    """SIDE cooldown filters BEFORE conflict detection."""
+
+    def test_side_cooldown_long_filters_trend_before_conflict(self):
+        """LONG cooldown → TREND_LONG filtered out → MEAN_REVERSION_SHORT survives alone."""
+        result = router.route(_input(
+            trend_state=TrendState.TREND_UP_CONFIRMED,
+            trend_confirmed=True,
+            trend_confirmed_direction="LONG",
+            mr_short_allowed=True,
+            cooldown_side="LONG",
+            cooldown_until_ts_ms=20000,
+            cooldown_scope="SIDE",
+            ts_ms=10000,
+        ))
+        # LONG cooldown filters TREND_LONG; MEAN_REVERSION_SHORT is opposite side → survives
+        # No conflict because only SHORT remains
+        assert result.decision_type == RegimeDecisionType.MEAN_REVERSION_SHORT
+        assert result.side == "SHORT"
+
+    def test_side_cooldown_short_filters_trend_before_conflict(self):
+        """SHORT cooldown → TREND_SHORT filtered out → MEAN_REVERSION_LONG survives alone."""
+        result = router.route(_input(
+            trend_state=TrendState.TREND_DOWN_CONFIRMED,
+            trend_confirmed=True,
+            trend_confirmed_direction="SHORT",
+            mr_long_allowed=True,
+            cooldown_side="SHORT",
+            cooldown_until_ts_ms=20000,
+            cooldown_scope="SIDE",
+            ts_ms=10000,
+        ))
+        assert result.decision_type == RegimeDecisionType.MEAN_REVERSION_LONG
+        assert result.side == "LONG"
+
+    def test_side_cooldown_blocks_all_returns_no_trade(self):
+        """No decisions survive cooldown → NO_TRADE."""
+        result = router.route(_input(
+            trend_state=TrendState.TREND_UP_CONFIRMED,
+            trend_confirmed=True,
+            trend_confirmed_direction="LONG",
+            mr_long_allowed=True,
+            cooldown_side="LONG",
+            cooldown_until_ts_ms=20000,
+            cooldown_scope="SIDE",
+            ts_ms=10000,
+        ))
+        assert result.decision_type == RegimeDecisionType.NO_TRADE
+        assert "cooldown_side" in result.reason
+
+
+class TestTrendBlocksMeanReversionInRouter:
+    """trend_blocks_mean_reversion=True blocks MR decisions in router."""
+
+    def test_trend_blocks_prevents_mr(self):
+        result = router.route(_input(
+            trend_state=TrendState.TREND_UP_CANDIDATE,
+            trend_candidate_active=True,
+            trend_candidate_direction="LONG",
+            trend_blocks_mean_reversion=True,
+            mr_short_allowed=True,
+            ts_ms=10000,
+        ))
+        assert result.decision_type == RegimeDecisionType.NO_TRADE
+        assert "waiting_confirmation" in result.reason
+
+    def test_trend_not_blocking_allows_mr(self):
+        result = router.route(_input(
+            trend_state=TrendState.NO_TREND,
+            trend_blocks_mean_reversion=False,
+            mr_short_allowed=True,
+            ts_ms=10000,
+        ))
+        assert result.decision_type == RegimeDecisionType.MEAN_REVERSION_SHORT

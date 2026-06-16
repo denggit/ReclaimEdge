@@ -72,8 +72,10 @@ class MeanReversionDetector:
         trend_state: TrendState,
         trend_failed: bool,
         trend_failure_reason: Optional[str],
+        trend_blocks_mean_reversion: bool,
         price_reclaimed_inside: bool,
         price_new_extreme: bool,
+        cvd_divergence_seen: bool = False,
     ) -> MeanReversionGate:
         """Decide whether mean-reversion is allowed at this tick.
 
@@ -81,7 +83,22 @@ class MeanReversionDetector:
         """
         direction = breakout.direction
 
-        # ── Case 1: Trend is confirmed — block opposite mean-reversion ──
+        # ── Case 1: Trend blocks mean-reversion (confirmed or viable candidate) ──
+        if trend_blocks_mean_reversion:
+            if direction == "UP":
+                return MeanReversionGate(
+                    side="SHORT",
+                    allowed=False,
+                    reason="trend_blocks_mean_reversion_short",
+                )
+            else:
+                return MeanReversionGate(
+                    side="LONG",
+                    allowed=False,
+                    reason="trend_blocks_mean_reversion_long",
+                )
+
+        # ── Case 2: Trend confirmed (explicit state check as safety net) ──
         if trend_state == TrendState.TREND_UP_CONFIRMED:
             return MeanReversionGate(
                 side="SHORT",
@@ -93,20 +110,6 @@ class MeanReversionDetector:
                 side="LONG",
                 allowed=False,
                 reason="trend_down_confirmed_blocks_mean_reversion_long",
-            )
-
-        # ── Case 2: Trend candidate active and NOT failed — block ──
-        if trend_state in (TrendState.TREND_UP_CANDIDATE,) and not trend_failed:
-            return MeanReversionGate(
-                side="SHORT",
-                allowed=False,
-                reason="trend_up_candidate_active_blocks_mean_reversion_short",
-            )
-        if trend_state in (TrendState.TREND_DOWN_CANDIDATE,) and not trend_failed:
-            return MeanReversionGate(
-                side="LONG",
-                allowed=False,
-                reason="trend_down_candidate_active_blocks_mean_reversion_long",
             )
 
         # ── Case 3: Trend failed — allow mean-reversion if conditions met ──
@@ -121,10 +124,11 @@ class MeanReversionDetector:
                         reason="trend_failed_but_price_not_reclaimed",
                     )
                 if self._config.require_cvd_divergence:
-                    cvd_diverges = is_cvd_diverging_from_price(
+                    current_cvd_diverges = is_cvd_diverging_from_price(
                         "UP", anchored_cvd, price_new_extreme, self._cvd_config
                     )
-                    if not cvd_diverges:
+                    has_cvd_divergence = cvd_divergence_seen or current_cvd_diverges
+                    if not has_cvd_divergence:
                         return MeanReversionGate(
                             side=side,
                             allowed=False,
@@ -144,10 +148,11 @@ class MeanReversionDetector:
                         reason="trend_failed_but_price_not_reclaimed",
                     )
                 if self._config.require_cvd_divergence:
-                    cvd_diverges = is_cvd_diverging_from_price(
+                    current_cvd_diverges = is_cvd_diverging_from_price(
                         "DOWN", anchored_cvd, price_new_extreme, self._cvd_config
                     )
-                    if not cvd_diverges:
+                    has_cvd_divergence = cvd_divergence_seen or current_cvd_diverges
+                    if not has_cvd_divergence:
                         return MeanReversionGate(
                             side=side,
                             allowed=False,

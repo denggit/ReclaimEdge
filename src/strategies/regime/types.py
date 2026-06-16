@@ -51,8 +51,10 @@ class CompressionEpisode:
     upper_at_end: float
     middle_at_end: float
     lower_at_end: float
-    highest_high: float
-    lowest_low: float
+    # These are band proxies only. Do not use them for live stop placement.
+    # Real candle high/low must be wired separately before using compression range for risk.
+    highest_band_upper: float
+    lowest_band_lower: float
 
 
 @dataclass(frozen=True)

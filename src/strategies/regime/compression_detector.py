@@ -168,12 +168,9 @@ class CompressionDetector:
         distances = [_outer_distance_pct(b) for b in episode_bands]
         candle_count = len(episode_bands)
 
-        highs = [b.upper for b in episode_bands]  # proxy: no candle high in BandSnapshot
-        lows = [b.lower for b in episode_bands]   # proxy: no candle low in BandSnapshot
-        # Use upper as price proxy for highest_high_during_compression
-        # and lower as proxy for lowest_low_during_compression
-        highest_high = max(b.upper for b in episode_bands)
-        lowest_low = min(b.lower for b in episode_bands)
+        # These are band proxies only — not real candle high/low.
+        highest_band_upper = max(b.upper for b in episode_bands)
+        lowest_band_lower = min(b.lower for b in episode_bands)
 
         end_band = episode_bands[-1]
         valid_until_ts_ms = (
@@ -190,8 +187,8 @@ class CompressionDetector:
             upper_at_end=end_band.upper,
             middle_at_end=end_band.middle,
             lower_at_end=end_band.lower,
-            highest_high=highest_high,
-            lowest_low=lowest_low,
+            highest_band_upper=highest_band_upper,
+            lowest_band_lower=lowest_band_lower,
         )
 
 

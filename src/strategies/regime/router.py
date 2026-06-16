@@ -24,6 +24,7 @@ class RouterInput:
     trend_candidate_direction: RegimeSide | None = None
     trend_failed: bool = False
     trend_failure_reason: Optional[str] = None
+    trend_blocks_mean_reversion: bool = False
 
     # Mean-reversion assessment
     mr_long_allowed: bool = False
@@ -56,21 +57,19 @@ class RegimeRouter:
     """
 
     def route(self, input_: RouterInput) -> RegimeDecision:
+        """Produce a single regime decision from the given inputs.
+
+        Order:
+        1. Build possible decisions
+        2. Apply cooldown filter
+        3. Conflict detection
+        4. Trend confirmed priority
+        5. Trend blocks mean-reversion
+        6. Select best
+        """
         ts = input_.ts_ms
 
-        # ── Cooldown enforcement ──────────────────────────────────────
-        if _is_cooldown_active(input_, ts):
-            if input_.cooldown_scope == "GLOBAL":
-                return RegimeDecision(
-                    decision_type=RegimeDecisionType.NO_TRADE,
-                    side=None,
-                    reason="cooldown_global_active",
-                    confidence=0.0,
-                    trend_state=input_.trend_state,
-                )
-            # SIDE cooldown — we'll filter individual decisions below
-
-        # ── Collect possible decisions this tick ──────────────────────
+        # ── 1. Collect possible decisions this tick ────────────────────
         possible: list[tuple[RegimeDecisionType, RegimeSide, str, float]] = []
 
         # Trend confirmed
@@ -82,18 +81,6 @@ class RegimeRouter:
                 else RegimeDecisionType.TREND_SHORT
             )
             possible.append((dt, trend_side, "trend_confirmed", 0.9))
-
-        # Trend candidate active but not yet confirmed/failed
-        if input_.trend_candidate_active and not input_.trend_confirmed and not input_.trend_failed:
-            if input_.trend_candidate_direction is not None:
-                # Don't add as possible — it blocks everything else
-                return RegimeDecision(
-                    decision_type=RegimeDecisionType.NO_TRADE,
-                    side=None,
-                    reason="trend_candidate_waiting_confirmation",
-                    confidence=0.0,
-                    trend_state=input_.trend_state,
-                )
 
         # Mean-reversion allowed
         if input_.mr_long_allowed:
@@ -111,7 +98,28 @@ class RegimeRouter:
                 0.7,
             ))
 
-        # ── Conflict detection ────────────────────────────────────────
+        # ── 2. Apply cooldown filter (BEFORE conflict detection) ──────
+        possible, cooldown_reason = _apply_cooldown_filter(input_, possible, ts)
+        if cooldown_reason is not None:
+            return RegimeDecision(
+                decision_type=RegimeDecisionType.NO_TRADE,
+                side=None,
+                reason=cooldown_reason,
+                confidence=0.0,
+                trend_state=input_.trend_state,
+            )
+
+        # ── No decisions after cooldown ────────────────────────────────
+        if not possible:
+            return RegimeDecision(
+                decision_type=RegimeDecisionType.NO_TRADE,
+                side=None,
+                reason="no_candidate",
+                confidence=0.0,
+                trend_state=input_.trend_state,
+            )
+
+        # ── 3. Conflict detection (on cooldown-filtered decisions) ────
         long_decision = [p for p in possible if p[1] == "LONG"]
         short_decision = [p for p in possible if p[1] == "SHORT"]
 
@@ -124,37 +132,34 @@ class RegimeRouter:
                 trend_state=input_.trend_state,
             )
 
-        # ── No decisions available ────────────────────────────────────
-        if not possible:
+        # ── 4. Trend confirmed takes priority ──────────────────────────
+        trend_decisions = [
+            p for p in possible
+            if p[0] in (RegimeDecisionType.TREND_LONG, RegimeDecisionType.TREND_SHORT)
+        ]
+        if trend_decisions:
+            dt, side, reason, confidence = trend_decisions[0]
+            return RegimeDecision(
+                decision_type=dt,
+                side=side,
+                reason=reason,
+                confidence=confidence,
+                trend_state=input_.trend_state,
+            )
+
+        # ── 5. Trend blocks mean-reversion ────────────────────────────
+        if input_.trend_blocks_mean_reversion:
             return RegimeDecision(
                 decision_type=RegimeDecisionType.NO_TRADE,
                 side=None,
-                reason="no_candidate",
+                reason="trend_candidate_waiting_confirmation",
                 confidence=0.0,
                 trend_state=input_.trend_state,
             )
 
-        # ── Pick the best decision (first is highest priority) ────────
+        # ── 6. Select best remaining (MR) decision ────────────────────
         best = possible[0]
         dt, side, reason, confidence = best
-
-        # ── Apply SIDE cooldown ───────────────────────────────────────
-        if _is_cooldown_active(input_, ts) and input_.cooldown_scope == "SIDE":
-            if input_.cooldown_side == side:
-                # Check if there's an opposite-side decision
-                opposite = [p for p in possible if p[1] != side]
-                if opposite:
-                    best_opposite = opposite[0]
-                    dt, side, reason, confidence = best_opposite
-                else:
-                    return RegimeDecision(
-                        decision_type=RegimeDecisionType.NO_TRADE,
-                        side=None,
-                        reason=f"cooldown_side_{input_.cooldown_side}_blocks_{side}",
-                        confidence=0.0,
-                        trend_state=input_.trend_state,
-                    )
-
         return RegimeDecision(
             decision_type=dt,
             side=side,
@@ -170,3 +175,30 @@ def _is_cooldown_active(input_: RouterInput, ts_ms: int) -> bool:
     if input_.cooldown_until_ts_ms <= 0:
         return False
     return ts_ms < input_.cooldown_until_ts_ms
+
+
+def _apply_cooldown_filter(
+    input_: RouterInput,
+    possible: list[tuple[RegimeDecisionType, RegimeSide, str, float]],
+    ts_ms: int,
+) -> tuple[list[tuple[RegimeDecisionType, RegimeSide, str, float]], str | None]:
+    """Filter out decisions blocked by cooldown.
+
+    Returns (filtered_possible, block_reason).
+    If block_reason is not None, all decisions are blocked — caller
+    should return NO_TRADE.
+    """
+    if not _is_cooldown_active(input_, ts_ms):
+        return possible, None
+
+    if input_.cooldown_scope == "GLOBAL":
+        return [], "cooldown_global_active"
+
+    # SIDE cooldown: filter out decisions on the cooldown side
+    if input_.cooldown_scope == "SIDE":
+        filtered = [p for p in possible if p[1] != input_.cooldown_side]
+        if not filtered:
+            return [], f"cooldown_side_{input_.cooldown_side}_blocks_all"
+        return filtered, None
+
+    return possible, None

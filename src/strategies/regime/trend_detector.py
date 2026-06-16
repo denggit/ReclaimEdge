@@ -70,6 +70,7 @@ class TrendAssessment:
     is_candidate: bool
     is_confirmed: bool
     is_failed: bool
+    blocks_mean_reversion: bool
     reason: str
 
 
@@ -133,26 +134,48 @@ class TrendDetector:
         """
         self._breakout = breakout
         self._episode = compression_episode
+        direction = breakout.direction
 
-        # ── Guard: no recent compression → no trend ──────────────────
+        # ── Guard: no recent compression → no trend (NOT failed) ──────
         if compression_episode is None:
-            return self._set_failed("no_recent_compression")
+            self._state = TrendState.NO_TREND
+            self._failure_reason = None
+            return TrendAssessment(
+                trend_state=self._state,
+                is_candidate=False,
+                is_confirmed=False,
+                is_failed=False,
+                blocks_mean_reversion=False,
+                reason="no_recent_compression",
+            )
 
+        # ── Guard: compression expired ─────────────────────────────────
         if current_ts_ms > compression_episode.valid_until_ts_ms:
-            return self._set_failed("compression_expired")
+            if self._has_active_candidate():
+                return self._set_failed("compression_expired")
+            self._state = TrendState.NO_TREND
+            self._failure_reason = None
+            return TrendAssessment(
+                trend_state=self._state,
+                is_candidate=False,
+                is_confirmed=False,
+                is_failed=False,
+                blocks_mean_reversion=False,
+                reason="compression_expired_no_candidate",
+            )
 
         # ── Determine breakout duration ──────────────────────────────
         breakout_duration_sec = (current_ts_ms - breakout.ts_ms) / 1000.0
 
-        # ── Check trend-candidate prerequisites ──────────────────────
+        # ── Prerequisites: range and volume expansion ────────────────
         if not range_expansion_passed:
-            # Insufficient range expansion yet — still expanding
             self._state = TrendState.POST_COMPRESSION_EXPANDING
             return TrendAssessment(
                 trend_state=self._state,
                 is_candidate=False,
                 is_confirmed=False,
                 is_failed=False,
+                blocks_mean_reversion=False,
                 reason="range_expansion_not_met",
             )
 
@@ -163,45 +186,52 @@ class TrendDetector:
                 is_candidate=False,
                 is_confirmed=False,
                 is_failed=False,
+                blocks_mean_reversion=False,
                 reason="volume_expansion_not_met",
             )
 
-        # ── Check trend-failure conditions ───────────────────────────
-        # 1. Confirm_max_seconds exceeded
+        # ── Expansion passed → immediately become candidate ───────────
+        if direction == "UP":
+            self._state = TrendState.TREND_UP_CANDIDATE
+        else:
+            self._state = TrendState.TREND_DOWN_CANDIDATE
+
+        # ── Failure check 1: confirm_max_seconds exceeded ─────────────
         if breakout_duration_sec > self._config.confirm_max_seconds:
             return self._set_failed("confirm_max_seconds_exceeded")
 
-        # 2. Price reclaimed inside too long
+        # ── Failure check 2: inside reclaim too long (fast-fail) ──────
         if price_reclaimed_inside and inside_reclaim_seconds > self._config.max_inside_reclaim_seconds:
+            cvd_diverges = is_cvd_diverging_from_price(
+                direction, anchored_cvd, True, self._cvd_config
+            )
+            cvd_confirms = is_cvd_confirming_trend(
+                direction, anchored_cvd, self._cvd_config
+            )
+            if cvd_diverges or not cvd_confirms:
+                return self._set_failed("fast_reclaim_with_cvd_divergence")
             return self._set_failed("inside_reclaim_too_long")
 
-        # 3. Outside occupancy too low (must have enough data)
+        # ── Failure check 3: outside occupancy too low ────────────────
         if breakout_duration_sec >= self._config.confirm_min_seconds and not outside_occupancy_passed:
             return self._set_failed("outside_occupancy_insufficient")
 
-        # 4. Anchored CVD diverges
-        direction = breakout.direction
+        # ── Failure check 4: anchored CVD diverges ────────────────────
         price_new_extreme = new_extreme_count >= self._config.min_new_extreme_count
         if price_new_extreme and is_cvd_diverging_from_price(
             direction, anchored_cvd, True, self._cvd_config
         ):
             return self._set_failed("cvd_diverges_from_price")
 
-        # ── Set candidate direction ──────────────────────────────────
-        if breakout_duration_sec >= self._config.confirm_min_seconds:
-            if direction == "UP":
-                self._state = TrendState.TREND_UP_CANDIDATE
-            else:
-                self._state = TrendState.TREND_DOWN_CANDIDATE
-        else:
-            # Still within min_seconds window — just expanding
-            self._state = TrendState.POST_COMPRESSION_EXPANDING
+        # ── Candidate is active but waiting for min_seconds ────────────
+        if breakout_duration_sec < self._config.confirm_min_seconds:
             return TrendAssessment(
                 trend_state=self._state,
-                is_candidate=False,
+                is_candidate=True,
                 is_confirmed=False,
                 is_failed=False,
-                reason="waiting_confirm_min_seconds",
+                blocks_mean_reversion=True,
+                reason="trend_candidate_waiting_min_seconds",
             )
 
         # ── Check confirmed conditions ───────────────────────────────
@@ -218,15 +248,17 @@ class TrendDetector:
                 is_candidate=False,  # promoted to confirmed
                 is_confirmed=True,
                 is_failed=False,
+                blocks_mean_reversion=True,
                 reason="trend_confirmed",
             )
 
-        # Still a candidate
+        # Still a candidate — still viable, blocks MR
         return TrendAssessment(
             trend_state=self._state,
             is_candidate=True,
             is_confirmed=False,
             is_failed=False,
+            blocks_mean_reversion=True,
             reason="trend_candidate_waiting_confirmation",
         )
 
@@ -256,6 +288,13 @@ class TrendDetector:
             return False
         return True
 
+    def _has_active_candidate(self) -> bool:
+        """Check whether there is already an active trend candidate."""
+        return self._state in {
+            TrendState.TREND_UP_CANDIDATE,
+            TrendState.TREND_DOWN_CANDIDATE,
+        }
+
     def _set_failed(self, reason: str) -> TrendAssessment:
         self._state = TrendState.TREND_FAILED
         self._failure_reason = reason
@@ -264,6 +303,7 @@ class TrendDetector:
             is_candidate=False,
             is_confirmed=False,
             is_failed=True,
+            blocks_mean_reversion=False,
             reason=reason,
         )
 

@@ -60,6 +60,12 @@ class TestCompressionEpisodeDetection:
         episode = detector.detect(bands, current_ts_ms=bands[-1].candle_ts_ms + 1000)
         assert episode is not None
         assert episode.compressed_candle_count >= 8
+        # Field rename: should have highest_band_upper / lowest_band_lower
+        assert hasattr(episode, "highest_band_upper")
+        assert hasattr(episode, "lowest_band_lower")
+        # Old field names should not exist
+        assert not hasattr(episode, "highest_high")
+        assert not hasattr(episode, "lowest_low")
 
 
 class TestHighDistanceNoEpisode:
