@@ -21,6 +21,10 @@ from src.strategies.middle_bucket_split_apply import (
     apply_three_stage_middle_bucket_split,
 )
 from src.strategies.tp_lifecycle import is_pre_tp1_lifecycle
+from src.strategies.trend_middle_trailing_sl import (
+    calculate_trend_middle_sl,
+    tighten_trend_sl,
+)
 from src.utils.log import get_logger
 
 if TYPE_CHECKING:
@@ -96,6 +100,12 @@ class TpUpdateCoordinator:
                 s.state.tp_plan,
                 boll.candle_ts_ms,
                 s.state.last_tp_update_candle_ts_ms,
+            )
+
+        # ── Trend Breakout trailing SL branch ──────────────────────────
+        if getattr(s.state, "entry_regime", None) == "TREND_BREAKOUT":
+            return self._maybe_update_trend_trailing_sl(
+                price, ts_ms, boll, cvd, force_reconcile,
             )
 
         # ── Three-Stage waiting-TP2 branch ────────────────────────────
@@ -928,3 +938,98 @@ class TpUpdateCoordinator:
         if tp_plan not in ("THREE_STAGE_RUNNER", "MIDDLE_RUNNER"):
             if s.state.middle_bucket_split_active:
                 self._reset_middle_bucket_split_state()
+
+    # ------------------------------------------------------------------
+    # Trend Breakout trailing SL
+    # ------------------------------------------------------------------
+
+    def _maybe_update_trend_trailing_sl(
+        self,
+        price: float,
+        ts_ms: int,
+        boll: BollSnapshot,
+        cvd: CvdSnapshot,
+        force_reconcile: bool,
+    ) -> TradeIntent | None:
+        """Update the trend trailing SL for TREND_BREAKOUT positions.
+
+        Only tightens the SL (never loosens).  The TP stays at SINGLE outer.
+        SL update frequency is controlled by TREND_SL_UPDATE_INTERVAL_SECONDS.
+        """
+        s = self.strategy
+
+        if not s.config.trend_middle_trailing_sl_enabled:
+            return None
+
+        # Rate-limit SL updates
+        last_update_ms = int(getattr(s.state, "trend_last_sl_update_ts_ms", 0) or 0)
+        update_interval_ms = s.config.trend_sl_update_interval_seconds * 1000
+        if not force_reconcile and last_update_ms > 0 and (ts_ms - last_update_ms) < update_interval_ms:
+            return None
+
+        if s.state.side is None:
+            return None
+
+        # Calculate candidate trailing SL from BOLL middle
+        candidate_sl = calculate_trend_middle_sl(
+            boll_middle=boll.middle,
+            buffer_pct=s.config.trend_middle_sl_buffer_pct,
+            side=s.state.side,
+        )
+
+        # Only tighten, never loosen
+        old_sl = getattr(s.state, "trend_trailing_sl_price", None)
+        new_sl = tighten_trend_sl(
+            old_sl=old_sl,
+            candidate_sl=candidate_sl,
+            current_price=price,
+            side=s.state.side,
+        )
+
+        if new_sl is None:
+            # SL did not tighten (loosened or unchanged) or invalid candidate
+            if not force_reconcile:
+                return None
+            # Force reconcile: use the old SL or the candidate as-is
+            new_sl = old_sl if old_sl is not None else candidate_sl
+
+        # Check max stop distance from avg entry
+        if s.state.avg_entry_price > 0:
+            if s.state.side == "LONG":
+                stop_distance_pct = (s.state.avg_entry_price - new_sl) / s.state.avg_entry_price
+            else:
+                stop_distance_pct = (new_sl - s.state.avg_entry_price) / s.state.avg_entry_price
+            if stop_distance_pct > s.config.trend_max_stop_distance_pct:
+                logger.info(
+                    "TREND_SL_UPDATE_SKIPPED | reason=exceeds_max_stop_distance "
+                    "side=%s candidate_sl=%.4f stop_distance_pct=%.6f max=%.6f",
+                    s.state.side, new_sl, stop_distance_pct, s.config.trend_max_stop_distance_pct,
+                )
+                return None
+
+        # Update state
+        s.state.trend_trailing_sl_price = new_sl
+        s.state.trend_last_sl_update_ts_ms = ts_ms
+        s.state.entry_protective_sl_price = new_sl
+        s.state.last_tp_update_ts_ms = ts_ms
+        s.state.last_tp_update_candle_ts_ms = boll.candle_ts_ms
+
+        logger.warning(
+            "TREND_TRAILING_SL_UPDATED | side=%s old_sl=%s new_sl=%.4f "
+            "boll_middle=%.4f buffer_pct=%.6f candle_ts=%s",
+            s.state.side,
+            f"{old_sl:.4f}" if old_sl is not None else "-",
+            new_sl,
+            boll.middle,
+            s.config.trend_middle_sl_buffer_pct,
+            boll.candle_ts_ms,
+        )
+
+        # Emit UPDATE_TP with new SL price
+        size = s.sizer.calculate(price, layer_index=s.state.layers)
+        return s._intent(
+            "UPDATE_TP", s.state.side, price, s.state.layers,
+            s.state.tp_price or price,
+            "trend_trailing_sl_tightened",
+            size, boll, cvd, ts_ms,
+        )

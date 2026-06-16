@@ -125,6 +125,11 @@ class LivePositionState:
     post_entry_sl_cooldown_side: str | None = None
     post_entry_sl_cooldown_reason: str | None = None
 
+    # ── Trend Breakout Entry fields ────────────────────────────────────
+    entry_regime: str | None = None
+    trend_trailing_sl_price: float | None = None
+    trend_last_sl_update_ts_ms: int = 0
+
 
 class LiveStateStore:
     """Small JSON state store for restart recovery.
@@ -301,6 +306,9 @@ class LiveStateStore:
                 getattr(strategy_state, "post_entry_sl_cooldown_until_ts_ms", 0) or 0),
             post_entry_sl_cooldown_side=getattr(strategy_state, "post_entry_sl_cooldown_side", None),
             post_entry_sl_cooldown_reason=getattr(strategy_state, "post_entry_sl_cooldown_reason", None),
+            entry_regime=getattr(strategy_state, "entry_regime", None),
+            trend_trailing_sl_price=getattr(strategy_state, "trend_trailing_sl_price", None),
+            trend_last_sl_update_ts_ms=int(getattr(strategy_state, "trend_last_sl_update_ts_ms", 0) or 0),
         )
 
 

@@ -12,7 +12,19 @@ from src.strategies import middle_runner as middle_runner_helpers
 from src.strategies import three_stage_runner as three_stage_helpers
 from src.strategies import tp_plan_selector
 from src.strategies import trend_runner as trend_runner_helpers
+from src.strategies.regime.router import RegimeRouter, RouterInput
+from src.strategies.regime.types import (
+    AnchoredCvdState,
+    BandSnapshot,
+    RegimeDecision,
+    RegimeDecisionType,
+    TrendState,
+)
 from src.strategies.tp_lifecycle import is_pre_tp1_lifecycle
+from src.strategies.trend_breakout import TrendBreakoutAssessor, TrendBreakoutDecision
+from src.strategies.trend_middle_trailing_sl import (
+    calculate_trend_middle_sl,
+)
 from src.utils.log import get_logger
 
 logger = get_logger(__name__)
@@ -136,6 +148,24 @@ class BollCvdReclaimStrategyConfig:
     post_entry_sl_cooldown_seconds: int = 1800
     post_entry_sl_cooldown_scope: str = "SIDE"
 
+    # ── Trend Breakout Entry ────────────────────────────────────────────
+    trend_breakout_enabled: bool = False
+    trend_middle_trailing_sl_enabled: bool = True
+    trend_middle_sl_buffer_pct: float = 0.001
+    trend_max_stop_distance_pct: float = 0.02
+    trend_sl_update_interval_seconds: int = 900
+    trend_compression_valid_after_seconds: int = 7200
+    trend_confirm_min_seconds: int = 60
+    trend_confirm_max_seconds: int = 180
+    trend_range_expansion_ratio_min: float = 3.0
+    trend_volume_expansion_ratio_min: float = 3.0
+    trend_outside_occupancy_min_ratio: float = 0.70
+    trend_min_new_extreme_count: int = 2
+    trend_max_inside_reclaim_seconds: int = 3
+    trend_cvd_min_buy_ratio: float = 0.58
+    trend_cvd_min_sell_ratio: float = 0.58
+    trend_cvd_max_pullback_ratio: float = 0.45
+
     def __post_init__(self) -> None:
         if (
                 self.three_stage_pre_tp1_degrade_enabled
@@ -190,6 +220,60 @@ class BollCvdReclaimStrategyConfig:
         if self.post_entry_sl_cooldown_scope not in {"GLOBAL", "SIDE"}:
             raise RuntimeError(
                 f"POST_ENTRY_SL_COOLDOWN_SCOPE={self.post_entry_sl_cooldown_scope!r} must be GLOBAL or SIDE"
+            )
+        # ── Trend Breakout validation ────────────────────────────────────
+        if self.trend_middle_sl_buffer_pct < 0:
+            raise RuntimeError(
+                f"TREND_MIDDLE_SL_BUFFER_PCT={self.trend_middle_sl_buffer_pct} must be >= 0"
+            )
+        if self.trend_max_stop_distance_pct <= 0:
+            raise RuntimeError(
+                f"TREND_MAX_STOP_DISTANCE_PCT={self.trend_max_stop_distance_pct} must be > 0"
+            )
+        if self.trend_sl_update_interval_seconds <= 0:
+            raise RuntimeError(
+                f"TREND_SL_UPDATE_INTERVAL_SECONDS={self.trend_sl_update_interval_seconds} must be > 0"
+            )
+        if self.trend_confirm_min_seconds <= 0:
+            raise RuntimeError(
+                f"TREND_CONFIRM_MIN_SECONDS={self.trend_confirm_min_seconds} must be > 0"
+            )
+        if self.trend_confirm_max_seconds < self.trend_confirm_min_seconds:
+            raise RuntimeError(
+                f"TREND_CONFIRM_MAX_SECONDS={self.trend_confirm_max_seconds} must be >= "
+                f"TREND_CONFIRM_MIN_SECONDS={self.trend_confirm_min_seconds}"
+            )
+        if self.trend_range_expansion_ratio_min <= 0:
+            raise RuntimeError(
+                f"TREND_RANGE_EXPANSION_RATIO_MIN={self.trend_range_expansion_ratio_min} must be > 0"
+            )
+        if self.trend_volume_expansion_ratio_min <= 0:
+            raise RuntimeError(
+                f"TREND_VOLUME_EXPANSION_RATIO_MIN={self.trend_volume_expansion_ratio_min} must be > 0"
+            )
+        if not (0 < self.trend_outside_occupancy_min_ratio <= 1):
+            raise RuntimeError(
+                f"TREND_OUTSIDE_OCCUPANCY_MIN_RATIO={self.trend_outside_occupancy_min_ratio} must be in (0, 1]"
+            )
+        if self.trend_min_new_extreme_count < 0:
+            raise RuntimeError(
+                f"TREND_MIN_NEW_EXTREME_COUNT={self.trend_min_new_extreme_count} must be >= 0"
+            )
+        if self.trend_max_inside_reclaim_seconds < 0:
+            raise RuntimeError(
+                f"TREND_MAX_INSIDE_RECLAIM_SECONDS={self.trend_max_inside_reclaim_seconds} must be >= 0"
+            )
+        if not (0 < self.trend_cvd_min_buy_ratio <= 1):
+            raise RuntimeError(
+                f"TREND_CVD_MIN_BUY_RATIO={self.trend_cvd_min_buy_ratio} must be in (0, 1]"
+            )
+        if not (0 < self.trend_cvd_min_sell_ratio <= 1):
+            raise RuntimeError(
+                f"TREND_CVD_MIN_SELL_RATIO={self.trend_cvd_min_sell_ratio} must be in (0, 1]"
+            )
+        if not (0 <= self.trend_cvd_max_pullback_ratio <= 1):
+            raise RuntimeError(
+                f"TREND_CVD_MAX_PULLBACK_RATIO={self.trend_cvd_max_pullback_ratio} must be in [0, 1]"
             )
         if self.middle_bucket_split_enabled:
             _fr = self.middle_bucket_split_fast_ratio
@@ -293,6 +377,23 @@ class BollCvdReclaimStrategyConfig:
             post_entry_sl_cooldown_enabled=_env_bool("POST_ENTRY_SL_COOLDOWN_ENABLED", True),
             post_entry_sl_cooldown_seconds=int(os.getenv("POST_ENTRY_SL_COOLDOWN_SECONDS", "1800")),
             post_entry_sl_cooldown_scope=os.getenv("POST_ENTRY_SL_COOLDOWN_SCOPE", "SIDE").strip().upper(),
+            # ── Trend Breakout Entry ────────────────────────────────────
+            trend_breakout_enabled=_env_bool("TREND_BREAKOUT_ENABLED", False),
+            trend_middle_trailing_sl_enabled=_env_bool("TREND_MIDDLE_TRAILING_SL_ENABLED", True),
+            trend_middle_sl_buffer_pct=float(os.getenv("TREND_MIDDLE_SL_BUFFER_PCT", "0.001")),
+            trend_max_stop_distance_pct=float(os.getenv("TREND_MAX_STOP_DISTANCE_PCT", "0.02")),
+            trend_sl_update_interval_seconds=int(os.getenv("TREND_SL_UPDATE_INTERVAL_SECONDS", "900")),
+            trend_compression_valid_after_seconds=int(os.getenv("TREND_COMPRESSION_VALID_AFTER_SECONDS", "7200")),
+            trend_confirm_min_seconds=int(os.getenv("TREND_CONFIRM_MIN_SECONDS", "60")),
+            trend_confirm_max_seconds=int(os.getenv("TREND_CONFIRM_MAX_SECONDS", "180")),
+            trend_range_expansion_ratio_min=float(os.getenv("TREND_RANGE_EXPANSION_RATIO_MIN", "3.0")),
+            trend_volume_expansion_ratio_min=float(os.getenv("TREND_VOLUME_EXPANSION_RATIO_MIN", "3.0")),
+            trend_outside_occupancy_min_ratio=float(os.getenv("TREND_OUTSIDE_OCCUPANCY_MIN_RATIO", "0.70")),
+            trend_min_new_extreme_count=int(os.getenv("TREND_MIN_NEW_EXTREME_COUNT", "2")),
+            trend_max_inside_reclaim_seconds=int(os.getenv("TREND_MAX_INSIDE_RECLAIM_SECONDS", "3")),
+            trend_cvd_min_buy_ratio=float(os.getenv("TREND_CVD_MIN_BUY_RATIO", "0.58")),
+            trend_cvd_min_sell_ratio=float(os.getenv("TREND_CVD_MIN_SELL_RATIO", "0.58")),
+            trend_cvd_max_pullback_ratio=float(os.getenv("TREND_CVD_MAX_PULLBACK_RATIO", "0.45")),
         )
 
 
@@ -377,6 +478,10 @@ class TradeIntent:
     middle_bucket_split_fast_sl_price: float | None = None
     middle_bucket_split_fast_sl_order_id: str | None = None
     middle_bucket_split_fast_sl_protected: bool = False
+
+    # ── Entry Regime ────────────────────────────────────────────────────
+    # "MEAN_REVERSION" | "TREND_BREAKOUT" | None
+    entry_regime: str | None = None
 
 
 @dataclass(frozen=True)
@@ -569,6 +674,12 @@ class StrategyPositionState:
     delayed_market_exit_exit_attempt_count: int = 0
     delayed_market_exit_last_exit_message: str | None = None
 
+    # ── Trend Breakout Entry state ────────────────────────────────────────
+    entry_regime: str | None = None  # None | "MEAN_REVERSION" | "TREND_BREAKOUT"
+    trend_breakout_active: bool = False
+    trend_trailing_sl_price: float | None = None
+    trend_last_sl_update_ts_ms: int = 0
+
     # ── Extreme Retest Add state (DEPRECATED: kept for live_state_store backward compat) ──
     extreme_retest_anchor_side: Optional[str] = None
     extreme_retest_anchor_kind: Optional[str] = None
@@ -622,6 +733,8 @@ class BollCvdReclaimStrategy:
         self.config = config
         self.sizer = sizer
         self.state = StrategyPositionState()
+        self.regime_router = RegimeRouter()
+        self.trend_assessor: TrendBreakoutAssessor | None = None
 
     def on_tick(self, price: float, ts_ms: int, boll: BollSnapshot, cvd: CvdSnapshot) -> list[TradeIntent]:
         intents: list[TradeIntent] = []
@@ -638,21 +751,70 @@ class BollCvdReclaimStrategy:
         if tp_intent is not None:
             intents.append(tp_intent)
 
+        # Already in a position — no new entries
+        if self.state.side is not None:
+            return intents
+
         if not boll.alert_switch_on:
             return intents
 
         if not self._cooldown_ok(ts_ms):
             return intents
 
-        if self._post_entry_sl_cooldown_ok("LONG", ts_ms) and self._long_setup(price, cvd, boll):
+        # MR setup gates (side effects for reclaim state machine)
+        long_setup_ok = (
+            self._post_entry_sl_cooldown_ok("LONG", ts_ms)
+            and self._long_setup(price, cvd, boll)
+        )
+        short_setup_ok = (
+            self._post_entry_sl_cooldown_ok("SHORT", ts_ms)
+            and self._short_setup(price, cvd, boll)
+        )
+
+        # Regime routing: trend vs mean-reversion arbitration
+        regime_decision = self._route_regime(
+            price=price, ts_ms=ts_ms, boll=boll, cvd=cvd,
+            mr_long_allowed=long_setup_ok,
+            mr_short_allowed=short_setup_ok,
+        )
+
+        if regime_decision is None:
+            # Trend breakout disabled — fall through to existing MR-only logic
+            if long_setup_ok:
+                intent = self._maybe_open_or_add_long(price, ts_ms, boll, cvd)
+                if intent is not None:
+                    intents.append(intent)
+            if short_setup_ok:
+                intent = self._maybe_open_or_add_short(price, ts_ms, boll, cvd)
+                if intent is not None:
+                    intents.append(intent)
+            return intents
+
+        # Execute based on regime decision
+        dt = regime_decision.decision_type
+        if dt == RegimeDecisionType.TREND_LONG:
+            intent = self._maybe_trend_entry("LONG", price, ts_ms, boll, cvd, regime_decision)
+            if intent is not None:
+                intents.append(intent)
+        elif dt == RegimeDecisionType.TREND_SHORT:
+            intent = self._maybe_trend_entry("SHORT", price, ts_ms, boll, cvd, regime_decision)
+            if intent is not None:
+                intents.append(intent)
+        elif dt == RegimeDecisionType.MEAN_REVERSION_LONG and long_setup_ok:
             intent = self._maybe_open_or_add_long(price, ts_ms, boll, cvd)
             if intent is not None:
                 intents.append(intent)
-
-        if self._post_entry_sl_cooldown_ok("SHORT", ts_ms) and self._short_setup(price, cvd, boll):
+        elif dt == RegimeDecisionType.MEAN_REVERSION_SHORT and short_setup_ok:
             intent = self._maybe_open_or_add_short(price, ts_ms, boll, cvd)
             if intent is not None:
                 intents.append(intent)
+        elif dt == RegimeDecisionType.CONFLICT_NO_TRADE:
+            logger.warning(
+                "REGIME_CONFLICT_NO_TRADE | reason=%s confidence=%.2f trend_state=%s",
+                regime_decision.reason, regime_decision.confidence,
+                regime_decision.trend_state,
+            )
+        # NO_TRADE, TREND_UPGRADE_* → skip
 
         return intents
 
@@ -1447,6 +1609,165 @@ class BollCvdReclaimStrategy:
             from src.strategies.tp_update_coordinator import TpUpdateCoordinator
             self._tp_update_coordinator = TpUpdateCoordinator(self)
         return self._tp_update_coordinator
+
+    # ------------------------------------------------------------------
+    # Trend Breakout wiring
+    # ------------------------------------------------------------------
+
+    def _get_trend_assessor(self) -> TrendBreakoutAssessor | None:
+        """Lazy-initialise the TrendBreakoutAssessor."""
+        if not self.config.trend_breakout_enabled:
+            return None
+        if self.trend_assessor is None:
+            self.trend_assessor = TrendBreakoutAssessor(
+                compression_valid_after_seconds=self.config.trend_compression_valid_after_seconds,
+                confirm_min_seconds=self.config.trend_confirm_min_seconds,
+                confirm_max_seconds=self.config.trend_confirm_max_seconds,
+                range_expansion_ratio_min=self.config.trend_range_expansion_ratio_min,
+                volume_expansion_ratio_min=self.config.trend_volume_expansion_ratio_min,
+                outside_occupancy_min_ratio=self.config.trend_outside_occupancy_min_ratio,
+                min_new_extreme_count=self.config.trend_min_new_extreme_count,
+                max_inside_reclaim_seconds=self.config.trend_max_inside_reclaim_seconds,
+                cvd_min_buy_ratio=self.config.trend_cvd_min_buy_ratio,
+                cvd_min_sell_ratio=self.config.trend_cvd_min_sell_ratio,
+                cvd_max_pullback_ratio=self.config.trend_cvd_max_pullback_ratio,
+            )
+        return self.trend_assessor
+
+    def _route_regime(
+        self,
+        *,
+        price: float,
+        ts_ms: int,
+        boll: BollSnapshot,
+        cvd: CvdSnapshot,
+        mr_long_allowed: bool,
+        mr_short_allowed: bool,
+    ) -> RegimeDecision | None:
+        """Run trend detection and route through RegimeRouter.
+
+        Returns:
+            A ``RegimeDecision`` or ``None`` when trend_breakout is disabled
+            (caller should fall through to existing MR-only logic).
+        """
+        if not self.config.trend_breakout_enabled:
+            return None
+
+        assessor = self._get_trend_assessor()
+        if assessor is None:
+            return None
+
+        # Feed current BOLL band into trend assessor's ring buffer
+        assessor.feed_band(BandSnapshot(
+            upper=boll.upper,
+            middle=boll.middle,
+            lower=boll.lower,
+            candle_ts_ms=boll.candle_ts_ms,
+            source="closed_or_frozen",
+        ))
+
+        # Run trend breakout assessment
+        trend_decision = assessor.assess(
+            price=price,
+            ts_ms=ts_ms,
+            boll_upper=boll.upper,
+            boll_middle=boll.middle,
+            boll_lower=boll.lower,
+            fast_cvd=cvd.fast_cvd,
+            buy_ratio=cvd.buy_ratio,
+            sell_ratio=cvd.sell_ratio,
+            # Expansion / occupancy booleans — the TrendDetector's internal
+            # state machine manages these; for now we pass True to allow the
+            # detector to evaluate CVD confirmation as the primary gate.
+            range_expansion_passed=True,
+            volume_expansion_passed=True,
+            sustained_volume_passed=True,
+            outside_occupancy_passed=True,
+        )
+
+        # Build router input
+        router_input = RouterInput(
+            trend_state=trend_decision.trend_state,
+            trend_confirmed=trend_decision.is_trend_breakout,
+            trend_confirmed_direction=trend_decision.direction,
+            trend_candidate_active=(
+                trend_decision.trend_assessment is not None
+                and trend_decision.trend_assessment.is_candidate
+            ),
+            trend_candidate_direction=trend_decision.direction,
+            trend_failed=(
+                trend_decision.trend_assessment is not None
+                and trend_decision.trend_assessment.is_failed
+            ),
+            trend_failure_reason=trend_decision.reason if (
+                trend_decision.trend_assessment is not None
+                and trend_decision.trend_assessment.is_failed
+            ) else None,
+            trend_blocks_mean_reversion=trend_decision.blocks_mean_reversion,
+            mr_long_allowed=mr_long_allowed,
+            mr_short_allowed=mr_short_allowed,
+            cooldown_side=None,
+            cooldown_until_ts_ms=0,
+            cooldown_scope="SIDE",
+            ts_ms=ts_ms,
+        )
+
+        return self.regime_router.route(router_input)
+
+    def _maybe_trend_entry(
+        self,
+        side: PositionSide,
+        price: float,
+        ts_ms: int,
+        boll: BollSnapshot,
+        cvd: CvdSnapshot,
+        regime_decision: RegimeDecision,
+    ) -> TradeIntent | None:
+        """Attempt a trend breakout entry.
+
+        Calculates the trend middle SL, checks max stop distance,
+        and delegates to EntryAddFlowCoordinator.open_trend_position().
+        """
+        # Calculate trend middle SL
+        trend_sl = calculate_trend_middle_sl(
+            boll_middle=boll.middle,
+            buffer_pct=self.config.trend_middle_sl_buffer_pct,
+            side=side,
+        )
+
+        # Check max stop distance
+        if price > 0 and self.config.trend_max_stop_distance_pct > 0:
+            if side == "LONG":
+                stop_distance_pct = (price - trend_sl) / price
+            else:
+                stop_distance_pct = (trend_sl - price) / price
+            if stop_distance_pct > self.config.trend_max_stop_distance_pct:
+                logger.info(
+                    "TREND_ENTRY_SKIPPED | reason=stop_distance_too_wide "
+                    "side=%s price=%.4f sl=%.4f stop_pct=%.6f max_pct=%.6f",
+                    side, price, trend_sl, stop_distance_pct,
+                    self.config.trend_max_stop_distance_pct,
+                )
+                return None
+
+        reason = (
+            f"趋势入口: {regime_decision.reason} "
+            f"方向={side} 置信度={regime_decision.confidence:.2f}"
+        )
+        return self._entry_add_flow().open_trend_position(
+            side=side,
+            price=price,
+            ts_ms=ts_ms,
+            boll=boll,
+            cvd=cvd,
+            reason=reason,
+            trend_sl_price=trend_sl,
+        )
+
+    def reset_trend_state(self) -> None:
+        """Reset all trend breakout internal state."""
+        if self.trend_assessor is not None:
+            self.trend_assessor.reset()
 
     def _intent_factory(self):
         if not hasattr(self, "_strategy_intent_factory"):
