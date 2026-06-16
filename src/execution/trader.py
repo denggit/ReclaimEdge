@@ -469,9 +469,13 @@ class Trader:
     async def _execute_update_trend_sl(self, intent: TradeIntent) -> LiveTradeResult:
         """Execute an UPDATE_TREND_SL intent for trend breakout positions.
 
-        Cancels the old entry protective SL and places a new one at the
-        tightened price.  Does NOT call replace_take_profit().
-        On failure, triggers delayed market exit for safety.
+        SAFETY ORDER: places the NEW protective SL FIRST, verifies it,
+        and ONLY THEN cancels the old one.  This ensures the position is
+        never left unprotected if the new SL placement fails.
+
+        Does NOT call replace_take_profit().
+        On failure, triggers delayed market exit for safety (old SL
+        remains alive because we have not cancelled it yet).
         """
         entry_sl_price = getattr(intent, "entry_protective_sl_price", None)
         if entry_sl_price is None or entry_sl_price <= 0:
@@ -490,19 +494,8 @@ class Trader:
                 protective_sl_ok=False,
             )
 
-        # Cancel old entry protective SL
-        old_sl_id = self.entry_protective_sl_order_id
-        if old_sl_id:
-            try:
-                cancelled = await self.cancel_protective_stop(old_sl_id)
-                logger.warning(
-                    "TREND_TRAILING_SL_CANCELLED_OLD | old_sl_id=%s cancelled=%s",
-                    old_sl_id, cancelled,
-                )
-            except Exception:
-                logger.exception(
-                    "TREND_TRAILING_SL_CANCEL_OLD_FAILED | old_sl_id=%s", old_sl_id,
-                )
+        # Snapshot the old SL ID BEFORE placing the new one
+        old_sl_id: str | None = self.entry_protective_sl_order_id
 
         # Get current position contracts
         try:
@@ -529,7 +522,8 @@ class Trader:
                 protective_sl_ok=False,
             )
 
-        # Place new entry protective SL at tightened price
+        # ── Step 1: Place the NEW protective SL FIRST ────────────────────
+        # Old SL is NOT cancelled yet — position remains protected.
         sl_ok, sl_id, sl_message = await self.place_entry_protective_stop_with_retries(
             side=intent.side,
             contracts=contracts,
@@ -539,10 +533,11 @@ class Trader:
         )
 
         if not sl_ok or not sl_id:
+            # ── NEW SL FAILED — old SL is STILL ALIVE, DO NOT cancel it ──
             logger.warning(
                 "TREND_TRAILING_SL_UPDATE_FAILED | reason=place_new_sl_failed "
-                "side=%s message=%s",
-                intent.side, sl_message,
+                "side=%s message=%s old_sl_id=%s old_sl_still_alive=true",
+                intent.side, sl_message, old_sl_id or "",
             )
             return LiveTradeResult(
                 ok=False,
@@ -557,12 +552,27 @@ class Trader:
                 protective_sl_ok=False,
             )
 
+        # ── Step 2: New SL is ALIVE — now safe to cancel the old one ────
+        if old_sl_id and old_sl_id != sl_id:
+            try:
+                cancelled = await self.cancel_protective_stop(old_sl_id)
+                logger.warning(
+                    "TREND_TRAILING_SL_CANCELLED_OLD | old_sl_id=%s new_sl_id=%s cancelled=%s",
+                    old_sl_id, sl_id, cancelled,
+                )
+            except Exception:
+                logger.exception(
+                    "TREND_TRAILING_SL_CANCEL_OLD_FAILED | old_sl_id=%s new_sl_id=%s",
+                    old_sl_id, sl_id,
+                )
+
         # Update tracked SL order ID
         self.entry_protective_sl_order_id = sl_id
         logger.warning(
             "TREND_TRAILING_SL_UPDATE_OK | side=%s new_sl_id=%s new_sl_price=%.4f "
-            "contracts=%s",
+            "old_sl_id=%s contracts=%s",
             intent.side, sl_id, float(entry_sl_price),
+            old_sl_id or "",
             self.decimal_to_str(contracts),
         )
 

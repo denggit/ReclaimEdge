@@ -675,7 +675,12 @@ class ExecutionCommandProcessor:
         command: live_runtime_types.TradeCommand,
         result: Any,
     ) -> None:
-        """Apply UPDATE_TREND_SL result: update entry protective SL state."""
+        """Apply UPDATE_TREND_SL result: update entry protective SL state.
+
+        Only called when execution SUCCEEDED (result.ok is True).  State
+        updates are gated on success so that a failed UPDATE_TREND_SL
+        leaves the old SL price / old order ID intact.
+        """
         async with self.state_lock:
             current_position_id = self.execution_state.current_position_id
             cash_before_position = self.execution_state.cash_before_position
@@ -688,6 +693,9 @@ class ExecutionCommandProcessor:
             sl_price = getattr(command.intent, "entry_protective_sl_price", None)
             if sl_price is not None:
                 self.strategy.state.entry_protective_sl_price = sl_price
+                self.strategy.state.trend_trailing_sl_price = sl_price
+                self.strategy.state.trend_last_sl_update_ts_ms = command.intent.ts_ms
+                self.strategy.state.last_tp_update_ts_ms = command.intent.ts_ms
 
             strategy_state_for_save = copy.deepcopy(self.strategy.state)
             equity = self.account_snapshot.equity

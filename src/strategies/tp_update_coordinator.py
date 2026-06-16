@@ -1013,12 +1013,6 @@ class TpUpdateCoordinator:
                 )
                 return None
 
-        # Update state
-        s.state.trend_trailing_sl_price = new_sl
-        s.state.trend_last_sl_update_ts_ms = ts_ms
-        s.state.entry_protective_sl_price = new_sl
-        s.state.last_tp_update_ts_ms = ts_ms
-
         logger.warning(
             "TREND_TRAILING_SL_UPDATE_SIGNAL | side=%s old_sl=%s new_sl=%.4f "
             "boll_middle=%.4f buffer_pct=%.6f candle_ts=%s",
@@ -1030,12 +1024,18 @@ class TpUpdateCoordinator:
             boll.candle_ts_ms,
         )
 
-        # Emit UPDATE_TREND_SL (NOT UPDATE_TP) with new SL price
+        # Emit UPDATE_TREND_SL (NOT UPDATE_TP) with new SL price.
+        # State (trend_trailing_sl_price, trend_last_sl_update_ts_ms,
+        # entry_protective_sl_price, last_tp_update_ts_ms) is NOT written
+        # here — it is only applied in _apply_update_trend_sl_result()
+        # after the execution succeeds.  This prevents state pollution
+        # when the intent fails to execute.
         size = s.sizer.calculate(price, layer_index=s.state.layers)
         intent = s._intent(
             "UPDATE_TREND_SL", s.state.side, price, s.state.layers,
             s.state.tp_price or price,
             "trend_trailing_sl_tightened",
             size, boll, cvd, ts_ms,
+            sl_price_override=new_sl,
         )
         return intent

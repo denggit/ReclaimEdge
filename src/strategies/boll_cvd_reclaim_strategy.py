@@ -1650,6 +1650,7 @@ class BollCvdReclaimStrategy:
                 outside_occupancy_min_ratio=self.config.trend_outside_occupancy_min_ratio,
                 min_new_extreme_count=self.config.trend_min_new_extreme_count,
                 max_inside_reclaim_seconds=self.config.trend_max_inside_reclaim_seconds,
+                confirm_min_seconds=self.config.trend_confirm_min_seconds,
             )
         return self.trend_metrics_tracker
 
@@ -1704,9 +1705,14 @@ class BollCvdReclaimStrategy:
                 direction=direction,
                 boll_upper=boll.upper,
                 boll_lower=boll.lower,
+                pre_breakout_range=max(cvd.baseline_range_pct, 0.0),
+                pre_breakout_volume=max(cvd.baseline_volume, 0.0),
             )
         elif direction is not None and metrics_tracker.initialised:
-            band_range = abs(boll.upper - boll.lower)
+            # Use percentage-based band range for consistent comparison
+            # with pre_breakout_range_pct (from cvd.baseline_range_pct).
+            band_range_pct = abs(boll.upper - boll.lower) / boll.middle if boll.middle > 0 else 0.0
+            tick_volume = float(cvd.buy_volume + cvd.sell_volume)
             metrics_tracker.update(
                 ts_ms=ts_ms,
                 price=price,
@@ -1716,12 +1722,13 @@ class BollCvdReclaimStrategy:
                 boll_upper=boll.upper,
                 boll_middle=boll.middle,
                 boll_lower=boll.lower,
-                band_range=band_range,
-                tick_volume=float(cvd.size) if cvd.size > 0 else 0.0,
+                band_range=band_range_pct,
+                tick_volume=tick_volume,
             )
         elif direction is None and metrics_tracker.initialised:
             # Price reclaimed inside — still update metrics for inside tracking
-            band_range = abs(boll.upper - boll.lower)
+            band_range_pct = abs(boll.upper - boll.lower) / boll.middle if boll.middle > 0 else 0.0
+            tick_volume = float(cvd.buy_volume + cvd.sell_volume)
             metrics_tracker.update(
                 ts_ms=ts_ms,
                 price=price,
@@ -1731,8 +1738,8 @@ class BollCvdReclaimStrategy:
                 boll_upper=boll.upper,
                 boll_middle=boll.middle,
                 boll_lower=boll.lower,
-                band_range=band_range,
-                tick_volume=float(cvd.size) if cvd.size > 0 else 0.0,
+                band_range=band_range_pct,
+                tick_volume=tick_volume,
             )
 
         # ── Get real metrics (NOT hardcoded True) ──────────────────────
@@ -3353,6 +3360,8 @@ class BollCvdReclaimStrategy:
             boll: BollSnapshot,
             cvd: CvdSnapshot,
             ts_ms: int,
+            *,
+            sl_price_override: float | None = None,
     ) -> TradeIntent:
         return self._intent_factory().build_intent(
             intent_type=intent_type,
@@ -3365,6 +3374,7 @@ class BollCvdReclaimStrategy:
             boll=boll,
             cvd=cvd,
             ts_ms=ts_ms,
+            entry_protective_sl_price_override=sl_price_override,
         )
 
     def _managed_core_contracts_for_intent(self, intent_type: TradeIntentType) -> str | None:

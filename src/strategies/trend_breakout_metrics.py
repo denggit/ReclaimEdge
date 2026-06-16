@@ -67,12 +67,14 @@ class TrendBreakoutMetricsTracker:
         outside_occupancy_min_ratio: float = 0.70,
         min_new_extreme_count: int = 2,
         max_inside_reclaim_seconds: int = 3,
+        confirm_min_seconds: int = 60,
     ) -> None:
         self._range_expansion_ratio_min = range_expansion_ratio_min
         self._volume_expansion_ratio_min = volume_expansion_ratio_min
         self._outside_occupancy_min_ratio = outside_occupancy_min_ratio
         self._min_new_extreme_count = min_new_extreme_count
         self._max_inside_reclaim_seconds = max_inside_reclaim_seconds
+        self._confirm_min_seconds = confirm_min_seconds
 
         self._m = TrendBreakoutMetrics()
         self._initialised: bool = False
@@ -193,9 +195,7 @@ class TrendBreakoutMetricsTracker:
             m.range_expansion_passed = (
                 band_range / m._pre_breakout_range >= self._range_expansion_ratio_min
             )
-        elif elapsed_sec > 60:
-            # If no pre-breakout range, assume passed after 60s
-            m.range_expansion_passed = True
+        # else: no pre-breakout baseline → not passed (never auto-pass)
 
         # ── Volume expansion ───────────────────────────────────────────
         episode_volume_rate = m._episode_volume / elapsed_sec
@@ -208,15 +208,15 @@ class TrendBreakoutMetricsTracker:
             m.volume_expansion_passed = (
                 episode_volume_rate / pre_breakout_volume_rate >= self._volume_expansion_ratio_min
             )
-        elif m._episode_volume > 0 and elapsed_sec > 60:
-            m.volume_expansion_passed = True
+        # else: no pre-breakout volume baseline → not passed (never auto-pass)
 
         # ── Sustained volume ───────────────────────────────────────────
-        # Volume must remain elevated throughout the episode
-        total_episode_volume = m.episode_buy_volume + m.episode_sell_volume
-        if total_episode_volume > 0 and elapsed_sec > 0:
-            # Check if recent volume (last half of episode) is at least 50% of total
-            m.sustained_volume_passed = True  # simplified: real check needs sub-windows
+        # Conservative rule: volume expansion must already be confirmed
+        # AND the episode must have lasted at least confirm_min_seconds.
+        m.sustained_volume_passed = (
+            m.volume_expansion_passed
+            and elapsed_sec >= self._confirm_min_seconds
+        )
 
         # ── Outside occupancy ──────────────────────────────────────────
         total_elapsed = max(ts_ms - m._anchor_ts_ms, 1)

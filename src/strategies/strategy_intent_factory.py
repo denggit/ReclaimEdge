@@ -60,10 +60,19 @@ class StrategyIntentFactory:
             boll: BollSnapshot,
             cvd: CvdSnapshot,
             ts_ms: int,
+            entry_protective_sl_price_override: float | None = None,
     ) -> TradeIntent:
         from src.strategies.boll_cvd_reclaim_strategy import TradeIntent
 
         state = self.strategy.state
+        # Use override when provided (e.g. UPDATE_TREND_SL which must not
+        # pollute strategy state before execution succeeds), otherwise
+        # read the current state value.
+        sl_price = (
+            entry_protective_sl_price_override
+            if entry_protective_sl_price_override is not None
+            else getattr(state, "entry_protective_sl_price", None)
+        )
         return TradeIntent(
             intent_type=intent_type,
             side=side,
@@ -87,7 +96,7 @@ class StrategyIntentFactory:
             partial_tp_ratio=state.partial_tp_ratio,
             tp_plan=state.tp_plan,
             partial_tp_consumed=state.partial_tp_consumed,
-            entry_protective_sl_price=getattr(state, "entry_protective_sl_price", None),
+            entry_protective_sl_price=sl_price,
             entry_protective_sl_order_id=getattr(state, "entry_protective_sl_order_id", None),
             entry_protective_sl_protected=bool(getattr(state, "entry_protective_sl_protected", False)),
             middle_runner_enabled_for_position=state.middle_runner_enabled_for_position,
