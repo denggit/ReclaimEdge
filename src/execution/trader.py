@@ -353,13 +353,39 @@ class Trader:
                 protective_sl_ok=False,
             )
 
-        sl_ok, sl_id, sl_message = await self.place_entry_protective_stop_with_retries(
-            side=intent.side,
-            contracts=self.position_contracts if self.position_contracts > 0 else contracts,
-            stop_price=float(entry_sl_price),
-            retry_count=int(getattr(intent, "entry_protective_sl_retry_count", 0) or os.getenv("ENTRY_PROTECTIVE_SL_RETRY_COUNT", "3")),
-            retry_interval_seconds=float(os.getenv("ENTRY_PROTECTIVE_SL_RETRY_INTERVAL_SECONDS", "1")),
-        )
+        try:
+            sl_ok, sl_id, sl_message = await self.place_protective_stop_with_retries(
+                side=intent.side,
+                contracts=self.position_contracts if self.position_contracts > 0 else contracts,
+                stop_price=float(entry_sl_price),
+                retry_count=int(getattr(intent, "entry_protective_sl_retry_count", 0) or os.getenv("ENTRY_PROTECTIVE_SL_RETRY_COUNT", "3")),
+                retry_interval_seconds=float(os.getenv("ENTRY_PROTECTIVE_SL_RETRY_INTERVAL_SECONDS", "1")),
+            )
+        except Exception as exc:
+            logger.exception(
+                "ENTRY_PROTECTIVE_SL_EXCEPTION | side=%s order_id=%s stop_price=%s",
+                intent.side,
+                order_id,
+                entry_sl_price,
+            )
+            ok, exit_message = await self.market_exit_remaining_position_with_retries(
+                intent.side,
+                retry_count=int(os.getenv("ENTRY_SL_FAIL_MARKET_EXIT_RETRY_COUNT", "3")),
+                context="entry_protective_sl_exception",
+                retry_interval_seconds=1.0,
+            )
+            return LiveTradeResult(
+                ok=False,
+                action=intent.intent_type,
+                order_id=order_id,
+                tp_order_id=None,
+                contracts=self.decimal_to_str(contracts),
+                tp_price=self.price_to_str(intent.tp_price),
+                message=f"entry_filled_but_entry_protective_sl_exception: {exc}; market_exit_ok={ok}; {exit_message}",
+                entry_filled=True,
+                tp_ok=False,
+                protective_sl_ok=False,
+            )
         if not sl_ok or not sl_id:
             ok, exit_message = await self.market_exit_remaining_position_with_retries(
                 intent.side,
@@ -526,13 +552,32 @@ class Trader:
 
         # ── Step 1: Place the NEW protective SL FIRST ────────────────────
         # Old SL is NOT cancelled yet — position remains protected.
-        sl_ok, sl_id, sl_message = await self.place_entry_protective_stop_with_retries(
-            side=intent.side,
-            contracts=contracts,
-            stop_price=float(entry_sl_price),
-            retry_count=int(os.getenv("ENTRY_PROTECTIVE_SL_RETRY_COUNT", "3")),
-            retry_interval_seconds=float(os.getenv("ENTRY_PROTECTIVE_SL_RETRY_INTERVAL_SECONDS", "1")),
-        )
+        try:
+            sl_ok, sl_id, sl_message = await self.place_protective_stop_with_retries(
+                side=intent.side,
+                contracts=contracts,
+                stop_price=float(entry_sl_price),
+                retry_count=int(os.getenv("ENTRY_PROTECTIVE_SL_RETRY_COUNT", "3")),
+                retry_interval_seconds=float(os.getenv("ENTRY_PROTECTIVE_SL_RETRY_INTERVAL_SECONDS", "1")),
+            )
+        except Exception as exc:
+            logger.exception(
+                "TREND_TRAILING_SL_UPDATE_FAILED | reason=place_new_sl_exception side=%s old_sl_id=%s",
+                intent.side,
+                old_sl_id or "",
+            )
+            return LiveTradeResult(
+                ok=False,
+                action=intent.intent_type,
+                order_id=None,
+                tp_order_id=None,
+                contracts=self.decimal_to_str(contracts),
+                tp_price=self.price_to_str(intent.tp_price),
+                message=f"trend_sl_update_failed_place_new_sl_exception: {exc}",
+                protective_sl_order_id=None,
+                protective_sl_price=self.price_to_str(float(entry_sl_price)),
+                protective_sl_ok=False,
+            )
 
         if not sl_ok or not sl_id:
             # ── NEW SL FAILED — old SL is STILL ALIVE, DO NOT cancel it ──

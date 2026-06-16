@@ -971,8 +971,8 @@ class TestUpdateTrendSLNewFirstOldLater:
         from src.execution.tp_sl_execution_manager import TpSlExecutionManager
         trader._tp_sl_manager = TpSlExecutionManager(trader, trading_client=trading_client)
 
-        # Monkey-patch place_entry_protective_stop_with_retries on trader
-        trader.place_entry_protective_stop_with_retries = AsyncMock(
+        # Monkey-patch place_protective_stop_with_retries on trader
+        trader.place_protective_stop_with_retries = AsyncMock(
             return_value=(True, "entry-sl-1", "protective_sl_placed")
         )
 
@@ -1021,7 +1021,7 @@ class TestUpdateTrendSLNewFirstOldLater:
             return True
 
         # Replace the instance-level mocks with tracking versions
-        trader.place_entry_protective_stop_with_retries = AsyncMock(side_effect=track_place)
+        trader.place_protective_stop_with_retries = AsyncMock(side_effect=track_place)
 
         from unittest.mock import patch
         with patch.object(
@@ -1058,7 +1058,7 @@ class TestUpdateTrendSLNewFirstOldLater:
             cancel_called_with.append(algo_id)
             return True
 
-        trader.place_entry_protective_stop_with_retries = AsyncMock(side_effect=fail_place)
+        trader.place_protective_stop_with_retries = AsyncMock(side_effect=fail_place)
 
         with patch.object(
             trader._tp_sl_manager, "cancel_protective_stop",
@@ -1096,7 +1096,7 @@ class TestUpdateTrendSLNewFirstOldLater:
             cancel_called_with.append(algo_id)
             return True
 
-        trader.place_entry_protective_stop_with_retries = AsyncMock(side_effect=success_place)
+        trader.place_protective_stop_with_retries = AsyncMock(side_effect=success_place)
 
         with patch.object(
             trader._tp_sl_manager, "cancel_protective_stop",
@@ -1133,7 +1133,7 @@ class TestUpdateTrendSLNewFirstOldLater:
             cancel_called = True
             return True
 
-        trader.place_entry_protective_stop_with_retries = AsyncMock(side_effect=success_place)
+        trader.place_protective_stop_with_retries = AsyncMock(side_effect=success_place)
 
         with patch.object(
             trader._tp_sl_manager, "cancel_protective_stop",
@@ -1166,7 +1166,7 @@ class TestUpdateTrendSLNewFirstOldLater:
             cancel_called = True
             return True
 
-        trader.place_entry_protective_stop_with_retries = AsyncMock(side_effect=success_place)
+        trader.place_protective_stop_with_retries = AsyncMock(side_effect=success_place)
 
         with patch.object(
             trader._tp_sl_manager, "cancel_protective_stop",

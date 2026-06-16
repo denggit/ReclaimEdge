@@ -126,7 +126,7 @@ def _make_trader(*, trading_client: Any) -> Trader:
             raw_pos=Decimal("1"),
         )
     )
-    trader.place_entry_protective_stop_with_retries = AsyncMock(
+    trader.place_protective_stop_with_retries = AsyncMock(
         return_value=(True, "entry-sl-1", "protective_sl_placed")
     )
     trader.market_exit_remaining_position_with_retries = AsyncMock(
@@ -369,7 +369,7 @@ class TestEntryMissingProtectiveSlSafety:
         fake = FakeTradingClient()
         trader = _make_trader(trading_client=fake)
         # Override: SL placement fails
-        trader.place_entry_protective_stop_with_retries = AsyncMock(
+        trader.place_protective_stop_with_retries = AsyncMock(
             return_value=(False, None, "sl_placement_failed")
         )
         trader.market_exit_remaining_position_with_retries = AsyncMock(
@@ -395,7 +395,7 @@ class TestEntryMissingProtectiveSlSafety:
         fake = FakeTradingClient()
         trader = _make_trader(trading_client=fake)
         # SL placement ok
-        trader.place_entry_protective_stop_with_retries = AsyncMock(
+        trader.place_protective_stop_with_retries = AsyncMock(
             return_value=(True, "entry-sl-ok", "protective_sl_placed")
         )
         # TP fails
