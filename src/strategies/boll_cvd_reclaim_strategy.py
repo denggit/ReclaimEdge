@@ -654,6 +654,9 @@ class StrategyPositionState:
     lower_reclaim_confirmed_logged: bool = False
     upper_reclaim_confirmed_logged: bool = False
 
+    lower_reclaim_cvd_follow_through_logged: bool = False
+    upper_reclaim_cvd_follow_through_logged: bool = False
+
     # ── Reclaim V2 attempt reject lock ────────────────────────────────
     lower_reclaim_rejected_until_next_outside: bool = False
     upper_reclaim_rejected_until_next_outside: bool = False
@@ -1625,6 +1628,7 @@ class BollCvdReclaimStrategy:
                 price, boll.lower, ts_ms,
             )
         self.state.lower_reclaim_rejected_until_next_outside = False
+        self.state.lower_reclaim_cvd_follow_through_logged = False
 
         # ── Update orderflow tracker ───────────────────────────────────
         prev_extreme_count: int = getattr(self, "_previous_lower_extreme_count", 0)
@@ -1801,6 +1805,7 @@ class BollCvdReclaimStrategy:
                 price, boll.upper, ts_ms,
             )
         self.state.upper_reclaim_rejected_until_next_outside = False
+        self.state.upper_reclaim_cvd_follow_through_logged = False
 
         # ── Update orderflow tracker ───────────────────────────────────
         prev_extreme_count: int = getattr(self, "_previous_upper_extreme_count", 0)
@@ -1980,6 +1985,7 @@ class BollCvdReclaimStrategy:
             self.state.lower_reclaim_seen = False
             self.state.lower_reclaim_ts_ms = 0
             self.state.lower_reclaim_confirmed_logged = False
+            self.state.lower_reclaim_cvd_follow_through_logged = False
             self.state.lower_reclaim_cycle_count += 1
             if self.state.lower_reclaim_cycle_count > self.config.entry_max_reclaim_cycles:
                 logger.info(
@@ -2010,13 +2016,15 @@ class BollCvdReclaimStrategy:
         reclaim_anchored_cvd = current_cumulative_cvd - anchor_cvd
 
         if reclaim_anchored_cvd > div_cvd + self.config.entry_reclaim_min_cvd_follow_through:
-            logger.info(
-                "LOWER_RECLAIM_CVD_FOLLOW_THROUGH_CONFIRMED | "
-                "reclaim_anchored_cvd=%.4f div_cvd=%.4f anchor_cvd=%.4f "
-                "price=%.4f ref_lower=%.4f max_entry_price=%.4f ts_ms=%s",
-                reclaim_anchored_cvd, div_cvd, anchor_cvd,
-                price, ref_lower, max_entry_price, cvd.ts_ms,
-            )
+            if not self.state.lower_reclaim_cvd_follow_through_logged:
+                logger.info(
+                    "LOWER_RECLAIM_CVD_FOLLOW_THROUGH_CONFIRMED | "
+                    "reclaim_anchored_cvd=%.4f div_cvd=%.4f anchor_cvd=%.4f "
+                    "price=%.4f ref_lower=%.4f max_entry_price=%.4f ts_ms=%s",
+                    reclaim_anchored_cvd, div_cvd, anchor_cvd,
+                    price, ref_lower, max_entry_price, cvd.ts_ms,
+                )
+                self.state.lower_reclaim_cvd_follow_through_logged = True
             return True
 
         # CVD not yet followed through, still in shallow zone → keep waiting
@@ -2052,6 +2060,7 @@ class BollCvdReclaimStrategy:
             self.state.upper_reclaim_seen = False
             self.state.upper_reclaim_ts_ms = 0
             self.state.upper_reclaim_confirmed_logged = False
+            self.state.upper_reclaim_cvd_follow_through_logged = False
             self.state.upper_reclaim_cycle_count += 1
             if self.state.upper_reclaim_cycle_count > self.config.entry_max_reclaim_cycles:
                 logger.info(
@@ -2082,13 +2091,15 @@ class BollCvdReclaimStrategy:
         reclaim_anchored_cvd = current_cumulative_cvd - anchor_cvd
 
         if reclaim_anchored_cvd < div_cvd - self.config.entry_reclaim_min_cvd_follow_through:
-            logger.info(
-                "UPPER_RECLAIM_CVD_FOLLOW_THROUGH_CONFIRMED | "
-                "reclaim_anchored_cvd=%.4f div_cvd=%.4f anchor_cvd=%.4f "
-                "price=%.4f ref_upper=%.4f min_entry_price=%.4f ts_ms=%s",
-                reclaim_anchored_cvd, div_cvd, anchor_cvd,
-                price, ref_upper, min_entry_price, cvd.ts_ms,
-            )
+            if not self.state.upper_reclaim_cvd_follow_through_logged:
+                logger.info(
+                    "UPPER_RECLAIM_CVD_FOLLOW_THROUGH_CONFIRMED | "
+                    "reclaim_anchored_cvd=%.4f div_cvd=%.4f anchor_cvd=%.4f "
+                    "price=%.4f ref_upper=%.4f min_entry_price=%.4f ts_ms=%s",
+                    reclaim_anchored_cvd, div_cvd, anchor_cvd,
+                    price, ref_upper, min_entry_price, cvd.ts_ms,
+                )
+                self.state.upper_reclaim_cvd_follow_through_logged = True
             return True
 
         # CVD not yet reversed down, still in shallow zone → keep waiting
@@ -2218,6 +2229,7 @@ class BollCvdReclaimStrategy:
         self.state.lower_reclaim_ts_ms = 0
         self.state.lower_reclaim_cycle_count = 0
         self.state.lower_reclaim_confirmed_logged = False
+        self.state.lower_reclaim_cvd_follow_through_logged = False
         self.state.lower_reclaim_rejected_until_next_outside = False
         # ── Clear Reclaim V2 state ──────────────────────────────────────
         self.state.lower_outside_observed = False
@@ -2261,6 +2273,7 @@ class BollCvdReclaimStrategy:
         self.state.upper_reclaim_ts_ms = 0
         self.state.upper_reclaim_cycle_count = 0
         self.state.upper_reclaim_confirmed_logged = False
+        self.state.upper_reclaim_cvd_follow_through_logged = False
         self.state.upper_reclaim_rejected_until_next_outside = False
         # ── Clear Reclaim V2 state ──────────────────────────────────────
         self.state.upper_outside_observed = False

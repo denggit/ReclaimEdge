@@ -989,3 +989,208 @@ def test_legacy_path_still_uses_confirm_seconds() -> None:
                 cross_positive=True, cvd_increasing=True, no_new_low=True)
     result3 = strat._long_setup(price, cvd3, boll)
     assert result3 is True, "Legacy soft confirm must still work after 1 second"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Tests: follow-through confirmed log once-per-setup latch
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def test_lower_follow_through_confirmed_log_only_once(caplog) -> None:
+    """LOWER_RECLAIM_CVD_FOLLOW_THROUGH_CONFIRMED must print only once per setup."""
+    import logging
+    caplog.set_level(logging.INFO)
+
+    strat = _strategy(
+        entry_reclaim_confirm_seconds=0,
+        entry_reclaim_inside_band=False,
+        entry_reclaim_max_inside_depth_ratio=0.15,
+        entry_reclaim_min_cvd_follow_through=0,
+    )
+    boll = _boll(lower=1900, middle=2000, upper=2100)
+    _setup_lower_armed_divergence(
+        strat, ref_lower=1900, ref_middle=2000,
+        div_extreme_price=1880, div_extreme_cvd=-800_000,
+        anchor_cum_cvd=-1_000_000,
+    )
+
+    # max_entry_price = 1900 + 100 * 0.15 = 1915
+    price = 1908.0  # shallow zone, CVD satisfied
+    # reclaim_anchored_cvd = (1_200_000 - 1_500_000) - (-1_000_000) = 700_000
+    # 700_000 > -800_000 → True
+    cvd = _cvd(
+        ts_ms=20000, price=price,
+        cumulative_buy_volume=1_200_000, cumulative_sell_volume=1_500_000,
+    )
+
+    # First call: log should appear
+    result1 = strat._check_lower_reclaim_v2_follow_through(price, cvd, boll)
+    assert result1 is True
+    assert strat.state.lower_reclaim_cvd_follow_through_logged is True
+
+    # Second call: no additional log
+    result2 = strat._check_lower_reclaim_v2_follow_through(price, cvd, boll)
+    assert result2 is True
+
+    confirmed_count = sum(
+        1 for r in caplog.records
+        if r.levelno == logging.INFO
+        and "LOWER_RECLAIM_CVD_FOLLOW_THROUGH_CONFIRMED" in r.message
+    )
+    assert confirmed_count == 1, (
+        f"Expected 1 LOWER_RECLAIM_CVD_FOLLOW_THROUGH_CONFIRMED, got {confirmed_count}"
+    )
+
+
+def test_upper_follow_through_confirmed_log_only_once(caplog) -> None:
+    """UPPER_RECLAIM_CVD_FOLLOW_THROUGH_CONFIRMED must print only once per setup."""
+    import logging
+    caplog.set_level(logging.INFO)
+
+    strat = _strategy(
+        entry_reclaim_confirm_seconds=0,
+        entry_reclaim_inside_band=False,
+        entry_reclaim_max_inside_depth_ratio=0.15,
+        entry_reclaim_min_cvd_follow_through=0,
+    )
+    boll = _boll(upper=2100, middle=2000, lower=1900)
+    _setup_upper_armed_divergence(
+        strat, ref_upper=2100, ref_middle=2000,
+        div_extreme_price=2120, div_extreme_cvd=800_000,
+        anchor_cum_cvd=1_000_000,
+    )
+
+    # min_entry_price = 2100 - 100 * 0.15 = 2085
+    price = 2092.0  # shallow zone, CVD satisfied
+    # reclaim_anchored_cvd = (1_400_000 - 600_000) - 1_000_000 = -200_000
+    # -200_000 < 800_000 → True
+    cvd = _cvd(
+        ts_ms=20000, price=price,
+        cumulative_buy_volume=1_400_000, cumulative_sell_volume=600_000,
+        buy_ratio=0.4, sell_ratio=0.6,
+    )
+
+    # First call: log should appear
+    result1 = strat._check_upper_reclaim_v2_follow_through(price, cvd, boll)
+    assert result1 is True
+    assert strat.state.upper_reclaim_cvd_follow_through_logged is True
+
+    # Second call: no additional log
+    result2 = strat._check_upper_reclaim_v2_follow_through(price, cvd, boll)
+    assert result2 is True
+
+    confirmed_count = sum(
+        1 for r in caplog.records
+        if r.levelno == logging.INFO
+        and "UPPER_RECLAIM_CVD_FOLLOW_THROUGH_CONFIRMED" in r.message
+    )
+    assert confirmed_count == 1, (
+        f"Expected 1 UPPER_RECLAIM_CVD_FOLLOW_THROUGH_CONFIRMED, got {confirmed_count}"
+    )
+
+
+def test_lower_follow_through_log_again_after_reset(caplog) -> None:
+    """After _reset_lower_armed(), follow-through confirmed log can print again."""
+    import logging
+    caplog.set_level(logging.INFO)
+
+    strat = _strategy(
+        entry_reclaim_confirm_seconds=0,
+        entry_reclaim_inside_band=False,
+        entry_reclaim_max_inside_depth_ratio=0.15,
+        entry_reclaim_min_cvd_follow_through=0,
+    )
+    boll = _boll(lower=1900, middle=2000, upper=2100)
+    _setup_lower_armed_divergence(
+        strat, ref_lower=1900, ref_middle=2000,
+        div_extreme_price=1880, div_extreme_cvd=-800_000,
+        anchor_cum_cvd=-1_000_000,
+    )
+
+    price = 1908.0
+    cvd = _cvd(
+        ts_ms=20000, price=price,
+        cumulative_buy_volume=1_200_000, cumulative_sell_volume=1_500_000,
+    )
+
+    # First cycle: log prints once
+    strat._check_lower_reclaim_v2_follow_through(price, cvd, boll)
+    assert strat.state.lower_reclaim_cvd_follow_through_logged is True
+
+    # Reset
+    strat._reset_lower_armed()
+    assert strat.state.lower_reclaim_cvd_follow_through_logged is False
+
+    # Re-setup armed divergence
+    _setup_lower_armed_divergence(
+        strat, ref_lower=1900, ref_middle=2000,
+        div_extreme_price=1880, div_extreme_cvd=-800_000,
+        anchor_cum_cvd=-1_000_000,
+    )
+
+    # Second cycle: log can print again
+    strat._check_lower_reclaim_v2_follow_through(price, cvd, boll)
+    assert strat.state.lower_reclaim_cvd_follow_through_logged is True
+
+    confirmed_count = sum(
+        1 for r in caplog.records
+        if r.levelno == logging.INFO
+        and "LOWER_RECLAIM_CVD_FOLLOW_THROUGH_CONFIRMED" in r.message
+    )
+    assert confirmed_count == 2, (
+        f"Expected 2 LOWER_RECLAIM_CVD_FOLLOW_THROUGH_CONFIRMED after reset, got {confirmed_count}"
+    )
+
+
+def test_upper_follow_through_log_again_after_reset(caplog) -> None:
+    """After _reset_upper_armed(), follow-through confirmed log can print again."""
+    import logging
+    caplog.set_level(logging.INFO)
+
+    strat = _strategy(
+        entry_reclaim_confirm_seconds=0,
+        entry_reclaim_inside_band=False,
+        entry_reclaim_max_inside_depth_ratio=0.15,
+        entry_reclaim_min_cvd_follow_through=0,
+    )
+    boll = _boll(upper=2100, middle=2000, lower=1900)
+    _setup_upper_armed_divergence(
+        strat, ref_upper=2100, ref_middle=2000,
+        div_extreme_price=2120, div_extreme_cvd=800_000,
+        anchor_cum_cvd=1_000_000,
+    )
+
+    price = 2092.0
+    cvd = _cvd(
+        ts_ms=20000, price=price,
+        cumulative_buy_volume=1_400_000, cumulative_sell_volume=600_000,
+        buy_ratio=0.4, sell_ratio=0.6,
+    )
+
+    # First cycle: log prints once
+    strat._check_upper_reclaim_v2_follow_through(price, cvd, boll)
+    assert strat.state.upper_reclaim_cvd_follow_through_logged is True
+
+    # Reset
+    strat._reset_upper_armed()
+    assert strat.state.upper_reclaim_cvd_follow_through_logged is False
+
+    # Re-setup armed divergence
+    _setup_upper_armed_divergence(
+        strat, ref_upper=2100, ref_middle=2000,
+        div_extreme_price=2120, div_extreme_cvd=800_000,
+        anchor_cum_cvd=1_000_000,
+    )
+
+    # Second cycle: log can print again
+    strat._check_upper_reclaim_v2_follow_through(price, cvd, boll)
+    assert strat.state.upper_reclaim_cvd_follow_through_logged is True
+
+    confirmed_count = sum(
+        1 for r in caplog.records
+        if r.levelno == logging.INFO
+        and "UPPER_RECLAIM_CVD_FOLLOW_THROUGH_CONFIRMED" in r.message
+    )
+    assert confirmed_count == 2, (
+        f"Expected 2 UPPER_RECLAIM_CVD_FOLLOW_THROUGH_CONFIRMED after reset, got {confirmed_count}"
+    )
