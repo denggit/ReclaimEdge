@@ -598,6 +598,8 @@ class StrategyPositionState:
 
     lower_reclaim_cycle_count: int = 0
     upper_reclaim_cycle_count: int = 0
+    lower_reclaim_confirmed_logged: bool = False
+    upper_reclaim_confirmed_logged: bool = False
 
     # ── Post-Entry SL Cooldown state ────────────────────────────────
     post_entry_sl_cooldown_until_ts_ms: int = 0
@@ -796,6 +798,14 @@ class BollCvdReclaimStrategy:
         self.regime_router = RegimeRouter()
         self.trend_assessor: TrendBreakoutAssessor | None = None
         self.trend_metrics_tracker: TrendBreakoutMetricsTracker | None = None
+        self._last_throttled_log_ts_ms: dict[str, int] = {}
+
+    def _log_info_throttled(self, key: str, interval_ms: int, ts_ms: int, message: str, *args) -> None:
+        """Log at INFO level at most once per interval_ms for each unique key."""
+        last_ts = self._last_throttled_log_ts_ms.get(key, 0)
+        if ts_ms - last_ts >= interval_ms:
+            self._last_throttled_log_ts_ms[key] = ts_ms
+            logger.info(message, *args)
 
     def on_tick(self, price: float, ts_ms: int, boll: BollSnapshot, cvd: CvdSnapshot) -> list[TradeIntent]:
         intents: list[TradeIntent] = []
@@ -1080,6 +1090,7 @@ class BollCvdReclaimStrategy:
                 return
             self.state.lower_reclaim_seen = False
             self.state.lower_reclaim_ts_ms = 0
+            self.state.lower_reclaim_confirmed_logged = False
             self.state.lower_extreme_price = price
             self.state.lower_extreme_ts_ms = ts_ms
             logger.info(
@@ -1091,6 +1102,7 @@ class BollCvdReclaimStrategy:
         else:
             # Minor breach → soft reset timer only
             self.state.lower_reclaim_ts_ms = 0
+            self.state.lower_reclaim_confirmed_logged = False
             logger.info(
                 "LOWER_RECLAIM_CONFIRM_RESET | reason=minor_outside_noise price=%.4f extreme=%.4f "
                 "lower=%.4f ts_ms=%s",
@@ -1113,6 +1125,7 @@ class BollCvdReclaimStrategy:
                 return
             self.state.upper_reclaim_seen = False
             self.state.upper_reclaim_ts_ms = 0
+            self.state.upper_reclaim_confirmed_logged = False
             self.state.upper_extreme_price = price
             self.state.upper_extreme_ts_ms = ts_ms
             logger.info(
@@ -1124,6 +1137,7 @@ class BollCvdReclaimStrategy:
         else:
             # Minor breach → soft reset timer only
             self.state.upper_reclaim_ts_ms = 0
+            self.state.upper_reclaim_confirmed_logged = False
             logger.info(
                 "UPPER_RECLAIM_CONFIRM_RESET | reason=minor_outside_noise price=%.4f extreme=%.4f "
                 "upper=%.4f ts_ms=%s",
@@ -1380,6 +1394,7 @@ class BollCvdReclaimStrategy:
         self.state.lower_reclaim_seen = False
         self.state.lower_reclaim_ts_ms = 0
         self.state.lower_reclaim_cycle_count = 0
+        self.state.lower_reclaim_confirmed_logged = False
 
     def _reset_upper_armed(self) -> None:
         self.state.upper_armed = False
@@ -1397,6 +1412,7 @@ class BollCvdReclaimStrategy:
         self.state.upper_reclaim_seen = False
         self.state.upper_reclaim_ts_ms = 0
         self.state.upper_reclaim_cycle_count = 0
+        self.state.upper_reclaim_confirmed_logged = False
 
     def _long_setup(self, price: float, cvd: CvdSnapshot, boll: BollSnapshot) -> bool:
         if not self.state.lower_armed or self.state.lower_extreme_price is None:
@@ -1419,6 +1435,7 @@ class BollCvdReclaimStrategy:
                     # (the _update_armed_state handles new extreme vs minor breach)
                     # Here we just reset reclaim_ts_ms so the timer restarts
                     self.state.lower_reclaim_ts_ms = 0
+                    self.state.lower_reclaim_confirmed_logged = False
                     return False
 
             # Timer was reset → wait for price to come back inside, then restart
@@ -1463,10 +1480,12 @@ class BollCvdReclaimStrategy:
             if cvd.ts_ms - self.state.lower_reclaim_ts_ms < confirm_ms:
                 return False
 
-            logger.info(
-                "LOWER_RECLAIM_CONFIRMED | reclaim_ts_ms=%s ts_ms=%s elapsed_ms=%s",
-                self.state.lower_reclaim_ts_ms, cvd.ts_ms, cvd.ts_ms - self.state.lower_reclaim_ts_ms,
-            )
+            if not self.state.lower_reclaim_confirmed_logged:
+                logger.info(
+                    "LOWER_RECLAIM_CONFIRMED | reclaim_ts_ms=%s ts_ms=%s elapsed_ms=%s",
+                    self.state.lower_reclaim_ts_ms, cvd.ts_ms, cvd.ts_ms - self.state.lower_reclaim_ts_ms,
+                )
+                self.state.lower_reclaim_confirmed_logged = True
 
         # ── Inside-band reclaim check ───────────────────────────────────
         if self.config.entry_reclaim_inside_band and price < boll.lower * (1 + self.config.entry_reclaim_buffer_pct):
@@ -1499,6 +1518,7 @@ class BollCvdReclaimStrategy:
                 if price > boll.upper * (1 + tolerance):
                     # Outside band beyond tolerance → soft reset timer
                     self.state.upper_reclaim_ts_ms = 0
+                    self.state.upper_reclaim_confirmed_logged = False
                     return False
 
             # Timer was reset → wait for price to come back inside, then restart
@@ -1543,10 +1563,12 @@ class BollCvdReclaimStrategy:
             if cvd.ts_ms - self.state.upper_reclaim_ts_ms < confirm_ms:
                 return False
 
-            logger.info(
-                "UPPER_RECLAIM_CONFIRMED | reclaim_ts_ms=%s ts_ms=%s elapsed_ms=%s",
-                self.state.upper_reclaim_ts_ms, cvd.ts_ms, cvd.ts_ms - self.state.upper_reclaim_ts_ms,
-            )
+            if not self.state.upper_reclaim_confirmed_logged:
+                logger.info(
+                    "UPPER_RECLAIM_CONFIRMED | reclaim_ts_ms=%s ts_ms=%s elapsed_ms=%s",
+                    self.state.upper_reclaim_ts_ms, cvd.ts_ms, cvd.ts_ms - self.state.upper_reclaim_ts_ms,
+                )
+                self.state.upper_reclaim_confirmed_logged = True
 
         # ── Inside-band reclaim check ───────────────────────────────────
         if self.config.entry_reclaim_inside_band and price > boll.upper * (1 - self.config.entry_reclaim_buffer_pct):
@@ -1852,7 +1874,10 @@ class BollCvdReclaimStrategy:
         )
 
         if metrics_missing and current_direction is not None:
-            logger.info(
+            self._log_info_throttled(
+                f"TREND_METRICS_MISSING:{current_direction}:episode_volume_cvd_not_accumulated",
+                30_000,
+                ts_ms,
                 "TREND_METRICS_MISSING | reason=episode_volume_cvd_not_accumulated "
                 "direction=%s price=%.4f ts_ms=%s",
                 current_direction, price, ts_ms,

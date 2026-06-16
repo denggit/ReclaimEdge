@@ -334,11 +334,10 @@ class Trader:
         entry_sl_order_id: str | None = None
         entry_sl_price = getattr(intent, "entry_protective_sl_price", None)
         if entry_sl_price is None:
-            ok, exit_message = await self.market_exit_remaining_position_with_retries(
+            logger.error(
+                "ENTRY_PROTECTIVE_SL_MISSING | side=%s order_id=%s manual_intervention_required=true",
                 intent.side,
-                retry_count=int(os.getenv("ENTRY_SL_FAIL_MARKET_EXIT_RETRY_COUNT", "3")),
-                context="entry_missing_protective_sl",
-                retry_interval_seconds=1.0,
+                order_id,
             )
             return LiveTradeResult(
                 ok=False,
@@ -347,7 +346,7 @@ class Trader:
                 tp_order_id=None,
                 contracts=self.decimal_to_str(contracts),
                 tp_price=self.price_to_str(intent.tp_price),
-                message=f"entry_filled_but_missing_entry_protective_sl; market_exit_ok={ok}; {exit_message}",
+                message="entry_filled_but_missing_entry_protective_sl; manual_intervention_required=true",
                 entry_filled=True,
                 tp_ok=False,
                 protective_sl_ok=False,
@@ -363,16 +362,10 @@ class Trader:
             )
         except Exception as exc:
             logger.exception(
-                "ENTRY_PROTECTIVE_SL_EXCEPTION | side=%s order_id=%s stop_price=%s",
+                "ENTRY_PROTECTIVE_SL_EXCEPTION | side=%s order_id=%s stop_price=%s manual_intervention_required=true",
                 intent.side,
                 order_id,
                 entry_sl_price,
-            )
-            ok, exit_message = await self.market_exit_remaining_position_with_retries(
-                intent.side,
-                retry_count=int(os.getenv("ENTRY_SL_FAIL_MARKET_EXIT_RETRY_COUNT", "3")),
-                context="entry_protective_sl_exception",
-                retry_interval_seconds=1.0,
             )
             return LiveTradeResult(
                 ok=False,
@@ -381,17 +374,22 @@ class Trader:
                 tp_order_id=None,
                 contracts=self.decimal_to_str(contracts),
                 tp_price=self.price_to_str(intent.tp_price),
-                message=f"entry_filled_but_entry_protective_sl_exception: {exc}; market_exit_ok={ok}; {exit_message}",
+                message=(
+                    "entry_filled_but_entry_protective_sl_exception;"
+                    f" manual_intervention_required=true; error={exc}"
+                ),
                 entry_filled=True,
                 tp_ok=False,
                 protective_sl_ok=False,
             )
         if not sl_ok or not sl_id:
-            ok, exit_message = await self.market_exit_remaining_position_with_retries(
+            logger.error(
+                "ENTRY_PROTECTIVE_SL_FAILED | side=%s order_id=%s stop_price=%s sl_id=%s message=%s manual_intervention_required=true",
                 intent.side,
-                retry_count=int(os.getenv("ENTRY_SL_FAIL_MARKET_EXIT_RETRY_COUNT", "3")),
-                context="entry_protective_sl_failed",
-                retry_interval_seconds=1.0,
+                order_id,
+                entry_sl_price,
+                sl_id or "",
+                sl_message,
             )
             return LiveTradeResult(
                 ok=False,
@@ -400,7 +398,10 @@ class Trader:
                 tp_order_id=None,
                 contracts=self.decimal_to_str(contracts),
                 tp_price=self.price_to_str(intent.tp_price),
-                message=f"entry_filled_but_entry_protective_sl_failed: {sl_message}; market_exit_ok={ok}; {exit_message}",
+                message=(
+                    "entry_filled_but_entry_protective_sl_failed;"
+                    f" manual_intervention_required=true; {sl_message}"
+                ),
                 entry_filled=True,
                 tp_ok=False,
                 protective_sl_order_id=sl_id,

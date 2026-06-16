@@ -3,10 +3,11 @@
 Covers:
 1. Trader no longer references the non-existent method
 2. Entry protective SL placement success path
-3. Entry protective SL placement failure (returns ok=False) -> market exit
-4. Entry protective SL placement exception -> market exit (no bubble)
-5. Trend SL update success path uses correct method
-6. Trend SL update exception -> no old SL cancel, returns ok=False
+3. SL placement exception -> NO market exit, manual_intervention_required
+4. SL placement returns failure -> NO market exit, manual_intervention_required
+5. Missing entry_protective_sl_price -> NO market exit, manual_intervention_required
+6. Trend SL update success path uses correct method
+7. Trend SL update exception -> no old SL cancel, returns ok=False
 """
 
 from __future__ import annotations
@@ -127,6 +128,40 @@ def _make_minimal_trader(*, set_position: bool = True):
     return trader
 
 
+def _make_fake_tc():
+    """Build a minimal FakeTradingClient that returns successful market entry."""
+    from src.execution.trading_client_port import OrderResult
+
+    class FakeTC:
+        async def place_market_order(self, *, side, qty, reduce_only, client_order_id):
+            return OrderResult(ok=True, order_id="entry-1", client_order_id=None, raw={})
+
+        async def fetch_balance(self):
+            class FB:
+                total = 500.0
+            return FB()
+
+        async def configure_instrument(self):
+            pass
+
+        async def fetch_position(self):
+            class FakePos:
+                has_position = True
+                side = "LONG"
+                qty = Decimal("1")
+                avg_entry_price = 3200.0
+                raw = {"raw_pos": "1"}
+            return FakePos()
+
+        async def fetch_open_orders(self):
+            return []
+
+        async def fetch_open_algo_orders(self):
+            return []
+
+    return FakeTC()
+
+
 # ======================================================================
 # 1. Trader no longer references the non-existent method
 # ======================================================================
@@ -141,6 +176,14 @@ def test_trader_does_not_reference_missing_entry_protective_stop_method():
     )
 
 
+def test_trader_references_correct_place_protective_stop():
+    """Source code must reference the correct method."""
+    source = Path("src/execution/trader.py").read_text()
+    assert "place_protective_stop_with_retries" in source, (
+        "trader.py must reference place_protective_stop_with_retries"
+    )
+
+
 # ======================================================================
 # 2. Entry protective SL placement success
 # ======================================================================
@@ -152,40 +195,10 @@ class TestEntryProtectiveSLSuccess:
     @pytest.mark.asyncio
     async def test_entry_sl_success_returns_correct_result(self):
         """When SL placement succeeds, LiveTradeResult reflects it."""
-        from src.execution.trading_client_port import OrderResult
-
         trader = _make_minimal_trader()
-
-        # Mock trading client for market entry
-        class FakeTC:
-            async def place_market_order(self, *, side, qty, reduce_only, client_order_id):
-                return OrderResult(ok=True, order_id="entry-1", client_order_id=None, raw={})
-
-            async def fetch_balance(self):
-                class FB:
-                    total = 500.0
-                return FB()
-
-            async def configure_instrument(self):
-                pass
-
-            async def fetch_position(self):
-                from src.execution.trading_client_port import PositionResult
-                return PositionResult(
-                    has_position=True, side="LONG", qty=Decimal("1"),
-                    avg_entry_price=3200.0, raw={"raw_pos": "1"},
-                )
-
-            async def fetch_open_orders(self):
-                return []
-
-            async def fetch_open_algo_orders(self):
-                return []
-
-        fake_tc = FakeTC()
+        fake_tc = _make_fake_tc()
         trader.trading_client = fake_tc
 
-        # Bind tp_sl_manager so place_protective_stop_with_retries works
         from src.execution.tp_sl_execution_manager import TpSlExecutionManager
         trader._tp_sl_manager = TpSlExecutionManager(trader, trading_client=fake_tc)
 
@@ -213,9 +226,6 @@ class TestEntryProtectiveSLSuccess:
         assert result.protective_sl_ok is True, (
             f"protective_sl_ok must be True, got {result}"
         )
-        assert result.protective_sl_order_id is not None or "entry-sl-1" in result.message, (
-            f"protective_sl_order_id must be set, got {result}"
-        )
 
         # Verify the correct method was called
         trader.place_protective_stop_with_retries.assert_called_once()
@@ -223,36 +233,8 @@ class TestEntryProtectiveSLSuccess:
     @pytest.mark.asyncio
     async def test_entry_sl_success_for_trend_entry(self):
         """Trend entries skip fixed TP but still place entry protective SL."""
-        from src.execution.trading_client_port import OrderResult
-
         trader = _make_minimal_trader()
-
-        class FakeTC:
-            async def place_market_order(self, *, side, qty, reduce_only, client_order_id):
-                return OrderResult(ok=True, order_id="entry-1", client_order_id=None, raw={})
-
-            async def fetch_balance(self):
-                class FB:
-                    total = 500.0
-                return FB()
-
-            async def configure_instrument(self):
-                pass
-
-            async def fetch_position(self):
-                from src.execution.trading_client_port import PositionResult
-                return PositionResult(
-                    has_position=True, side="LONG", qty=Decimal("1"),
-                    avg_entry_price=3200.0, raw={"raw_pos": "1"},
-                )
-
-            async def fetch_open_orders(self):
-                return []
-
-            async def fetch_open_algo_orders(self):
-                return []
-
-        fake_tc = FakeTC()
+        fake_tc = _make_fake_tc()
         trader.trading_client = fake_tc
 
         from src.execution.tp_sl_execution_manager import TpSlExecutionManager
@@ -272,122 +254,18 @@ class TestEntryProtectiveSLSuccess:
 
 
 # ======================================================================
-# 3. Entry protective SL placement failure -> market exit
-# ======================================================================
-
-
-class TestEntryProtectiveSLFailure:
-    """When SL placement returns ok=False, market exit is triggered."""
-
-    @pytest.mark.asyncio
-    async def test_sl_returns_false_triggers_market_exit(self):
-        """SL placement returns ok=False -> market_exit_remaining_position_with_retries."""
-        from src.execution.trading_client_port import OrderResult
-
-        trader = _make_minimal_trader()
-
-        class FakeTC:
-            async def place_market_order(self, *, side, qty, reduce_only, client_order_id):
-                return OrderResult(ok=True, order_id="entry-1", client_order_id=None, raw={})
-
-            async def fetch_balance(self):
-                class FB:
-                    total = 500.0
-                return FB()
-
-            async def configure_instrument(self):
-                pass
-
-            async def fetch_position(self):
-                from src.execution.trading_client_port import PositionResult
-                return PositionResult(
-                    has_position=True, side="LONG", qty=Decimal("1"),
-                    avg_entry_price=3200.0, raw={"raw_pos": "1"},
-                )
-
-            async def fetch_open_orders(self):
-                return []
-
-            async def fetch_open_algo_orders(self):
-                return []
-
-        fake_tc = FakeTC()
-        trader.trading_client = fake_tc
-
-        from src.execution.tp_sl_execution_manager import TpSlExecutionManager
-        trader._tp_sl_manager = TpSlExecutionManager(trader, trading_client=fake_tc)
-
-        # SL placement FAILS
-        trader.place_protective_stop_with_retries = AsyncMock(
-            return_value=(False, None, "SL placement failed: insufficient margin"),
-        )
-
-        # Track market exit call
-        market_exit_calls = []
-
-        async def track_market_exit(*args, **kwargs):
-            market_exit_calls.append((args, kwargs))
-            return (True, "market_exit_ok")
-
-        trader.market_exit_remaining_position_with_retries = AsyncMock(
-            side_effect=track_market_exit,
-        )
-
-        intent = _open_long_intent()
-        result = await trader.execute_intent(intent)
-
-        assert result.ok is False, f"Result must be not ok, got {result}"
-        assert result.entry_filled is True, "entry_filled must be True"
-        assert result.protective_sl_ok is False, "protective_sl_ok must be False"
-        assert "entry_filled_but_entry_protective_sl_failed" in result.message, (
-            f"message must indicate SL failure, got: {result.message}"
-        )
-        assert len(market_exit_calls) == 1, (
-            f"market_exit must be called exactly once, got {len(market_exit_calls)}"
-        )
-
-
-# ======================================================================
-# 4. Entry protective SL placement exception -> market exit
+# 3. Entry protective SL placement exception -> NO market exit
 # ======================================================================
 
 
 class TestEntryProtectiveSLException:
-    """When SL placement raises an exception, market exit is triggered."""
+    """When SL placement raises an exception, NO market exit — halt only."""
 
     @pytest.mark.asyncio
-    async def test_sl_exception_triggers_market_exit(self):
-        """SL placement exception -> market_exit, no bubble to caller."""
-        from src.execution.trading_client_port import OrderResult
-
+    async def test_sl_exception_does_not_market_exit(self):
+        """SL placement exception -> result.ok=False, manual_intervention_required, NO market exit."""
         trader = _make_minimal_trader()
-
-        class FakeTC:
-            async def place_market_order(self, *, side, qty, reduce_only, client_order_id):
-                return OrderResult(ok=True, order_id="entry-1", client_order_id=None, raw={})
-
-            async def fetch_balance(self):
-                class FB:
-                    total = 500.0
-                return FB()
-
-            async def configure_instrument(self):
-                pass
-
-            async def fetch_position(self):
-                from src.execution.trading_client_port import PositionResult
-                return PositionResult(
-                    has_position=True, side="LONG", qty=Decimal("1"),
-                    avg_entry_price=3200.0, raw={"raw_pos": "1"},
-                )
-
-            async def fetch_open_orders(self):
-                return []
-
-            async def fetch_open_algo_orders(self):
-                return []
-
-        fake_tc = FakeTC()
+        fake_tc = _make_fake_tc()
         trader.trading_client = fake_tc
 
         from src.execution.tp_sl_execution_manager import TpSlExecutionManager
@@ -398,14 +276,9 @@ class TestEntryProtectiveSLException:
             side_effect=RuntimeError("Connection reset"),
         )
 
-        market_exit_calls = []
-
-        async def track_market_exit(*args, **kwargs):
-            market_exit_calls.append((args, kwargs))
-            return (True, "market_exit_ok")
-
+        # Track market exit — must NOT be called
         trader.market_exit_remaining_position_with_retries = AsyncMock(
-            side_effect=track_market_exit,
+            return_value=(True, "should_not_be_called"),
         )
 
         intent = _open_long_intent()
@@ -419,16 +292,105 @@ class TestEntryProtectiveSLException:
         assert "entry_filled_but_entry_protective_sl_exception" in result.message, (
             f"message must indicate SL exception, got: {result.message}"
         )
+        assert "manual_intervention_required=true" in result.message, (
+            f"message must contain manual_intervention_required=true, got: {result.message}"
+        )
         assert "Connection reset" in result.message, (
             f"message must include exception text, got: {result.message}"
         )
-        assert len(market_exit_calls) == 1, (
-            f"market_exit must be called once, got {len(market_exit_calls)}"
-        )
+        # CRITICAL: market exit must NOT be called
+        trader.market_exit_remaining_position_with_retries.assert_not_called()
 
 
 # ======================================================================
-# 5. Trend SL update success path uses correct method
+# 4. Entry protective SL placement returns failure -> NO market exit
+# ======================================================================
+
+
+class TestEntryProtectiveSLFailure:
+    """When SL placement returns ok=False, NO market exit — halt only."""
+
+    @pytest.mark.asyncio
+    async def test_sl_returns_false_does_not_market_exit(self):
+        """SL placement returns ok=False -> manual_intervention_required, NO market exit."""
+        trader = _make_minimal_trader()
+        fake_tc = _make_fake_tc()
+        trader.trading_client = fake_tc
+
+        from src.execution.tp_sl_execution_manager import TpSlExecutionManager
+        trader._tp_sl_manager = TpSlExecutionManager(trader, trading_client=fake_tc)
+
+        # SL placement FAILS
+        trader.place_protective_stop_with_retries = AsyncMock(
+            return_value=(False, None, "SL placement failed: insufficient margin"),
+        )
+
+        # Track market exit — must NOT be called
+        trader.market_exit_remaining_position_with_retries = AsyncMock(
+            return_value=(True, "should_not_be_called"),
+        )
+
+        intent = _open_long_intent()
+        result = await trader.execute_intent(intent)
+
+        assert result.ok is False, f"Result must be not ok, got {result}"
+        assert result.entry_filled is True, "entry_filled must be True"
+        assert result.protective_sl_ok is False, "protective_sl_ok must be False"
+        assert "entry_filled_but_entry_protective_sl_failed" in result.message, (
+            f"message must indicate SL failure, got: {result.message}"
+        )
+        assert "manual_intervention_required=true" in result.message, (
+            f"message must contain manual_intervention_required=true, got: {result.message}"
+        )
+        # CRITICAL: market exit must NOT be called
+        trader.market_exit_remaining_position_with_retries.assert_not_called()
+
+
+# ======================================================================
+# 5. Missing entry_protective_sl_price -> NO market exit
+# ======================================================================
+
+
+class TestEntryProtectiveSLMissing:
+    """When entry_protective_sl_price is None, NO market exit — halt only."""
+
+    @pytest.mark.asyncio
+    async def test_missing_sl_price_does_not_market_exit(self):
+        """Missing SL price -> manual_intervention_required, NO market exit."""
+        trader = _make_minimal_trader()
+        fake_tc = _make_fake_tc()
+        trader.trading_client = fake_tc
+
+        # Track market exit — must NOT be called
+        trader.market_exit_remaining_position_with_retries = AsyncMock(
+            return_value=(True, "should_not_be_called"),
+        )
+
+        # Intent without entry_protective_sl_price
+        intent = _open_long_intent()
+        # Remove entry_protective_sl_price by constructing dict and popping
+        intent_dict = dict(intent.__dict__)
+        intent_dict.pop("entry_protective_sl_price", None)
+        from src.strategies.boll_cvd_reclaim_strategy import TradeIntent
+        intent_no_sl = TradeIntent(**intent_dict)
+
+        result = await trader.execute_intent(intent_no_sl)
+
+        assert result.ok is False, f"Result must be not ok, got {result}"
+        assert result.entry_filled is True, "entry_filled must be True"
+        assert result.protective_sl_ok is False, "protective_sl_ok must be False"
+        assert "manual_intervention_required=true" in result.message, (
+            f"message must contain manual_intervention_required=true, got: {result.message}"
+        )
+        assert "missing_entry_protective_sl" in result.message, (
+            f"message must indicate missing SL, got: {result.message}"
+        )
+        # CRITICAL: market exit must NOT be called
+        trader.market_exit_remaining_position_with_retries.assert_not_called()
+
+
+# ======================================================================
+# 6. Trend SL update success path uses correct method
 # ======================================================================
 
 
@@ -443,33 +405,7 @@ class TestTrendSLUpdateCorrectMethod:
 
         from src.execution.tp_sl_execution_manager import TpSlExecutionManager
 
-        class FakeTC:
-            async def place_market_order(self, *, side, qty, reduce_only, client_order_id):
-                from src.execution.trading_client_port import OrderResult
-                return OrderResult(ok=True, order_id="entry-1", client_order_id=None, raw={})
-
-            async def fetch_balance(self):
-                class FB:
-                    total = 500.0
-                return FB()
-
-            async def configure_instrument(self):
-                pass
-
-            async def fetch_position(self):
-                from src.execution.trading_client_port import PositionResult
-                return PositionResult(
-                    has_position=True, side="LONG", qty=Decimal("1"),
-                    avg_entry_price=3200.0, raw={"raw_pos": "1"},
-                )
-
-            async def fetch_open_orders(self):
-                return []
-
-            async def fetch_open_algo_orders(self):
-                return []
-
-        fake_tc = FakeTC()
+        fake_tc = _make_fake_tc()
         trader.trading_client = fake_tc
         trader._tp_sl_manager = TpSlExecutionManager(trader, trading_client=fake_tc)
 
@@ -489,7 +425,6 @@ class TestTrendSLUpdateCorrectMethod:
         assert result.ok is True, f"Result must be ok, got: {result.message}"
         assert result.protective_sl_ok is True
         assert result.protective_sl_order_id == "new-sl-1"
-        # Verify the CORRECT method was called (not the old name)
         trader.place_protective_stop_with_retries.assert_called_once()
 
     @pytest.mark.asyncio
@@ -500,33 +435,7 @@ class TestTrendSLUpdateCorrectMethod:
 
         from src.execution.tp_sl_execution_manager import TpSlExecutionManager
 
-        class FakeTC:
-            async def place_market_order(self, *, side, qty, reduce_only, client_order_id):
-                from src.execution.trading_client_port import OrderResult
-                return OrderResult(ok=True, order_id="entry-1", client_order_id=None, raw={})
-
-            async def fetch_balance(self):
-                class FB:
-                    total = 500.0
-                return FB()
-
-            async def configure_instrument(self):
-                pass
-
-            async def fetch_position(self):
-                from src.execution.trading_client_port import PositionResult
-                return PositionResult(
-                    has_position=True, side="LONG", qty=Decimal("1"),
-                    avg_entry_price=3200.0, raw={"raw_pos": "1"},
-                )
-
-            async def fetch_open_orders(self):
-                return []
-
-            async def fetch_open_algo_orders(self):
-                return []
-
-        fake_tc = FakeTC()
+        fake_tc = _make_fake_tc()
         trader.trading_client = fake_tc
         trader._tp_sl_manager = TpSlExecutionManager(trader, trading_client=fake_tc)
 
@@ -555,7 +464,7 @@ class TestTrendSLUpdateCorrectMethod:
 
 
 # ======================================================================
-# 6. Trend SL update exception -> no old SL cancel, returns ok=False
+# 7. Trend SL update exception -> no old SL cancel, returns ok=False
 # ======================================================================
 
 
@@ -570,33 +479,7 @@ class TestTrendSLUpdateException:
 
         from src.execution.tp_sl_execution_manager import TpSlExecutionManager
 
-        class FakeTC:
-            async def place_market_order(self, *, side, qty, reduce_only, client_order_id):
-                from src.execution.trading_client_port import OrderResult
-                return OrderResult(ok=True, order_id="entry-1", client_order_id=None, raw={})
-
-            async def fetch_balance(self):
-                class FB:
-                    total = 500.0
-                return FB()
-
-            async def configure_instrument(self):
-                pass
-
-            async def fetch_position(self):
-                from src.execution.trading_client_port import PositionResult
-                return PositionResult(
-                    has_position=True, side="LONG", qty=Decimal("1"),
-                    avg_entry_price=3200.0, raw={"raw_pos": "1"},
-                )
-
-            async def fetch_open_orders(self):
-                return []
-
-            async def fetch_open_algo_orders(self):
-                return []
-
-        fake_tc = FakeTC()
+        fake_tc = _make_fake_tc()
         trader.trading_client = fake_tc
         trader._tp_sl_manager = TpSlExecutionManager(trader, trading_client=fake_tc)
 

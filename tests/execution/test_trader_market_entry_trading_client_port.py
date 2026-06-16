@@ -346,9 +346,9 @@ class TestEntryMissingProtectiveSlSafety:
             entry_protective_sl_price=None,  # MISSING — triggers safety check
         )
 
-        # Mock market exit to return ok
+        # Mock market exit to track — must NOT be called under new policy
         trader.market_exit_remaining_position_with_retries = AsyncMock(
-            return_value=(True, "market_exit_order_id=exit-safety")
+            return_value=(True, "should_not_be_called")
         )
 
         result = await trader.execute_intent(intent)
@@ -358,10 +358,9 @@ class TestEntryMissingProtectiveSlSafety:
         assert result.tp_ok is False
         assert result.protective_sl_ok is False
         assert "entry_filled_but_missing_entry_protective_sl" in str(result.message)
-        # Must have attempted market exit
-        trader.market_exit_remaining_position_with_retries.assert_called()
-        call_kwargs = trader.market_exit_remaining_position_with_retries.call_args.kwargs
-        assert call_kwargs["context"] == "entry_missing_protective_sl"
+        assert "manual_intervention_required=true" in str(result.message)
+        # NO automatic market exit — system halts for manual intervention
+        trader.market_exit_remaining_position_with_retries.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_entry_protective_sl_failed_triggers_market_exit(self) -> None:
@@ -373,7 +372,7 @@ class TestEntryMissingProtectiveSlSafety:
             return_value=(False, None, "sl_placement_failed")
         )
         trader.market_exit_remaining_position_with_retries = AsyncMock(
-            return_value=(True, "market_exit_order_id=exit-sl-fail")
+            return_value=(True, "should_not_be_called")
         )
 
         # Intent with entry SL price (so it passes the missing check)
@@ -385,9 +384,9 @@ class TestEntryMissingProtectiveSlSafety:
         assert result.entry_filled is True
         assert result.protective_sl_ok is False
         assert "entry_filled_but_entry_protective_sl_failed" in str(result.message)
-        trader.market_exit_remaining_position_with_retries.assert_called()
-        call_kwargs = trader.market_exit_remaining_position_with_retries.call_args.kwargs
-        assert call_kwargs["context"] == "entry_protective_sl_failed"
+        assert "manual_intervention_required=true" in str(result.message)
+        # NO automatic market exit — system halts for manual intervention
+        trader.market_exit_remaining_position_with_retries.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_entry_sl_ok_but_tp_failed_preserves_sl_state(self) -> None:
