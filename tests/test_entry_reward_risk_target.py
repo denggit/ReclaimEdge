@@ -103,6 +103,9 @@ def _make_strategy(*, entry_rr_target: str = "STRUCTURE_MIDDLE",
         min_outside_pct=min_outside_pct,
         order_cooldown_seconds=0,
         entry_reclaim_buffer_pct=0.0,
+        entry_cvd_divergence_enabled=False,
+        entry_cvd_absorption_enabled=False,
+        entry_reclaim_confirm_seconds=0,
         **kwargs,
     )
     sizer = SimplePositionSizer(
@@ -232,6 +235,9 @@ def test_structure_middle_passes_but_real_tp_is_outer() -> None:
         min_outside_pct=0.001,
         order_cooldown_seconds=0,
         entry_reclaim_buffer_pct=0.0,
+        entry_cvd_divergence_enabled=False,
+        entry_cvd_absorption_enabled=False,
+        entry_reclaim_confirm_seconds=0,
     )
 
     # Arm.

@@ -149,6 +149,10 @@ async def prepare_account_sync_flat_settlement_phase(
 
     async with state_lock:
         result_flat_previous_halt_reason = execution_state.halt_reason if execution_state.trading_halted else None
+        # ── Preserve post-entry SL cooldown across flat state reset ──────
+        saved_cooldown_until = int(getattr(strategy.state, "post_entry_sl_cooldown_until_ts_ms", 0) or 0)
+        saved_cooldown_side = getattr(strategy.state, "post_entry_sl_cooldown_side", None)
+        saved_cooldown_reason = getattr(strategy.state, "post_entry_sl_cooldown_reason", None)
         account_snapshot.position = position
         account_snapshot.cash = settled.cash
         account_snapshot.equity = settled.equity
@@ -158,6 +162,11 @@ async def prepare_account_sync_flat_settlement_phase(
         trader.account_equity_usdt = settled.equity
         sizer.update_account_equity(settled.equity)
         strategy.state = StrategyPositionState()
+        # ── Restore post-entry SL cooldown onto fresh state ──────────────
+        if saved_cooldown_until > 0:
+            strategy.state.post_entry_sl_cooldown_until_ts_ms = saved_cooldown_until
+            strategy.state.post_entry_sl_cooldown_side = saved_cooldown_side
+            strategy.state.post_entry_sl_cooldown_reason = saved_cooldown_reason
         trader.mark_flat()
         flat_clearable_halt_reasons = {
             None,

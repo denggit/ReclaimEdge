@@ -181,6 +181,11 @@ def restore_strategy_from_saved_state(
         middle_bucket_split_fast_sl_invalid_action_taken=getattr(
             saved_state, "middle_bucket_split_fast_sl_invalid_action_taken", None),
         middle_bucket_split_add_disabled=bool(getattr(saved_state, "middle_bucket_split_add_disabled", False)),
+        # ── Post-Entry SL Cooldown ────────────────────────────────────
+        post_entry_sl_cooldown_until_ts_ms=int(
+            getattr(saved_state, "post_entry_sl_cooldown_until_ts_ms", 0) or 0),
+        post_entry_sl_cooldown_side=getattr(saved_state, "post_entry_sl_cooldown_side", None),
+        post_entry_sl_cooldown_reason=getattr(saved_state, "post_entry_sl_cooldown_reason", None),
     )
     logger.warning(
         "Recovered strategy state from local disk | position_id=%s side=%s layers=%s avg_entry=%.4f tp=%s partial_tp=%s tp_plan=%s partial_tp_consumed=%s",

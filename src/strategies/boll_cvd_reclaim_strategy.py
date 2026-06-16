@@ -127,6 +127,27 @@ class BollCvdReclaimStrategyConfig:
     # FINAL_TP         — the actual selected take-profit price.
     entry_rr_target: str = "STRUCTURE_MIDDLE"
 
+    # ── CVD Structure Entry ──────────────────────────────────────────
+    entry_cvd_structure_mode: str = "DIVERGENCE_OR_ABSORPTION"
+    entry_cvd_divergence_enabled: bool = True
+    entry_cvd_absorption_enabled: bool = True
+    entry_cvd_structure_min_outside_pct: float = 0.001
+
+    # ── Reclaim Soft Confirm ─────────────────────────────────────────
+    entry_reclaim_confirm_seconds: float = 1.0
+    entry_reclaim_outside_tolerance_pct: float = 0.0002
+    entry_reclaim_new_extreme_buffer_pct: float = 0.0001
+
+    # ── Setup Lifetime ───────────────────────────────────────────────
+    entry_max_extreme_to_reclaim_seconds: int = 900
+    entry_max_total_setup_seconds: int = 1800
+    entry_max_reclaim_cycles: int = 3
+
+    # ── Post-Entry SL Cooldown ────────────────────────────────────────
+    post_entry_sl_cooldown_enabled: bool = True
+    post_entry_sl_cooldown_seconds: int = 1800
+    post_entry_sl_cooldown_scope: str = "GLOBAL"
+
     # ── Extreme Retest Add ────────────────────────────────────────────
     extreme_retest_add_enabled: bool = False
     extreme_retest_pivot_left_bars: int = 2
@@ -158,6 +179,47 @@ class BollCvdReclaimStrategyConfig:
             raise RuntimeError(
                 f"ENTRY_RR_TARGET={self.entry_rr_target!r} is not supported; "
                 f"must be STRUCTURE_MIDDLE or FINAL_TP"
+            )
+        if self.entry_reclaim_confirm_seconds < 0:
+            raise RuntimeError(
+                f"ENTRY_RECLAIM_CONFIRM_SECONDS={self.entry_reclaim_confirm_seconds} must be >= 0"
+            )
+        if self.entry_cvd_structure_min_outside_pct < 0:
+            raise RuntimeError(
+                f"ENTRY_CVD_STRUCTURE_MIN_OUTSIDE_PCT={self.entry_cvd_structure_min_outside_pct} must be >= 0"
+            )
+        if self.entry_max_extreme_to_reclaim_seconds <= 0:
+            raise RuntimeError(
+                f"ENTRY_MAX_EXTREME_TO_RECLAIM_SECONDS={self.entry_max_extreme_to_reclaim_seconds} must be > 0"
+            )
+        if self.entry_max_total_setup_seconds <= 0:
+            raise RuntimeError(
+                f"ENTRY_MAX_TOTAL_SETUP_SECONDS={self.entry_max_total_setup_seconds} must be > 0"
+            )
+        if self.entry_max_reclaim_cycles < 0:
+            raise RuntimeError(
+                f"ENTRY_MAX_RECLAIM_CYCLES={self.entry_max_reclaim_cycles} must be >= 0"
+            )
+        if self.entry_reclaim_outside_tolerance_pct < 0:
+            raise RuntimeError(
+                f"ENTRY_RECLAIM_OUTSIDE_TOLERANCE_PCT={self.entry_reclaim_outside_tolerance_pct} must be >= 0"
+            )
+        if self.entry_reclaim_new_extreme_buffer_pct < 0:
+            raise RuntimeError(
+                f"ENTRY_RECLAIM_NEW_EXTREME_BUFFER_PCT={self.entry_reclaim_new_extreme_buffer_pct} must be >= 0"
+            )
+        if self.entry_cvd_structure_mode not in {"DIVERGENCE_ONLY", "ABSORPTION_ONLY", "DIVERGENCE_OR_ABSORPTION"}:
+            raise RuntimeError(
+                f"ENTRY_CVD_STRUCTURE_MODE={self.entry_cvd_structure_mode!r} "
+                f"must be DIVERGENCE_ONLY, ABSORPTION_ONLY, or DIVERGENCE_OR_ABSORPTION"
+            )
+        if self.post_entry_sl_cooldown_seconds < 0:
+            raise RuntimeError(
+                f"POST_ENTRY_SL_COOLDOWN_SECONDS={self.post_entry_sl_cooldown_seconds} must be >= 0"
+            )
+        if self.post_entry_sl_cooldown_scope not in {"GLOBAL", "SIDE"}:
+            raise RuntimeError(
+                f"POST_ENTRY_SL_COOLDOWN_SCOPE={self.post_entry_sl_cooldown_scope!r} must be GLOBAL or SIDE"
             )
         if self.middle_bucket_split_enabled:
             _fr = self.middle_bucket_split_fast_ratio
@@ -263,6 +325,23 @@ class BollCvdReclaimStrategyConfig:
             extreme_retest_reclaim_pct=float(os.getenv("EXTREME_RETEST_RECLAIM_PCT", "0.0005")),
             extreme_retest_min_reverse_ratio=float(os.getenv("EXTREME_RETEST_MIN_REVERSE_RATIO", "0.55")),
             extreme_retest_one_add_per_anchor=_env_bool("EXTREME_RETEST_ONE_ADD_PER_ANCHOR", True),
+            # ── CVD Structure Entry ──────────────────────────────────
+            entry_cvd_structure_mode=os.getenv("ENTRY_CVD_STRUCTURE_MODE", "DIVERGENCE_OR_ABSORPTION").strip().upper(),
+            entry_cvd_divergence_enabled=_env_bool("ENTRY_CVD_DIVERGENCE_ENABLED", True),
+            entry_cvd_absorption_enabled=_env_bool("ENTRY_CVD_ABSORPTION_ENABLED", True),
+            entry_cvd_structure_min_outside_pct=float(os.getenv("ENTRY_CVD_STRUCTURE_MIN_OUTSIDE_PCT", "0.001")),
+            # ── Reclaim Soft Confirm ─────────────────────────────────
+            entry_reclaim_confirm_seconds=float(os.getenv("ENTRY_RECLAIM_CONFIRM_SECONDS", "1.0")),
+            entry_reclaim_outside_tolerance_pct=float(os.getenv("ENTRY_RECLAIM_OUTSIDE_TOLERANCE_PCT", "0.0002")),
+            entry_reclaim_new_extreme_buffer_pct=float(os.getenv("ENTRY_RECLAIM_NEW_EXTREME_BUFFER_PCT", "0.0001")),
+            # ── Setup Lifetime ───────────────────────────────────────
+            entry_max_extreme_to_reclaim_seconds=int(os.getenv("ENTRY_MAX_EXTREME_TO_RECLAIM_SECONDS", "900")),
+            entry_max_total_setup_seconds=int(os.getenv("ENTRY_MAX_TOTAL_SETUP_SECONDS", "1800")),
+            entry_max_reclaim_cycles=int(os.getenv("ENTRY_MAX_RECLAIM_CYCLES", "3")),
+            # ── Post-Entry SL Cooldown ────────────────────────────────
+            post_entry_sl_cooldown_enabled=_env_bool("POST_ENTRY_SL_COOLDOWN_ENABLED", True),
+            post_entry_sl_cooldown_seconds=int(os.getenv("POST_ENTRY_SL_COOLDOWN_SECONDS", "1800")),
+            post_entry_sl_cooldown_scope=os.getenv("POST_ENTRY_SL_COOLDOWN_SCOPE", "GLOBAL").strip().upper(),
         )
 
 
@@ -388,6 +467,40 @@ class StrategyPositionState:
     upper_last_burst_ts_ms: int = 0
     lower_deep_enough: bool = False
     upper_deep_enough: bool = False
+
+    # ── CVD Structure Entry state ───────────────────────────────────
+    lower_first_armed_ts_ms: int = 0
+    upper_first_armed_ts_ms: int = 0
+
+    lower_extreme_ts_ms: int = 0
+    upper_extreme_ts_ms: int = 0
+
+    lower_reference_fast_cvd: float | None = None
+    upper_reference_fast_cvd: float | None = None
+
+    lower_extreme_fast_cvd: float | None = None
+    upper_extreme_fast_cvd: float | None = None
+
+    lower_cvd_divergence_confirmed: bool = False
+    upper_cvd_divergence_confirmed: bool = False
+
+    lower_cvd_absorption_confirmed: bool = False
+    upper_cvd_absorption_confirmed: bool = False
+
+    lower_reclaim_seen: bool = False
+    upper_reclaim_seen: bool = False
+
+    lower_reclaim_ts_ms: int = 0
+    upper_reclaim_ts_ms: int = 0
+
+    lower_reclaim_cycle_count: int = 0
+    upper_reclaim_cycle_count: int = 0
+
+    # ── Post-Entry SL Cooldown state ────────────────────────────────
+    post_entry_sl_cooldown_until_ts_ms: int = 0
+    post_entry_sl_cooldown_side: str | None = None
+    post_entry_sl_cooldown_reason: str | None = None
+
     total_entry_qty: float = 0.0
     total_entry_notional: float = 0.0
     avg_entry_price: float = 0.0
@@ -557,7 +670,7 @@ class BollCvdReclaimStrategy:
     def on_tick(self, price: float, ts_ms: int, boll: BollSnapshot, cvd: CvdSnapshot) -> list[TradeIntent]:
         intents: list[TradeIntent] = []
 
-        self._update_armed_state(price, ts_ms, boll)
+        self._update_armed_state(price, ts_ms, boll, cvd)
 
         runner_exit_intent = self._maybe_trend_runner_market_exit(price, ts_ms, boll, cvd)
         if runner_exit_intent is not None:
@@ -575,6 +688,11 @@ class BollCvdReclaimStrategy:
         if not self._cooldown_ok(ts_ms):
             return intents
 
+        if not self._post_entry_sl_cooldown_ok("LONG", ts_ms):
+            return intents
+        if not self._post_entry_sl_cooldown_ok("SHORT", ts_ms):
+            return intents
+
         if self._long_setup(price, cvd, boll):
             intent = self._maybe_open_or_add_long(price, ts_ms, boll, cvd)
             if intent is not None:
@@ -587,54 +705,30 @@ class BollCvdReclaimStrategy:
 
         return intents
 
-    def _update_armed_state(self, price: float, ts_ms: int, boll: BollSnapshot) -> None:
+    def _update_armed_state(self, price: float, ts_ms: int, boll: BollSnapshot,
+                            cvd: CvdSnapshot | None = None) -> None:
         self._expire_armed_state(ts_ms)
 
+        # ── Total setup timeout check ──────────────────────────────────
+        _total_ms = self.config.entry_max_total_setup_seconds * 1000
+        if self.state.lower_first_armed_ts_ms > 0 and ts_ms - self.state.lower_first_armed_ts_ms > _total_ms:
+            logger.info("LOWER_SETUP_EXPIRED | reason=total_setup_timeout age_ms=%s max_ms=%s",
+                        ts_ms - self.state.lower_first_armed_ts_ms, _total_ms)
+            self._reset_lower_armed()
+        if self.state.upper_first_armed_ts_ms > 0 and ts_ms - self.state.upper_first_armed_ts_ms > _total_ms:
+            logger.info("UPPER_SETUP_EXPIRED | reason=total_setup_timeout age_ms=%s max_ms=%s",
+                        ts_ms - self.state.upper_first_armed_ts_ms, _total_ms)
+            self._reset_upper_armed()
+
         if price < boll.lower:
-            if not self.state.lower_armed:
-                self.state.lower_armed = True
-                self.state.lower_armed_ts_ms = ts_ms
-                self.state.lower_extreme_price = price
-                logger.info(
-                    "LOWER_ARMED | price=%.4f lower=%.4f middle=%.4f max_entry_distance=%.4f%% max_armed=%ss",
-                    price,
-                    boll.lower,
-                    boll.middle,
-                    self.config.max_entry_distance_from_extreme_pct * 100,
-                    self.config.max_armed_seconds,
-                )
-            else:
-                old_extreme = self.state.lower_extreme_price or price
-                self.state.lower_extreme_price = min(old_extreme, price)
-                if self.state.lower_extreme_price < old_extreme:
-                    logger.debug("LOWER_EXTREME_UPDATED | extreme=%.4f price=%.4f", self.state.lower_extreme_price,
-                                 price)
-            self._update_lower_deep_enough(boll)
+            self._update_lower_outside(price, ts_ms, boll, cvd)
             if self.state.upper_armed:
                 logger.info("UPPER_ARMED_RESET | reason=opposite_lower_break price=%.4f", price)
             self._reset_upper_armed()
             return
 
         if price > boll.upper:
-            if not self.state.upper_armed:
-                self.state.upper_armed = True
-                self.state.upper_armed_ts_ms = ts_ms
-                self.state.upper_extreme_price = price
-                logger.info(
-                    "UPPER_ARMED | price=%.4f upper=%.4f middle=%.4f max_entry_distance=%.4f%% max_armed=%ss",
-                    price,
-                    boll.upper,
-                    boll.middle,
-                    self.config.max_entry_distance_from_extreme_pct * 100,
-                    self.config.max_armed_seconds,
-                )
-            else:
-                old_extreme = self.state.upper_extreme_price or price
-                self.state.upper_extreme_price = max(old_extreme, price)
-                if self.state.upper_extreme_price > old_extreme:
-                    logger.debug("UPPER_EXTREME_UPDATED | extreme=%.4f price=%.4f", self.state.upper_extreme_price,
-                                 price)
-            self._update_upper_deep_enough(boll)
+            self._update_upper_outside(price, ts_ms, boll, cvd)
             if self.state.lower_armed:
                 logger.info("LOWER_ARMED_RESET | reason=opposite_upper_break price=%.4f", price)
             self._reset_lower_armed()
@@ -648,6 +742,160 @@ class BollCvdReclaimStrategy:
         if self.state.upper_armed and price <= boll.middle:
             logger.info("UPPER_ARMED_RESET | reason=middle_reclaimed price=%.4f middle=%.4f", price, boll.middle)
             self._reset_upper_armed()
+
+    def _update_lower_outside(self, price: float, ts_ms: int, boll: BollSnapshot,
+                               cvd: CvdSnapshot | None) -> None:
+        """Handle a tick where price is below the lower BOLL band."""
+        if not self.state.lower_armed:
+            # ── First arm ──────────────────────────────────────────────
+            self.state.lower_armed = True
+            self.state.lower_armed_ts_ms = ts_ms
+            self.state.lower_first_armed_ts_ms = ts_ms
+            self.state.lower_extreme_price = price
+            if cvd is not None:
+                self.state.lower_reference_fast_cvd = cvd.fast_cvd
+            _fast_cvd_str = f" fast_cvd={cvd.fast_cvd:.8f}" if cvd is not None else ""
+            logger.info(
+                "LOWER_ARMED | price=%.4f lower=%.4f middle=%.4f max_entry_distance=%.4f%% max_armed=%ss%s",
+                price, boll.lower, boll.middle,
+                self.config.max_entry_distance_from_extreme_pct * 100,
+                self.config.max_armed_seconds, _fast_cvd_str,
+            )
+        elif self.state.lower_reclaim_seen:
+            # ── Previously reclaimed, now outside again ────────────────
+            self._handle_lower_rebreak_after_reclaim(price, ts_ms, boll, cvd)
+        else:
+            # ── Normal extreme update during outside excursion ─────────
+            self._update_lower_extreme(price, ts_ms, boll, cvd)
+
+        self._update_lower_deep_enough(boll)
+        if cvd is not None:
+            self._check_lower_cvd_structure(cvd, boll, ts_ms)
+
+    def _update_upper_outside(self, price: float, ts_ms: int, boll: BollSnapshot,
+                               cvd: CvdSnapshot | None) -> None:
+        """Handle a tick where price is above the upper BOLL band."""
+        if not self.state.upper_armed:
+            # ── First arm ──────────────────────────────────────────────
+            self.state.upper_armed = True
+            self.state.upper_armed_ts_ms = ts_ms
+            self.state.upper_first_armed_ts_ms = ts_ms
+            self.state.upper_extreme_price = price
+            if cvd is not None:
+                self.state.upper_reference_fast_cvd = cvd.fast_cvd
+            _fast_cvd_str = f" fast_cvd={cvd.fast_cvd:.8f}" if cvd is not None else ""
+            logger.info(
+                "UPPER_ARMED | price=%.4f upper=%.4f middle=%.4f max_entry_distance=%.4f%% max_armed=%ss%s",
+                price, boll.upper, boll.middle,
+                self.config.max_entry_distance_from_extreme_pct * 100,
+                self.config.max_armed_seconds, _fast_cvd_str,
+            )
+        elif self.state.upper_reclaim_seen:
+            # ── Previously reclaimed, now outside again ────────────────
+            self._handle_upper_rebreak_after_reclaim(price, ts_ms, boll, cvd)
+        else:
+            # ── Normal extreme update during outside excursion ─────────
+            self._update_upper_extreme(price, ts_ms, boll, cvd)
+
+        self._update_upper_deep_enough(boll)
+        if cvd is not None:
+            self._check_upper_cvd_structure(cvd, boll, ts_ms)
+
+    def _update_lower_extreme(self, price: float, ts_ms: int, boll: BollSnapshot,
+                               cvd: CvdSnapshot | None) -> None:
+        """Update lower extreme during ongoing outside excursion."""
+        old_extreme = self.state.lower_extreme_price
+        if old_extreme is None or price >= old_extreme:
+            return
+        buffer_pct = self.config.entry_reclaim_new_extreme_buffer_pct
+        if price >= old_extreme * (1 - buffer_pct):
+            return  # within noise buffer, not a real new extreme
+        # Real new extreme — update price and timestamp
+        # (extreme_fast_cvd is managed by _check_lower_cvd_structure)
+        self.state.lower_extreme_price = price
+        self.state.lower_extreme_ts_ms = ts_ms
+        logger.debug("LOWER_EXTREME_UPDATED | extreme=%.4f price=%.4f", price, price)
+
+    def _update_upper_extreme(self, price: float, ts_ms: int, boll: BollSnapshot,
+                               cvd: CvdSnapshot | None) -> None:
+        """Update upper extreme during ongoing outside excursion."""
+        old_extreme = self.state.upper_extreme_price
+        if old_extreme is None or price <= old_extreme:
+            return
+        buffer_pct = self.config.entry_reclaim_new_extreme_buffer_pct
+        if price <= old_extreme * (1 + buffer_pct):
+            return  # within noise buffer, not a real new extreme
+        # Real new extreme — update price and timestamp
+        # (extreme_fast_cvd is managed by _check_upper_cvd_structure)
+        self.state.upper_extreme_price = price
+        self.state.upper_extreme_ts_ms = ts_ms
+        logger.debug("UPPER_EXTREME_UPDATED | extreme=%.4f price=%.4f", price, price)
+
+    def _handle_lower_rebreak_after_reclaim(self, price: float, ts_ms: int, boll: BollSnapshot,
+                                             cvd: CvdSnapshot | None) -> None:
+        """Handle price going back below lower band after reclaim was seen."""
+        old_extreme = self.state.lower_extreme_price or price
+        buffer_pct = self.config.entry_reclaim_new_extreme_buffer_pct
+        new_extreme_threshold = old_extreme * (1 - buffer_pct)
+        if price < new_extreme_threshold:
+            # Breaks old extreme → cancel pending, new extreme, increment cycle
+            self.state.lower_reclaim_cycle_count += 1
+            if self.state.lower_reclaim_cycle_count > self.config.entry_max_reclaim_cycles:
+                logger.info("LOWER_SETUP_EXPIRED | reason=max_reclaim_cycles cycles=%s max=%s",
+                            self.state.lower_reclaim_cycle_count, self.config.entry_max_reclaim_cycles)
+                self._reset_lower_armed()
+                return
+            self.state.lower_reclaim_seen = False
+            self.state.lower_reclaim_ts_ms = 0
+            self.state.lower_extreme_price = price
+            self.state.lower_extreme_ts_ms = ts_ms
+            logger.info(
+                "LOWER_RECLAIM_PENDING_CANCELLED_BY_NEW_EXTREME | old_extreme=%.4f new_extreme=%.4f "
+                "cycle_count=%s max_cycles=%s ts_ms=%s",
+                old_extreme, price, self.state.lower_reclaim_cycle_count,
+                self.config.entry_max_reclaim_cycles, ts_ms,
+            )
+        else:
+            # Minor breach → soft reset timer only
+            self.state.lower_reclaim_ts_ms = 0
+            logger.info(
+                "LOWER_RECLAIM_CONFIRM_RESET | reason=minor_outside_noise price=%.4f extreme=%.4f "
+                "lower=%.4f ts_ms=%s",
+                price, old_extreme, boll.lower, ts_ms,
+            )
+
+    def _handle_upper_rebreak_after_reclaim(self, price: float, ts_ms: int, boll: BollSnapshot,
+                                             cvd: CvdSnapshot | None) -> None:
+        """Handle price going back above upper band after reclaim was seen."""
+        old_extreme = self.state.upper_extreme_price or price
+        buffer_pct = self.config.entry_reclaim_new_extreme_buffer_pct
+        new_extreme_threshold = old_extreme * (1 + buffer_pct)
+        if price > new_extreme_threshold:
+            # Breaks old extreme → cancel pending, new extreme, increment cycle
+            self.state.upper_reclaim_cycle_count += 1
+            if self.state.upper_reclaim_cycle_count > self.config.entry_max_reclaim_cycles:
+                logger.info("UPPER_SETUP_EXPIRED | reason=max_reclaim_cycles cycles=%s max=%s",
+                            self.state.upper_reclaim_cycle_count, self.config.entry_max_reclaim_cycles)
+                self._reset_upper_armed()
+                return
+            self.state.upper_reclaim_seen = False
+            self.state.upper_reclaim_ts_ms = 0
+            self.state.upper_extreme_price = price
+            self.state.upper_extreme_ts_ms = ts_ms
+            logger.info(
+                "UPPER_RECLAIM_PENDING_CANCELLED_BY_NEW_EXTREME | old_extreme=%.4f new_extreme=%.4f "
+                "cycle_count=%s max_cycles=%s ts_ms=%s",
+                old_extreme, price, self.state.upper_reclaim_cycle_count,
+                self.config.entry_max_reclaim_cycles, ts_ms,
+            )
+        else:
+            # Minor breach → soft reset timer only
+            self.state.upper_reclaim_ts_ms = 0
+            logger.info(
+                "UPPER_RECLAIM_CONFIRM_RESET | reason=minor_outside_noise price=%.4f extreme=%.4f "
+                "upper=%.4f ts_ms=%s",
+                price, old_extreme, boll.upper, ts_ms,
+            )
 
     def _update_lower_deep_enough(self, boll: BollSnapshot) -> None:
         if self.state.lower_deep_enough or self.state.lower_extreme_price is None:
@@ -677,6 +925,136 @@ class BollCvdReclaimStrategy:
                 self.config.min_outside_pct * 100,
             )
 
+    def _lower_cvd_structure_ok(self) -> bool:
+        """Check whether lower-side CVD structure is confirmed per mode."""
+        # If neither divergence nor absorption is enabled, skip CVD structure gate
+        if not self.config.entry_cvd_divergence_enabled and not self.config.entry_cvd_absorption_enabled:
+            return True
+        mode = self.config.entry_cvd_structure_mode
+        if mode == "DIVERGENCE_ONLY":
+            return self.state.lower_cvd_divergence_confirmed
+        if mode == "ABSORPTION_ONLY":
+            return self.state.lower_cvd_absorption_confirmed
+        # DIVERGENCE_OR_ABSORPTION
+        return self.state.lower_cvd_divergence_confirmed or self.state.lower_cvd_absorption_confirmed
+
+    def _upper_cvd_structure_ok(self) -> bool:
+        """Check whether upper-side CVD structure is confirmed per mode."""
+        # If neither divergence nor absorption is enabled, skip CVD structure gate
+        if not self.config.entry_cvd_divergence_enabled and not self.config.entry_cvd_absorption_enabled:
+            return True
+        mode = self.config.entry_cvd_structure_mode
+        if mode == "DIVERGENCE_ONLY":
+            return self.state.upper_cvd_divergence_confirmed
+        if mode == "ABSORPTION_ONLY":
+            return self.state.upper_cvd_absorption_confirmed
+        # DIVERGENCE_OR_ABSORPTION
+        return self.state.upper_cvd_divergence_confirmed or self.state.upper_cvd_absorption_confirmed
+
+    def _check_lower_cvd_structure(self, cvd: CvdSnapshot, boll: BollSnapshot, ts_ms: int) -> None:
+        """Evaluate both divergence and absorption during lower outside excursion."""
+        if not self.state.lower_deep_enough:
+            return
+        if self._lower_cvd_structure_ok():
+            return
+        extreme = self.state.lower_extreme_price
+        if extreme is None or extreme <= 0:
+            return
+
+        # ── First time reaching valid extreme depth — record baseline ──
+        if self.state.lower_extreme_fast_cvd is None:
+            self.state.lower_extreme_fast_cvd = cvd.fast_cvd
+            self.state.lower_extreme_ts_ms = ts_ms
+            outside_pct = (boll.lower - extreme) / boll.lower * 100
+            logger.info(
+                "LOWER_VALID_EXTREME | extreme_price=%.4f boll_lower=%.4f outside_pct=%.4f%% fast_cvd=%.8f ts_ms=%s",
+                extreme, boll.lower, outside_pct, cvd.fast_cvd, ts_ms,
+            )
+            # Also check absorption on first extreme
+            self._check_lower_absorption(extreme, ts_ms)
+            return
+
+        # ── Divergence: compare current fast_cvd vs stored extreme_fast_cvd ──
+        if self.config.entry_cvd_divergence_enabled and not self.state.lower_cvd_divergence_confirmed:
+            if cvd.fast_cvd >= self.state.lower_extreme_fast_cvd:
+                self.state.lower_cvd_divergence_confirmed = True
+                logger.info(
+                    "LOWER_CVD_DIVERGENCE_CONFIRMED | old_extreme_fast_cvd=%.8f new_fast_cvd=%.8f "
+                    "extreme_price=%.4f price=%.4f ts_ms=%s",
+                    self.state.lower_extreme_fast_cvd, cvd.fast_cvd, extreme, cvd.price, ts_ms,
+                )
+            else:
+                # CVD making new low — update reference for next comparison
+                self.state.lower_extreme_fast_cvd = cvd.fast_cvd
+
+        # ── Absorption: compare extreme_fast_cvd vs reference_fast_cvd ──
+        self._check_lower_absorption(extreme, ts_ms)
+
+    def _check_lower_absorption(self, extreme: float, ts_ms: int) -> None:
+        """Check lower-side single-sweep absorption."""
+        if not self.config.entry_cvd_absorption_enabled or self.state.lower_cvd_absorption_confirmed:
+            return
+        if self.state.lower_reference_fast_cvd is not None and self.state.lower_extreme_fast_cvd is not None:
+            if self.state.lower_extreme_fast_cvd >= self.state.lower_reference_fast_cvd:
+                self.state.lower_cvd_absorption_confirmed = True
+                logger.info(
+                    "LOWER_CVD_ABSORPTION_CONFIRMED | reference_fast_cvd=%.8f extreme_fast_cvd=%.8f "
+                    "extreme_price=%.4f ts_ms=%s",
+                    self.state.lower_reference_fast_cvd, self.state.lower_extreme_fast_cvd, extreme, ts_ms,
+                )
+
+    def _check_upper_absorption(self, extreme: float, ts_ms: int) -> None:
+        """Check upper-side single-sweep absorption."""
+        if not self.config.entry_cvd_absorption_enabled or self.state.upper_cvd_absorption_confirmed:
+            return
+        if self.state.upper_reference_fast_cvd is not None and self.state.upper_extreme_fast_cvd is not None:
+            if self.state.upper_extreme_fast_cvd <= self.state.upper_reference_fast_cvd:
+                self.state.upper_cvd_absorption_confirmed = True
+                logger.info(
+                    "UPPER_CVD_ABSORPTION_CONFIRMED | reference_fast_cvd=%.8f extreme_fast_cvd=%.8f "
+                    "extreme_price=%.4f ts_ms=%s",
+                    self.state.upper_reference_fast_cvd, self.state.upper_extreme_fast_cvd, extreme, ts_ms,
+                )
+
+    def _check_upper_cvd_structure(self, cvd: CvdSnapshot, boll: BollSnapshot, ts_ms: int) -> None:
+        """Evaluate both divergence and absorption during upper outside excursion."""
+        if not self.state.upper_deep_enough:
+            return
+        if self._upper_cvd_structure_ok():
+            return
+        extreme = self.state.upper_extreme_price
+        if extreme is None or extreme <= 0:
+            return
+
+        # ── First time reaching valid extreme depth — record baseline ──
+        if self.state.upper_extreme_fast_cvd is None:
+            self.state.upper_extreme_fast_cvd = cvd.fast_cvd
+            self.state.upper_extreme_ts_ms = ts_ms
+            outside_pct = (extreme - boll.upper) / boll.upper * 100
+            logger.info(
+                "UPPER_VALID_EXTREME | extreme_price=%.4f boll_upper=%.4f outside_pct=%.4f%% fast_cvd=%.8f ts_ms=%s",
+                extreme, boll.upper, outside_pct, cvd.fast_cvd, ts_ms,
+            )
+            # Also check absorption on first extreme
+            self._check_upper_absorption(extreme, ts_ms)
+            return
+
+        # ── Divergence: compare current fast_cvd vs stored extreme_fast_cvd ──
+        if self.config.entry_cvd_divergence_enabled and not self.state.upper_cvd_divergence_confirmed:
+            if cvd.fast_cvd <= self.state.upper_extreme_fast_cvd:
+                self.state.upper_cvd_divergence_confirmed = True
+                logger.info(
+                    "UPPER_CVD_DIVERGENCE_CONFIRMED | old_extreme_fast_cvd=%.8f new_fast_cvd=%.8f "
+                    "extreme_price=%.4f price=%.4f ts_ms=%s",
+                    self.state.upper_extreme_fast_cvd, cvd.fast_cvd, extreme, cvd.price, ts_ms,
+                )
+            else:
+                # CVD making new high — update reference for next comparison
+                self.state.upper_extreme_fast_cvd = cvd.fast_cvd
+
+        # ── Absorption: compare extreme_fast_cvd vs reference_fast_cvd ──
+        self._check_upper_absorption(extreme, ts_ms)
+
     def _expire_armed_state(self, ts_ms: int) -> None:
         max_age_ms = self.config.max_armed_seconds * 1000
         if self.state.lower_armed and ts_ms - self.state.lower_armed_ts_ms > max_age_ms:
@@ -692,6 +1070,16 @@ class BollCvdReclaimStrategy:
         self.state.lower_armed_ts_ms = 0
         self.state.lower_last_burst_ts_ms = 0
         self.state.lower_deep_enough = False
+        # ── Clear CVD structure / reclaim state (NOT cooldown) ──────────
+        self.state.lower_first_armed_ts_ms = 0
+        self.state.lower_extreme_ts_ms = 0
+        self.state.lower_reference_fast_cvd = None
+        self.state.lower_extreme_fast_cvd = None
+        self.state.lower_cvd_divergence_confirmed = False
+        self.state.lower_cvd_absorption_confirmed = False
+        self.state.lower_reclaim_seen = False
+        self.state.lower_reclaim_ts_ms = 0
+        self.state.lower_reclaim_cycle_count = 0
 
     def _reset_upper_armed(self) -> None:
         self.state.upper_armed = False
@@ -699,28 +1087,178 @@ class BollCvdReclaimStrategy:
         self.state.upper_armed_ts_ms = 0
         self.state.upper_last_burst_ts_ms = 0
         self.state.upper_deep_enough = False
+        # ── Clear CVD structure / reclaim state (NOT cooldown) ──────────
+        self.state.upper_first_armed_ts_ms = 0
+        self.state.upper_extreme_ts_ms = 0
+        self.state.upper_reference_fast_cvd = None
+        self.state.upper_extreme_fast_cvd = None
+        self.state.upper_cvd_divergence_confirmed = False
+        self.state.upper_cvd_absorption_confirmed = False
+        self.state.upper_reclaim_seen = False
+        self.state.upper_reclaim_ts_ms = 0
+        self.state.upper_reclaim_cycle_count = 0
 
     def _long_setup(self, price: float, cvd: CvdSnapshot, boll: BollSnapshot) -> bool:
         if not self.state.lower_armed or self.state.lower_extreme_price is None:
             return False
         if not self.state.lower_deep_enough:
             return False
+
+        # ── CVD structure gate ──────────────────────────────────────────
+        if not self._lower_cvd_structure_ok():
+            return False
+
+        # ── Reclaim soft confirm state machine ──────────────────────────
+        if self.config.entry_reclaim_confirm_seconds > 0:
+            tolerance = self.config.entry_reclaim_outside_tolerance_pct
+
+            # Check if price went back outside during confirmation
+            if self.state.lower_reclaim_seen and self.state.lower_reclaim_ts_ms > 0:
+                if price < boll.lower * (1 - tolerance):
+                    # Outside band beyond tolerance → soft reset timer
+                    # (the _update_armed_state handles new extreme vs minor breach)
+                    # Here we just reset reclaim_ts_ms so the timer restarts
+                    self.state.lower_reclaim_ts_ms = 0
+                    return False
+
+            # Timer was reset → wait for price to come back inside, then restart
+            if self.state.lower_reclaim_seen and self.state.lower_reclaim_ts_ms == 0:
+                if price >= boll.lower:
+                    self.state.lower_reclaim_ts_ms = cvd.ts_ms
+                    logger.info(
+                        "LOWER_RECLAIM_CONFIRM_RESET | reason=timer_restarted reclaim_ts_ms=%s price=%.4f lower=%.4f",
+                        cvd.ts_ms, price, boll.lower,
+                    )
+                return False
+
+            if not self.state.lower_reclaim_seen:
+                # First tick back inside band
+                inside_band = price >= boll.lower * (1 + self.config.entry_reclaim_buffer_pct)
+                if not inside_band:
+                    return False
+
+                # Check extreme-to-reclaim time window
+                if self.state.lower_extreme_ts_ms > 0:
+                    elapsed_ms = cvd.ts_ms - self.state.lower_extreme_ts_ms
+                    if elapsed_ms > self.config.entry_max_extreme_to_reclaim_seconds * 1000:
+                        logger.info(
+                            "LOWER_SETUP_EXPIRED | reason=extreme_to_reclaim_timeout "
+                            "elapsed_ms=%s max_ms=%s",
+                            elapsed_ms,
+                            self.config.entry_max_extreme_to_reclaim_seconds * 1000,
+                        )
+                        self._reset_lower_armed()
+                        return False
+
+                self.state.lower_reclaim_seen = True
+                self.state.lower_reclaim_ts_ms = cvd.ts_ms
+                logger.info(
+                    "LOWER_RECLAIM_PENDING | reclaim_ts_ms=%s confirm_seconds=%.1f price=%.4f lower=%.4f",
+                    cvd.ts_ms, self.config.entry_reclaim_confirm_seconds, price, boll.lower,
+                )
+                return False
+
+            # Check if enough continuous time has elapsed
+            confirm_ms = int(self.config.entry_reclaim_confirm_seconds * 1000)
+            if cvd.ts_ms - self.state.lower_reclaim_ts_ms < confirm_ms:
+                return False
+
+            logger.info(
+                "LOWER_RECLAIM_CONFIRMED | reclaim_ts_ms=%s ts_ms=%s elapsed_ms=%s",
+                self.state.lower_reclaim_ts_ms, cvd.ts_ms, cvd.ts_ms - self.state.lower_reclaim_ts_ms,
+            )
+
+        # ── Inside-band reclaim check ───────────────────────────────────
         if self.config.entry_reclaim_inside_band and price < boll.lower * (1 + self.config.entry_reclaim_buffer_pct):
             return False
-        cvd_reclaim = cvd.cross_positive and cvd.buy_ratio >= self.config.min_buy_ratio and cvd.no_new_low
-        cvd_absorption = cvd.cvd_increasing and cvd.buy_ratio >= self.config.min_buy_ratio and cvd.no_new_low
-        return cvd_reclaim or cvd_absorption
+
+        # ── CVD direction check at entry ────────────────────────────────
+        cvd_direction_ok = (
+            (cvd.cross_positive or cvd.cvd_increasing)
+            and cvd.buy_ratio >= self.config.min_buy_ratio
+            and cvd.no_new_low
+        )
+        return cvd_direction_ok
 
     def _short_setup(self, price: float, cvd: CvdSnapshot, boll: BollSnapshot) -> bool:
         if not self.state.upper_armed or self.state.upper_extreme_price is None:
             return False
         if not self.state.upper_deep_enough:
             return False
+
+        # ── CVD structure gate ──────────────────────────────────────────
+        if not self._upper_cvd_structure_ok():
+            return False
+
+        # ── Reclaim soft confirm state machine ──────────────────────────
+        if self.config.entry_reclaim_confirm_seconds > 0:
+            tolerance = self.config.entry_reclaim_outside_tolerance_pct
+
+            # Check if price went back outside during confirmation
+            if self.state.upper_reclaim_seen and self.state.upper_reclaim_ts_ms > 0:
+                if price > boll.upper * (1 + tolerance):
+                    # Outside band beyond tolerance → soft reset timer
+                    self.state.upper_reclaim_ts_ms = 0
+                    return False
+
+            # Timer was reset → wait for price to come back inside, then restart
+            if self.state.upper_reclaim_seen and self.state.upper_reclaim_ts_ms == 0:
+                if price <= boll.upper:
+                    self.state.upper_reclaim_ts_ms = cvd.ts_ms
+                    logger.info(
+                        "UPPER_RECLAIM_CONFIRM_RESET | reason=timer_restarted reclaim_ts_ms=%s price=%.4f upper=%.4f",
+                        cvd.ts_ms, price, boll.upper,
+                    )
+                return False
+
+            if not self.state.upper_reclaim_seen:
+                # First tick back inside band
+                inside_band = price <= boll.upper * (1 - self.config.entry_reclaim_buffer_pct)
+                if not inside_band:
+                    return False
+
+                # Check extreme-to-reclaim time window
+                if self.state.upper_extreme_ts_ms > 0:
+                    elapsed_ms = cvd.ts_ms - self.state.upper_extreme_ts_ms
+                    if elapsed_ms > self.config.entry_max_extreme_to_reclaim_seconds * 1000:
+                        logger.info(
+                            "UPPER_SETUP_EXPIRED | reason=extreme_to_reclaim_timeout "
+                            "elapsed_ms=%s max_ms=%s",
+                            elapsed_ms,
+                            self.config.entry_max_extreme_to_reclaim_seconds * 1000,
+                        )
+                        self._reset_upper_armed()
+                        return False
+
+                self.state.upper_reclaim_seen = True
+                self.state.upper_reclaim_ts_ms = cvd.ts_ms
+                logger.info(
+                    "UPPER_RECLAIM_PENDING | reclaim_ts_ms=%s confirm_seconds=%.1f price=%.4f upper=%.4f",
+                    cvd.ts_ms, self.config.entry_reclaim_confirm_seconds, price, boll.upper,
+                )
+                return False
+
+            # Check if enough continuous time has elapsed
+            confirm_ms = int(self.config.entry_reclaim_confirm_seconds * 1000)
+            if cvd.ts_ms - self.state.upper_reclaim_ts_ms < confirm_ms:
+                return False
+
+            logger.info(
+                "UPPER_RECLAIM_CONFIRMED | reclaim_ts_ms=%s ts_ms=%s elapsed_ms=%s",
+                self.state.upper_reclaim_ts_ms, cvd.ts_ms, cvd.ts_ms - self.state.upper_reclaim_ts_ms,
+            )
+
+        # ── Inside-band reclaim check ───────────────────────────────────
         if self.config.entry_reclaim_inside_band and price > boll.upper * (1 - self.config.entry_reclaim_buffer_pct):
             return False
-        cvd_reject = cvd.cross_negative and cvd.sell_ratio >= self.config.min_sell_ratio and cvd.no_new_high
-        cvd_absorption = cvd.cvd_decreasing and cvd.sell_ratio >= self.config.min_sell_ratio and cvd.no_new_high
-        return cvd_reject or cvd_absorption
+
+        # ── CVD direction check at entry ────────────────────────────────
+        cvd_direction_ok = (
+            (cvd.cross_negative or cvd.cvd_decreasing)
+            and cvd.sell_ratio >= self.config.min_sell_ratio
+            and cvd.no_new_high
+        )
+        return cvd_direction_ok
 
     def _near_lower_extreme(self, price: float) -> bool:
         extreme = self.state.lower_extreme_price
@@ -2476,3 +3014,70 @@ class BollCvdReclaimStrategy:
 
     def _cooldown_ok(self, ts_ms: int) -> bool:
         return ts_ms - self.state.last_order_ts_ms >= self.config.order_cooldown_seconds * 1000
+
+    def _post_entry_sl_cooldown_ok(self, side: PositionSide, ts_ms: int) -> bool:
+        """Check whether post-entry-SL cooldown allows a new entry.
+
+        Returns True if entry is allowed, False if blocked by cooldown.
+        """
+        if not self.config.post_entry_sl_cooldown_enabled:
+            return True
+        if self.state.post_entry_sl_cooldown_until_ts_ms <= 0:
+            return True
+        if ts_ms >= self.state.post_entry_sl_cooldown_until_ts_ms:
+            remaining_ms = max(self.state.post_entry_sl_cooldown_until_ts_ms - ts_ms, 0)
+            logger.info(
+                "POST_ENTRY_SL_COOLDOWN_EXPIRED | until_ts_ms=%s ts_ms=%s side=%s reason=%s",
+                self.state.post_entry_sl_cooldown_until_ts_ms,
+                ts_ms,
+                self.state.post_entry_sl_cooldown_side,
+                self.state.post_entry_sl_cooldown_reason,
+            )
+            self.state.post_entry_sl_cooldown_until_ts_ms = 0
+            self.state.post_entry_sl_cooldown_side = None
+            self.state.post_entry_sl_cooldown_reason = None
+            return True
+
+        # Cooldown is active
+        scope = self.config.post_entry_sl_cooldown_scope
+        if scope == "GLOBAL":
+            logger.info(
+                "POST_ENTRY_SL_COOLDOWN_ACTIVE | side=%s scope=GLOBAL "
+                "until_ts_ms=%s remaining_ms=%s cooldown_side=%s reason=%s",
+                side,
+                self.state.post_entry_sl_cooldown_until_ts_ms,
+                self.state.post_entry_sl_cooldown_until_ts_ms - ts_ms,
+                self.state.post_entry_sl_cooldown_side,
+                self.state.post_entry_sl_cooldown_reason,
+            )
+            return False
+        if scope == "SIDE" and side == self.state.post_entry_sl_cooldown_side:
+            logger.info(
+                "POST_ENTRY_SL_COOLDOWN_ACTIVE | side=%s scope=SIDE "
+                "until_ts_ms=%s remaining_ms=%s reason=%s",
+                side,
+                self.state.post_entry_sl_cooldown_until_ts_ms,
+                self.state.post_entry_sl_cooldown_until_ts_ms - ts_ms,
+                self.state.post_entry_sl_cooldown_reason,
+            )
+            return False
+        return True
+
+    def arm_post_entry_sl_cooldown(self, ts_ms: int, side: str, reason: str) -> None:
+        """Arm post-entry-SL cooldown after an initial entry protective SL exit."""
+        if not self.config.post_entry_sl_cooldown_enabled:
+            return
+        cooldown_ms = self.config.post_entry_sl_cooldown_seconds * 1000
+        self.state.post_entry_sl_cooldown_until_ts_ms = ts_ms + cooldown_ms
+        self.state.post_entry_sl_cooldown_side = side
+        self.state.post_entry_sl_cooldown_reason = reason
+        logger.warning(
+            "POST_ENTRY_SL_COOLDOWN_ARMED | side=%s until_ts_ms=%s cooldown_seconds=%s "
+            "scope=%s reason=%s ts_ms=%s",
+            side,
+            self.state.post_entry_sl_cooldown_until_ts_ms,
+            self.config.post_entry_sl_cooldown_seconds,
+            self.config.post_entry_sl_cooldown_scope,
+            reason,
+            ts_ms,
+        )

@@ -132,6 +132,11 @@ class LivePositionState:
     middle_bucket_split_fast_sl_invalid_action_taken: str | None = None
     middle_bucket_split_add_disabled: bool = False
 
+    # ── Post-Entry SL Cooldown ────────────────────────────────────────
+    post_entry_sl_cooldown_until_ts_ms: int = 0
+    post_entry_sl_cooldown_side: str | None = None
+    post_entry_sl_cooldown_reason: str | None = None
+
 
 class LiveStateStore:
     """Small JSON state store for restart recovery.
@@ -316,6 +321,11 @@ class LiveStateStore:
                 strategy_state, "middle_bucket_split_fast_sl_invalid_action_taken", None),
             middle_bucket_split_add_disabled=bool(
                 getattr(strategy_state, "middle_bucket_split_add_disabled", False)),
+            # ── Post-Entry SL Cooldown ────────────────────────────────
+            post_entry_sl_cooldown_until_ts_ms=int(
+                getattr(strategy_state, "post_entry_sl_cooldown_until_ts_ms", 0) or 0),
+            post_entry_sl_cooldown_side=getattr(strategy_state, "post_entry_sl_cooldown_side", None),
+            post_entry_sl_cooldown_reason=getattr(strategy_state, "post_entry_sl_cooldown_reason", None),
         )
 
 
