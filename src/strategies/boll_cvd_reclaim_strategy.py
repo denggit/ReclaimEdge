@@ -802,8 +802,8 @@ class BollCvdReclaimStrategy:
 
     def _log_info_throttled(self, key: str, interval_ms: int, ts_ms: int, message: str, *args) -> None:
         """Log at INFO level at most once per interval_ms for each unique key."""
-        last_ts = self._last_throttled_log_ts_ms.get(key, 0)
-        if ts_ms - last_ts >= interval_ms:
+        last_ts = self._last_throttled_log_ts_ms.get(key)
+        if last_ts is None or ts_ms - last_ts >= interval_ms:
             self._last_throttled_log_ts_ms[key] = ts_ms
             logger.info(message, *args)
 
@@ -1955,7 +1955,14 @@ class BollCvdReclaimStrategy:
         """
         # ── Post-entry SL cooldown gate ─────────────────────────────────
         if not self._post_entry_sl_cooldown_ok(side, ts_ms):
-            logger.info(
+            self._log_info_throttled(
+                "TREND_ENTRY_SKIPPED_POST_ENTRY_SL_COOLDOWN:"
+                f"{side}:"
+                f"{self.state.post_entry_sl_cooldown_side}:"
+                f"{self.state.post_entry_sl_cooldown_until_ts_ms}:"
+                f"{self.config.post_entry_sl_cooldown_scope}",
+                60_000,
+                ts_ms,
                 "TREND_ENTRY_SKIPPED_POST_ENTRY_SL_COOLDOWN | side=%s "
                 "cooldown_side=%s cooldown_until_ts_ms=%s scope=%s",
                 side,
@@ -3871,25 +3878,24 @@ class BollCvdReclaimStrategy:
 
         # Cooldown is active
         scope = self.config.post_entry_sl_cooldown_scope
-        if scope == "GLOBAL":
-            logger.info(
-                "POST_ENTRY_SL_COOLDOWN_ACTIVE | side=%s scope=GLOBAL "
-                "until_ts_ms=%s remaining_ms=%s cooldown_side=%s reason=%s",
-                side,
-                self.state.post_entry_sl_cooldown_until_ts_ms,
-                self.state.post_entry_sl_cooldown_until_ts_ms - ts_ms,
-                self.state.post_entry_sl_cooldown_side,
-                self.state.post_entry_sl_cooldown_reason,
-            )
-            return False
-        if scope == "SIDE" and side == self.state.post_entry_sl_cooldown_side:
-            logger.info(
-                "POST_ENTRY_SL_COOLDOWN_ACTIVE | side=%s scope=SIDE "
+        if scope == "GLOBAL" or (scope == "SIDE" and side == self.state.post_entry_sl_cooldown_side):
+            remaining_ms = max(self.state.post_entry_sl_cooldown_until_ts_ms - ts_ms, 0)
+            reason = self.state.post_entry_sl_cooldown_reason or ""
+            self._log_info_throttled(
+                "POST_ENTRY_SL_COOLDOWN_ACTIVE:"
+                f"{side}:"
+                f"{scope}:"
+                f"{self.state.post_entry_sl_cooldown_until_ts_ms}:"
+                f"{reason}",
+                60_000,
+                ts_ms,
+                "POST_ENTRY_SL_COOLDOWN_ACTIVE | side=%s scope=%s "
                 "until_ts_ms=%s remaining_ms=%s reason=%s",
                 side,
+                scope,
                 self.state.post_entry_sl_cooldown_until_ts_ms,
-                self.state.post_entry_sl_cooldown_until_ts_ms - ts_ms,
-                self.state.post_entry_sl_cooldown_reason,
+                remaining_ms,
+                reason,
             )
             return False
         return True
