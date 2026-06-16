@@ -645,6 +645,21 @@ class StrategyPositionState:
     extreme_retest_consumed_anchor_ts_ms: Optional[int] = None
 
 
+@dataclass(frozen=True)
+class _ExtremeUpdateResult:
+    """Structured result from _update_lower_extreme / _update_upper_extreme.
+
+    Only when new_extreme_detected=True should divergence be evaluated.
+    Absorption may still be checked on the first valid extreme tick.
+    """
+
+    new_extreme_detected: bool
+    old_extreme_price: float | None = None
+    new_extreme_price: float | None = None
+    old_extreme_fast_cvd: float | None = None
+    new_fast_cvd: float | None = None
+
+
 def _env_bool(name: str, default: bool) -> bool:
     value = os.getenv(name)
     if value is None:
@@ -688,17 +703,12 @@ class BollCvdReclaimStrategy:
         if not self._cooldown_ok(ts_ms):
             return intents
 
-        if not self._post_entry_sl_cooldown_ok("LONG", ts_ms):
-            return intents
-        if not self._post_entry_sl_cooldown_ok("SHORT", ts_ms):
-            return intents
-
-        if self._long_setup(price, cvd, boll):
+        if self._post_entry_sl_cooldown_ok("LONG", ts_ms) and self._long_setup(price, cvd, boll):
             intent = self._maybe_open_or_add_long(price, ts_ms, boll, cvd)
             if intent is not None:
                 intents.append(intent)
 
-        if self._short_setup(price, cvd, boll):
+        if self._post_entry_sl_cooldown_ok("SHORT", ts_ms) and self._short_setup(price, cvd, boll):
             intent = self._maybe_open_or_add_short(price, ts_ms, boll, cvd)
             if intent is not None:
                 intents.append(intent)
@@ -746,6 +756,7 @@ class BollCvdReclaimStrategy:
     def _update_lower_outside(self, price: float, ts_ms: int, boll: BollSnapshot,
                                cvd: CvdSnapshot | None) -> None:
         """Handle a tick where price is below the lower BOLL band."""
+        new_extreme_detected = False
         if not self.state.lower_armed:
             # ── First arm ──────────────────────────────────────────────
             self.state.lower_armed = True
@@ -761,20 +772,24 @@ class BollCvdReclaimStrategy:
                 self.config.max_entry_distance_from_extreme_pct * 100,
                 self.config.max_armed_seconds, _fast_cvd_str,
             )
+            # First arm is the first extreme — allow absorption evaluation
+            new_extreme_detected = True
         elif self.state.lower_reclaim_seen:
             # ── Previously reclaimed, now outside again ────────────────
             self._handle_lower_rebreak_after_reclaim(price, ts_ms, boll, cvd)
         else:
             # ── Normal extreme update during outside excursion ─────────
-            self._update_lower_extreme(price, ts_ms, boll, cvd)
+            result = self._update_lower_extreme(price, ts_ms, boll, cvd)
+            new_extreme_detected = result.new_extreme_detected
 
         self._update_lower_deep_enough(boll)
         if cvd is not None:
-            self._check_lower_cvd_structure(cvd, boll, ts_ms)
+            self._check_lower_cvd_structure(cvd, boll, ts_ms, new_extreme_detected=new_extreme_detected)
 
     def _update_upper_outside(self, price: float, ts_ms: int, boll: BollSnapshot,
                                cvd: CvdSnapshot | None) -> None:
         """Handle a tick where price is above the upper BOLL band."""
+        new_extreme_detected = False
         if not self.state.upper_armed:
             # ── First arm ──────────────────────────────────────────────
             self.state.upper_armed = True
@@ -790,46 +805,97 @@ class BollCvdReclaimStrategy:
                 self.config.max_entry_distance_from_extreme_pct * 100,
                 self.config.max_armed_seconds, _fast_cvd_str,
             )
+            # First arm is the first extreme — allow absorption evaluation
+            new_extreme_detected = True
         elif self.state.upper_reclaim_seen:
             # ── Previously reclaimed, now outside again ────────────────
             self._handle_upper_rebreak_after_reclaim(price, ts_ms, boll, cvd)
         else:
             # ── Normal extreme update during outside excursion ─────────
-            self._update_upper_extreme(price, ts_ms, boll, cvd)
+            result = self._update_upper_extreme(price, ts_ms, boll, cvd)
+            new_extreme_detected = result.new_extreme_detected
 
         self._update_upper_deep_enough(boll)
         if cvd is not None:
-            self._check_upper_cvd_structure(cvd, boll, ts_ms)
+            self._check_upper_cvd_structure(cvd, boll, ts_ms, new_extreme_detected=new_extreme_detected)
 
     def _update_lower_extreme(self, price: float, ts_ms: int, boll: BollSnapshot,
-                               cvd: CvdSnapshot | None) -> None:
-        """Update lower extreme during ongoing outside excursion."""
+                               cvd: CvdSnapshot | None) -> _ExtremeUpdateResult:
+        """Update lower extreme during ongoing outside excursion.
+
+        Returns a structured result so the caller can decide whether to
+        evaluate divergence (only when new_extreme_detected=True).
+        """
         old_extreme = self.state.lower_extreme_price
+        old_fast_cvd = self.state.lower_extreme_fast_cvd
+        new_fast_cvd = cvd.fast_cvd if cvd is not None else None
+
         if old_extreme is None or price >= old_extreme:
-            return
+            return _ExtremeUpdateResult(
+                new_extreme_detected=False,
+                old_extreme_price=old_extreme,
+                old_extreme_fast_cvd=old_fast_cvd,
+                new_fast_cvd=new_fast_cvd,
+            )
         buffer_pct = self.config.entry_reclaim_new_extreme_buffer_pct
         if price >= old_extreme * (1 - buffer_pct):
-            return  # within noise buffer, not a real new extreme
+            return _ExtremeUpdateResult(
+                new_extreme_detected=False,
+                old_extreme_price=old_extreme,
+                old_extreme_fast_cvd=old_fast_cvd,
+                new_fast_cvd=new_fast_cvd,
+            )
         # Real new extreme — update price and timestamp
         # (extreme_fast_cvd is managed by _check_lower_cvd_structure)
         self.state.lower_extreme_price = price
         self.state.lower_extreme_ts_ms = ts_ms
         logger.debug("LOWER_EXTREME_UPDATED | extreme=%.4f price=%.4f", price, price)
+        return _ExtremeUpdateResult(
+            new_extreme_detected=True,
+            old_extreme_price=old_extreme,
+            new_extreme_price=price,
+            old_extreme_fast_cvd=old_fast_cvd,
+            new_fast_cvd=new_fast_cvd,
+        )
 
     def _update_upper_extreme(self, price: float, ts_ms: int, boll: BollSnapshot,
-                               cvd: CvdSnapshot | None) -> None:
-        """Update upper extreme during ongoing outside excursion."""
+                               cvd: CvdSnapshot | None) -> _ExtremeUpdateResult:
+        """Update upper extreme during ongoing outside excursion.
+
+        Returns a structured result so the caller can decide whether to
+        evaluate divergence (only when new_extreme_detected=True).
+        """
         old_extreme = self.state.upper_extreme_price
+        old_fast_cvd = self.state.upper_extreme_fast_cvd
+        new_fast_cvd = cvd.fast_cvd if cvd is not None else None
+
         if old_extreme is None or price <= old_extreme:
-            return
+            return _ExtremeUpdateResult(
+                new_extreme_detected=False,
+                old_extreme_price=old_extreme,
+                old_extreme_fast_cvd=old_fast_cvd,
+                new_fast_cvd=new_fast_cvd,
+            )
         buffer_pct = self.config.entry_reclaim_new_extreme_buffer_pct
         if price <= old_extreme * (1 + buffer_pct):
-            return  # within noise buffer, not a real new extreme
+            return _ExtremeUpdateResult(
+                new_extreme_detected=False,
+                old_extreme_price=old_extreme,
+                old_extreme_fast_cvd=old_fast_cvd,
+                new_fast_cvd=new_fast_cvd,
+            )
         # Real new extreme — update price and timestamp
         # (extreme_fast_cvd is managed by _check_upper_cvd_structure)
         self.state.upper_extreme_price = price
         self.state.upper_extreme_ts_ms = ts_ms
         logger.debug("UPPER_EXTREME_UPDATED | extreme=%.4f price=%.4f", price, price)
+        return _ExtremeUpdateResult(
+            new_extreme_detected=True,
+            old_extreme_price=old_extreme,
+            new_extreme_price=price,
+            old_extreme_fast_cvd=old_fast_cvd,
+            new_fast_cvd=new_fast_cvd,
+        )
 
     def _handle_lower_rebreak_after_reclaim(self, price: float, ts_ms: int, boll: BollSnapshot,
                                              cvd: CvdSnapshot | None) -> None:
@@ -951,8 +1017,15 @@ class BollCvdReclaimStrategy:
         # DIVERGENCE_OR_ABSORPTION
         return self.state.upper_cvd_divergence_confirmed or self.state.upper_cvd_absorption_confirmed
 
-    def _check_lower_cvd_structure(self, cvd: CvdSnapshot, boll: BollSnapshot, ts_ms: int) -> None:
-        """Evaluate both divergence and absorption during lower outside excursion."""
+    def _check_lower_cvd_structure(self, cvd: CvdSnapshot, boll: BollSnapshot, ts_ms: int,
+                                    new_extreme_detected: bool = False) -> None:
+        """Evaluate both divergence and absorption during lower outside excursion.
+
+        Divergence is only evaluated when new_extreme_detected=True — i.e. only
+        on ticks that actually break a new price extreme.  Absorption is still
+        evaluated on the first valid extreme tick (when extreme_fast_cvd is
+        first recorded) regardless of the flag.
+        """
         if not self.state.lower_deep_enough:
             return
         if self._lower_cvd_structure_ok():
@@ -974,8 +1047,8 @@ class BollCvdReclaimStrategy:
             self._check_lower_absorption(extreme, ts_ms)
             return
 
-        # ── Divergence: compare current fast_cvd vs stored extreme_fast_cvd ──
-        if self.config.entry_cvd_divergence_enabled and not self.state.lower_cvd_divergence_confirmed:
+        # ── Divergence: only evaluate when price broke a new extreme ──
+        if new_extreme_detected and self.config.entry_cvd_divergence_enabled and not self.state.lower_cvd_divergence_confirmed:
             if cvd.fast_cvd >= self.state.lower_extreme_fast_cvd:
                 self.state.lower_cvd_divergence_confirmed = True
                 logger.info(
@@ -985,6 +1058,12 @@ class BollCvdReclaimStrategy:
                 )
             else:
                 # CVD making new low — update reference for next comparison
+                self.state.lower_extreme_fast_cvd = cvd.fast_cvd
+        elif not new_extreme_detected and self.config.entry_cvd_divergence_enabled and not self.state.lower_cvd_divergence_confirmed:
+            # CVD trend update on non-extreme ticks: update extreme_fast_cvd
+            # only if CVD confirms (makes new low), to keep reference for
+            # future divergence comparison.
+            if cvd.fast_cvd < self.state.lower_extreme_fast_cvd:
                 self.state.lower_extreme_fast_cvd = cvd.fast_cvd
 
         # ── Absorption: compare extreme_fast_cvd vs reference_fast_cvd ──
@@ -1016,8 +1095,15 @@ class BollCvdReclaimStrategy:
                     self.state.upper_reference_fast_cvd, self.state.upper_extreme_fast_cvd, extreme, ts_ms,
                 )
 
-    def _check_upper_cvd_structure(self, cvd: CvdSnapshot, boll: BollSnapshot, ts_ms: int) -> None:
-        """Evaluate both divergence and absorption during upper outside excursion."""
+    def _check_upper_cvd_structure(self, cvd: CvdSnapshot, boll: BollSnapshot, ts_ms: int,
+                                    new_extreme_detected: bool = False) -> None:
+        """Evaluate both divergence and absorption during upper outside excursion.
+
+        Divergence is only evaluated when new_extreme_detected=True — i.e. only
+        on ticks that actually break a new price extreme.  Absorption is still
+        evaluated on the first valid extreme tick (when extreme_fast_cvd is
+        first recorded) regardless of the flag.
+        """
         if not self.state.upper_deep_enough:
             return
         if self._upper_cvd_structure_ok():
@@ -1039,8 +1125,8 @@ class BollCvdReclaimStrategy:
             self._check_upper_absorption(extreme, ts_ms)
             return
 
-        # ── Divergence: compare current fast_cvd vs stored extreme_fast_cvd ──
-        if self.config.entry_cvd_divergence_enabled and not self.state.upper_cvd_divergence_confirmed:
+        # ── Divergence: only evaluate when price broke a new extreme ──
+        if new_extreme_detected and self.config.entry_cvd_divergence_enabled and not self.state.upper_cvd_divergence_confirmed:
             if cvd.fast_cvd <= self.state.upper_extreme_fast_cvd:
                 self.state.upper_cvd_divergence_confirmed = True
                 logger.info(
@@ -1051,18 +1137,65 @@ class BollCvdReclaimStrategy:
             else:
                 # CVD making new high — update reference for next comparison
                 self.state.upper_extreme_fast_cvd = cvd.fast_cvd
+        elif not new_extreme_detected and self.config.entry_cvd_divergence_enabled and not self.state.upper_cvd_divergence_confirmed:
+            # CVD trend update on non-extreme ticks: update extreme_fast_cvd
+            # only if CVD confirms (makes new high), to keep reference for
+            # future divergence comparison.
+            if cvd.fast_cvd > self.state.upper_extreme_fast_cvd:
+                self.state.upper_extreme_fast_cvd = cvd.fast_cvd
 
         # ── Absorption: compare extreme_fast_cvd vs reference_fast_cvd ──
         self._check_upper_absorption(extreme, ts_ms)
 
     def _expire_armed_state(self, ts_ms: int) -> None:
-        max_age_ms = self.config.max_armed_seconds * 1000
-        if self.state.lower_armed and ts_ms - self.state.lower_armed_ts_ms > max_age_ms:
-            logger.info("LOWER_ARMED_RESET | reason=expired age_ms=%s", ts_ms - self.state.lower_armed_ts_ms)
-            self._reset_lower_armed()
-        if self.state.upper_armed and ts_ms - self.state.upper_armed_ts_ms > max_age_ms:
-            logger.info("UPPER_ARMED_RESET | reason=expired age_ms=%s", ts_ms - self.state.upper_armed_ts_ms)
-            self._reset_upper_armed()
+        """Expire armed state using new-state-machine timeouts.
+
+        When lower_extreme_ts_ms / upper_extreme_ts_ms is available, the
+        extreme-to-reclaim timeout (entry_max_extreme_to_reclaim_seconds) is
+        used so that a new price extreme resets the 15-minute reclaim window.
+        The old max_armed_seconds is kept only as a fallback when NO extreme
+        timestamp has been recorded yet (e.g. price went outside but never
+        reached min_outside_pct depth).
+
+        The total setup lifetime (entry_max_total_setup_seconds) is enforced
+        separately in _update_armed_state() via first_armed_ts_ms.
+        """
+        _extreme_ms = self.config.entry_max_extreme_to_reclaim_seconds * 1000
+        _fallback_ms = self.config.max_armed_seconds * 1000
+
+        # ── Lower side ──────────────────────────────────────────────────
+        if self.state.lower_armed:
+            _extreme_ts = self.state.lower_extreme_ts_ms
+            if _extreme_ts > 0 and ts_ms - _extreme_ts > _extreme_ms:
+                logger.info(
+                    "LOWER_ARMED_RESET | reason=extreme_to_reclaim_timeout "
+                    "extreme_ts_ms=%s age_ms=%s max_ms=%s",
+                    _extreme_ts, ts_ms - _extreme_ts, _extreme_ms,
+                )
+                self._reset_lower_armed()
+            elif _extreme_ts <= 0 and ts_ms - self.state.lower_armed_ts_ms > _fallback_ms:
+                logger.info(
+                    "LOWER_ARMED_RESET | reason=expired_no_extreme age_ms=%s max_ms=%s",
+                    ts_ms - self.state.lower_armed_ts_ms, _fallback_ms,
+                )
+                self._reset_lower_armed()
+
+        # ── Upper side ──────────────────────────────────────────────────
+        if self.state.upper_armed:
+            _extreme_ts = self.state.upper_extreme_ts_ms
+            if _extreme_ts > 0 and ts_ms - _extreme_ts > _extreme_ms:
+                logger.info(
+                    "UPPER_ARMED_RESET | reason=extreme_to_reclaim_timeout "
+                    "extreme_ts_ms=%s age_ms=%s max_ms=%s",
+                    _extreme_ts, ts_ms - _extreme_ts, _extreme_ms,
+                )
+                self._reset_upper_armed()
+            elif _extreme_ts <= 0 and ts_ms - self.state.upper_armed_ts_ms > _fallback_ms:
+                logger.info(
+                    "UPPER_ARMED_RESET | reason=expired_no_extreme age_ms=%s max_ms=%s",
+                    ts_ms - self.state.upper_armed_ts_ms, _fallback_ms,
+                )
+                self._reset_upper_armed()
 
     def _reset_lower_armed(self) -> None:
         self.state.lower_armed = False

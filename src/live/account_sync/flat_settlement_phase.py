@@ -147,6 +147,40 @@ async def prepare_account_sync_flat_settlement_phase(
             logger.warning("MIDDLE_BUCKET_FAST_SL_CANCELLED | reason=flat_sl_cancel_failed algoId=%s",
                            middle_bucket_fast_sl_order_id)
 
+    # ── Post-entry SL cooldown: arm if candidate and realized loss ────
+    # The decision is made here (after settled balance is visible) rather
+    # than in pre_core_position so we can use actual realized PnL to
+    # distinguish an entry protective SL loss from a TP fill or manual close.
+    entry_sl_cooldown_candidate = bool(pending_flat_payload.get("entry_sl_cooldown_candidate", False))
+    if entry_sl_cooldown_candidate:
+        cash_before_pos = pending_flat_payload.get("cash_before_position")
+        if cash_before_pos is not None:
+            try:
+                realized_delta = float(settled.cash) - float(cash_before_pos)
+            except (TypeError, ValueError):
+                realized_delta = 0.0
+            if realized_delta < 0:
+                flat_side = str(pending_flat_payload.get("side") or "UNKNOWN")
+                strategy.arm_post_entry_sl_cooldown(
+                    ts_ms=live_time_utils.utc_ms(),
+                    side=flat_side,
+                    reason="entry_protective_sl_loss_flat",
+                )
+                logger.warning(
+                    "POST_ENTRY_SL_COOLDOWN_ARMED_ON_SETTLED_LOSS | side=%s "
+                    "cash_before=%.4f cash_after=%.4f realized=%.4f",
+                    flat_side, float(cash_before_pos), settled.cash, realized_delta,
+                )
+            else:
+                logger.info(
+                    "POST_ENTRY_SL_COOLDOWN_SKIPPED_NOT_LOSS | side=%s "
+                    "cash_before=%.4f cash_after=%.4f realized=%.4f",
+                    pending_flat_payload.get("side", "-"),
+                    float(cash_before_pos) if cash_before_pos else 0.0,
+                    settled.cash,
+                    realized_delta,
+                )
+
     async with state_lock:
         result_flat_previous_halt_reason = execution_state.halt_reason if execution_state.trading_halted else None
         # ── Preserve post-entry SL cooldown across flat state reset ──────

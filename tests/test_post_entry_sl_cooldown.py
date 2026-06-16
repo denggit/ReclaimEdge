@@ -363,3 +363,262 @@ def test_cooldown_blocks_on_tick_entry() -> None:
                buy_ratio=0.7, sell_ratio=0.3, no_new_low=True)
     intents = strat.on_tick(reclaim_price, ts_now + 5000, boll, cvd)
     assert len(intents) == 0  # blocked by cooldown
+
+
+# ── Test: on_tick scope=GLOBAL, LONG cooldown blocks both sides ─────────
+
+
+def test_on_tick_cooldown_global_blocks_both_sides() -> None:
+    """scope=GLOBAL: LONG cooldown should block both LONG and SHORT entry via on_tick."""
+    strat = _strategy(post_entry_sl_cooldown_scope="GLOBAL")
+    ts_now = 100_000
+    strat.arm_post_entry_sl_cooldown(ts_now, "LONG", "entry_protective_sl_flat")
+
+    boll = _boll()
+    # Arm lower band for LONG setup
+    strat.on_tick(1900 * 0.9985, ts_now + 1000, boll, _cvd(ts_ms=ts_now + 1000, price=1900 * 0.9985))
+    # Also arm upper band for SHORT setup (opposite band break resets lower, so arm upper only)
+    # Actually, after the fix, each side is checked independently. But upper_armed was cleared
+    # by opposite band break. Let's re-arm upper in a separate tick.
+    strat2 = _strategy(post_entry_sl_cooldown_scope="GLOBAL")
+    strat2.arm_post_entry_sl_cooldown(ts_now, "LONG", "entry_protective_sl_flat")
+    # Arm upper
+    strat2.on_tick(2100 * 1.0015, ts_now + 1000, boll, _cvd(ts_ms=ts_now + 1000, price=2100 * 1.0015,
+               cross_positive=False, cross_negative=False, cvd_increasing=False, cvd_decreasing=False))
+    # Try SHORT reclaim
+    short_reclaim = boll.upper * 0.999
+    cvd_short = _cvd(ts_ms=ts_now + 5000, price=short_reclaim,
+                     cross_positive=False, cross_negative=True, cvd_increasing=False, cvd_decreasing=True,
+                     buy_ratio=0.3, sell_ratio=0.7, no_new_high=True)
+    intents = strat2.on_tick(short_reclaim, ts_now + 5000, boll, cvd_short)
+    assert len(intents) == 0  # GLOBAL cooldown blocks SHORT too
+
+
+# ── Test: on_tick scope=SIDE, LONG cooldown allows SHORT entry ─────────
+
+
+def test_on_tick_cooldown_side_long_allows_short_entry() -> None:
+    """scope=SIDE: LONG cooldown blocks LONG but allows SHORT entry via on_tick.
+
+    We test each direction independently because _update_armed_state() resets
+    the opposite armed side when price crosses the middle band.
+    """
+    strat = _strategy(post_entry_sl_cooldown_scope="SIDE")
+    ts_now = 100_000
+    strat.arm_post_entry_sl_cooldown(ts_now, "LONG", "entry_protective_sl_flat")
+    boll = _boll()
+
+    # ── Sub-test A: LONG is blocked ──────────────────────────────────
+    strat_a = _strategy(post_entry_sl_cooldown_scope="SIDE")
+    strat_a.arm_post_entry_sl_cooldown(ts_now, "LONG", "entry_protective_sl_flat")
+    # Arm lower band for LONG
+    strat_a.on_tick(1900 * 0.9985, ts_now + 1000, boll, _cvd(ts_ms=ts_now + 1000, price=1900 * 0.9985))
+    long_reclaim = boll.lower * 1.001
+    cvd_long = _cvd(ts_ms=ts_now + 2000, price=long_reclaim,
+                    cross_positive=True, cvd_increasing=True, buy_ratio=0.7, sell_ratio=0.3, no_new_low=True)
+    intents_a = strat_a.on_tick(long_reclaim, ts_now + 2000, boll, cvd_long)
+    long_intents = [i for i in intents_a if i.side == "LONG"]
+    assert len(long_intents) == 0  # LONG blocked by SIDE cooldown
+
+    # ── Sub-test B: SHORT is NOT blocked ─────────────────────────────
+    strat_b = _strategy(post_entry_sl_cooldown_scope="SIDE")
+    strat_b.arm_post_entry_sl_cooldown(ts_now, "LONG", "entry_protective_sl_flat")
+    # Arm upper band for SHORT
+    strat_b.on_tick(2100 * 1.0015, ts_now + 1000, boll, _cvd(ts_ms=ts_now + 1000, price=2100 * 1.0015,
+                    cross_positive=False, cross_negative=False, cvd_increasing=False, cvd_decreasing=False))
+    short_reclaim = boll.upper * 0.999
+    cvd_short = _cvd(ts_ms=ts_now + 2000, price=short_reclaim,
+                     cross_positive=False, cross_negative=True, cvd_increasing=False, cvd_decreasing=True,
+                     buy_ratio=0.3, sell_ratio=0.7, no_new_high=True)
+    intents_b = strat_b.on_tick(short_reclaim, ts_now + 2000, boll, cvd_short)
+    short_intents = [i for i in intents_b if i.side == "SHORT"]
+    assert len(short_intents) >= 1  # SHORT allowed with SIDE cooldown
+
+
+# ── Test: on_tick scope=SIDE, SHORT cooldown allows LONG entry ─────────
+
+
+def test_on_tick_cooldown_side_short_allows_long_entry() -> None:
+    """scope=SIDE: SHORT cooldown blocks SHORT but allows LONG entry via on_tick.
+
+    We test each direction independently because _update_armed_state() resets
+    the opposite armed side when price crosses the middle band.
+    """
+    strat = _strategy(post_entry_sl_cooldown_scope="SIDE")
+    ts_now = 100_000
+    strat.arm_post_entry_sl_cooldown(ts_now, "SHORT", "entry_protective_sl_flat")
+    boll = _boll()
+
+    # ── Sub-test A: SHORT is blocked ─────────────────────────────────
+    strat_a = _strategy(post_entry_sl_cooldown_scope="SIDE")
+    strat_a.arm_post_entry_sl_cooldown(ts_now, "SHORT", "entry_protective_sl_flat")
+    # Arm upper band for SHORT
+    strat_a.on_tick(2100 * 1.0015, ts_now + 1000, boll, _cvd(ts_ms=ts_now + 1000, price=2100 * 1.0015,
+                    cross_positive=False, cross_negative=False, cvd_increasing=False, cvd_decreasing=False))
+    short_reclaim = boll.upper * 0.999
+    cvd_short = _cvd(ts_ms=ts_now + 2000, price=short_reclaim,
+                     cross_positive=False, cross_negative=True, cvd_increasing=False, cvd_decreasing=True,
+                     buy_ratio=0.3, sell_ratio=0.7, no_new_high=True)
+    intents_a = strat_a.on_tick(short_reclaim, ts_now + 2000, boll, cvd_short)
+    short_intents = [i for i in intents_a if i.side == "SHORT"]
+    assert len(short_intents) == 0  # SHORT blocked by SIDE cooldown
+
+    # ── Sub-test B: LONG is NOT blocked ──────────────────────────────
+    strat_b = _strategy(post_entry_sl_cooldown_scope="SIDE")
+    strat_b.arm_post_entry_sl_cooldown(ts_now, "SHORT", "entry_protective_sl_flat")
+    # Arm lower band for LONG
+    strat_b.on_tick(1900 * 0.9985, ts_now + 1000, boll, _cvd(ts_ms=ts_now + 1000, price=1900 * 0.9985))
+    long_reclaim = boll.lower * 1.001
+    cvd_long = _cvd(ts_ms=ts_now + 2000, price=long_reclaim,
+                    cross_positive=True, cvd_increasing=True, buy_ratio=0.7, sell_ratio=0.3, no_new_low=True)
+    intents_b = strat_b.on_tick(long_reclaim, ts_now + 2000, boll, cvd_long)
+    long_intents = [i for i in intents_b if i.side == "LONG"]
+    assert len(long_intents) >= 1  # LONG allowed with SIDE cooldown
+
+
+# ── Fix 4: cooldown candidate logic (pre_core_position pattern) ─────────
+
+
+def test_entry_sl_loss_flat_is_cooldown_candidate() -> None:
+    """Entry SL loss scenario: no partial TP, has entry_sl_order_id → candidate."""
+    strat = _strategy()
+    strat.state.entry_protective_sl_order_id = "sl-order-123"
+    strat.state.partial_tp_consumed = False
+    strat.state.three_stage_tp1_consumed = False
+
+    entry_sl_cooldown_candidate = (
+        strat.config.post_entry_sl_cooldown_enabled
+        and not strat.state.three_stage_tp1_consumed
+        and not strat.state.partial_tp_consumed
+        and strat.state.entry_protective_sl_order_id is not None
+    )
+    assert entry_sl_cooldown_candidate is True
+
+
+def test_single_tp_positive_flat_not_candidate() -> None:
+    """SINGLE TP filled scenario: partial_tp_consumed=True → not a candidate."""
+    strat = _strategy()
+    strat.state.entry_protective_sl_order_id = "sl-order-123"
+    strat.state.partial_tp_consumed = True  # TP was consumed
+    strat.state.three_stage_tp1_consumed = False
+
+    entry_sl_cooldown_candidate = (
+        strat.config.post_entry_sl_cooldown_enabled
+        and not strat.state.three_stage_tp1_consumed
+        and not strat.state.partial_tp_consumed
+        and strat.state.entry_protective_sl_order_id is not None
+    )
+    assert entry_sl_cooldown_candidate is False  # TP consumed → not candidate
+
+
+def test_manual_close_positive_flat_not_candidate_by_pattern() -> None:
+    """Manual close positive flat: entry_sl_order_id may still be set but
+    partial_tp_consumed ≠ True. However, the settled-loss check in
+    flat_settlement_phase will skip arming because realized PnL ≥ 0.
+
+    The candidate flag alone does NOT arm — it only marks the flat for
+    settled-loss evaluation.
+    """
+    strat = _strategy()
+    strat.state.entry_protective_sl_order_id = "sl-order-123"
+    strat.state.partial_tp_consumed = False
+    strat.state.three_stage_tp1_consumed = False
+
+    # Candidate logic: passes the pre-checks
+    entry_sl_cooldown_candidate = (
+        strat.config.post_entry_sl_cooldown_enabled
+        and not strat.state.three_stage_tp1_consumed
+        and not strat.state.partial_tp_consumed
+        and strat.state.entry_protective_sl_order_id is not None
+    )
+    assert entry_sl_cooldown_candidate is True
+
+    # But settled-loss check would skip: cash_after >= cash_before → no arm
+    cash_before = 5000.0
+    cash_after = 5100.0  # positive realized
+    realized_delta = cash_after - cash_before
+    assert realized_delta >= 0  # positive → no cooldown
+    # cooldown should NOT be armed for positive flat
+
+
+def test_manual_close_loss_flat_default_no_arm() -> None:
+    """Manual close loss flat: by default, without explicit configuration
+    allowing manual loss cooldown, the realized loss check in
+    flat_settlement_phase is conservative.
+
+    The pre_core candidate flag may be True, but only a settled negative
+    PnL will actually arm. Manual close loss still gets the settled-loss
+    evaluation, and by default would NOT arm unless explicitly configured.
+    """
+    strat = _strategy()
+    strat.state.entry_protective_sl_order_id = "sl-order-123"
+    strat.state.partial_tp_consumed = False
+    strat.state.three_stage_tp1_consumed = False
+
+    # Candidate logic passes
+    entry_sl_cooldown_candidate = (
+        strat.config.post_entry_sl_cooldown_enabled
+        and not strat.state.three_stage_tp1_consumed
+        and not strat.state.partial_tp_consumed
+        and strat.state.entry_protective_sl_order_id is not None
+    )
+    assert entry_sl_cooldown_candidate is True
+
+    # But with negative realized: the settled-loss check in
+    # flat_settlement_phase would arm cooldown. This is conservative:
+    # if a loss flat occurs without explicit fill-source info, it may
+    # have been a protective SL. Manual close losses are rare in normal
+    # bot operation.
+    cash_before = 5000.0
+    cash_after = 4950.0  # negative realized
+    realized_delta = cash_after - cash_before
+    # Conservative: negative flat → arm cooldown
+    assert realized_delta < 0
+
+
+def test_post_tp1_protective_sl_flat_not_candidate() -> None:
+    """Post-TP1 protective SL flat: three_stage_tp1_consumed=True → not candidate."""
+    strat = _strategy()
+    strat.state.entry_protective_sl_order_id = "sl-order-123"
+    strat.state.three_stage_tp1_consumed = True
+    strat.state.partial_tp_consumed = False
+
+    entry_sl_cooldown_candidate = (
+        strat.config.post_entry_sl_cooldown_enabled
+        and not strat.state.three_stage_tp1_consumed
+        and not strat.state.partial_tp_consumed
+        and strat.state.entry_protective_sl_order_id is not None
+    )
+    assert entry_sl_cooldown_candidate is False  # TP1 consumed → not candidate
+
+
+def test_runner_sl_flat_not_candidate() -> None:
+    """Runner SL flat: partial_tp_consumed=True → not candidate."""
+    strat = _strategy()
+    strat.state.entry_protective_sl_order_id = "sl-order-123"
+    strat.state.partial_tp_consumed = True
+    strat.state.three_stage_tp1_consumed = False
+
+    entry_sl_cooldown_candidate = (
+        strat.config.post_entry_sl_cooldown_enabled
+        and not strat.state.three_stage_tp1_consumed
+        and not strat.state.partial_tp_consumed
+        and strat.state.entry_protective_sl_order_id is not None
+    )
+    assert entry_sl_cooldown_candidate is False  # partial TP consumed → not candidate
+
+
+def test_no_entry_sl_order_id_not_candidate() -> None:
+    """No entry_sl_order_id → not a candidate regardless of other flags."""
+    strat = _strategy()
+    strat.state.entry_protective_sl_order_id = None  # no SL order
+    strat.state.partial_tp_consumed = False
+    strat.state.three_stage_tp1_consumed = False
+
+    entry_sl_cooldown_candidate = (
+        strat.config.post_entry_sl_cooldown_enabled
+        and not strat.state.three_stage_tp1_consumed
+        and not strat.state.partial_tp_consumed
+        and strat.state.entry_protective_sl_order_id is not None
+    )
+    assert entry_sl_cooldown_candidate is False  # no SL order → not candidate

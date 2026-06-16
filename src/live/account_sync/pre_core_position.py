@@ -262,7 +262,11 @@ async def run_account_sync_pre_core_position_phase(
                 and strategy.state.layers > 0
         )
         if flat_transition_detected:
-            # ── Arm post-entry SL cooldown if this was an initial entry protective SL exit ──
+            # ── Collect flat metadata for cooldown decision ──────────────
+            # We do NOT arm the cooldown here because we cannot yet
+            # distinguish an entry protective SL loss from a TP fill or
+            # manual close.  The actual arming happens in
+            # flat_settlement_phase after the settled balance is visible.
             three_stage_tp1_consumed = bool(getattr(strategy.state, "three_stage_tp1_consumed", False))
             partial_tp_consumed = bool(getattr(strategy.state, "partial_tp_consumed", False))
             entry_sl_order_id = getattr(strategy.state, "entry_protective_sl_order_id", None)
@@ -271,18 +275,12 @@ async def run_account_sync_pre_core_position_phase(
                 getattr(strategy_config, "post_entry_sl_cooldown_enabled", False)
                 if strategy_config is not None else False
             )
-            should_arm_cooldown = (
+            entry_sl_cooldown_candidate = (
                 post_entry_sl_cooldown_enabled
                 and not three_stage_tp1_consumed
                 and not partial_tp_consumed
                 and entry_sl_order_id is not None
             )
-            if should_arm_cooldown:
-                strategy.arm_post_entry_sl_cooldown(
-                    ts_ms=live_time_utils.utc_ms(),
-                    side=strategy.state.side or "UNKNOWN",
-                    reason="entry_protective_sl_flat",
-                )
 
             pending_flat_payload = {
                 "position_id": execution_state.current_position_id,
@@ -307,7 +305,8 @@ async def run_account_sync_pre_core_position_phase(
                                                                        None),
                 "trend_runner_sl_order_id": getattr(strategy.state, "trend_runner_sl_order_id", None),
                 "trend_runner_exit_reason": getattr(strategy.state, "trend_runner_exit_reason", None),
-                "post_entry_sl_cooldown_armed": should_arm_cooldown,
+                "entry_sl_cooldown_candidate": entry_sl_cooldown_candidate,
+                "post_entry_sl_cooldown_enabled": post_entry_sl_cooldown_enabled,
             }
             execution_state.trading_halted = True
             last_flat_detected_monotonic = now

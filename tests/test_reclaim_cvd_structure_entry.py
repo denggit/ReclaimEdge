@@ -251,3 +251,114 @@ def test_divergence_or_absorption_either_ok() -> None:
     strat.on_tick(p1, 1000, boll, _cvd(ts_ms=1000, price=p1, fast_cvd=100.0))
     # absorption confirmed immediately (extreme_fast_cvd <= reference_fast_cvd)
     assert strat._upper_cvd_structure_ok() is True
+
+
+# ── Fix 3: divergence only on new price extreme ─────────────────────────
+
+
+def test_upper_no_new_extreme_no_divergence() -> None:
+    """Price did NOT break a new high, fast_cvd dropped — divergence must NOT
+    be confirmed because there's no new price extreme."""
+    strat = _strategy(entry_cvd_structure_mode="DIVERGENCE_ONLY",
+                       entry_cvd_absorption_enabled=False)
+    boll = _boll()
+    # First extreme
+    p1 = 2100 * 1.0015
+    strat.on_tick(p1, 1000, boll, _cvd(ts_ms=1000, price=p1, fast_cvd=100.0))
+    assert strat.state.upper_deep_enough is True
+    assert strat.state.upper_extreme_fast_cvd == 100.0
+
+    # Same extreme price (within buffer), fast_cvd dropped
+    # This should NOT trigger divergence because price didn't break new extreme
+    p2 = p1  # same price, not a new extreme
+    strat.on_tick(p2, 2000, boll, _cvd(ts_ms=2000, price=p2, fast_cvd=80.0))
+    assert strat.state.upper_cvd_divergence_confirmed is False  # no new extreme → no divergence check
+
+
+def test_upper_new_extreme_divergence_confirmed() -> None:
+    """Price breaks new high, fast_cvd does NOT — divergence confirmed."""
+    strat = _strategy(entry_cvd_structure_mode="DIVERGENCE_ONLY",
+                       entry_cvd_absorption_enabled=False)
+    boll = _boll()
+    p1 = 2100 * 1.0015
+    strat.on_tick(p1, 1000, boll, _cvd(ts_ms=1000, price=p1, fast_cvd=100.0))
+    # New extreme: price higher, fast_cvd lower → divergence
+    p2 = 2100 * 1.003
+    strat.on_tick(p2, 2000, boll, _cvd(ts_ms=2000, price=p2, fast_cvd=80.0))
+    assert strat.state.upper_cvd_divergence_confirmed is True
+
+
+def test_upper_new_extreme_cvd_confirms_no_divergence() -> None:
+    """Price breaks new high, fast_cvd also makes new high — no divergence,
+    extreme_fast_cvd updated."""
+    strat = _strategy(entry_cvd_structure_mode="DIVERGENCE_ONLY",
+                       entry_cvd_absorption_enabled=False)
+    boll = _boll()
+    p1 = 2100 * 1.0015
+    strat.on_tick(p1, 1000, boll, _cvd(ts_ms=1000, price=p1, fast_cvd=100.0))
+    assert strat.state.upper_extreme_fast_cvd == 100.0
+    # New extreme: price higher, fast_cvd ALSO higher → CVD confirms → update reference
+    p2 = 2100 * 1.003
+    strat.on_tick(p2, 2000, boll, _cvd(ts_ms=2000, price=p2, fast_cvd=120.0))
+    assert strat.state.upper_cvd_divergence_confirmed is False  # CVD confirms → no divergence
+    assert strat.state.upper_extreme_fast_cvd == 120.0  # updated for next comparison
+
+
+def test_lower_no_new_extreme_no_divergence() -> None:
+    """Price did NOT break a new low, fast_cvd rose — divergence must NOT
+    be confirmed because there's no new price extreme."""
+    strat = _strategy(entry_cvd_structure_mode="DIVERGENCE_ONLY",
+                       entry_cvd_absorption_enabled=False)
+    boll = _boll()
+    p1 = 1900 * 0.9985
+    strat.on_tick(p1, 1000, boll, _cvd(ts_ms=1000, price=p1, fast_cvd=-100.0))
+    assert strat.state.lower_deep_enough is True
+    assert strat.state.lower_extreme_fast_cvd == -100.0
+
+    # Same extreme price, fast_cvd rose → no new extreme, no divergence check
+    p2 = p1  # same price, not a new extreme
+    strat.on_tick(p2, 2000, boll, _cvd(ts_ms=2000, price=p2, fast_cvd=-70.0))
+    assert strat.state.lower_cvd_divergence_confirmed is False  # no new extreme → no divergence check
+
+
+def test_lower_new_extreme_divergence_confirmed() -> None:
+    """Price breaks new low, fast_cvd does NOT — divergence confirmed."""
+    strat = _strategy(entry_cvd_structure_mode="DIVERGENCE_ONLY",
+                       entry_cvd_absorption_enabled=False)
+    boll = _boll()
+    p1 = 1900 * 0.9985
+    strat.on_tick(p1, 1000, boll, _cvd(ts_ms=1000, price=p1, fast_cvd=-100.0))
+    # New extreme: price lower, fast_cvd higher → divergence
+    p2 = 1900 * 0.997
+    strat.on_tick(p2, 2000, boll, _cvd(ts_ms=2000, price=p2, fast_cvd=-70.0))
+    assert strat.state.lower_cvd_divergence_confirmed is True
+
+
+def test_lower_new_extreme_cvd_confirms_no_divergence() -> None:
+    """Price breaks new low, fast_cvd also makes new low — no divergence,
+    extreme_fast_cvd updated."""
+    strat = _strategy(entry_cvd_structure_mode="DIVERGENCE_ONLY",
+                       entry_cvd_absorption_enabled=False)
+    boll = _boll()
+    p1 = 1900 * 0.9985
+    strat.on_tick(p1, 1000, boll, _cvd(ts_ms=1000, price=p1, fast_cvd=-100.0))
+    assert strat.state.lower_extreme_fast_cvd == -100.0
+    # New extreme: price lower, fast_cvd ALSO lower → CVD confirms → update reference
+    p2 = 1900 * 0.997
+    strat.on_tick(p2, 2000, boll, _cvd(ts_ms=2000, price=p2, fast_cvd=-120.0))
+    assert strat.state.lower_cvd_divergence_confirmed is False  # CVD confirms → no divergence
+    assert strat.state.lower_extreme_fast_cvd == -120.0  # updated for next comparison
+
+
+def test_absorption_still_works_on_single_extreme() -> None:
+    """Absorption should still be confirmed on the first valid extreme tick
+    (within-buffer micro-breaches do not count as new extremes)."""
+    strat = _strategy(entry_cvd_structure_mode="ABSORPTION_ONLY",
+                       entry_cvd_divergence_enabled=False)
+    boll = _boll()
+    # First arm: reference_fast_cvd set
+    p1 = 2100 * 1.0015
+    strat.on_tick(p1, 1000, boll, _cvd(ts_ms=1000, price=p1, fast_cvd=100.0))
+    # extreme_fast_cvd = 100.0, reference_fast_cvd = 100.0
+    # extreme <= reference → 100 <= 100 → absorption confirmed on first extreme
+    assert strat.state.upper_cvd_absorption_confirmed is True

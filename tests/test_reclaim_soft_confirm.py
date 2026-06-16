@@ -269,3 +269,107 @@ def test_confirm_seconds_zero_immediate_entry() -> None:
     intents = strat.on_tick(reclaim_price, 5000, boll, cvd)
     assert len(intents) == 1
     assert intents[0].intent_type == "OPEN_LONG"
+
+
+# ── Fix 2: max_armed_seconds does NOT preempt new extreme window ────────
+
+
+def test_new_extreme_resets_timeout_window() -> None:
+    """A new price extreme within the armed window should extend the valid
+    reclaim window — max_armed_seconds must not preempt the new extreme.
+    """
+    strat = _strategy(
+        max_armed_seconds=900,          # old fallback: 15 min
+        entry_max_extreme_to_reclaim_seconds=900,  # 15 min per extreme
+        entry_max_total_setup_seconds=1800,        # 30 min total
+        entry_reclaim_confirm_seconds=0,           # no confirm wait
+        entry_cvd_divergence_enabled=False,
+        entry_cvd_absorption_enabled=False,
+    )
+    boll = _boll()
+
+    # t=0 min: first arm
+    p1 = 1900 * 0.9985  # outside lower band
+    strat.on_tick(p1, 0, boll, _cvd(ts_ms=0, price=p1, fast_cvd=-100.0))
+    assert strat.state.lower_armed is True
+    assert strat.state.lower_armed_ts_ms == 0
+    first_extreme_ts = strat.state.lower_extreme_ts_ms
+
+    # t=10 min (600_000 ms): new extreme
+    p2 = 1893.0  # lower price = new extreme
+    strat.on_tick(p2, 600_000, boll, _cvd(ts_ms=600_000, price=p2, fast_cvd=-120.0))
+    assert strat.state.lower_armed is True  # still armed
+    assert strat.state.lower_extreme_ts_ms == 600_000  # updated
+    assert strat.state.lower_extreme_price == 1893.0
+
+    # t=20 min (1_200_000 ms): 20 min from first arm but only 10 min from new extreme
+    # old max_armed_seconds=900 would expire at 900_000, but new extreme at 600_000
+    # gives a new window until 600_000 + 900_000 = 1_500_000.
+    # The old bug would reset here because 1_200_000 - 0 > 900_000.
+    inside_price = boll.lower * 1.001
+    strat.on_tick(inside_price, 1_200_000, boll, _cvd(ts_ms=1_200_000, price=inside_price, fast_cvd=-110.0))
+    assert strat.state.lower_armed is True  # NOT reset by max_armed_seconds
+
+    # t=26 min (1_560_000 ms): still within new extreme window (600k + 900k = 1_500k)
+    # Actually 1_560_000 > 1_500_000 so should expire the extreme window
+    # But total setup is 1800s = 1_800_000 ms, so armed should still be here
+    # Wait, 1_560_000 > 600_000 + 900_000 = 1_500_000, so _expire_armed_state would reset
+    # because the extreme_to_reclaim_timeout fires.
+    strat.on_tick(inside_price, 1_560_000, boll, _cvd(ts_ms=1_560_000, price=inside_price, fast_cvd=-110.0))
+    # extreme_to_reclaim_timeout: 1_560_000 - 600_000 = 960_000 > 900_000 → reset
+    assert strat.state.lower_armed is False  # expired by extreme timeout
+
+
+def test_no_new_extreme_falls_back_to_max_armed_seconds() -> None:
+    """When no extreme timestamp exists (e.g. price went outside but never
+    reached min_outside_pct depth), max_armed_seconds is used as fallback.
+    """
+    strat = _strategy(
+        max_armed_seconds=900,
+        entry_max_extreme_to_reclaim_seconds=900,
+        entry_max_total_setup_seconds=3600,
+        entry_reclaim_confirm_seconds=0,
+        entry_cvd_divergence_enabled=False,
+        entry_cvd_absorption_enabled=False,
+    )
+    boll = _boll()
+    # Arm lower but never reaches deep enough → no extreme timestamp
+    p1 = 1900 * 0.9995  # barely outside, NOT deep enough
+    strat.on_tick(p1, 0, boll, _cvd(ts_ms=0, price=p1, fast_cvd=-50.0))
+    assert strat.state.lower_armed is True
+    # extreme_ts_ms is 0 because never deep enough → no extreme recorded
+    assert strat.state.lower_extreme_ts_ms == 0
+
+    # t=901s (901_000 ms): max_armed_seconds=900 → should expire
+    inside_price = boll.lower * 1.001
+    strat.on_tick(inside_price, 901_000, boll, _cvd(ts_ms=901_000, price=inside_price, fast_cvd=-50.0))
+    assert strat.state.lower_armed is False  # expired by max_armed_seconds fallback
+
+
+def test_total_setup_timeout_still_fires() -> None:
+    """The total setup timeout (entry_max_total_setup_seconds) is enforced
+    via _update_armed_state() and fires independently of extreme timeouts.
+    """
+    strat = _strategy(
+        max_armed_seconds=3600,
+        entry_max_extreme_to_reclaim_seconds=900,
+        entry_max_total_setup_seconds=1800,
+        entry_reclaim_confirm_seconds=0,
+        entry_cvd_divergence_enabled=False,
+        entry_cvd_absorption_enabled=False,
+    )
+    boll = _boll()
+    # Arm lower, deep enough
+    p1 = 1900 * 0.9985
+    strat.on_tick(p1, 0, boll, _cvd(ts_ms=0, price=p1, fast_cvd=-100.0))
+    assert strat.state.lower_first_armed_ts_ms == 0
+
+    # t=10 min: new extreme refreshes the extreme window
+    p2 = 1893.0
+    strat.on_tick(p2, 600_000, boll, _cvd(ts_ms=600_000, price=p2, fast_cvd=-120.0))
+    assert strat.state.lower_armed is True
+
+    # t=31 min (1_860_000 ms): total setup = 1800s = 1_800_000 → should expire
+    inside_price = boll.lower * 1.001
+    strat.on_tick(inside_price, 1_860_000, boll, _cvd(ts_ms=1_860_000, price=inside_price, fast_cvd=-110.0))
+    assert strat.state.lower_armed is False  # expired by total setup timeout
