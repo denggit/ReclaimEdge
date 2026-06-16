@@ -61,7 +61,7 @@ def _strategy(**overrides) -> BollCvdReclaimStrategy:
         entry_sweep_profile_enabled=True,
         entry_sweep_profile_bucket_pct=0.0002,
         entry_poc_stop_enabled=True,
-        entry_poc_stop_min_tail_pct=0.003,
+        entry_poc_stop_min_tail_pct=0.008,
         entry_poc_stop_buffer_pct=0.001,
         entry_extreme_stop_buffer_pct=0.001,
         entry_sl_buffer_pct=0.0005,
@@ -85,7 +85,7 @@ def _strategy(**overrides) -> BollCvdReclaimStrategy:
 def test_long_poc_stop_when_extreme_is_far_tail() -> None:
     """When extreme is far below POC (sweep tail), use POC-based stop."""
     strat = _strategy(
-        entry_poc_stop_min_tail_pct=0.003,  # 0.3% tail minimum
+        entry_poc_stop_min_tail_pct=0.008,  # 0.3% tail minimum
         entry_poc_stop_buffer_pct=0.001,
     )
     entry = 100.0
@@ -109,15 +109,15 @@ def test_long_poc_stop_when_extreme_is_far_tail() -> None:
 
 # ── LONG: extreme close to POC → EXTREME_OUTWARD ─────────────────────
 
-def test_long_extreme_stop_when_tail_is_small() -> None:
-    """When extreme is close to POC, use extreme-based stop."""
+def test_long_extreme_stop_when_entry_extreme_distance_small() -> None:
+    """When entry-extreme distance is small (< 0.8%), use extreme-based stop regardless of POC."""
     strat = _strategy(
-        entry_poc_stop_min_tail_pct=0.01,  # 1% tail minimum
+        entry_poc_stop_min_tail_pct=0.008,
         entry_extreme_stop_buffer_pct=0.001,
     )
-    entry = 100.0
-    extreme = 96.0  # 4% below entry
-    poc = 96.2      # POC close to extreme, tail is small
+    entry = 2000.0
+    extreme = 1988.0  # 0.6% below entry (< 0.8% threshold)
+    poc = 1990.0      # POC is valid, but entry-extreme distance is too small
 
     strat.state.lower_extreme_price = extreme
     sp = SweepVolumeProfile(bucket_pct=0.0002)
@@ -136,7 +136,7 @@ def test_long_extreme_stop_when_tail_is_small() -> None:
 def test_short_poc_stop_when_extreme_is_far_tail() -> None:
     """When extreme is far above POC (sweep tail), use POC-based stop."""
     strat = _strategy(
-        entry_poc_stop_min_tail_pct=0.003,
+        entry_poc_stop_min_tail_pct=0.008,
         entry_poc_stop_buffer_pct=0.001,
     )
     entry = 100.0
@@ -159,15 +159,15 @@ def test_short_poc_stop_when_extreme_is_far_tail() -> None:
 
 # ── SHORT: extreme close to POC → EXTREME_OUTWARD ────────────────────
 
-def test_short_extreme_stop_when_tail_is_small() -> None:
-    """When extreme is close to POC, use extreme-based stop."""
+def test_short_extreme_stop_when_entry_extreme_distance_small() -> None:
+    """When entry-extreme distance is small (< 0.8%), use extreme-based stop regardless of POC."""
     strat = _strategy(
-        entry_poc_stop_min_tail_pct=0.01,
+        entry_poc_stop_min_tail_pct=0.008,
         entry_extreme_stop_buffer_pct=0.001,
     )
-    entry = 100.0
-    extreme = 104.0
-    poc = 103.8  # POC close to extreme
+    entry = 2000.0
+    extreme = 2012.0  # 0.6% above entry (< 0.8% threshold)
+    poc = 2010.0      # POC is valid, but entry-extreme distance is too small
 
     strat.state.upper_extreme_price = extreme
     sp = SweepVolumeProfile(bucket_pct=0.0002)
@@ -288,3 +288,125 @@ def test_poc_volume_uses_cvd_size_upper() -> None:
     )
     strat._record_sweep_volume("UPPER", 2100.0, cvd)
     assert sp.poc_price() is not None
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# New tests: entry-extreme distance replaces POC-extreme distance
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ── LONG: entry-extreme >= 0.8%, POC valid → POC_OUTWARD ─────────────
+
+def test_long_entry_extreme_wide_poc_valid() -> None:
+    """When entry-extreme distance >= 0.8% and POC stop is reasonable, use POC stop."""
+    strat = _strategy(
+        entry_poc_stop_min_tail_pct=0.008,
+        entry_poc_stop_buffer_pct=0.001,
+        entry_extreme_stop_buffer_pct=0.001,
+    )
+    entry = 2000.0
+    extreme = 1982.0  # 0.9% below entry ( >= 0.8% )
+    poc = 1990.0      # POC near entry, far from extreme
+
+    strat.state.lower_extreme_price = extreme
+    sp = SweepVolumeProfile(bucket_pct=0.0002)
+    sp.add(poc, 100.0)
+    sp.add(poc + 1.0, 10.0)
+    strat.state.lower_sweep_profile = sp
+
+    sl, mode = strat._select_entry_stop_price(side="LONG", entry_price=entry)
+    assert sl is not None
+    assert mode == "POC_OUTWARD", (
+        f"entry-extreme distance={(entry-extreme)/entry*100:.1f}% >= 0.8%, "
+        f"POC valid → POC_OUTWARD"
+    )
+    expected_poc_sl = poc * (1.0 - 0.001)
+    assert abs(sl - expected_poc_sl) < 0.0001
+    assert sl < entry
+
+
+# ── LONG: entry-extreme >= 0.8% but POC invalid → EXTREME_OUTWARD ────
+
+def test_long_entry_extreme_wide_poc_invalid() -> None:
+    """When entry-extreme >= 0.8% but POC stop >= entry_price, fallback to extreme."""
+    strat = _strategy(
+        entry_poc_stop_min_tail_pct=0.008,
+        entry_poc_stop_buffer_pct=0.001,
+        entry_extreme_stop_buffer_pct=0.001,
+    )
+    entry = 2000.0
+    extreme = 1982.0  # 0.9% below entry ( >= 0.8% )
+    # POC very close to entry — poc_stop = 1999.8 * 0.999 ≈ 1998.0, still < entry
+    # Actually need poc so close that poc_stop >= entry
+    # poc_stop = poc * 0.999 >= 2000 → poc >= 2002.003
+    # But poc should be < entry for a valid LONG POC... let me use a different approach
+    # Make poc very close to entry: poc=1999.9 → poc_stop = 1999.9*0.999=1997.9 < 2000
+    # Hmm, let me think differently. The user wants poc_stop >= entry_price
+    # For that, poc needs to be very close to or above entry
+    # Let me use poc = 2000.5 (slightly above entry, unusual but possible with sweep)
+    poc = 2000.5  # POC slightly above entry → poc_stop = 2000.5*0.999 = 1998.5 < 2000, still valid...
+
+    # Wait, poc_stop < entry is one of the conditions for use_poc. To make it invalid:
+    # Option 1: poc_stop >= entry_price → poc * 0.999 >= 2000 → poc >= 2002.003
+    # Option 2: poc_stop <= extreme_stop → poc*0.999 <= extreme*0.999 → poc <= extreme (unlikely)
+    # Let me use poc very near entry: poc=1999.0 → poc_stop=1999*0.999=1997.001
+    # extreme_stop = 1982 * 0.999 = 1980.018, poc_stop > extreme_stop ✓
+    # poc_stop < entry ✓
+    # → this would be POC_OUTWARD!
+
+    # To make it invalid, let me use a case where poc_stop <= extreme_stop
+    # That can happen when poc is close to extreme
+    # poc=1985.0 → poc_stop=1985*0.999=1983.015, extreme_stop=1982*0.999=1980.018
+    # poc_stop > extreme_stop still... hmm
+
+    # Actually for the test to show EXTREME_OUTWARD when POC is invalid,
+    # the simplest case: poc > entry_price (POC stop would be above entry on LONG)
+    # With poc=2001.0: poc_stop=2001*0.999=1998.999, still < 2000 (entry)
+    # Actually (2001 * 0.999) = 1998.999 < 2000, so it's still valid...
+
+    # Let me try with poc=2003.0: poc_stop=2003*0.999=2000.997 >= 2000 → INVALID!
+    # extreme_stop=1982*0.999=1980.018, 2000.997 > extreme_stop
+    # So: distance >= 0.8% but poc_stop >= entry → EXTREME_OUTWARD
+    poc = 2003.0  # poc_stop = 2003 * 0.999 = 2000.997 >= 2000 (entry)
+
+    strat.state.lower_extreme_price = extreme
+    sp = SweepVolumeProfile(bucket_pct=0.0002)
+    sp.add(poc, 100.0)
+    strat.state.lower_sweep_profile = sp
+
+    sl, mode = strat._select_entry_stop_price(side="LONG", entry_price=entry)
+    assert sl is not None
+    assert mode == "EXTREME_OUTWARD", (
+        f"POC stop (2000.997) >= entry (2000), must fallback to EXTREME_OUTWARD"
+    )
+    expected = extreme * (1.0 - 0.001)
+    assert abs(sl - expected) < 0.0001
+
+
+# ── SHORT: entry-extreme >= 0.8%, POC valid → POC_OUTWARD ────────────
+
+def test_short_entry_extreme_wide_poc_valid() -> None:
+    """When entry-extreme distance >= 0.8% and POC stop is reasonable, use POC stop."""
+    strat = _strategy(
+        entry_poc_stop_min_tail_pct=0.008,
+        entry_poc_stop_buffer_pct=0.001,
+        entry_extreme_stop_buffer_pct=0.001,
+    )
+    entry = 2000.0
+    extreme = 2018.0  # 0.9% above entry ( >= 0.8% )
+    poc = 2010.0      # POC near entry, far from extreme
+
+    strat.state.upper_extreme_price = extreme
+    sp = SweepVolumeProfile(bucket_pct=0.0002)
+    sp.add(poc, 100.0)
+    sp.add(poc - 1.0, 10.0)
+    strat.state.upper_sweep_profile = sp
+
+    sl, mode = strat._select_entry_stop_price(side="SHORT", entry_price=entry)
+    assert sl is not None
+    assert mode == "POC_OUTWARD", (
+        f"entry-extreme distance={(extreme-entry)/entry*100:.1f}% >= 0.8%, "
+        f"POC valid → POC_OUTWARD"
+    )
+    expected_poc_sl = poc * (1.0 + 0.001)
+    assert abs(sl - expected_poc_sl) < 0.0001
+    assert sl > entry

@@ -609,3 +609,383 @@ def test_v2_rejects_fast_cvd_confirm_short() -> None:
     assert cvd.cross_negative is True
     assert cvd.sell_ratio >= 0.55
     assert cvd.no_new_high is True
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# New tests: V2 immediate entry confirm (no 1-second soft confirm)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ── Test 17: LONG first reclaim tick with CVD OK → immediate entry ──────
+
+def test_long_v2_first_tick_entry_when_cvd_ok() -> None:
+    """V2 must enter on the very first tick that reclaims inside reference band.
+
+    Even with ENTRY_RECLAIM_CONFIRM_SECONDS=1.0 (legacy delay), V2 must NOT
+    wait—it immediately checks anchored CVD follow-through and returns True.
+    """
+    strat = _strategy(
+        entry_reclaim_confirm_seconds=1.0,   # legacy delay — V2 must ignore
+        entry_reclaim_inside_band=False,
+        entry_reclaim_max_inside_depth_ratio=0.15,
+    )
+    boll = _boll(lower=1900, middle=2000, upper=2100)
+    _setup_lower_armed_divergence(
+        strat, ref_lower=1900, ref_middle=2000,
+        div_extreme_price=1880, div_extreme_cvd=-800_000,
+        anchor_cum_cvd=-1_000_000,
+    )
+
+    # Price just inside ref_lower (1900), shallow zone
+    # max_entry_price = 1900 + 100 * 0.15 = 1915
+    price = 1905.0
+    # reclaim_anchored_cvd = (1_200_000 - 1_500_000) - (-1_000_000) = 700_000
+    # 700_000 > -800_000 → CVD satisfied
+    cvd = _cvd(
+        ts_ms=20000, price=price,
+        cumulative_buy_volume=1_200_000, cumulative_sell_volume=1_500_000,
+    )
+
+    # This is the FIRST tick back inside — V2 must return True immediately
+    result = strat._long_setup(price, cvd, boll)
+    assert result is True, "V2 should enter on first reclaim tick without waiting"
+
+
+# ── Test 18: SHORT first reclaim tick with CVD OK → immediate entry ─────
+
+def test_short_v2_first_tick_entry_when_cvd_ok() -> None:
+    """V2 SHORT must enter on the very first tick that reclaims inside reference band."""
+    strat = _strategy(
+        entry_reclaim_confirm_seconds=1.0,   # legacy delay — V2 must ignore
+        entry_reclaim_inside_band=False,
+        entry_reclaim_max_inside_depth_ratio=0.15,
+    )
+    boll = _boll(upper=2100, middle=2000, lower=1900)
+    _setup_upper_armed_divergence(
+        strat, ref_upper=2100, ref_middle=2000,
+        div_extreme_price=2120, div_extreme_cvd=800_000,
+        anchor_cum_cvd=1_000_000,
+    )
+
+    # min_entry_price = 2100 - 100 * 0.15 = 2085
+    price = 2092.0  # inside shallow zone
+    # reclaim_anchored_cvd = (1_400_000 - 600_000) - 1_000_000 = -200_000
+    # -200_000 < 800_000 → CVD satisfied
+    cvd = _cvd(
+        ts_ms=20000, price=price,
+        cumulative_buy_volume=1_400_000, cumulative_sell_volume=600_000,
+        buy_ratio=0.4, sell_ratio=0.6,
+    )
+
+    result = strat._short_setup(price, cvd, boll)
+    assert result is True, "V2 SHORT should enter on first reclaim tick without waiting"
+
+
+# ── Test 19: LONG CVD not satisfied then catches up while still shallow ──
+
+def test_long_v2_cvd_not_ok_then_ok_while_still_shallow() -> None:
+    """CVD not satisfied on first tick; price stays shallow; later CVD satisfies → entry."""
+    strat = _strategy(
+        entry_reclaim_confirm_seconds=0,
+        entry_reclaim_inside_band=False,
+        entry_reclaim_max_inside_depth_ratio=0.15,
+    )
+    boll = _boll(lower=1900, middle=2000, upper=2100)
+    _setup_lower_armed_divergence(
+        strat, ref_lower=1900, ref_middle=2000,
+        div_extreme_price=1880, div_extreme_cvd=-800_000,
+        anchor_cum_cvd=-1_000_000,
+    )
+
+    # max_entry_price = 1900 + 100 * 0.15 = 1915
+    price = 1908.0  # shallow zone
+
+    # Tick 1: CVD NOT satisfied
+    # reclaim_anchored_cvd = (500_000 - 2_400_000) - (-1_000_000) = -900_000
+    # -900_000 > -800_000 → False
+    cvd1 = _cvd(
+        ts_ms=20000, price=price,
+        cumulative_buy_volume=500_000, cumulative_sell_volume=2_400_000,
+    )
+    result1 = strat._long_setup(price, cvd1, boll)
+    assert result1 is False
+
+    # Tick 2: CVD now satisfies (more buying stepped in)
+    # reclaim_anchored_cvd = (1_200_000 - 1_500_000) - (-1_000_000) = 700_000
+    # 700_000 > -800_000 → True
+    cvd2 = _cvd(
+        ts_ms=21000, price=price,
+        cumulative_buy_volume=1_200_000, cumulative_sell_volume=1_500_000,
+    )
+    result2 = strat._long_setup(price, cvd2, boll)
+    assert result2 is True, "CVD caught up while still shallow → must enter"
+
+
+# ── Test 20: SHORT CVD not satisfied then catches up while still shallow ─
+
+def test_short_v2_cvd_not_ok_then_ok_while_still_shallow() -> None:
+    """CVD not satisfied on first tick; price stays shallow; later CVD satisfies (SHORT)."""
+    strat = _strategy(
+        entry_reclaim_confirm_seconds=0,
+        entry_reclaim_inside_band=False,
+        entry_reclaim_max_inside_depth_ratio=0.15,
+    )
+    boll = _boll(upper=2100, middle=2000, lower=1900)
+    _setup_upper_armed_divergence(
+        strat, ref_upper=2100, ref_middle=2000,
+        div_extreme_price=2120, div_extreme_cvd=800_000,
+        anchor_cum_cvd=1_000_000,
+    )
+
+    # min_entry_price = 2100 - 100 * 0.15 = 2085
+    price = 2092.0  # shallow zone
+
+    # Tick 1: CVD NOT satisfied
+    # reclaim_anchored_cvd = (2_400_000 - 500_000) - 1_000_000 = 900_000
+    # 900_000 < 800_000 → False
+    cvd1 = _cvd(
+        ts_ms=20000, price=price,
+        cumulative_buy_volume=2_400_000, cumulative_sell_volume=500_000,
+        buy_ratio=0.4, sell_ratio=0.6,
+    )
+    result1 = strat._short_setup(price, cvd1, boll)
+    assert result1 is False
+
+    # Tick 2: CVD now satisfies
+    # reclaim_anchored_cvd = (1_400_000 - 600_000) - 1_000_000 = -200_000
+    # -200_000 < 800_000 → True
+    cvd2 = _cvd(
+        ts_ms=21000, price=price,
+        cumulative_buy_volume=1_400_000, cumulative_sell_volume=600_000,
+        buy_ratio=0.4, sell_ratio=0.6,
+    )
+    result2 = strat._short_setup(price, cvd2, boll)
+    assert result2 is True, "CVD caught up while still shallow → must enter (SHORT)"
+
+
+# ── Test 21: LONG too-deep reject locks until re-outside ────────────────
+
+def test_long_v2_too_deep_reject_locks_until_re_outside() -> None:
+    """Too-deep reject must set rejected_until_next_outside; re-outside unlocks it."""
+    strat = _strategy(
+        entry_reclaim_confirm_seconds=0,
+        entry_reclaim_inside_band=False,
+        entry_reclaim_max_inside_depth_ratio=0.15,
+        entry_reclaim_min_cvd_follow_through=0,
+    )
+    boll = _boll(lower=1900, middle=2000, upper=2100)
+    _setup_lower_armed_divergence(
+        strat, ref_lower=1900, ref_middle=2000,
+        div_extreme_price=1880, div_extreme_cvd=-800_000,
+        anchor_cum_cvd=-1_000_000,
+    )
+
+    # max_entry_price = 1900 + 100 * 0.15 = 1915
+
+    # Tick 1: price inside shallow zone, CVD NOT satisfied → keep waiting
+    price_shallow = 1908.0
+    cvd_bad = _cvd(
+        ts_ms=20000, price=price_shallow,
+        cumulative_buy_volume=500_000, cumulative_sell_volume=2_400_000,
+    )
+    result1 = strat._long_setup(price_shallow, cvd_bad, boll)
+    assert result1 is False
+    assert strat.state.lower_reclaim_rejected_until_next_outside is False
+
+    # Tick 2: price > max_entry_price (too deep), CVD satisfied → REJECTED + LOCKED
+    price_deep = 1930.0  # well beyond max_entry_price=1915
+    cvd_good = _cvd(
+        ts_ms=21000, price=price_deep,
+        cumulative_buy_volume=1_200_000, cumulative_sell_volume=1_500_000,
+    )
+    result2 = strat._long_setup(price_deep, cvd_good, boll)
+    assert result2 is False
+    assert strat.state.lower_reclaim_rejected_until_next_outside is True
+    assert strat.state.lower_reclaim_cycle_count == 1
+
+    # Tick 3: price back in shallow zone, CVD satisfied → STILL blocked by lock
+    cvd_good3 = _cvd(
+        ts_ms=22000, price=price_shallow,
+        cumulative_buy_volume=1_200_000, cumulative_sell_volume=1_500_000,
+    )
+    result3 = strat._long_setup(price_shallow, cvd_good3, boll)
+    assert result3 is False, "Should be locked by rejected_until_next_outside"
+
+    # Now simulate re-entering outside (price below lower band → unlock)
+    # First initialise the orderflow tracker so _update_lower_outside_v2 hits "every tick" path
+    cum_cvd_outside = 500_000 - 1_500_000  # = -1_000_000
+    strat._lower_orderflow.anchor(
+        direction="DOWN", ts_ms=23000, price=boll.lower * 0.998,
+        cumulative_cvd=cum_cvd_outside,
+        cumulative_buy_volume=500_000, cumulative_sell_volume=1_500_000,
+    )
+    strat._update_lower_outside_v2(
+        price=boll.lower * 0.998, ts_ms=24000, boll=boll,
+        cvd=_cvd(ts_ms=24000, price=boll.lower * 0.998,
+                 cumulative_buy_volume=500_000, cumulative_sell_volume=1_500_000),
+    )
+    # Now unlock should have happened
+    assert strat.state.lower_reclaim_rejected_until_next_outside is False, (
+        "Re-entering outside must unlock reclaim retry"
+    )
+
+    # Tick 5: price reclaims shallow zone + CVD satisfied → NOW it enters
+    price_reclaim = 1905.0
+    cvd_final = _cvd(
+        ts_ms=25000, price=price_reclaim,
+        cumulative_buy_volume=1_200_000, cumulative_sell_volume=1_500_000,
+    )
+    result5 = strat._long_setup(price_reclaim, cvd_final, boll)
+    assert result5 is True, "After re-outside unlock, reclaim must succeed"
+
+
+# ── Test 22: SHORT too-deep reject locks until re-outside ───────────────
+
+def test_short_v2_too_deep_reject_locks_until_re_outside() -> None:
+    """Too-deep reject must set upper_rejected_until_next_outside; re-outside unlocks it."""
+    strat = _strategy(
+        entry_reclaim_confirm_seconds=0,
+        entry_reclaim_inside_band=False,
+        entry_reclaim_max_inside_depth_ratio=0.15,
+        entry_reclaim_min_cvd_follow_through=0,
+    )
+    boll = _boll(upper=2100, middle=2000, lower=1900)
+    _setup_upper_armed_divergence(
+        strat, ref_upper=2100, ref_middle=2000,
+        div_extreme_price=2120, div_extreme_cvd=800_000,
+        anchor_cum_cvd=1_000_000,
+    )
+
+    # min_entry_price = 2100 - 100 * 0.15 = 2085
+
+    # Tick 1: price inside shallow zone, CVD NOT satisfied
+    price_shallow = 2092.0
+    cvd_bad = _cvd(
+        ts_ms=20000, price=price_shallow,
+        cumulative_buy_volume=2_400_000, cumulative_sell_volume=500_000,
+        buy_ratio=0.4, sell_ratio=0.6,
+    )
+    result1 = strat._short_setup(price_shallow, cvd_bad, boll)
+    assert result1 is False
+    assert strat.state.upper_reclaim_rejected_until_next_outside is False
+
+    # Tick 2: price < min_entry_price (too deep), CVD satisfied → REJECTED + LOCKED
+    price_deep = 2070.0  # below min_entry_price=2085
+    cvd_good = _cvd(
+        ts_ms=21000, price=price_deep,
+        cumulative_buy_volume=1_400_000, cumulative_sell_volume=600_000,
+        buy_ratio=0.4, sell_ratio=0.6,
+    )
+    result2 = strat._short_setup(price_deep, cvd_good, boll)
+    assert result2 is False
+    assert strat.state.upper_reclaim_rejected_until_next_outside is True
+    assert strat.state.upper_reclaim_cycle_count == 1
+
+    # Tick 3: price back in shallow zone, CVD satisfied → STILL blocked
+    cvd_good3 = _cvd(
+        ts_ms=22000, price=price_shallow,
+        cumulative_buy_volume=1_400_000, cumulative_sell_volume=600_000,
+        buy_ratio=0.4, sell_ratio=0.6,
+    )
+    result3 = strat._short_setup(price_shallow, cvd_good3, boll)
+    assert result3 is False, "Should be locked by upper_rejected_until_next_outside"
+
+    # Simulate re-entering outside (price above upper band → unlock)
+    cum_cvd_outside = 1_500_000 - 500_000  # = 1_000_000
+    strat._upper_orderflow.anchor(
+        direction="UP", ts_ms=23000, price=boll.upper * 1.002,
+        cumulative_cvd=cum_cvd_outside,
+        cumulative_buy_volume=1_500_000, cumulative_sell_volume=500_000,
+    )
+    strat._update_upper_outside_v2(
+        price=boll.upper * 1.002, ts_ms=24000, boll=boll,
+        cvd=_cvd(ts_ms=24000, price=boll.upper * 1.002,
+                 cumulative_buy_volume=1_500_000, cumulative_sell_volume=500_000,
+                 buy_ratio=0.4, sell_ratio=0.6),
+    )
+    assert strat.state.upper_reclaim_rejected_until_next_outside is False, (
+        "Re-entering outside must unlock reclaim retry (SHORT)"
+    )
+
+    # Tick 5: price reclaims shallow zone + CVD satisfied → enters
+    price_reclaim = 2092.0
+    cvd_final = _cvd(
+        ts_ms=25000, price=price_reclaim,
+        cumulative_buy_volume=1_400_000, cumulative_sell_volume=600_000,
+        buy_ratio=0.4, sell_ratio=0.6,
+    )
+    result5 = strat._short_setup(price_reclaim, cvd_final, boll)
+    assert result5 is True, "After re-outside unlock, SHORT reclaim must succeed"
+
+
+# ── Test 23: V2 ignores ENTRY_RECLAIM_CONFIRM_SECONDS ───────────────────
+
+def test_v2_ignores_confirm_seconds() -> None:
+    """Even with ENTRY_RECLAIM_CONFIRM_SECONDS=999, V2 enters immediately."""
+    strat = _strategy(
+        entry_reclaim_confirm_seconds=999.0,  # huge delay — V2 must ignore
+        entry_reclaim_inside_band=False,
+        entry_reclaim_max_inside_depth_ratio=0.15,
+    )
+    boll = _boll(lower=1900, middle=2000, upper=2100)
+    _setup_lower_armed_divergence(
+        strat, ref_lower=1900, ref_middle=2000,
+        div_extreme_price=1880, div_extreme_cvd=-800_000,
+        anchor_cum_cvd=-1_000_000,
+    )
+
+    price = 1905.0  # shallow zone, CVD satisfied
+    cvd = _cvd(
+        ts_ms=20000, price=price,
+        cumulative_buy_volume=1_200_000, cumulative_sell_volume=1_500_000,
+    )
+
+    result = strat._long_setup(price, cvd, boll)
+    assert result is True, (
+        "V2 must ignore ENTRY_RECLAIM_CONFIRM_SECONDS and enter on first tick"
+    )
+
+
+# ── Test 24: Legacy path still uses ENTRY_RECLAIM_CONFIRM_SECONDS ───────
+
+def test_legacy_path_still_uses_confirm_seconds() -> None:
+    """When V2 is disabled, the legacy 1-second soft confirm must still work."""
+    strat = _strategy(
+        entry_reclaim_v2_enabled=False,
+        entry_cvd_structure_mode="DIVERGENCE_OR_ABSORPTION",
+        entry_cvd_divergence_enabled=True,
+        entry_cvd_absorption_enabled=False,
+        entry_reclaim_confirm_seconds=1.0,
+        entry_reclaim_inside_band=False,
+        entry_reclaim_buffer_pct=0.0,
+        entry_max_extreme_to_reclaim_seconds=900,
+    )
+    boll = _boll(lower=1900, middle=2000, upper=2100)
+
+    # Manually arm state (legacy path needs lower_armed + extreme + deep_enough + divergence)
+    strat.state.lower_armed = True
+    strat.state.lower_extreme_price = 1880.0
+    strat.state.lower_extreme_ts_ms = 5000
+    strat.state.lower_deep_enough = True
+    strat.state.lower_cvd_divergence_confirmed = True
+
+    # First tick back inside band → PENDING, not entry
+    price = 1905.0
+    cvd1 = _cvd(ts_ms=10000, price=price,
+                cumulative_buy_volume=1_200_000, cumulative_sell_volume=1_500_000)
+    result1 = strat._long_setup(price, cvd1, boll)
+    assert result1 is False
+    assert strat.state.lower_reclaim_seen is True
+    assert strat.state.lower_reclaim_ts_ms == 10000
+
+    # Before confirm_seconds elapses → still False
+    cvd2 = _cvd(ts_ms=10500, price=price,
+                cumulative_buy_volume=1_200_000, cumulative_sell_volume=1_500_000)
+    result2 = strat._long_setup(price, cvd2, boll)
+    assert result2 is False  # only 500ms elapsed, need 1000ms
+
+    # After 1 second → legacy soft confirm passes
+    cvd3 = _cvd(ts_ms=11001, price=price,
+                cumulative_buy_volume=1_200_000, cumulative_sell_volume=1_500_000,
+                cross_positive=True, cvd_increasing=True, no_new_low=True)
+    result3 = strat._long_setup(price, cvd3, boll)
+    assert result3 is True, "Legacy soft confirm must still work after 1 second"

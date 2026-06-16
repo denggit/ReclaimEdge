@@ -169,7 +169,7 @@ class BollCvdReclaimStrategyConfig:
     entry_sweep_profile_enabled: bool = True
     entry_sweep_profile_bucket_pct: float = 0.0002
     entry_poc_stop_enabled: bool = True
-    entry_poc_stop_min_tail_pct: float = 0.003
+    entry_poc_stop_min_tail_pct: float = 0.008
     entry_poc_stop_buffer_pct: float = 0.001
     entry_extreme_stop_buffer_pct: float = 0.001
     entry_reclaim_min_cvd_recovery: float = 0.0
@@ -460,7 +460,7 @@ class BollCvdReclaimStrategyConfig:
             entry_sweep_profile_enabled=_env_bool("ENTRY_SWEEP_PROFILE_ENABLED", True),
             entry_sweep_profile_bucket_pct=float(os.getenv("ENTRY_SWEEP_PROFILE_BUCKET_PCT", "0.0002")),
             entry_poc_stop_enabled=_env_bool("ENTRY_POC_STOP_ENABLED", True),
-            entry_poc_stop_min_tail_pct=float(os.getenv("ENTRY_POC_STOP_MIN_TAIL_PCT", "0.003")),
+            entry_poc_stop_min_tail_pct=float(os.getenv("ENTRY_POC_STOP_MIN_TAIL_PCT", "0.008")),
             entry_poc_stop_buffer_pct=float(os.getenv("ENTRY_POC_STOP_BUFFER_PCT", "0.001")),
             entry_extreme_stop_buffer_pct=float(os.getenv("ENTRY_EXTREME_STOP_BUFFER_PCT", "0.001")),
             entry_reclaim_min_cvd_recovery=float(os.getenv("ENTRY_RECLAIM_MIN_CVD_RECOVERY", "0")),
@@ -653,6 +653,10 @@ class StrategyPositionState:
     upper_reclaim_cycle_count: int = 0
     lower_reclaim_confirmed_logged: bool = False
     upper_reclaim_confirmed_logged: bool = False
+
+    # ── Reclaim V2 attempt reject lock ────────────────────────────────
+    lower_reclaim_rejected_until_next_outside: bool = False
+    upper_reclaim_rejected_until_next_outside: bool = False
 
     # ── Reclaim V2: event-anchored cumulative CVD divergence ──────────
     # LOWER / LONG side
@@ -1523,18 +1527,18 @@ class BollCvdReclaimStrategy:
             else poc * (1.0 + self.config.entry_poc_stop_buffer_pct)
         )
 
-        # ── Tail distance check ──────────────────────────────────────────
+        # ── Entry-extreme distance check ───────────────────────────────────
         if side == "LONG":
-            tail_distance_pct = (poc - extreme) / entry_price
+            entry_extreme_distance_pct = (entry_price - extreme) / entry_price
             use_poc = (
-                tail_distance_pct >= self.config.entry_poc_stop_min_tail_pct
+                entry_extreme_distance_pct >= self.config.entry_poc_stop_min_tail_pct
                 and poc_stop < entry_price
                 and poc_stop > extreme_stop
             )
         else:
-            tail_distance_pct = (extreme - poc) / entry_price
+            entry_extreme_distance_pct = (extreme - entry_price) / entry_price
             use_poc = (
-                tail_distance_pct >= self.config.entry_poc_stop_min_tail_pct
+                entry_extreme_distance_pct >= self.config.entry_poc_stop_min_tail_pct
                 and poc_stop > entry_price
                 and poc_stop < extreme_stop
             )
@@ -1542,15 +1546,15 @@ class BollCvdReclaimStrategy:
         if use_poc:
             logger.info(
                 "ENTRY_SL_SELECTED | side=%s mode=POC_OUTWARD entry=%.4f poc=%.4f extreme=%.4f "
-                "tail_pct=%.6f sl=%.4f",
-                side, entry_price, poc, extreme, tail_distance_pct, poc_stop,
+                "entry_extreme_distance_pct=%.6f sl=%.4f",
+                side, entry_price, poc, extreme, entry_extreme_distance_pct, poc_stop,
             )
             return poc_stop, "POC_OUTWARD"
 
         logger.info(
             "ENTRY_SL_SELECTED | side=%s mode=EXTREME_OUTWARD entry=%.4f poc=%.4f extreme=%.4f "
-            "tail_pct=%.6f sl=%.4f",
-            side, entry_price, poc, extreme, tail_distance_pct, extreme_stop,
+            "entry_extreme_distance_pct=%.6f sl=%.4f",
+            side, entry_price, poc, extreme, entry_extreme_distance_pct, extreme_stop,
         )
         return extreme_stop, "EXTREME_OUTWARD"
 
@@ -1612,6 +1616,15 @@ class BollCvdReclaimStrategy:
 
         # ── Record sweep volume every tick ─────────────────────────────
         self._record_sweep_volume("LOWER", price, cvd)
+
+        # ── Unlock reclaim retry when price re-enters outside ──────────
+        if self.state.lower_reclaim_rejected_until_next_outside:
+            logger.info(
+                "LOWER_RECLAIM_RETRY_ENABLED | reason=reentered_outside_after_late_cvd_reject "
+                "price=%.4f lower=%.4f ts_ms=%s",
+                price, boll.lower, ts_ms,
+            )
+        self.state.lower_reclaim_rejected_until_next_outside = False
 
         # ── Update orderflow tracker ───────────────────────────────────
         prev_extreme_count: int = getattr(self, "_previous_lower_extreme_count", 0)
@@ -1779,6 +1792,15 @@ class BollCvdReclaimStrategy:
 
         # ── Record sweep volume every tick ─────────────────────────────
         self._record_sweep_volume("UPPER", price, cvd)
+
+        # ── Unlock reclaim retry when price re-enters outside ──────────
+        if self.state.upper_reclaim_rejected_until_next_outside:
+            logger.info(
+                "UPPER_RECLAIM_RETRY_ENABLED | reason=reentered_outside_after_late_cvd_reject "
+                "price=%.4f upper=%.4f ts_ms=%s",
+                price, boll.upper, ts_ms,
+            )
+        self.state.upper_reclaim_rejected_until_next_outside = False
 
         # ── Update orderflow tracker ───────────────────────────────────
         prev_extreme_count: int = getattr(self, "_previous_upper_extreme_count", 0)
@@ -1954,10 +1976,21 @@ class BollCvdReclaimStrategy:
         # ── Shallow inside zone check ──────────────────────────────────
         if price > max_entry_price:
             # Price has moved too deep inside before CVD follow-through
+            self.state.lower_reclaim_rejected_until_next_outside = True
             self.state.lower_reclaim_seen = False
             self.state.lower_reclaim_ts_ms = 0
             self.state.lower_reclaim_confirmed_logged = False
             self.state.lower_reclaim_cycle_count += 1
+            if self.state.lower_reclaim_cycle_count > self.config.entry_max_reclaim_cycles:
+                logger.info(
+                    "LOWER_SETUP_EXPIRED | reason=max_reclaim_cycles "
+                    "cycles=%s max=%s ts_ms=%s",
+                    self.state.lower_reclaim_cycle_count,
+                    self.config.entry_max_reclaim_cycles,
+                    cvd.ts_ms,
+                )
+                self._reset_lower_armed()
+                return False
             logger.info(
                 "LOWER_RECLAIM_ATTEMPT_REJECTED | reason=too_deep_inside_before_cvd_follow_through "
                 "price=%.4f max_entry_price=%.4f ref_lower=%.4f ref_middle=%.4f band_width=%.4f "
@@ -2015,10 +2048,21 @@ class BollCvdReclaimStrategy:
         # ── Shallow inside zone check ──────────────────────────────────
         if price < min_entry_price:
             # Price has moved too deep inside before CVD follow-through
+            self.state.upper_reclaim_rejected_until_next_outside = True
             self.state.upper_reclaim_seen = False
             self.state.upper_reclaim_ts_ms = 0
             self.state.upper_reclaim_confirmed_logged = False
             self.state.upper_reclaim_cycle_count += 1
+            if self.state.upper_reclaim_cycle_count > self.config.entry_max_reclaim_cycles:
+                logger.info(
+                    "UPPER_SETUP_EXPIRED | reason=max_reclaim_cycles "
+                    "cycles=%s max=%s ts_ms=%s",
+                    self.state.upper_reclaim_cycle_count,
+                    self.config.entry_max_reclaim_cycles,
+                    cvd.ts_ms,
+                )
+                self._reset_upper_armed()
+                return False
             logger.info(
                 "UPPER_RECLAIM_ATTEMPT_REJECTED | reason=too_deep_inside_before_cvd_follow_through "
                 "price=%.4f min_entry_price=%.4f ref_upper=%.4f ref_middle=%.4f band_width=%.4f "
@@ -2174,6 +2218,7 @@ class BollCvdReclaimStrategy:
         self.state.lower_reclaim_ts_ms = 0
         self.state.lower_reclaim_cycle_count = 0
         self.state.lower_reclaim_confirmed_logged = False
+        self.state.lower_reclaim_rejected_until_next_outside = False
         # ── Clear Reclaim V2 state ──────────────────────────────────────
         self.state.lower_outside_observed = False
         self.state.lower_anchor_price = None
@@ -2216,6 +2261,7 @@ class BollCvdReclaimStrategy:
         self.state.upper_reclaim_ts_ms = 0
         self.state.upper_reclaim_cycle_count = 0
         self.state.upper_reclaim_confirmed_logged = False
+        self.state.upper_reclaim_rejected_until_next_outside = False
         # ── Clear Reclaim V2 state ──────────────────────────────────────
         self.state.upper_outside_observed = False
         self.state.upper_anchor_price = None
@@ -2241,6 +2287,86 @@ class BollCvdReclaimStrategy:
         if hasattr(self, "_previous_upper_extreme_count"):
             delattr(self, "_previous_upper_extreme_count")
 
+    # ── Reclaim V2 entry setup (immediate near-band CVD follow-through) ──
+
+    def _long_setup_v2(self, price: float, cvd: CvdSnapshot, boll: BollSnapshot) -> bool:
+        """Reclaim V2 LONG entry setup — immediate near-band CVD follow-through.
+
+        Unlike the legacy path, V2 does NOT wait for ENTRY_RECLAIM_CONFIRM_SECONDS.
+        The first tick where price reclaims inside the divergence reference band
+        immediately checks anchored CVD follow-through.
+        """
+        if not self.state.lower_armed or self.state.lower_extreme_price is None:
+            return False
+        if not self.state.lower_deep_enough:
+            return False
+        if not self.state.lower_anchored_divergence_confirmed:
+            return False
+        if self.state.lower_reclaim_rejected_until_next_outside:
+            return False
+
+        ref_lower = self.state.lower_divergence_ref_lower or boll.lower
+
+        # Not reclaimed yet — still outside reference band
+        if price < ref_lower * (1 + self.config.entry_reclaim_buffer_pct):
+            return False
+
+        # Extreme-to-reclaim timeout
+        if self.state.lower_extreme_ts_ms > 0:
+            elapsed_ms = cvd.ts_ms - self.state.lower_extreme_ts_ms
+            if elapsed_ms > self.config.entry_max_extreme_to_reclaim_seconds * 1000:
+                logger.info(
+                    "LOWER_SETUP_EXPIRED | reason=extreme_to_reclaim_timeout "
+                    "elapsed_ms=%s max_ms=%s ts_ms=%s",
+                    elapsed_ms,
+                    self.config.entry_max_extreme_to_reclaim_seconds * 1000,
+                    cvd.ts_ms,
+                )
+                self._reset_lower_armed()
+                return False
+
+        # First tick inside reference band → immediately check CVD follow-through
+        return self._check_lower_reclaim_v2_follow_through(price, cvd, boll)
+
+    def _short_setup_v2(self, price: float, cvd: CvdSnapshot, boll: BollSnapshot) -> bool:
+        """Reclaim V2 SHORT entry setup — immediate near-band CVD follow-through.
+
+        Unlike the legacy path, V2 does NOT wait for ENTRY_RECLAIM_CONFIRM_SECONDS.
+        The first tick where price reclaims inside the divergence reference band
+        immediately checks anchored CVD follow-through.
+        """
+        if not self.state.upper_armed or self.state.upper_extreme_price is None:
+            return False
+        if not self.state.upper_deep_enough:
+            return False
+        if not self.state.upper_anchored_divergence_confirmed:
+            return False
+        if self.state.upper_reclaim_rejected_until_next_outside:
+            return False
+
+        ref_upper = self.state.upper_divergence_ref_upper or boll.upper
+
+        # Not reclaimed yet — still outside reference band
+        if price > ref_upper * (1 - self.config.entry_reclaim_buffer_pct):
+            return False
+
+        # Extreme-to-reclaim timeout
+        if self.state.upper_extreme_ts_ms > 0:
+            elapsed_ms = cvd.ts_ms - self.state.upper_extreme_ts_ms
+            if elapsed_ms > self.config.entry_max_extreme_to_reclaim_seconds * 1000:
+                logger.info(
+                    "UPPER_SETUP_EXPIRED | reason=extreme_to_reclaim_timeout "
+                    "elapsed_ms=%s max_ms=%s ts_ms=%s",
+                    elapsed_ms,
+                    self.config.entry_max_extreme_to_reclaim_seconds * 1000,
+                    cvd.ts_ms,
+                )
+                self._reset_upper_armed()
+                return False
+
+        # First tick inside reference band → immediately check CVD follow-through
+        return self._check_upper_reclaim_v2_follow_through(price, cvd, boll)
+
     def _long_setup(self, price: float, cvd: CvdSnapshot, boll: BollSnapshot) -> bool:
         if not self.state.lower_armed or self.state.lower_extreme_price is None:
             return False
@@ -2251,7 +2377,11 @@ class BollCvdReclaimStrategy:
         if not self._lower_cvd_structure_ok():
             return False
 
-        # ── Reclaim soft confirm state machine ──────────────────────────
+        # ── Reclaim V2: immediate near-band CVD follow-through ──────────
+        if self.config.entry_reclaim_v2_enabled:
+            return self._long_setup_v2(price, cvd, boll)
+
+        # ── Legacy reclaim soft confirm state machine ───────────────────
         if self.config.entry_reclaim_confirm_seconds > 0:
             tolerance = self.config.entry_reclaim_outside_tolerance_pct
 
@@ -2318,10 +2448,6 @@ class BollCvdReclaimStrategy:
         if self.config.entry_reclaim_inside_band and price < boll.lower * (1 + self.config.entry_reclaim_buffer_pct):
             return False
 
-        # ── Reclaim V2: anchored CVD follow-through ────────────────────
-        if self.config.entry_reclaim_v2_enabled:
-            return self._check_lower_reclaim_v2_follow_through(price, cvd, boll)
-
         # ── Legacy CVD direction check at entry ─────────────────────────
         cvd_direction_ok = (
             (cvd.cross_positive or cvd.cvd_increasing)
@@ -2340,7 +2466,11 @@ class BollCvdReclaimStrategy:
         if not self._upper_cvd_structure_ok():
             return False
 
-        # ── Reclaim soft confirm state machine ──────────────────────────
+        # ── Reclaim V2: immediate near-band CVD follow-through ──────────
+        if self.config.entry_reclaim_v2_enabled:
+            return self._short_setup_v2(price, cvd, boll)
+
+        # ── Legacy reclaim soft confirm state machine ───────────────────
         if self.config.entry_reclaim_confirm_seconds > 0:
             tolerance = self.config.entry_reclaim_outside_tolerance_pct
 
@@ -2404,10 +2534,6 @@ class BollCvdReclaimStrategy:
         # ── Inside-band reclaim check ───────────────────────────────────
         if self.config.entry_reclaim_inside_band and price > boll.upper * (1 - self.config.entry_reclaim_buffer_pct):
             return False
-
-        # ── Reclaim V2: anchored CVD follow-through ────────────────────
-        if self.config.entry_reclaim_v2_enabled:
-            return self._check_upper_reclaim_v2_follow_through(price, cvd, boll)
 
         # ── Legacy CVD direction check at entry ─────────────────────────
         cvd_direction_ok = (
