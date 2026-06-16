@@ -37,13 +37,6 @@ from src.monitors.boll_band_breakout_monitor import (  # noqa: E402
     env_bool,
 )
 
-from src.position_management.sidecar import runtime_state as sidecar_runtime_state  # noqa: E402
-from src.position_management.sidecar.model import (  # noqa: E402
-    sidecar_open_contracts,
-    sidecar_open_qty,
-)
-
-from src.position_management.sidecar.reconciler import build_core_position_view  # noqa: E402
 from src.reporting import live_report_helpers as report_helpers  # noqa: E402
 from src.reporting.daily_trade_reporter import DailyTradeReporter  # noqa: E402
 from src.reporting.journal_compactor import compact_after_weekly_summary  # noqa: E402
@@ -192,12 +185,7 @@ async def main() -> None:
         journal=journal,
         state_store=state_store,
     )
-    sidecar_runtime_state.refresh_sidecar_state_totals(strategy.state, int(os.getenv("SIDECAR_MAX_LEGS", "10")))
-    startup_core_position = build_core_position_view(
-        startup_position,
-        sidecar_open_qty(strategy.state.sidecar_legs),
-        sidecar_open_contracts(strategy.state.sidecar_legs),
-    )
+    startup_core_position = startup_position
     core_position_view_helpers.apply_core_position_view_to_state(strategy.state, startup_core_position)
     account_snapshot.position = startup_core_position
     if startup_position.has_position:
@@ -371,7 +359,6 @@ async def main() -> None:
                 state_store=state_store,
                 email_sender=email_sender,
                 backlog_log_seconds=execution_backlog_log_seconds,
-                sidecar_skip_first_layer=sizer.config.sidecar_skip_first_layer,
             ),
             daily_report_loop(),
             weekly_summary_loop(),

@@ -17,8 +17,6 @@ from src.live.account_sync import protective_orders_phase as account_sync_protec
 from src.live.account_sync import tp_progress_phase as account_sync_tp_progress_phase
 from src.position_management import core_position_view as core_position_view_helpers
 from src.position_management import tp_progress as tp_progress_helpers
-from src.position_management.sidecar import force_close_runtime as sidecar_force_close_runtime
-from src.position_management.sidecar import monitor_runtime as sidecar_monitor_runtime
 from src.reporting.live_state_store import LiveStateStore
 from src.reporting.trade_journal import LiveTradeJournal
 from src.risk import rolling_loss_live as rolling_loss_live_helpers
@@ -63,7 +61,6 @@ async def account_position_sync_worker(
     last_stale_log = 0.0
     last_cash_event_log = 0.0
     last_flat_detected_monotonic = 0.0
-    last_sidecar_status_check = 0.0
     sync_failure_log_interval_seconds = float(os.getenv("ACCOUNT_SYNC_FAILURE_LOG_INTERVAL_SECONDS", "60"))
     sync_stale_warn_seconds = float(os.getenv("ACCOUNT_SYNC_STALE_WARN_SECONDS", "180"))
     cash_transfer_detect_enabled = os.getenv("CASH_TRANSFER_DETECT_ENABLED", "true").strip().lower() in {"1", "true",
@@ -112,12 +109,9 @@ async def account_position_sync_worker(
             core_position = pre_core_result.core_position
             current_position_key = pre_core_result.current_position_key
             pending_order_count = pre_core_result.pending_order_count
-            force_close_sidecar = pre_core_result.force_close_sidecar
             pending_flat_payload = pre_core_result.pending_flat_payload
             cash_transfer_payload = pre_core_result.cash_transfer_payload
             cash_drift_payload = pre_core_result.cash_drift_payload
-            sidecar_reconciled_this_sync = pre_core_result.sidecar_reconciled_this_sync
-            sidecar_state_changed_this_sync = pre_core_result.sidecar_state_changed_this_sync
             last_account_sync = pre_core_result.last_account_sync
             last_logged_cash = pre_core_result.last_logged_cash
             last_logged_equity = pre_core_result.last_logged_equity
@@ -189,44 +183,6 @@ async def account_position_sync_worker(
                 three_stage_post_tp1_sl_payload = None
                 middle_runner_sl_payload = None
                 middle_bucket_split_fast_protection_payload = None
-
-            if force_close_sidecar:
-                await sidecar_force_close_runtime.force_close_sidecar_after_core_flat(
-                    trader=trader,
-                    strategy_state=strategy.state,
-                    execution_state=execution_state,
-                    journal=journal,
-                    state_store=state_store,
-                    trader_symbol=trader.symbol,
-                    position_id=execution_state.current_position_id,
-                    cash_before_position=execution_state.cash_before_position,
-                    ts_ms=live_time_utils.utc_ms(),
-                )
-                continue
-
-            sidecar_check_seconds = max(float(getattr(sizer.config, "sidecar_order_status_check_seconds", 5.0) or 5.0),
-                                        0.0)
-            if (
-                    sidecar_check_seconds >= 0
-                    and now - last_sidecar_status_check >= sidecar_check_seconds
-                    and getattr(strategy.state, "sidecar_enabled_for_position", False)
-                    and not sidecar_reconciled_this_sync
-                    and pending_order_count == 0
-            ):
-                last_sidecar_status_check = now
-                await sidecar_monitor_runtime.monitor_sidecar_orders_once(
-                    trader=trader,
-                    strategy_state=strategy.state,
-                    execution_state=execution_state,
-                    journal=journal,
-                    state_store=state_store,
-                    trader_symbol=trader.symbol,
-                    core_position=core_position,
-                    position_id=execution_state.current_position_id,
-                    cash_before_position=execution_state.cash_before_position,
-                    ts_ms=live_time_utils.utc_ms(),
-                    fee_buffer_pct=strategy.config.breakeven_fee_buffer_pct,
-                )
 
             flat_settlement_result = await account_sync_flat_settlement_phase.prepare_account_sync_flat_settlement_phase(
                 state_lock=state_lock,

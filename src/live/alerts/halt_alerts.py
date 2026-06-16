@@ -15,7 +15,6 @@ from typing import Any
 
 from src.live.halt_modes import (
     FULL_HALT,
-    SIDECAR_DIRTY_HALT,
     allows_core_position_management,
     resolve_halt_mode,
 )
@@ -61,7 +60,7 @@ class HaltAlertPayload:
     side: str | None = None
     layer: int | None = None
     has_position: bool = False
-    sidecar_dirty: bool = False
+    sidecar_dirty: bool = False  # kept for backward compat, always False
     manual_intervention_required: bool = False
     message: str = ""
     ts_ms: int | None = None
@@ -145,7 +144,7 @@ def _build_html(payload: HaltAlertPayload) -> str:
     mode_label = {
         FULL_HALT: "FULL_HALT — all trading frozen",
         "ENTRY_HALT_POSITION_MANAGEMENT_ALLOWED": "ENTRY_HALT — position management only",
-        SIDECAR_DIRTY_HALT: "SIDECAR_DIRTY_HALT — core management allowed, sidecar dirty",
+        # SIDECAR_DIRTY_HALT removed — Sidecar runtime removed
     }.get(payload.halt_mode, payload.halt_mode)
 
     # Build extra rows

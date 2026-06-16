@@ -11,7 +11,6 @@ from src.live import runtime_types as live_runtime_types
 from src.live.halt_modes import (
     FULL_HALT,
     ENTRY_HALT_POSITION_MANAGEMENT_ALLOWED,
-    SIDECAR_DIRTY_HALT,
     allowed_intents_for_halt_mode,
     allows_core_position_management,
     resolve_halt_mode,
@@ -38,8 +37,8 @@ def _halt_filter_intents(
 
     - FULL_HALT: drop everything.
     - ENTRY_HALT_POSITION_MANAGEMENT_ALLOWED: keep POSITION_MANAGEMENT_INTENTS.
-    - SIDECAR_DIRTY_HALT: keep only CORE_POSITION_MANAGEMENT_INTENTS (UPDATE_TP, MARKET_EXIT_RUNNER).
     """
+
     allowed = allowed_intents_for_halt_mode(halt_mode)
     return [intent for intent in intents if intent.intent_type in allowed]
 
@@ -158,8 +157,6 @@ async def strategy_tick_worker(
                 intents = _halt_filter_intents(intents, halt_mode)
 
             for intent in intents:
-                if getattr(strategy.state, "sidecar_enabled_for_position", False):
-                    intent = core_position_view_helpers.with_runtime_managed_core(intent, account_snapshot.position)
                 command = live_runtime_types.TradeCommand(
                     intent=intent,
                     strategy_state_snapshot=backup_state,

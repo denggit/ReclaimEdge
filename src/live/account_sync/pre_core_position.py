@@ -12,15 +12,6 @@ from src.live import runtime_types as live_runtime_types
 from src.live import time_utils as live_time_utils
 from src.live.account_sync import flat_balance as live_flat_balance
 from src.position_management import core_position_view as core_position_view_helpers
-from src.position_management.sidecar import pre_core_reconcile as sidecar_pre_core_reconcile
-from src.position_management.sidecar import runtime_state as sidecar_runtime_state
-from src.position_management.sidecar.fill_normalization import normalize_sidecar_tp_fill
-from src.position_management.sidecar.model import (
-    SidecarLegStatus,
-    sidecar_open_contracts,
-    sidecar_open_qty,
-)
-from src.position_management.sidecar.reconciler import build_core_position_view
 from src.reporting.live_state_store import LiveStateStore
 from src.reporting.trade_journal import LiveTradeJournal
 from src.risk.simple_position_sizer import SimplePositionSizer
@@ -111,22 +102,14 @@ class AccountSyncPreCorePositionResult:
     core_position: PositionSnapshot
     current_position_key: Any
     pending_order_count: int
-    force_close_sidecar: bool
     pending_flat_payload: dict[str, Any] | None
     cash_transfer_payload: dict[str, Any] | None
     cash_drift_payload: dict[str, Any] | None
-    sidecar_reconciled_this_sync: bool
-    sidecar_state_changed_this_sync: bool
     last_account_sync: float
     last_logged_cash: float
     last_logged_equity: float
     last_cash_event_log: float
     last_flat_detected_monotonic: float
-    sidecar_tp_filled_count: int = 0
-    sidecar_tp_filled_leg_ids: tuple[str, ...] = ()
-    sidecar_tp_filled_order_ids: tuple[str, ...] = ()
-    sidecar_tp_filled_qty: float = 0.0
-    sidecar_tp_filled_contracts: float = 0.0
 
 
 async def run_account_sync_pre_core_position_phase(
@@ -167,106 +150,21 @@ async def run_account_sync_pre_core_position_phase(
     pending_flat_payload: dict[str, Any] | None = None
     cash_transfer_payload: dict[str, Any] | None = None
     cash_drift_payload: dict[str, Any] | None = None
-    force_close_sidecar = False
-    # ── Pre-core sidecar reconciliation ──────────────────────────
-    # Sidecar TP may have already filled on OKX but local state still
-    # counts it as open.  If we compute core_position = OKX_net -
-    # stale_sidecar_open_qty first and discover the fill later via
-    # monitor_sidecar_orders_once, the stale core view can incorrectly
-    # trigger TP progress markers or pollute strategy cost.
-    #
-    # Reconcile sidecar orders NOW so that refresh_sidecar_state_totals
-    # and build_core_position_view inside the main state_lock block
-    # always see up-to-date sidecar_open_qty.
-    _sidecar_pre_core_result = await sidecar_pre_core_reconcile.reconcile_sidecar_orders_before_core_view(
-        trader=trader,
-        strategy=strategy,
-        execution_state=execution_state,
-        journal=journal,
-        state_store=state_store,
-        trader_symbol=trader.symbol,
-        ts_ms=live_time_utils.utc_ms(),
-        state_lock=state_lock,
-    )
-    sidecar_reconciled_this_sync = _sidecar_pre_core_result.queried
-    sidecar_state_changed_this_sync = _sidecar_pre_core_result.changed
-    _sidecar_tp_filled_count = _sidecar_pre_core_result.sidecar_tp_filled_count
-    _sidecar_tp_filled_leg_ids = _sidecar_pre_core_result.sidecar_tp_filled_leg_ids
-    _sidecar_tp_filled_order_ids = _sidecar_pre_core_result.sidecar_tp_filled_order_ids
-    _sidecar_tp_filled_qty = _sidecar_pre_core_result.sidecar_tp_filled_qty
-    _sidecar_tp_filled_contracts = _sidecar_pre_core_result.sidecar_tp_filled_contracts
-    # ── End pre-core reconciliation ──────────────────────────────
+
+    # Sidecar runtime has been removed.
+    # core_position is now always the raw OKX position.
+
     async with state_lock:
         pending_order_count = execution_state.pending_order_count
-        sidecar_runtime_state.refresh_sidecar_state_totals(strategy.state, int(os.getenv("SIDECAR_MAX_LEGS", "10")))
-        if sidecar_runtime_state.open_sidecar_legs_exceed_limit(strategy.state,
-                                                                int(os.getenv("SIDECAR_MAX_LEGS", "10"))):
-            execution_state.trading_halted = True
-            execution_state.halt_reason = "sidecar_open_legs_exceed_max"
-            strategy.state.sidecar_dirty = True
-            strategy.state.sidecar_halt_reason = "sidecar_open_legs_exceed_max"
-            if hasattr(journal, "append"):
-                journal.append(
-                    "SIDECAR_OPEN_LEGS_EXCEED_MAX",
-                    {
-                        "open_leg_count": sum(
-                            1
-                            for leg in strategy.state.sidecar_legs
-                            if
-                            leg.get("status") in {SidecarLegStatus.OPEN.value, SidecarLegStatus.OPEN_UNPROTECTED.value}
-                        ),
-                        "sidecar_max_legs": int(os.getenv("SIDECAR_MAX_LEGS", "10")),
-                        "manual_intervention_required": True,
-                    },
-                    position_id=execution_state.current_position_id,
-                )
-        open_sidecar_qty = sidecar_open_qty(strategy.state.sidecar_legs)
-        core_position = build_core_position_view(position, open_sidecar_qty,
-                                                 sidecar_open_contracts(strategy.state.sidecar_legs))
         core_position_view_helpers.apply_core_position_view_to_state(strategy.state, core_position)
         current_position_key = core_position_view_helpers.position_log_key(core_position)
-        if core_position_view_helpers.sidecar_position_mismatch(position, strategy.state):
-            execution_state.trading_halted = True
-            execution_state.halt_reason = "core_sidecar_position_mismatch"
-            strategy.state.sidecar_dirty = True
-            strategy.state.sidecar_halt_reason = "core_sidecar_position_mismatch"
-            if hasattr(journal, "append"):
-                journal.append(
-                    "CORE_SIDECAR_POSITION_MISMATCH",
-                    {
-                        "okx_eth_qty": position.eth_qty,
-                        "core_eth_qty": core_position.eth_qty,
-                        "sidecar_open_qty": open_sidecar_qty,
-                        "manual_intervention_required": True,
-                    },
-                    position_id=execution_state.current_position_id,
-                )
-            logger.error(
-                "CORE_SIDECAR_POSITION_MISMATCH | position_id=%s okx_eth_qty=%.8f core_eth_qty=%.8f sidecar_open_qty=%.8f trading_halted=true manual_intervention_required=true",
-                execution_state.current_position_id,
-                position.eth_qty,
-                core_position.eth_qty,
-                open_sidecar_qty,
-            )
-        force_close_sidecar = bool(
-            pending_order_count == 0
-            and not core_position.has_position
-            and open_sidecar_qty > 0
-            and getattr(strategy.state, "sidecar_enabled_for_position", False)
-            and getattr(sizer.config, "sidecar_close_when_core_flat", True)
-        )
+
         flat_transition_detected = (
                 pending_order_count == 0
                 and not core_position.has_position
-                and not force_close_sidecar
                 and strategy.state.layers > 0
         )
         if flat_transition_detected:
-            # ── Collect flat metadata for cooldown decision ──────────────
-            # We do NOT arm the cooldown here because we cannot yet
-            # distinguish an entry protective SL loss from a TP fill or
-            # manual close.  The actual arming happens in
-            # flat_settlement_phase after the settled balance is visible.
             three_stage_tp1_consumed = bool(getattr(strategy.state, "three_stage_tp1_consumed", False))
             partial_tp_consumed = bool(getattr(strategy.state, "partial_tp_consumed", False))
             entry_sl_order_id = getattr(strategy.state, "entry_protective_sl_order_id", None)
@@ -394,94 +292,15 @@ async def run_account_sync_pre_core_position_phase(
                     )
                     last_cash_event_log = now
             elif unsafe_reasons and abs(cash_delta) >= cash_drift_min_delta_usdt:
-                # ── Determine sidecar TP fill context ──────────────────
-                try:
-                    _lookback_s = float(os.getenv("SIDECAR_TP_CASH_DRIFT_LOOKBACK_SECONDS", "120"))
-                    if _lookback_s <= 0:
-                        _lookback_s = 120.0
-                except (TypeError, ValueError):
-                    _lookback_s = 120.0
-                _now_ms = live_time_utils.utc_ms()
-
-                # Same-sync: pre-core reconcile detected a fill this cycle
-                _same_sync_fill = _sidecar_tp_filled_count > 0
-
-                # Delayed: a recent TP_FILLED leg in state whose fill was
-                # detected in a prior sync but cash change appears now.
-                _recent_fill_leg_ids: list[str] = []
-                _recent_fill_order_ids: list[str] = []
-                _recent_fill_qty = 0.0
-                _recent_fill_contracts = 0.0
-                if not _same_sync_fill:
-                    for _leg in strategy.state.sidecar_legs:
-                        if _leg.get("status") != SidecarLegStatus.TP_FILLED.value:
-                            continue
-                        # ── Safe parse updated_ts_ms ──
-                        try:
-                            _leg_updated = int(_leg.get("updated_ts_ms", 0))
-                        except (TypeError, ValueError):
-                            continue
-                        if _leg_updated <= 0:
-                            continue
-                        if _leg_updated > _now_ms:
-                            # future timestamp → skip
-                            continue
-                        _delta_ms = _now_ms - _leg_updated
-                        if _delta_ms < 0 or _delta_ms > (_lookback_s * 1000):
-                            continue
-                        _snapshot = normalize_sidecar_tp_fill(leg=_leg, status=None)
-                        _rid = _snapshot.leg_id
-                        if not _rid:
-                            continue
-                        _recent_fill_leg_ids.append(_rid)
-                        _oid = _snapshot.order_id
-                        if _oid:
-                            _recent_fill_order_ids.append(_oid)
-                        _recent_fill_qty += _snapshot.filled_eth_qty
-                        _recent_fill_contracts += _snapshot.filled_contracts
-                _has_recent_fill = len(_recent_fill_leg_ids) > 0
-
-                if _same_sync_fill:
-                    drift_reason = "position_cash_change:sidecar_tp_filled;unsafe_state:" + ",".join(unsafe_reasons)
-                    cash_drift_payload = {
-                        "amount": cash_delta,
-                        "cash_before": last_logged_cash,
-                        "cash_after": cash,
-                        "equity_before": last_logged_equity,
-                        "equity_after": equity,
-                        "reason": drift_reason,
-                        "sidecar_tp_filled_count": _sidecar_tp_filled_count,
-                        "sidecar_tp_filled_leg_ids": list(_sidecar_tp_filled_leg_ids),
-                        "sidecar_tp_filled_order_ids": list(_sidecar_tp_filled_order_ids),
-                        "sidecar_tp_filled_qty": _sidecar_tp_filled_qty,
-                        "sidecar_tp_filled_contracts": _sidecar_tp_filled_contracts,
-                    }
-                elif _has_recent_fill:
-                    drift_reason = "position_cash_change:recent_sidecar_tp_filled;unsafe_state:" + ",".join(unsafe_reasons)
-                    cash_drift_payload = {
-                        "amount": cash_delta,
-                        "cash_before": last_logged_cash,
-                        "cash_after": cash,
-                        "equity_before": last_logged_equity,
-                        "equity_after": equity,
-                        "reason": drift_reason,
-                        "sidecar_tp_filled_count": len(_recent_fill_leg_ids),
-                        "sidecar_tp_filled_leg_ids": _recent_fill_leg_ids,
-                        "sidecar_tp_filled_order_ids": _recent_fill_order_ids,
-                        "sidecar_tp_filled_qty": _recent_fill_qty,
-                        "sidecar_tp_filled_contracts": _recent_fill_contracts,
-                        "sidecar_tp_cash_drift_recent_window_seconds": _lookback_s,
-                    }
-                else:
-                    drift_reason = "unsafe_state:" + ",".join(unsafe_reasons)
-                    cash_drift_payload = {
-                        "amount": cash_delta,
-                        "cash_before": last_logged_cash,
-                        "cash_after": cash,
-                        "equity_before": last_logged_equity,
-                        "equity_after": equity,
-                        "reason": drift_reason,
-                    }
+                drift_reason = "unsafe_state:" + ",".join(unsafe_reasons)
+                cash_drift_payload = {
+                    "amount": cash_delta,
+                    "cash_before": last_logged_cash,
+                    "cash_after": cash,
+                    "equity_before": last_logged_equity,
+                    "equity_after": equity,
+                    "reason": drift_reason,
+                }
                 if now - last_cash_event_log >= cash_event_log_interval_seconds:
                     logger.warning(
                         "ACCOUNT_CASH_DRIFT | amount=%.4f cash_before=%.4f cash_after=%.4f reason=%s",
@@ -514,20 +333,12 @@ async def run_account_sync_pre_core_position_phase(
         core_position=core_position,
         current_position_key=current_position_key,
         pending_order_count=pending_order_count,
-        force_close_sidecar=force_close_sidecar,
         pending_flat_payload=pending_flat_payload,
         cash_transfer_payload=cash_transfer_payload,
         cash_drift_payload=cash_drift_payload,
-        sidecar_reconciled_this_sync=sidecar_reconciled_this_sync,
-        sidecar_state_changed_this_sync=sidecar_state_changed_this_sync,
         last_account_sync=last_account_sync,
         last_logged_cash=last_logged_cash,
         last_logged_equity=last_logged_equity,
         last_cash_event_log=last_cash_event_log,
         last_flat_detected_monotonic=last_flat_detected_monotonic,
-        sidecar_tp_filled_count=_sidecar_tp_filled_count,
-        sidecar_tp_filled_leg_ids=_sidecar_tp_filled_leg_ids,
-        sidecar_tp_filled_order_ids=_sidecar_tp_filled_order_ids,
-        sidecar_tp_filled_qty=_sidecar_tp_filled_qty,
-        sidecar_tp_filled_contracts=_sidecar_tp_filled_contracts,
     )

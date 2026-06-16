@@ -4,7 +4,6 @@ from typing import Any, Callable
 
 from src.execution.trader import PositionSnapshot
 from src.position_management.cost_basis import calculate_remaining_breakeven_price
-from src.position_management.sidecar.model import sidecar_open_qty
 from src.strategies.boll_cvd_reclaim_strategy import (
     BollCvdReclaimStrategy,
     StrategyPositionState,
@@ -83,10 +82,8 @@ def record_remaining_exit_notional(
     refresh_net_remaining_breakeven(strategy_state, fee_buffer_pct)
 
 
-def remaining_total_qty_from_core_position(strategy_state: StrategyPositionState,
-                                           core_position: PositionSnapshot) -> float:
-    return max(float(core_position.eth_qty or 0.0), 0.0) + sidecar_open_qty(
-        list(getattr(strategy_state, "sidecar_legs", []) or []))
+def remaining_total_qty_from_core_position(strategy_state, core_position: PositionSnapshot) -> float:
+    return max(float(core_position.eth_qty or 0.0), 0.0)
 
 
 def record_core_position_reduction_exit(
@@ -108,12 +105,8 @@ def record_core_position_reduction_exit(
     if expected_remaining_qty is not None and expected_remaining_qty > new_remaining_qty:
         # Simultaneous TP1+TP2: position was reduced by both TP1 and TP2
         # in the same fill.  Compute TP1's reduction directly from
-        # total_entry_qty and the caller-supplied expected_remaining_qty,
-        # excluding sidecar open qty from the core reduction.
-        sidecar_qty_from_state = sidecar_open_qty(
-            list(getattr(strategy_state, "sidecar_legs", []) or [])
-        )
-        expected_core_remaining = max(expected_remaining_qty - sidecar_qty_from_state, 0.0)
+        # total_entry_qty and the caller-supplied expected_remaining_qty.
+        expected_core_remaining = max(expected_remaining_qty, 0.0)
         reduced_qty = max(total_entry_qty - expected_core_remaining, 0.0)
         remaining_qty = expected_remaining_qty
     else:
@@ -141,25 +134,14 @@ def record_core_position_reduction_exit(
 
 
 def record_sidecar_tp_fill_exit(
-        strategy_state: StrategyPositionState,
+        strategy_state,
         leg: dict[str, Any],
         status: dict[str, Any],
         *,
         fee_buffer_pct: float = DEFAULT_NET_REMAINING_FEE_BUFFER_PCT,
 ) -> None:
-    from src.position_management.sidecar.fill_normalization import normalize_sidecar_tp_fill
-
-    snapshot = normalize_sidecar_tp_fill(leg=leg, status=status)
-    filled_qty = snapshot.filled_eth_qty
-    fill_price = snapshot.avg_fill_price or snapshot.tp_price
-    if filled_qty is None or filled_qty <= 0 or fill_price is None or fill_price <= 0:
-        return
-    record_remaining_exit_notional(
-        strategy_state,
-        qty=filled_qty,
-        price=fill_price,
-        fee_buffer_pct=fee_buffer_pct,
-    )
+    """Sidecar runtime removed. This function is a no-op kept for backward compatibility."""
+    return
 
 
 def _coerce_positive_float(value: Any) -> float | None:

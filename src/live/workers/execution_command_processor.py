@@ -21,7 +21,6 @@ from src.live.alerts.halt_alerts import (
 from src.live import delayed_market_exit as dme
 from src.live.halt_modes import (
     FULL_HALT,
-    SIDECAR_DIRTY_HALT,
     allowed_intents_for_halt_mode,
     is_intent_allowed_during_halt,
     resolve_halt_mode,
@@ -35,19 +34,6 @@ from src.position_management.middle_bucket_split_state import (
     degrade_middle_bucket_split_to_single_final,
 )
 from src.position_management import tp_progress as tp_progress_helpers
-from src.position_management.sidecar import entry_runtime as sidecar_entry_runtime
-from src.position_management.sidecar import runtime_state as sidecar_runtime_state
-from src.position_management.sidecar.reconciler import mark_sidecar_leg_force_closed
-from src.position_management.sidecar.core_exit_safety import (
-    active_sidecar_tp_order_ids,
-    classify_sidecar_core_final_exit_risk,
-    open_sidecar_legs,
-    sidecar_core_exit_client_order_id,
-)
-from src.position_management.sidecar.planner import (
-    SidecarExecutionPlan,
-    build_combined_entry_intent,
-)
 from src.reporting.live_state_store import LiveStateStore
 from src.reporting.trade_journal import LiveTradeJournal
 from src.strategies.boll_cvd_shock_reclaim_strategy import BollCvdShockReclaimStrategy
@@ -68,7 +54,6 @@ class ExecutionCommandProcessor:
     state_store: LiveStateStore
     email_sender: EmailSender
     halt_alert_deduper: HaltAlertDeduper = field(default_factory=HaltAlertDeduper)
-    sidecar_skip_first_layer: bool = True
     _background_tasks: set[asyncio.Task] = field(default_factory=set, init=False)
 
     async def _send_halt_alert(
@@ -78,7 +63,6 @@ class ExecutionCommandProcessor:
         side: str | None = None,
         layer: int | None = None,
         has_position: bool = True,
-        sidecar_dirty: bool = False,
         manual_intervention_required: bool = True,
         message: str = "",
         extra: dict | None = None,
@@ -98,7 +82,7 @@ class ExecutionCommandProcessor:
                     side=side,
                     layer=layer,
                     has_position=has_position,
-                    sidecar_dirty=sidecar_dirty,
+                    sidecar_dirty=False,
                     manual_intervention_required=manual_intervention_required,
                     message=message,
                     extra=extra or {},
@@ -212,52 +196,6 @@ class ExecutionCommandProcessor:
                         strategy_state_for_save.tp_plan,
                     )
                     return None
-
-        # ── managed core contracts ───────────────────────────────────────
-        entry_intent = core_position_view_helpers.with_entry_add_managed_core_contracts(
-            intent=command.intent,
-            strategy_state=self.strategy.state,
-            account_core_position=self.account_snapshot.position,
-            trader=self.trader,
-        )
-        if entry_intent is not command.intent:
-            command = replace(command, intent=entry_intent)
-
-        # ── sidecar combined entry plan ──────────────────────────────────
-        sidecar_plan: SidecarExecutionPlan | None = None
-        if command.intent.intent_type in {"OPEN_LONG", "OPEN_SHORT", "ADD_LONG", "ADD_SHORT"}:
-            async with self.state_lock:
-                if self.execution_state.current_position_id is None:
-                    self.execution_state.current_position_id = self.journal.new_position_id(
-                        self.trader.symbol,
-                        command.intent.side,
-                        command.intent.ts_ms,
-                    )
-                    self.execution_state.cash_before_position = entry_cash_before
-                current_position_id = self.execution_state.current_position_id
-            combined_plan = build_combined_entry_intent(
-                intent=command.intent,
-                sidecar_enabled=bool(getattr(self.strategy.state, "sidecar_enabled_for_position", False)),
-                account_equity_usdt=float(self.trader.account_equity_usdt),
-                leverage=float(
-                    getattr(self.trader, "leverage", getattr(getattr(self.trader, "config", None), "leverage", 50)) or 50
-                ),
-                sidecar_margin_pct=float(getattr(self.strategy.state, "sidecar_margin_pct", 0.0) or 0.0),
-                sidecar_tp_pct=float(getattr(self.strategy.state, "sidecar_tp_pct", 0.0) or 0.0),
-                position_id=current_position_id,
-                sidecar_skip_first_layer=self.sidecar_skip_first_layer,
-                contract_multiplier=getattr(self.trader, "contract_multiplier", Decimal("0.1")),
-                contract_precision=getattr(self.trader, "contract_precision", Decimal("0.01")),
-            )
-            command = replace(command, intent=combined_plan.execution_intent)
-            sidecar_plan = combined_plan.sidecar_plan
-
-        # ── sidecar core final exit safety guard ─────────────────────────
-        if command.intent.intent_type == "UPDATE_TP":
-            alignment_result = await self._align_sidecar_tp_with_unsafe_core_final_exit(command)
-            if alignment_result is not None:
-                return alignment_result
-            command = self._with_current_sidecar_tp_protected_ids(command)
 
         # ── execute intent ───────────────────────────────────────────────
         result = await self.trader.execute_intent(command.intent)
@@ -403,317 +341,9 @@ class ExecutionCommandProcessor:
         elif command.intent.intent_type == "MARKET_EXIT_RUNNER":
             await self._apply_market_exit_runner_result(command, result)
         else:
-            await self._apply_entry_result(command, result, entry_cash_before, sidecar_plan)
+            await self._apply_entry_result(command, result, entry_cash_before)
 
         return result
-
-    # ── sidecar core final exit safety guard ────────────────────────────
-
-    async def _align_sidecar_tp_with_unsafe_core_final_exit(
-        self, command: live_runtime_types.TradeCommand,
-    ) -> LiveTradeResult | None:
-        """Realign sidecar TP orders when core final TP would leave sidecar exposed.
-
-        Returns:
-            None — alignment skipped or succeeded; core UPDATE_TP should proceed.
-            LiveTradeResult — market exit succeeded; core UPDATE_TP must be skipped.
-        Raises:
-            RuntimeError — market exit failed; manual intervention required.
-        """
-        # 1. Guard: sidecar not enabled
-        if not getattr(self.strategy.state, "sidecar_enabled_for_position", False):
-            return None
-
-        # 2. Guard: no open sidecar legs
-        sidecar_legs: list[dict[str, Any]] = list(getattr(self.strategy.state, "sidecar_legs", []) or [])
-        if not open_sidecar_legs(sidecar_legs):
-            return None
-
-        # 3. Read core TP params
-        side = command.intent.side
-        core_tp_price = command.intent.tp_price
-        breakeven_price: float | None = getattr(command.intent, "breakeven_price", None)
-        if breakeven_price is None or breakeven_price <= 0:
-            breakeven_price = getattr(self.strategy.state, "breakeven_price", None)
-
-        # 4. Classify risk
-        risk = classify_sidecar_core_final_exit_risk(
-            side=side,
-            core_tp_price=core_tp_price,
-            breakeven_price=breakeven_price,
-            sidecar_legs=sidecar_legs,
-        )
-        if not risk.risky:
-            return None
-
-        logger.warning(
-            "SIDECAR_CORE_FINAL_EXIT_RISK_DETECTED | risk=%s position_id=%s side=%s core_tp_price=%.4f breakeven_price=%s risky_leg_ids=%s",
-            risk.reason,
-            self.execution_state.current_position_id,
-            side,
-            core_tp_price,
-            breakeven_price,
-            list(risk.risky_leg_ids),
-        )
-
-        # 5. Realign all open sidecar legs (not just risky ones)
-        async with self.state_lock:
-            current_position_id = self.execution_state.current_position_id
-            cash_before_position = self.execution_state.cash_before_position
-
-        try:
-            for leg in sidecar_legs:
-                status = str(leg.get("status") or "")
-                if status not in {"OPEN", "OPEN_UNPROTECTED"}:
-                    continue
-
-                old_tp_order_id = leg.get("tp_order_id")
-                old_tp_price = leg.get("tp_price")
-                contracts = leg["contracts"]
-                leg_id = str(leg.get("leg_id") or "")
-
-                # Cancel old sidecar TP if exists
-                if old_tp_order_id:
-                    ok = await self.trader.cancel_sidecar_take_profit(str(old_tp_order_id))
-                    if not ok:
-                        raise RuntimeError(
-                            f"cancel_sidecar_tp_failed leg_id={leg_id} order_id={old_tp_order_id}"
-                        )
-
-                # Place new TP aligned to core final exit with unique clOrdId
-                client_order_id = sidecar_core_exit_client_order_id(
-                    position_id=current_position_id,
-                    leg_id=leg_id,
-                    old_tp_order_id=str(old_tp_order_id) if old_tp_order_id else None,
-                    ts_ms=command.intent.ts_ms,
-                )
-                new_tp_order_id = await self.trader.place_sidecar_fixed_take_profit(
-                    side=side,
-                    contracts=contracts,
-                    tp_price=core_tp_price,
-                    client_order_id=client_order_id,
-                )
-
-                # Update leg state
-                leg["tp_price"] = float(core_tp_price)
-                leg["tp_order_id"] = new_tp_order_id
-                leg["updated_ts_ms"] = command.intent.ts_ms
-                leg["core_exit_aligned"] = True
-                leg["core_exit_alignment_reason"] = risk.reason
-
-                logger.warning(
-                    "SIDECAR_TP_REALIGNED_TO_CORE_EXIT | position_id=%s side=%s core_tp_price=%.4f reason=%s leg_id=%s old_tp_price=%s old_tp_order_id=%s new_tp_order_id=%s client_order_id=%s",
-                    current_position_id,
-                    side,
-                    core_tp_price,
-                    risk.reason,
-                    leg_id,
-                    old_tp_price,
-                    old_tp_order_id,
-                    new_tp_order_id,
-                    client_order_id,
-                )
-
-                self.journal.append(
-                    "SIDECAR_TP_REALIGNED_TO_CORE_EXIT",
-                    {
-                        "side": side,
-                        "core_tp_price": core_tp_price,
-                        "reason": risk.reason,
-                        "leg_id": leg_id,
-                        "old_tp_price": old_tp_price,
-                        "old_tp_order_id": old_tp_order_id,
-                        "new_tp_order_id": new_tp_order_id,
-                        "client_order_id": client_order_id,
-                    },
-                    position_id=current_position_id,
-                )
-
-            # Refresh sidecar state totals
-            sidecar_runtime_state.refresh_sidecar_state_totals(
-                self.strategy.state, int(os.getenv("SIDECAR_MAX_LEGS", "10"))
-            )
-            self.state_store.save(
-                LiveStateStore.from_strategy_state(
-                    position_id=current_position_id,
-                    symbol=self.trader.symbol,
-                    strategy_state=self.strategy.state,
-                    cash_before_position=cash_before_position,
-                )
-            )
-
-        except Exception as exc:
-            logger.error(
-                "SIDECAR_CORE_EXIT_ALIGNMENT_FAILED | position_id=%s side=%s core_tp_price=%.4f reason=%s error=%s delayed_market_exit_armed=true",
-                current_position_id,
-                side,
-                core_tp_price,
-                risk.reason,
-                exc,
-            )
-
-            # ── arm delayed emergency exit (do NOT market-exit immediately) ──
-            delay_seconds = float(
-                os.getenv("SIDECAR_CORE_EXIT_ALIGNMENT_FAIL_AUTO_EXIT_DELAY_SECONDS", "1800")
-            )
-
-            async with self.state_lock:
-                self.execution_state.trading_halted = True
-                self.execution_state.halt_reason = (
-                    "sidecar_core_exit_alignment_failed_delayed_market_exit_armed"
-                )
-                self.execution_state.halt_until_ts_ms = None
-                self.strategy.state.sidecar_dirty = True
-                self.strategy.state.sidecar_halt_reason = (
-                    "sidecar_core_exit_alignment_failed_delayed_market_exit_armed"
-                )
-                # ── Persist via unified delayed market exit state ────────
-                dme.arm_delayed_market_exit(
-                    strategy_state=self.strategy.state,
-                    execution_state=self.execution_state,
-                    position_id=current_position_id,
-                    side=side,
-                    reason="sidecar_core_exit_alignment_failed_delayed_market_exit_armed",
-                    context="sidecar_core_exit_alignment_failed",
-                    source_event="SIDECAR_CORE_EXIT_ALIGNMENT_FAILED",
-                    now_ms=command.intent.ts_ms,
-                    delay_seconds=delay_seconds,
-                    error=str(exc),
-                )
-
-            self.journal.append(
-                "SIDECAR_CORE_EXIT_ALIGNMENT_DELAYED_MARKET_EXIT_ARMED",
-                {
-                    "side": side,
-                    "core_tp_price": core_tp_price,
-                    "risk_reason": risk.reason,
-                    "error": str(exc),
-                    "delay_seconds": delay_seconds,
-                    "manual_intervention_required": True,
-                    **dme.delayed_market_exit_payload(self.strategy.state),
-                },
-                position_id=current_position_id,
-            )
-
-            self.state_store.save(
-                LiveStateStore.from_strategy_state(
-                    position_id=current_position_id,
-                    symbol=self.trader.symbol,
-                    strategy_state=self.strategy.state,
-                    cash_before_position=cash_before_position,
-                )
-            )
-
-            logger.warning(
-                "SIDECAR_CORE_EXIT_ALIGNMENT_DELAYED_MARKET_EXIT_ARMED | position_id=%s side=%s core_tp_price=%.4f reason=%s delay_seconds=%.0f",
-                current_position_id,
-                side,
-                core_tp_price,
-                risk.reason,
-                delay_seconds,
-            )
-
-            # Send CRITICAL arm email
-            arm_subject = "CRITICAL: Sidecar core-exit alignment failed; delayed market exit armed"
-            arm_content = (
-                "<div style='font-family:Arial,Helvetica,sans-serif;line-height:1.55;'>"
-                "<h2>Sidecar Core-Exit Alignment Failed</h2>"
-                "<p>Sidecar TP realignment failed. Trading has been halted.</p>"
-                "<p>A delayed market exit task has been scheduled.</p>"
-                f"<p><b>position_id:</b> {html.escape(str(current_position_id))}</p>"
-                f"<p><b>side:</b> {html.escape(str(side))}</p>"
-                f"<p><b>core_tp_price:</b> {core_tp_price:.4f}</p>"
-                f"<p><b>risk_reason:</b> {html.escape(risk.reason)}</p>"
-                f"<p><b>error:</b> {html.escape(str(exc))}</p>"
-                f"<p><b>delay_seconds:</b> {delay_seconds:.0f}</p>"
-                f"<p><b>action:</b> manual window open</p>"
-                "</div>"
-            )
-            ok = await self.email_sender.send_email_async(arm_subject, arm_content, content_type="html")
-            if not ok:
-                logger.error("Failed to send sidecar core-exit delayed arm email")
-
-            # ── Delayed market exit is now managed by the unified DME phase ──
-            # The account sync worker calls run_delayed_market_exit_phase()
-            # which checks persisted delayed_market_exit_* state.  No background
-            # task is needed — the persisted state survives restarts and the
-            # account sync phase is the authoritative executor.
-            # (Old _delayed_sidecar_core_exit_market_exit background task removed.)
-
-            # Return synthetic ok result — skip core UPDATE_TP, avoid failure-handler rollback
-            return LiveTradeResult(
-                ok=True,
-                action="SIDECAR_CORE_EXIT_ALIGNMENT_DELAYED_MARKET_EXIT_ARMED",
-                order_id=None,
-                tp_order_id=None,
-                contracts="0",
-                tp_price=str(core_tp_price),
-                message="sidecar_core_exit_alignment_failed_delayed_market_exit_armed",
-            )
-
-    def _with_current_sidecar_tp_protected_ids(
-        self,
-        command: live_runtime_types.TradeCommand,
-    ) -> live_runtime_types.TradeCommand:
-        """Ensure the current active sidecar TP order ids are in protected_order_ids.
-
-        After _align_sidecar_tp_with_unsafe_core_final_exit() may have placed
-        new sidecar TP orders, the intent's protected_order_ids (built before
-        alignment) needs to include those new order ids so that core TP cleanup
-        does not treat them as unknown reduce-only orders.
-        """
-        sidecar_legs: list[dict[str, Any]] = list(
-            getattr(self.strategy.state, "sidecar_legs", []) or []
-        )
-        sidecar_ids = active_sidecar_tp_order_ids(sidecar_legs)
-        if not sidecar_ids:
-            return command
-
-        old_ids = tuple(getattr(command.intent, "protected_order_ids", ()) or ())
-        merged_ids = tuple(dict.fromkeys((*old_ids, *sidecar_ids)))
-
-        if merged_ids == old_ids:
-            return command
-
-        new_intent = replace(command.intent, protected_order_ids=merged_ids)
-        logger.info(
-            "SIDECAR_TP_PROTECTED_FOR_CORE_TP_UPDATE | position_id=%s side=%s old_protected_order_ids=%s sidecar_tp_order_ids=%s merged_protected_order_ids=%s",
-            self.execution_state.current_position_id,
-            command.intent.side,
-            list(old_ids),
-            list(sidecar_ids),
-            list(merged_ids),
-        )
-        if hasattr(self.journal, "append"):
-            self.journal.append(
-                "SIDECAR_TP_PROTECTED_FOR_CORE_TP_UPDATE",
-                {
-                    "side": command.intent.side,
-                    "old_protected_order_ids": list(old_ids),
-                    "sidecar_tp_order_ids": list(sidecar_ids),
-                    "merged_protected_order_ids": list(merged_ids),
-                },
-                position_id=self.execution_state.current_position_id,
-            )
-        return replace(command, intent=new_intent)
-
-    # ── DEPRECATED: old background task methods ────────────────────────────
-    # These methods are no longer called.  The unified DME phase
-    # (src/live/account_sync/delayed_market_exit_phase.py) now handles all
-    # delayed market exit execution via persisted state.  Kept only for
-    # reference; will be removed in a future cleanup.
-
-    def _schedule_background_task(self, coro) -> None:
-        """DEPRECATED: unused.  DME phase handles delayed exits now."""
-        raise RuntimeError("_schedule_background_task is deprecated and must not be called")
-
-    async def _delayed_sidecar_core_exit_market_exit(self, **kwargs) -> None:
-        """DEPRECATED: unused.  DME phase handles delayed exits now."""
-        raise RuntimeError("_delayed_sidecar_core_exit_market_exit is deprecated and must not be called")
-
-    async def _delayed_sidecar_core_exit_market_exit_impl(self, **kwargs) -> None:
-        """DEPRECATED: unused.  DME phase handles delayed exits now."""
-        raise RuntimeError("_delayed_sidecar_core_exit_market_exit_impl is deprecated and must not be called")
 
     # ── result application helpers ───────────────────────────────────────
 
@@ -1065,7 +695,6 @@ class ExecutionCommandProcessor:
         command: live_runtime_types.TradeCommand,
         result: Any,
         entry_cash_before: float | None,
-        sidecar_plan: SidecarExecutionPlan | None,
     ) -> None:
         new_position_id = None
         async with self.state_lock:
@@ -1090,26 +719,7 @@ class ExecutionCommandProcessor:
             )
             strategy_state_for_save = copy.deepcopy(self.strategy.state)
             equity = self.account_snapshot.equity
-        sidecar_ok = True
-        sidecar_halt_reason: str | None = None
-        if sidecar_plan is not None:
-            sidecar_ok = await sidecar_entry_runtime.attach_sidecar_after_combined_entry(
-                trader=self.trader,
-                strategy_state=self.strategy.state,
-                execution_state=self.execution_state,
-                intent=command.intent,
-                sidecar_plan=sidecar_plan,
-                journal=self.journal,
-                state_store=self.state_store,
-                trader_symbol=self.trader.symbol,
-                fee_buffer_pct=self.strategy.config.breakeven_fee_buffer_pct,
-                email_sender=self.email_sender,
-                halt_alert_deduper=self.halt_alert_deduper,
-            )
-            if not sidecar_ok:
-                sidecar_halt_reason = self.execution_state.halt_reason
-
-        entry_status = "CORE_FILLED_SIDECAR_OK" if sidecar_ok else "CORE_FILLED_SIDECAR_FAILED"
+        entry_status = "CORE_FILLED_OK"
         self.journal.record_entry(
             position_id=current_position_id or new_position_id or "",
             intent=command.intent,
@@ -1118,23 +728,11 @@ class ExecutionCommandProcessor:
             equity=equity,
             extra={
                 "symbol": self.trader.symbol,
-                "sidecar_ok": sidecar_ok,
-                "sidecar_halt_reason": sidecar_halt_reason,
                 "entry_status": entry_status,
             },
         )
         async with self.state_lock:
             strategy_state_for_save = copy.deepcopy(self.strategy.state)
-        if not sidecar_ok:
-            logger.error(
-                "LIVE core entry success but sidecar failed | position_id=%s intent_type=%s side=%s layer=%s trading_halted=true halt_reason=%s entry_status=%s",
-                current_position_id or new_position_id,
-                command.intent.intent_type,
-                command.intent.side,
-                command.intent.layer_index,
-                sidecar_halt_reason,
-                entry_status,
-            )
         if (
             getattr(command.intent, "tp_plan", "SINGLE") == "MIDDLE_RUNNER"
             and hasattr(self.journal, "append")
@@ -1190,42 +788,22 @@ class ExecutionCommandProcessor:
                 cash_before_position=cash_before_position,
             )
         )
-        if sidecar_ok:
-            logger.warning(
-                "LIVE entry success | intent_type=%s side=%s layer=%s price=%.4f contracts=%s tp_price=%s tp_mode=%s tp_plan=%s partial_tp=%s avg_entry=%.4f breakeven=%.4f order_id=%s tp_order_id=%s entry_sl_ok=%s entry_sl_order_id=%s entry_status=%s",
-                command.intent.intent_type,
-                command.intent.side,
-                command.intent.layer_index,
-                command.intent.price,
-                result.contracts,
-                result.tp_price,
-                command.intent.tp_mode,
-                getattr(command.intent, "tp_plan", "SINGLE"),
-                getattr(command.intent, "partial_tp_price", None),
-                command.intent.avg_entry_price,
-                command.intent.breakeven_price,
-                result.order_id,
-                result.tp_order_id,
-                getattr(result, "protective_sl_ok", False),
-                getattr(result, "protective_sl_order_id", None),
-                entry_status,
-            )
-        else:
-            logger.error(
-                "LIVE core entry success but sidecar failed | intent_type=%s side=%s layer=%s price=%.4f contracts=%s tp_price=%s tp_mode=%s tp_plan=%s partial_tp=%s avg_entry=%.4f breakeven=%.4f order_id=%s tp_order_id=%s entry_status=%s trading_halted=true halt_reason=%s",
-                command.intent.intent_type,
-                command.intent.side,
-                command.intent.layer_index,
-                command.intent.price,
-                result.contracts,
-                result.tp_price,
-                command.intent.tp_mode,
-                getattr(command.intent, "tp_plan", "SINGLE"),
-                getattr(command.intent, "partial_tp_price", None),
-                command.intent.avg_entry_price,
-                command.intent.breakeven_price,
-                result.order_id,
-                result.tp_order_id,
-                entry_status,
-                sidecar_halt_reason,
-            )
+        logger.warning(
+            "LIVE entry success | intent_type=%s side=%s layer=%s price=%.4f contracts=%s tp_price=%s tp_mode=%s tp_plan=%s partial_tp=%s avg_entry=%.4f breakeven=%.4f order_id=%s tp_order_id=%s entry_sl_ok=%s entry_sl_order_id=%s entry_status=%s",
+            command.intent.intent_type,
+            command.intent.side,
+            command.intent.layer_index,
+            command.intent.price,
+            result.contracts,
+            result.tp_price,
+            command.intent.tp_mode,
+            getattr(command.intent, "tp_plan", "SINGLE"),
+            getattr(command.intent, "partial_tp_price", None),
+            command.intent.avg_entry_price,
+            command.intent.breakeven_price,
+            result.order_id,
+            result.tp_order_id,
+            getattr(result, "protective_sl_ok", False),
+            getattr(result, "protective_sl_order_id", None),
+            entry_status,
+        )

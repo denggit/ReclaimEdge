@@ -2,9 +2,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from src.position_management.sidecar.core_exit_safety import active_sidecar_tp_order_ids
-from src.position_management.sidecar.model import trim_sidecar_legs_for_state
-
 if TYPE_CHECKING:
     from src.indicators.cvd_tracker import CvdSnapshot
     from src.monitors.boll_band_breakout_monitor import BollSnapshot
@@ -23,6 +20,9 @@ class StrategyIntentFactory:
 
     Extracted from BollCvdReclaimStrategy to keep intent-construction
     logic in a single place without changing any trigger logic.
+
+    Sidecar runtime has been removed. managed_core_* helpers now return
+    safe defaults.
     """
 
     def __init__(self, strategy: BollCvdReclaimStrategy) -> None:
@@ -31,28 +31,13 @@ class StrategyIntentFactory:
     # ── helpers that are thin wrappers around strategy state ──────────────
 
     def managed_core_contracts_for_intent(self, intent_type: TradeIntentType) -> str | None:
-        state = self.strategy.state
-        if not state.sidecar_enabled_for_position:
-            return None
-        if intent_type in {"UPDATE_TP", "MARKET_EXIT_RUNNER"}:
-            return state.core_contracts
         return None
 
     def managed_core_eth_qty_for_intent(self, intent_type: TradeIntentType) -> float:
-        state = self.strategy.state
-        if not state.sidecar_enabled_for_position:
-            return 0.0
-        if intent_type in {"OPEN_LONG", "OPEN_SHORT", "ADD_LONG", "ADD_SHORT", "UPDATE_TP"}:
-            return float(state.total_entry_qty or 0.0)
-        return float(state.core_eth_qty or 0.0)
+        return 0.0
 
     def protected_order_ids(self) -> tuple[str, ...]:
-        max_legs = int(getattr(self.strategy.sizer.config, "sidecar_max_legs", 10) or 10)
-        ids: list[str] = list(
-            active_sidecar_tp_order_ids(
-                trim_sidecar_legs_for_state(self.strategy.state.sidecar_legs, max_legs)
-            )
-        )
+        ids: list[str] = []
         for order_id in (
                 self.strategy.state.entry_protective_sl_order_id,
                 self.strategy.state.middle_runner_protective_sl_order_id,

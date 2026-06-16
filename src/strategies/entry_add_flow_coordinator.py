@@ -122,24 +122,6 @@ class EntryAddFlowCoordinator:
             strategy.state.add_freeze_penalty_count = 0
             strategy.state.three_stage_pre_tp1_degrade_stage = None
             strategy.state.three_stage_pre_tp1_degraded_ts_ms = 0
-            strategy.state.sidecar_enabled_for_position = bool(getattr(strategy.sizer.config, "sidecar_enabled", False))
-            strategy.state.sidecar_margin_pct = (
-                float(getattr(strategy.sizer.config, "sidecar_margin_pct", 0.0) or 0.0)
-                if strategy.state.sidecar_enabled_for_position
-                else 0.0
-            )
-            strategy.state.sidecar_tp_pct = (
-                float(getattr(strategy.sizer.config, "sidecar_tp_pct", 0.0) or 0.0)
-                if strategy.state.sidecar_enabled_for_position
-                else 0.0
-            )
-            strategy.state.sidecar_total_qty = 0.0
-            strategy.state.sidecar_open_qty = 0.0
-            strategy.state.sidecar_total_notional = 0.0
-            strategy.state.sidecar_realized_qty = 0.0
-            strategy.state.sidecar_legs = []
-            strategy.state.sidecar_dirty = False
-            strategy.state.sidecar_halt_reason = None
             strategy.state.position_cost_entry_notional = 0.0
             strategy.state.position_cost_exit_notional = 0.0
             strategy.state.position_cost_remaining_qty = 0.0

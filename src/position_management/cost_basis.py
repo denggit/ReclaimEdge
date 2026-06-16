@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from src.position_management.sidecar.model import PositionSide
+from typing import Literal
+
+PositionSide = Literal["LONG", "SHORT"]
 from src.utils.log import get_logger
 
 logger = get_logger(__name__)

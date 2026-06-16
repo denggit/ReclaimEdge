@@ -6,7 +6,6 @@ from typing import Any
 
 from src.execution.trader import PositionSnapshot
 from src.position_management import cost_runtime as position_cost_runtime
-from src.position_management.sidecar.model import sidecar_open_qty
 from src.strategies.boll_cvd_reclaim_strategy import BollCvdReclaimStrategy
 from src.utils.log import get_logger
 
@@ -142,11 +141,10 @@ def mark_middle_runner_active_if_position_reduced(strategy: BollCvdReclaimStrate
         fee_buffer_pct=strategy.config.breakeven_fee_buffer_pct,
     )
     logger.warning(
-        "MIDDLE_RUNNER_COST_BASIS_AFTER_FIRST_CLOSE | side=%s total_entry_qty=%.8f okx_core_eth_qty=%.8f sidecar_open_qty=%.8f position_cost_entry_notional=%.4f position_cost_exit_notional=%.4f position_cost_remaining_qty=%.8f net_remaining_breakeven_price=%.4f avg_entry_price=%.4f first_tp_price=%s first_close_ratio=%.4f keep_ratio=%.4f",
+        "MIDDLE_RUNNER_COST_BASIS_AFTER_FIRST_CLOSE | side=%s total_entry_qty=%.8f okx_core_eth_qty=%.8f position_cost_entry_notional=%.4f position_cost_exit_notional=%.4f position_cost_remaining_qty=%.8f net_remaining_breakeven_price=%.4f avg_entry_price=%.4f first_tp_price=%s first_close_ratio=%.4f keep_ratio=%.4f",
         state.side,
         total_entry_qty,
         float(position.eth_qty or 0.0),
-        sidecar_open_qty(list(getattr(state, "sidecar_legs", []) or [])),
         float(getattr(state, "position_cost_entry_notional", 0.0) or 0.0),
         float(getattr(state, "position_cost_exit_notional", 0.0) or 0.0),
         float(getattr(state, "position_cost_remaining_qty", 0.0) or 0.0),
@@ -209,8 +207,7 @@ def mark_three_stage_progress_if_position_reduced(strategy: BollCvdReclaimStrate
     event: str | None = None
 
     if not getattr(state, "three_stage_tp1_consumed", False) and remaining_ratio <= after_tp1_ratio + tp1_tolerance:
-        expected_after_tp1_qty = total_entry_qty * after_tp1_ratio + sidecar_open_qty(
-            list(getattr(state, "sidecar_legs", []) or []))
+        expected_after_tp1_qty = total_entry_qty * after_tp1_ratio
         will_mark_tp2_now = remaining_ratio <= after_tp2_ratio + tp2_tolerance
         position_cost_runtime.record_core_position_reduction_exit(
             state,
@@ -220,11 +217,10 @@ def mark_three_stage_progress_if_position_reduced(strategy: BollCvdReclaimStrate
             expected_remaining_qty=expected_after_tp1_qty if will_mark_tp2_now else None,
         )
         logger.warning(
-            "THREE_STAGE_COST_BASIS_AFTER_TP1 | side=%s total_entry_qty=%.8f okx_core_eth_qty=%.8f sidecar_open_qty=%.8f position_cost_entry_notional=%.4f position_cost_exit_notional=%.4f position_cost_remaining_qty=%.8f net_remaining_breakeven_price=%.4f avg_entry_price=%.4f tp1_price=%s tp1_ratio=%.4f remaining_ratio=%.6f",
+            "THREE_STAGE_COST_BASIS_AFTER_TP1 | side=%s total_entry_qty=%.8f okx_core_eth_qty=%.8f position_cost_entry_notional=%.4f position_cost_exit_notional=%.4f position_cost_remaining_qty=%.8f net_remaining_breakeven_price=%.4f avg_entry_price=%.4f tp1_price=%s tp1_ratio=%.4f remaining_ratio=%.6f",
             state.side,
             total_entry_qty,
             float(position.eth_qty or 0.0),
-            sidecar_open_qty(list(getattr(state, "sidecar_legs", []) or [])),
             float(getattr(state, "position_cost_entry_notional", 0.0) or 0.0),
             float(getattr(state, "position_cost_exit_notional", 0.0) or 0.0),
             float(getattr(state, "position_cost_remaining_qty", 0.0) or 0.0),

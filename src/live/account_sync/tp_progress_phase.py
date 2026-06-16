@@ -11,7 +11,7 @@ from src.live.startup_recovery import basic_restore as startup_basic_restore
 from src.position_management import cost_runtime as position_cost_runtime
 from src.position_management import runner_live_helpers
 from src.position_management import tp_progress as tp_progress_helpers
-from src.position_management.sidecar.model import sidecar_open_qty
+# Sidecar runtime removed — sidecar_open_qty is always 0.0
 from src.reporting.live_state_store import LiveStateStore
 from src.reporting.trade_journal import LiveTradeJournal
 from src.strategies.boll_cvd_reclaim_strategy import StrategyPositionState
@@ -104,7 +104,7 @@ def run_account_sync_tp_progress_phase(
             float(core_position.eth_qty or 0.0),
             core_position.contracts,
             position.contracts if position.has_position else 0,
-            sidecar_open_qty(list(getattr(strategy.state, "sidecar_legs", []) or [])),
+            0.0,
         )
     if three_stage_event is not None:
         if three_stage_event in {"TP1", "TP1_TP2"} and three_stage_event != "TP1_TP2":

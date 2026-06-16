@@ -3,8 +3,6 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
-from src.position_management.sidecar.model import calculate_core_margin_pct
-
 
 @dataclass(frozen=True)
 class SimplePositionSizerConfig:
@@ -15,17 +13,10 @@ class SimplePositionSizerConfig:
     trade_risk_pct: float = 0.003
     fee_slippage_buffer_pct: float = 0.001
     max_order_notional_usdt: float = 0.0
-    sidecar_enabled: bool = False
-    sidecar_margin_pct: float = 0.01
-    sidecar_tp_pct: float = 0.004
-    sidecar_close_when_core_flat: bool = True
-    sidecar_order_status_check_seconds: float = 5.0
-    sidecar_max_legs: int = 10
-    sidecar_skip_first_layer: bool = True
 
     @classmethod
     def from_env(cls) -> "SimplePositionSizerConfig":
-        config = cls(
+        return cls(
             dry_run_equity_usdt=float(os.getenv("DRY_RUN_EQUITY_USDT", "1000")),
             layer_margin_pct=float(os.getenv("LAYER_MARGIN_PCT", "0.03")),
             leverage=float(os.getenv("LEVERAGE", "20")),
@@ -34,20 +25,11 @@ class SimplePositionSizerConfig:
                 os.getenv("ENTRY_FEE_SLIPPAGE_BUFFER_PCT", os.getenv("FEE_SLIPPAGE_BUFFER_PCT", "0.001"))
             ),
             max_order_notional_usdt=float(os.getenv("MAX_ORDER_NOTIONAL_USDT", "0")),
-            sidecar_enabled=_env_bool("SIDECAR_ENABLED", False),
-            sidecar_margin_pct=float(os.getenv("SIDECAR_MARGIN_PCT", "0.01")),
-            sidecar_tp_pct=float(os.getenv("SIDECAR_TP_PCT", "0.004")),
-            sidecar_close_when_core_flat=_env_bool("SIDECAR_CLOSE_WHEN_CORE_FLAT", True),
-            sidecar_order_status_check_seconds=float(os.getenv("SIDECAR_ORDER_STATUS_CHECK_SECONDS", "5")),
-            sidecar_max_legs=int(os.getenv("SIDECAR_MAX_LEGS", "10")),
-            sidecar_skip_first_layer=_env_bool("SIDECAR_SKIP_FIRST_LAYER", True),
         )
-        config.validate_sidecar()
-        return config
 
     @classmethod
     def from_account_equity(cls, account_equity_usdt: float) -> "SimplePositionSizerConfig":
-        config = cls(
+        return cls(
             dry_run_equity_usdt=account_equity_usdt,
             layer_margin_pct=float(os.getenv("LAYER_MARGIN_PCT", "0.03")),
             leverage=float(os.getenv("LEVERAGE", "20")),
@@ -56,38 +38,12 @@ class SimplePositionSizerConfig:
                 os.getenv("ENTRY_FEE_SLIPPAGE_BUFFER_PCT", os.getenv("FEE_SLIPPAGE_BUFFER_PCT", "0.001"))
             ),
             max_order_notional_usdt=float(os.getenv("MAX_ORDER_NOTIONAL_USDT", "0")),
-            sidecar_enabled=_env_bool("SIDECAR_ENABLED", False),
-            sidecar_margin_pct=float(os.getenv("SIDECAR_MARGIN_PCT", "0.01")),
-            sidecar_tp_pct=float(os.getenv("SIDECAR_TP_PCT", "0.004")),
-            sidecar_close_when_core_flat=_env_bool("SIDECAR_CLOSE_WHEN_CORE_FLAT", True),
-            sidecar_order_status_check_seconds=float(os.getenv("SIDECAR_ORDER_STATUS_CHECK_SECONDS", "5")),
-            sidecar_max_legs=int(os.getenv("SIDECAR_MAX_LEGS", "10")),
-            sidecar_skip_first_layer=_env_bool("SIDECAR_SKIP_FIRST_LAYER", True),
         )
-        config.validate_sidecar()
-        return config
 
     @property
     def core_margin_pct(self) -> float:
-        return calculate_core_margin_pct(self.layer_margin_pct, self.sidecar_enabled, self.sidecar_margin_pct)
-
-    def validate_sidecar(self) -> None:
-        if self.trade_risk_pct <= 0:
-            raise RuntimeError("TRADE_RISK_PCT / ENTRY_RISK_PCT must be > 0")
-        if self.fee_slippage_buffer_pct < 0:
-            raise RuntimeError("ENTRY_FEE_SLIPPAGE_BUFFER_PCT must be >= 0")
-        if self.leverage <= 0:
-            raise RuntimeError("LEVERAGE must be > 0")
-        if not self.sidecar_enabled:
-            return
-        if self.sidecar_margin_pct <= 0:
-            raise RuntimeError("SIDECAR_ENABLED=true requires SIDECAR_MARGIN_PCT > 0")
-        if self.sidecar_margin_pct >= self.layer_margin_pct:
-            raise RuntimeError("SIDECAR_ENABLED=true requires SIDECAR_MARGIN_PCT < LAYER_MARGIN_PCT")
-        if self.sidecar_tp_pct <= 0:
-            raise RuntimeError("SIDECAR_ENABLED=true requires SIDECAR_TP_PCT > 0")
-        if self.sidecar_max_legs < 1:
-            raise RuntimeError("SIDECAR_ENABLED=true requires SIDECAR_MAX_LEGS >= 1")
+        """Legacy margin fallback — returns layer_margin_pct."""
+        return self.layer_margin_pct
 
 
 @dataclass(frozen=True)
@@ -117,13 +73,6 @@ class SimplePositionSizer:
             trade_risk_pct=self.config.trade_risk_pct,
             fee_slippage_buffer_pct=self.config.fee_slippage_buffer_pct,
             max_order_notional_usdt=self.config.max_order_notional_usdt,
-            sidecar_enabled=self.config.sidecar_enabled,
-            sidecar_margin_pct=self.config.sidecar_margin_pct,
-            sidecar_tp_pct=self.config.sidecar_tp_pct,
-            sidecar_close_when_core_flat=self.config.sidecar_close_when_core_flat,
-            sidecar_order_status_check_seconds=self.config.sidecar_order_status_check_seconds,
-            sidecar_max_legs=self.config.sidecar_max_legs,
-            sidecar_skip_first_layer=self.config.sidecar_skip_first_layer,
         )
 
     @property

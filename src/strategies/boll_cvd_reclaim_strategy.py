@@ -519,16 +519,6 @@ class StrategyPositionState:
     trend_runner_reverse_extreme_price: float | None = None
     trend_runner_reverse_fast_cvd_start: float = 0.0
     trend_runner_reverse_samples: list = None
-    sidecar_enabled_for_position: bool = False
-    sidecar_margin_pct: float = 0.0
-    sidecar_tp_pct: float = 0.0
-    sidecar_total_qty: float = 0.0
-    sidecar_open_qty: float = 0.0
-    sidecar_total_notional: float = 0.0
-    sidecar_realized_qty: float = 0.0
-    sidecar_legs: list[dict] = field(default_factory=list)
-    sidecar_dirty: bool = False
-    sidecar_halt_reason: str | None = None
     last_add_skip_log_reason: str | None = None
     last_add_skip_log_ts_ms: int = 0
     core_contracts: str | None = None

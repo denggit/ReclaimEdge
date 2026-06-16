@@ -4,7 +4,6 @@ import os
 from typing import Any
 
 from src.execution.trader import PositionSnapshot
-from src.position_management.sidecar.model import sidecar_open_qty
 from src.utils.log import get_logger
 
 logger = get_logger(__name__)
@@ -18,35 +17,25 @@ def expected_saved_state_remaining_qty(saved_state: Any) -> tuple[float, str]:  
     This function computes the *expected current remaining* qty using the
     best available information, prioritized:
 
-      1. Sidecar: core_eth_qty + sidecar_open_qty(sidecar_legs)
-      2. core_eth_qty (when > 0, even without sidecar)
-      3. position_cost_remaining_qty
-      4. Three-Stage deduction from consumed flags
-      5. Middle Runner keep_ratio
-      6. Fallback: total_entry_qty
+      1. core_eth_qty (when > 0)
+      2. position_cost_remaining_qty
+      3. Three-Stage deduction from consumed flags
+      4. Middle Runner keep_ratio
+      5. Fallback: total_entry_qty
 
     Returns (qty, source_label).
     """
-    # ── 1. Sidecar: net position = core + sidecar open ──────────────────
-    if bool(getattr(saved_state, "sidecar_enabled_for_position", False)):
-        core_qty = float(getattr(saved_state, "core_eth_qty", 0.0) or 0.0)
-        sidecar_legs = list(getattr(saved_state, "sidecar_legs", []) or [])
-        sc_open = sidecar_open_qty(sidecar_legs)
-        expected = core_qty + sc_open
-        if expected > 0:
-            return expected, "sidecar_core_plus_open"
-
-    # ── 2. core_eth_qty (present even when sidecar is disabled) ────────
+    # ── 1. core_eth_qty ──────────────────────────────────────────────────
     core_qty = float(getattr(saved_state, "core_eth_qty", 0.0) or 0.0)
     if core_qty > 0:
         return core_qty, "core_eth_qty"
 
-    # ── 3. position_cost_remaining_qty ──────────────────────────────────
+    # ── 2. position_cost_remaining_qty ──────────────────────────────────
     cost_remaining = float(getattr(saved_state, "position_cost_remaining_qty", 0.0) or 0.0)
     if cost_remaining > 0:
         return cost_remaining, "position_cost_remaining_qty"
 
-    # ── 4. Three-Stage deduction ────────────────────────────────────────
+    # ── 3. Three-Stage deduction ────────────────────────────────────────
     total_entry = float(getattr(saved_state, "total_entry_qty", 0.0) or 0.0)
     if (
             total_entry > 0
@@ -61,13 +50,13 @@ def expected_saved_state_remaining_qty(saved_state: Any) -> tuple[float, str]:  
         if tp1_consumed and (tp2_ratio + runner_ratio) > 0:
             return total_entry * (tp2_ratio + runner_ratio), "three_stage_after_tp1"
 
-    # ── 5. Middle Runner active ─────────────────────────────────────────
+    # ── 4. Middle Runner active ─────────────────────────────────────────
     if total_entry > 0 and bool(getattr(saved_state, "middle_runner_active", False)):
         keep_ratio = float(getattr(saved_state, "middle_runner_keep_ratio", 0.0) or 0.0)
         if keep_ratio > 0:
             return total_entry * keep_ratio, "middle_runner_active"
 
-    # ── 6. Fallback: total_entry_qty ────────────────────────────────────
+    # ── 5. Fallback: total_entry_qty ────────────────────────────────────
     if total_entry > 0:
         return total_entry, "total_entry_qty"
 
@@ -172,12 +161,11 @@ def trusted_startup_saved_state(  # type: ignore[no-untyped-def]
         return None
 
     logger.info(
-        "STARTUP_SAVED_STATE_QTY_EXPECTED | source=%s expected_qty=%.8f okx_qty=%.8f total_entry_qty=%s sidecar_enabled=%s",
+        "STARTUP_SAVED_STATE_QTY_EXPECTED | source=%s expected_qty=%.8f okx_qty=%.8f total_entry_qty=%s",
         qty_source,
         expected_qty,
         pos_qty,
         getattr(saved_state, "total_entry_qty", None),
-        bool(getattr(saved_state, "sidecar_enabled_for_position", False)),
     )
 
     qty_diff = abs(expected_qty - pos_qty) / pos_qty

@@ -29,7 +29,6 @@ async def execution_worker(
     state_store: LiveStateStore,
     email_sender: EmailSender,
     backlog_log_seconds: float,
-    sidecar_skip_first_layer: bool = True,
 ) -> None:
     processor = ExecutionCommandProcessor(
         state_lock=state_lock,
@@ -40,7 +39,6 @@ async def execution_worker(
         journal=journal,
         state_store=state_store,
         email_sender=email_sender,
-        sidecar_skip_first_layer=sidecar_skip_first_layer,
     )
 
     last_backlog_log = 0.0
