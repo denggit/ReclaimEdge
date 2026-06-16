@@ -297,45 +297,23 @@ class TestMarketExitManagerMissingOrderId:
 
 
 # ======================================================================
-# Tests: Sidecar is NOT migrated
+# Tests: Sidecar has been completely removed
 # ======================================================================
 
 
-class TestSidecarMigratedToTradingClientPort:
-    """Sidecar entry / fixed TP are now migrated to TradingClientPort (20C-CLEAN-PORTS-08)."""
+class TestSidecarManagerRemoved:
+    """Sidecar runtime has been removed — verify no stale files or methods remain."""
 
-    def test_sidecar_fixed_tp_uses_place_limit_order(self):
-        """SidecarManager.place_sidecar_fixed_take_profit now uses
-        .place_limit_order( (migrated)."""
+    def test_sidecar_manager_file_does_not_exist(self):
         from pathlib import Path
-
-        text = Path("src/execution/tp_sl_sidecar_manager.py").read_text(encoding="utf-8")
-        # The sidecar TP placement now uses TradingClientPort.place_limit_order
-        assert ".place_limit_order(" in text, (
-            "Sidecar fixed TP must use .place_limit_order( (migrated)"
-        )
-        # Verify the sidecar does NOT call place_market_order
-        assert ".place_market_order(" not in text, (
-            "Sidecar should NOT call place_market_order (no reduce-only market order to migrate)"
+        sidecar_path = Path("src/execution/tp_sl_sidecar_manager.py")
+        assert not sidecar_path.exists(), (
+            f"tp_sl_sidecar_manager.py must not exist: {sidecar_path}"
         )
 
-    def test_trader_sidecar_market_order_uses_place_market_order(self):
-        """Trader.place_sidecar_market_order now uses .place_market_order(
-        via TradingClientPort — migrated."""
+    def test_trader_has_no_place_sidecar_market_order(self):
         from pathlib import Path
-
         text = Path("src/execution/trader.py").read_text(encoding="utf-8")
-        sidecar_method_text = ""
-        lines = text.splitlines()
-        in_method = False
-        for line in lines:
-            if "def place_sidecar_market_order" in line:
-                in_method = True
-            elif in_method and line.startswith("    def "):
-                in_method = False
-            if in_method:
-                sidecar_method_text += line + "\n"
-
-        assert ".place_market_order(" in sidecar_method_text, (
-            "place_sidecar_market_order must use .place_market_order( (migrated)"
+        assert "def place_sidecar_market_order" not in text, (
+            "Trader must not have place_sidecar_market_order after Sidecar removal"
         )

@@ -298,58 +298,6 @@ async def test_market_exit_short_body_parity() -> None:
     assert payload == expected_body
 
 
-@pytest.mark.asyncio
-async def test_sidecar_entry_body_parity() -> None:
-    trader = CapturingTrader()
-    executor = _executor(trader)
-
-    await executor.sidecar_entry(
-        symbol=SYMBOL,
-        side=BrokerPositionSide.LONG,
-        quantity=Decimal("2"),
-        quantity_unit=BrokerQuantityUnit.CONTRACTS,
-    )
-
-    expected_body = order_specs.build_market_entry_order_body(
-        inst_id=SYMBOL,
-        td_mode=TD_MODE,
-        side="LONG",
-        contracts_text="2",
-        pos_side_mode=POS_SIDE_MODE,
-    )
-    method, endpoint, payload = _last_request(trader)
-    assert method == "POST"
-    assert endpoint == "/api/v5/trade/order"
-    assert payload == expected_body
-
-
-@pytest.mark.asyncio
-async def test_sidecar_tp_body_parity() -> None:
-    trader = CapturingTrader()
-    executor = _executor(trader)
-
-    await executor.sidecar_tp(
-        symbol=SYMBOL,
-        side=BrokerPositionSide.LONG,
-        quantity=Decimal("2"),
-        trigger_price=Decimal("3550"),
-        quantity_unit=BrokerQuantityUnit.CONTRACTS,
-        client_order_id="sidecar-tp-1",
-    )
-
-    expected_body = order_specs.build_reduce_only_tp_order_body(
-        inst_id=SYMBOL,
-        td_mode=TD_MODE,
-        side="LONG",
-        contracts_text="2",
-        price_text="3550.00",
-        pos_side_mode=POS_SIDE_MODE,
-        client_order_id="sidecar-tp-1",
-    )
-    method, endpoint, payload = _last_request(trader)
-    assert method == "POST"
-    assert endpoint == "/api/v5/trade/order"
-    assert payload == expected_body
 
 
 def test_semantic_parity_does_not_wire_live_entrypoint() -> None:
@@ -384,19 +332,3 @@ def test_market_exit_semantic_path_is_env_gated_and_indirect() -> None:
         assert token not in source, f"{token} unexpectedly found in {source_path}"
 
 
-def test_sidecar_semantic_paths_are_env_gated_and_indirect() -> None:
-    root = Path(__file__).resolve().parents[3]
-    source_path = root / "src/execution/tp_sl_sidecar_manager.py"
-    source = source_path.read_text(encoding="utf-8")
-
-    assert "BROKER_SEMANTIC_SIDECAR_TP_PLACEMENT_ENABLED" in source
-    assert "BROKER_SEMANTIC_SIDECAR_TP_CANCEL_ENABLED" in source
-    assert "broker_semantic_executor" in source
-
-    forbidden_tokens = (
-        "OkxBrokerSemanticExecutor",
-        "BROKER_SEMANTIC_EXECUTION",
-    )
-
-    for token in forbidden_tokens:
-        assert token not in source, f"{token} unexpectedly found in {source_path}"

@@ -30,7 +30,6 @@ EXECUTION_FILES: list[str] = [
     "src/execution/tp_sl_core_tp_manager.py",
     "src/execution/tp_sl_protective_stop_manager.py",
     "src/execution/tp_sl_market_exit_manager.py",
-    "src/execution/tp_sl_sidecar_manager.py",
 ]
 
 # ── REST endpoints to scan ───────────────────────────────────────────────
@@ -126,22 +125,16 @@ FORBIDDEN_DIRECT_REST_ENDPOINTS: frozenset[str] = frozenset({
 
 MIGRATED_METHODS: set[tuple[str, str]] = {
     ("src/execution/trader.py", "execute_intent"),
-    ("src/execution/trader.py", "place_sidecar_market_order"),
     ("src/execution/tp_sl_execution_manager.py", "cancel_existing_reduce_only_orders"),
     ("src/execution/tp_sl_core_tp_manager.py", "replace_take_profit"),
     ("src/execution/tp_sl_core_tp_manager.py", "_place_reduce_only_take_profit_orders"),
     ("src/execution/tp_sl_market_exit_manager.py", "market_exit_remaining_position_with_retries"),
-    ("src/execution/tp_sl_sidecar_manager.py", "place_sidecar_fixed_take_profit"),
-    ("src/execution/tp_sl_sidecar_manager.py", "cancel_sidecar_take_profit"),
     ("src/execution/trader.py", "initialize"),
-    ("src/execution/trader.py", "fetch_sidecar_order_status"),
-    ("src/execution/tp_sl_sidecar_manager.py", "fetch_sidecar_order_status"),
 }
 
 # ── Migrated methods must call these port methods ────────────────────────
 MIGRATED_METHOD_REQUIRED_PORT_CALLS: dict[tuple[str, str], list[str]] = {
     ("src/execution/trader.py", "execute_intent"): [".place_market_order("],
-    ("src/execution/trader.py", "place_sidecar_market_order"): [".place_market_order("],
     ("src/execution/tp_sl_execution_manager.py", "cancel_existing_reduce_only_orders"): [
         ".fetch_open_orders(", ".cancel_order(",
     ],
@@ -152,21 +145,9 @@ MIGRATED_METHOD_REQUIRED_PORT_CALLS: dict[tuple[str, str], list[str]] = {
     ("src/execution/tp_sl_market_exit_manager.py", "market_exit_remaining_position_with_retries"): [
         ".fetch_position(", ".place_market_order(",
     ],
-    ("src/execution/tp_sl_sidecar_manager.py", "place_sidecar_fixed_take_profit"): [
-        ".place_limit_order(",
-    ],
-    ("src/execution/tp_sl_sidecar_manager.py", "cancel_sidecar_take_profit"): [
-        ".cancel_order(",
-    ],
     ("src/execution/trader.py", "initialize"): [
         ".fetch_balance(",
         ".configure_instrument(",
-    ],
-    ("src/execution/trader.py", "fetch_sidecar_order_status"): [
-        "._require_tp_sl_manager().fetch_sidecar_order_status(",
-    ],
-    ("src/execution/tp_sl_sidecar_manager.py", "fetch_sidecar_order_status"): [
-        ".fetch_order_status(",
     ],
 }
 
@@ -530,14 +511,12 @@ def test_tp_sl_managers_no_okx_body_builders(report: AuditReport) -> None:
     - src/execution/tp_sl_core_tp_manager.py
     - src/execution/tp_sl_protective_stop_manager.py
     - src/execution/tp_sl_market_exit_manager.py
-    - src/execution/tp_sl_sidecar_manager.py
     """
     tp_sl_files: frozenset[str] = frozenset({
         "src/execution/tp_sl_execution_manager.py",
         "src/execution/tp_sl_core_tp_manager.py",
         "src/execution/tp_sl_protective_stop_manager.py",
         "src/execution/tp_sl_market_exit_manager.py",
-        "src/execution/tp_sl_sidecar_manager.py",
     })
 
     violations: list[str] = []

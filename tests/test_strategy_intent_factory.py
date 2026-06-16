@@ -313,104 +313,36 @@ class BuildIntentFullPayloadTest(unittest.TestCase):
         self.assertEqual(intent.managed_core_eth_qty, 0.0)
 
 
-class SidecarManagedCoreTest(unittest.TestCase):
-    """Verify sidecar managed_core behavior for different intent types."""
-
-    def setUp(self) -> None:
-        self.strat = _strategy()
-        _setup_long_position(self.strat)
-        self.factory = StrategyIntentFactory(self.strat)
-
-    def _enable_sidecar(self) -> None:
-        s = self.strat.state
-        s.sidecar_enabled_for_position = True
-        s.core_contracts = "10"
-        s.core_eth_qty = 0.5
-        s.total_entry_qty = 2.0
-
-    def test_sidecar_disabled_contracts_none(self) -> None:
-        result = self.factory.managed_core_contracts_for_intent("OPEN_LONG")
-        self.assertIsNone(result)
-
-    def test_sidecar_disabled_eth_qty_zero(self) -> None:
-        result = self.factory.managed_core_eth_qty_for_intent("OPEN_LONG")
-        self.assertEqual(result, 0.0)
-
-    def test_sidecar_enabled_update_tp_contracts(self) -> None:
-        self._enable_sidecar()
-        result = self.factory.managed_core_contracts_for_intent("UPDATE_TP")
-        self.assertEqual(result, "10")
-
-    def test_sidecar_enabled_update_tp_eth_qty(self) -> None:
-        self._enable_sidecar()
-        result = self.factory.managed_core_eth_qty_for_intent("UPDATE_TP")
-        self.assertEqual(result, 2.0)
-
-    def test_sidecar_enabled_market_exit_runner_contracts(self) -> None:
-        self._enable_sidecar()
-        result = self.factory.managed_core_contracts_for_intent("MARKET_EXIT_RUNNER")
-        self.assertEqual(result, "10")
-
-    def test_sidecar_enabled_market_exit_runner_eth_qty(self) -> None:
-        self._enable_sidecar()
-        result = self.factory.managed_core_eth_qty_for_intent("MARKET_EXIT_RUNNER")
-        self.assertEqual(result, 0.5)
-
-    def test_sidecar_enabled_open_long_contracts_none(self) -> None:
-        self._enable_sidecar()
-        result = self.factory.managed_core_contracts_for_intent("OPEN_LONG")
-        self.assertIsNone(result)
-
-    def test_sidecar_enabled_open_long_eth_qty_total(self) -> None:
-        self._enable_sidecar()
-        result = self.factory.managed_core_eth_qty_for_intent("OPEN_LONG")
-        self.assertEqual(result, 2.0)
-
-    def test_sidecar_enabled_add_long_eth_qty_total(self) -> None:
-        self._enable_sidecar()
-        result = self.factory.managed_core_eth_qty_for_intent("ADD_LONG")
-        self.assertEqual(result, 2.0)
-
-
 class ProtectedOrderIdsTest(unittest.TestCase):
-    """Verify protected_order_ids behavior."""
+    """Verify protected_order_ids behavior (no-sidecar runtime)."""
 
     def setUp(self) -> None:
         self.strat = _strategy()
         _setup_long_position(self.strat)
         self.factory = StrategyIntentFactory(self.strat)
 
-    def test_empty_when_no_legs_and_no_protective_ids(self) -> None:
+    def test_empty_when_no_protective_ids(self) -> None:
         result = self.factory.protected_order_ids()
         self.assertEqual(result, ())
 
-    def test_includes_sidecar_leg_tp_order_id(self) -> None:
-        self.strat.state.sidecar_legs = [
-            {"status": "OPEN", "tp_order_id": "sc-tp-1"},
-        ]
+    def test_includes_core_protective_order_ids(self) -> None:
+        """protected_order_ids includes entry, middle, three-stage, and trend runner SL IDs."""
+        self.strat.state.entry_protective_sl_order_id = "entry-sl-1"
+        self.strat.state.middle_runner_protective_sl_order_id = "mid-sl-1"
+        self.strat.state.three_stage_post_tp1_protective_sl_order_id = "ts-sl-1"
+        self.strat.state.trend_runner_sl_order_id = "tr-sl-1"
         result = self.factory.protected_order_ids()
-        self.assertIn("sc-tp-1", result)
+        self.assertIn("entry-sl-1", result)
+        self.assertIn("mid-sl-1", result)
+        self.assertIn("ts-sl-1", result)
+        self.assertIn("tr-sl-1", result)
+        self.assertEqual(len(result), 4)
 
-    def test_excludes_closed_leg(self) -> None:
-        self.strat.state.sidecar_legs = [
-            {"status": "CLOSED", "tp_order_id": "sc-tp-closed"},
-        ]
+    def test_no_sidecar_legs_in_protected_order_ids(self) -> None:
+        """With Sidecar removed, protected_order_ids only returns core order IDs."""
         result = self.factory.protected_order_ids()
-        self.assertNotIn("sc-tp-closed", result)
-
-    def test_excludes_leg_without_tp_order_id(self) -> None:
-        self.strat.state.sidecar_legs = [
-            {"status": "OPEN"},
-        ]
-        result = self.factory.protected_order_ids()
+        # No sidecar-derived entries
         self.assertEqual(result, ())
-
-    def test_includes_open_unprotected_leg(self) -> None:
-        self.strat.state.sidecar_legs = [
-            {"status": "OPEN_UNPROTECTED", "tp_order_id": "sc-tp-2"},
-        ]
-        result = self.factory.protected_order_ids()
-        self.assertIn("sc-tp-2", result)
 
     def test_includes_middle_runner_protective_sl_order_id(self) -> None:
         self.strat.state.middle_runner_protective_sl_order_id = "mid-sl-1"

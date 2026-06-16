@@ -158,35 +158,19 @@ class TestNoForbiddenNewImports:
 # ======================================================================
 
 
-class TestSidecarMarketEntryUsesTradingClientPort:
-    """Verify that place_sidecar_market_order now uses TradingClientPort
-    instead of direct OKX request (20C-CLEAN-PORTS-08)."""
+class TestSidecarMethodsRemovedFromTrader:
+    """Sidecar runtime has been removed — Trader must have no sidecar methods."""
 
-    def test_place_sidecar_market_order_uses_place_market_order(self):
+    def test_no_place_sidecar_market_order(self):
         text = _read_source()
-        sidecar_source = _extract_method(text, "place_sidecar_market_order")
-        assert ".place_market_order(" in sidecar_source, (
-            "place_sidecar_market_order must use .place_market_order("
+        assert "def place_sidecar_market_order" not in text, (
+            "Trader must not have place_sidecar_market_order after Sidecar removal"
         )
 
-    def test_place_sidecar_market_order_no_direct_request(self):
+    def test_no_sidecar_order_status(self):
         text = _read_source()
-        sidecar_source = _extract_method(text, "place_sidecar_market_order")
-        assert 'self.request("POST", "/api/v5/trade/order"' not in sidecar_source, (
-            "place_sidecar_market_order must NOT use direct request (migrated)"
-        )
-
-    def test_place_sidecar_market_order_no_build_market_entry_order_body(self):
-        """place_sidecar_market_order no longer calls build_market_entry_order_body."""
-        sidecar_source = _extract_method(_read_source(), "place_sidecar_market_order")
-        assert "build_market_entry_order_body" not in sidecar_source, (
-            "place_sidecar_market_order must NOT use build_market_entry_order_body (migrated)"
-        )
-
-    def test_place_sidecar_market_order_checks_missing_order_id(self):
-        sidecar_source = _extract_method(_read_source(), "place_sidecar_market_order")
-        assert "sidecar_market_entry_missing_order_id" in sidecar_source, (
-            "place_sidecar_market_order must raise on missing order_id"
+        assert "def fetch_sidecar_order_status" not in text, (
+            "Trader must not have fetch_sidecar_order_status after Sidecar removal"
         )
 
     def test_reduce_only_market_order_body_still_present(self):

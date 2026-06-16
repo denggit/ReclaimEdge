@@ -163,14 +163,16 @@ class EntryAddFlowCoordinatorLongOpenTest(unittest.TestCase):
         self.assertGreater(strat.state.total_entry_notional, 0.0)
         self.assertGreater(strat.state.avg_entry_price, 0.0)
 
-    def test_long_open_initialises_sidecar_fields(self) -> None:
+    def test_long_open_no_sidecar_fields_on_state(self) -> None:
+        """After Sidecar removal, StrategyPositionState must not have sidecar fields."""
         strat = _strategy()
         boll = _boll()
         cvd = _cvd()
         strat._maybe_open_or_add_long(1900.0, 1000, boll, cvd)
-        self.assertEqual(strat.state.sidecar_total_qty, 0.0)
-        self.assertEqual(strat.state.sidecar_open_qty, 0.0)
-        self.assertEqual(strat.state.sidecar_legs, [])
+        for field in ("sidecar_total_qty", "sidecar_open_qty", "sidecar_legs",
+                      "sidecar_enabled_for_position", "sidecar_dirty",
+                      "sidecar_halt_reason", "sidecar_margin_pct", "sidecar_tp_pct"):
+            assert not hasattr(strat.state, field), f"StrategyPositionState should not have {field}"
 
     def test_long_open_initialises_cost_basis(self) -> None:
         strat = _strategy()

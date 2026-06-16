@@ -24,7 +24,6 @@ import pytest
 # ======================================================================
 
 _MARKET_EXIT_PATH = Path(__file__).resolve().parents[2] / "src" / "execution" / "tp_sl_market_exit_manager.py"
-_SIDECAR_PATH = Path(__file__).resolve().parents[2] / "src" / "execution" / "tp_sl_sidecar_manager.py"
 _EXECUTION_MGR_PATH = Path(__file__).resolve().parents[2] / "src" / "execution" / "tp_sl_execution_manager.py"
 _TRADER_PATH = Path(__file__).resolve().parents[2] / "src" / "execution" / "trader.py"
 
@@ -154,58 +153,31 @@ class TestTpSlExecutionManagerWiring:
 
 
 # ======================================================================
-# 6. Sidecar is NOT migrated (untouched)
+# 6. Sidecar manager no longer exists
 # ======================================================================
 
 
-class TestSidecarMigratedToTradingClientPort:
-    """Sidecar fixed TP is now migrated to TradingClientPort.place_limit_order."""
+_SIDECAR_PATH = Path(__file__).resolve().parents[2] / "src" / "execution" / "tp_sl_sidecar_manager.py"
 
-    def test_sidecar_tp_placement_uses_place_limit_order(self):
-        """place_sidecar_fixed_take_profit now uses .place_limit_order(
-        (migrated in 20C-CLEAN-PORTS-08)."""
-        text = _read_source(_SIDECAR_PATH)
-        method_text = _extract_method(text, "place_sidecar_fixed_take_profit")
 
-        assert ".place_limit_order(" in method_text, (
-            "Sidecar fixed TP must use .place_limit_order( (migrated)"
-        )
-        # Must NOT contain place_market_order
-        assert ".place_market_order(" not in method_text, (
-            "Sidecar fixed TP is a limit order — must NOT call place_market_order"
+class TestSidecarManagerRemoved:
+    """Sidecar runtime has been removed — verify no stale files or methods remain."""
+
+    def test_sidecar_manager_file_does_not_exist(self):
+        assert not _SIDECAR_PATH.exists(), (
+            f"tp_sl_sidecar_manager.py must not exist: {_SIDECAR_PATH}"
         )
 
-    def test_sidecar_tp_placement_no_direct_request(self):
-        """place_sidecar_fixed_take_profit must NOT contain direct
-        /api/v5/trade/order request."""
-        text = _read_source(_SIDECAR_PATH)
-        method_text = _extract_method(text, "place_sidecar_fixed_take_profit")
-
-        for forbidden in ('"/api/v5/trade/order"', "'/api/v5/trade/order'",
-                          "build_reduce_only_tp_order_body", "extract_order_id("):
-            lines = method_text.splitlines()
-            for i, line in enumerate(lines, 1):
-                stripped = line.strip()
-                if stripped.startswith("#"):
-                    continue
-                if forbidden in line:
-                    pytest.fail(
-                        f"place_sidecar_fixed_take_profit:{i} must not contain {forbidden}"
-                    )
-
-    def test_sidecar_tp_placement_checks_missing_order_id(self):
-        text = _read_source(_SIDECAR_PATH)
-        method_text = _extract_method(text, "place_sidecar_fixed_take_profit")
-        assert "sidecar_fixed_tp_missing_order_id" in method_text, (
-            "Sidecar fixed TP must raise on missing order_id"
+    def test_trader_has_no_place_sidecar_market_order(self):
+        text = _read_source(_TRADER_PATH)
+        assert "def place_sidecar_market_order" not in text, (
+            "Trader must not have place_sidecar_market_order"
         )
 
-    def test_sidecar_has_no_reduce_only_market_order(self):
-        """SidecarTpManager has no reduce-only market order to migrate."""
-        text = _read_source(_SIDECAR_PATH)
-        # The sidecar manager should not contain any market order placement
-        assert ".place_market_order(" not in text, (
-            "SidecarTpManager has no reduce-only market order"
+    def test_tp_sl_execution_manager_has_no_sidecar_methods(self):
+        text = _read_source(_EXECUTION_MGR_PATH)
+        assert "sidecar" not in text.lower(), (
+            "TpSlExecutionManager must not reference sidecar"
         )
 
 
@@ -235,7 +207,6 @@ class TestNoForbiddenImports:
     MIGRATED_FILES = [
         _MARKET_EXIT_PATH,
         _EXECUTION_MGR_PATH,
-        _SIDECAR_PATH,
     ]
 
     FORBIDDEN_TOKENS = [
@@ -270,7 +241,6 @@ class TestNoNewClientInstantiation_OLD:
 
     MIGRATED_FILES = [
         _MARKET_EXIT_PATH,
-        _SIDECAR_PATH,
     ]
 
     # TpSlExecutionManager is checked separately below
@@ -324,7 +294,7 @@ class TestNoNewClientInstantiation_OLD:
 class TestNoNewEnvReads:
     """The trading_client wiring in __init__ must not read env vars."""
 
-    MIGRATED_FILES = [_MARKET_EXIT_PATH, _SIDECAR_PATH]
+    MIGRATED_FILES = [_MARKET_EXIT_PATH]
 
     @pytest.mark.parametrize("file_path", MIGRATED_FILES)
     def test_no_load_dotenv(self, file_path: Path) -> None:
@@ -335,21 +305,24 @@ class TestNoNewEnvReads:
 
 
 # ======================================================================
-# 11. Unmigrated methods still allowed to have direct request
+# 11. Sidecar removed — no longer allowed direct request
 # ======================================================================
 
 
-class TestUnmigratedMethodsAllowedDirectRequest:
-    """Methods that are NOT migrated may still use direct request."""
+class TestSidecarRemovedNoDirectRequest:
+    """Sidecar has been removed — the manager file must not exist,
+    and Trader has no sidecar methods."""
 
-    def test_sidecar_tp_placement_uses_trading_client_port(self):
-        """Sidecar TP placement now uses TradingClientPort.place_limit_order
-        (migrated in 20C-CLEAN-PORTS-08)."""
-        text = _read_source(_SIDECAR_PATH)
-        method_text = _extract_method(text, "place_sidecar_fixed_take_profit")
-        assert ".place_limit_order(" in method_text, (
-            "Sidecar fixed TP must use .place_limit_order( (migrated)"
+    def test_sidecar_manager_file_absent(self):
+        assert not _SIDECAR_PATH.exists(), (
+            "tp_sl_sidecar_manager.py must not exist after Sidecar removal"
         )
+
+    def test_trader_no_sidecar_methods(self):
+        text = _read_source(_TRADER_PATH)
+        assert "place_sidecar_market_order" not in text
+        assert "cancel_sidecar_take_profit" not in text
+        assert "fetch_sidecar_order_status" not in text
 
 
 # ======================================================================
@@ -361,7 +334,6 @@ class TestFilesCompile:
     @pytest.mark.parametrize("file_path", [
         _MARKET_EXIT_PATH,
         _EXECUTION_MGR_PATH,
-        _SIDECAR_PATH,
     ])
     def test_file_compiles(self, file_path: Path) -> None:
         text = _read_source(file_path)
