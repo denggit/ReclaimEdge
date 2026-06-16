@@ -144,6 +144,103 @@ def test_entry_max_stop_distance_pct_explicit_zero_disables_guard() -> None:
         del os.environ["ENTRY_MAX_STOP_DISTANCE_PCT"]
 
 
+def test_risk_based_sizing_uses_leverage_20_default_when_env_not_set() -> None:
+    """New entry with stop_price uses leverage=20 default (not 50)."""
+    # Clear any env override to ensure the default path is tested.
+    for key in ("LEVERAGE", "LAYER_MARGIN_PCT"):
+        os.environ.pop(key, None)
+    try:
+        cfg = SimplePositionSizerConfig(
+            dry_run_equity_usdt=10_000,
+            layer_margin_pct=0.05,  # deliberately different from risk-based sizing
+            leverage=20,
+            trade_risk_pct=0.005,
+            fee_slippage_buffer_pct=0.001,
+        )
+        sizer = SimplePositionSizer(cfg)
+        size = sizer.calculate(price=2000, stop_price=1980)
+
+        assert size.sizing_mode == "risk"
+        assert size.layer_multiplier == 1.0  # risk-based ignores layer multiplier
+        # margin = notional / leverage = notional / 20
+        assert size.margin_usdt == pytest.approx(size.notional_usdt / 20)
+
+        # Also verify from_env defaults to 20
+        cfg_env = SimplePositionSizerConfig.from_env()
+        assert cfg_env.leverage == 20.0
+    finally:
+        pass
+
+
+def test_risk_based_sizing_does_not_use_layer_margin_pct() -> None:
+    """LAYER_MARGIN_PCT does not affect risk-based entry sizing.
+
+    The margin/notional/qty output must be identical regardless of
+    layer_margin_pct when stop_price is provided.
+    """
+    sizer_low_margin = SimplePositionSizer(
+        SimplePositionSizerConfig(
+            dry_run_equity_usdt=10_000,
+            layer_margin_pct=0.01,
+            leverage=20,
+            trade_risk_pct=0.005,
+            fee_slippage_buffer_pct=0.001,
+        )
+    )
+    sizer_high_margin = SimplePositionSizer(
+        SimplePositionSizerConfig(
+            dry_run_equity_usdt=10_000,
+            layer_margin_pct=0.10,
+            leverage=20,
+            trade_risk_pct=0.005,
+            fee_slippage_buffer_pct=0.001,
+        )
+    )
+
+    size_low = sizer_low_margin.calculate(price=2000, stop_price=1980)
+    size_high = sizer_high_margin.calculate(price=2000, stop_price=1980)
+
+    assert size_low.sizing_mode == "risk"
+    assert size_high.sizing_mode == "risk"
+    assert size_low.notional_usdt == pytest.approx(size_high.notional_usdt)
+    assert size_low.margin_usdt == pytest.approx(size_high.margin_usdt)
+    assert size_low.eth_qty == pytest.approx(size_high.eth_qty)
+
+
+def test_max_order_notional_cap_still_effective_for_risk_sizing() -> None:
+    """max_order_notional_usdt cap limits notional even in risk-based sizing."""
+    sizer = SimplePositionSizer(
+        SimplePositionSizerConfig(
+            dry_run_equity_usdt=100_000,
+            leverage=20,
+            trade_risk_pct=0.01,
+            fee_slippage_buffer_pct=0.001,
+            max_order_notional_usdt=5000,
+        )
+    )
+
+    # Without cap, risk_usdt=1000, effective_risk=0.011, notional≈90909.
+    # With cap=5000, notional is clamped.
+    size = sizer.calculate(price=2000, stop_price=1980)
+    assert size.sizing_mode == "risk"
+    assert size.notional_usdt == pytest.approx(5000.0)
+
+    # With cap=0 (disabled), notional follows the risk formula freely.
+    sizer_no_cap = SimplePositionSizer(
+        SimplePositionSizerConfig(
+            dry_run_equity_usdt=100_000,
+            leverage=20,
+            trade_risk_pct=0.01,
+            fee_slippage_buffer_pct=0.001,
+            max_order_notional_usdt=0,
+        )
+    )
+    size_no_cap = sizer_no_cap.calculate(price=2000, stop_price=1980)
+    assert size_no_cap.sizing_mode == "risk"
+    expected_notional = 1000 / 0.011
+    assert size_no_cap.notional_usdt == pytest.approx(expected_notional)
+
+
 def test_legacy_margin_sizing_remains_fallback_without_stop() -> None:
     sizer = SimplePositionSizer(
         SimplePositionSizerConfig(

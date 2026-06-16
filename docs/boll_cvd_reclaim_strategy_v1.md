@@ -1,5 +1,11 @@
 # BOLL + CVD Reclaim Strategy V1
 
+> **⚠️ LEGACY / HISTORICAL DOCUMENT**
+> This document describes the original V1 strategy specification and contains
+> deprecated configuration keys (LEVERAGE=50, LAYER_MARGIN_PCT, MAX_LAYERS,
+> ADD_GAP, SPLIT_TP, EXTREME_RETEST, etc.) that are no longer the current live
+> defaults. Refer to `.env.example` for the current risk-first live configuration.
+
 ## 1. Strategy Positioning
 
 This strategy is not a pure BOLL breakout alert anymore. It is a layered execution strategy built on top of independent market-state modules.
