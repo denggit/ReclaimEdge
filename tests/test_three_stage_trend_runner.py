@@ -675,7 +675,8 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
         got = strat._calculate_three_stage_post_tp1_protective_sl("LONG", 105.0,
                                                                   boll(middle=102.0, upper=112.0, lower=92.0))
 
-        self.assertEqual(got, ((95.0 + 102.0) / 2))
+        # New relaxed logic: cost=95, structure=92 → max(95, 92) = 95
+        self.assertAlmostEqual(got, 95.0, places=3)
 
     def test_three_stage_time_tighten_long_moves_both_candidates_to_55pct(self) -> None:
         strat = strategy()
@@ -689,8 +690,10 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
         got = strat._calculate_three_stage_post_tp1_protective_sl("LONG", 250.0,
                                                                   boll(middle=200.0, upper=220.0, lower=100.0))
 
+        # _runner_sl_time_tighten_ratio still works as a pure helper
         self.assertEqual(strat._runner_sl_time_tighten_ratio(1), 0.55)
-        self.assertEqual(got, 155.0)
+        # New relaxed logic: ratio ignored; cost=100, structure=100 → max=100
+        self.assertEqual(got, 100.0)
 
     def test_three_stage_time_tighten_long_uses_more_conservative_of_two_candidates(self) -> None:
         strat = strategy()
@@ -704,7 +707,8 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
         got = strat._calculate_three_stage_post_tp1_protective_sl("LONG", 250.0,
                                                                   boll(middle=200.0, upper=220.0, lower=100.0))
 
-        self.assertEqual(got, 164.0)
+        # New relaxed logic: cost=120, structure=100 → max(120, 100) = 120
+        self.assertEqual(got, 120.0)
 
     def test_three_stage_time_tighten_short_moves_both_candidates_to_55pct(self) -> None:
         strat = strategy()
@@ -718,7 +722,8 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
         got = strat._calculate_three_stage_post_tp1_protective_sl("SHORT", 50.0,
                                                                   boll(middle=100.0, upper=200.0, lower=80.0))
 
-        self.assertEqual(got, 145.0)
+        # New relaxed logic: cost=200, structure=200 → min=200
+        self.assertEqual(got, 200.0)
 
     def test_three_stage_time_tighten_short_uses_more_conservative_of_two_candidates(self) -> None:
         strat = strategy()
@@ -732,7 +737,8 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
         got = strat._calculate_three_stage_post_tp1_protective_sl("SHORT", 50.0,
                                                                   boll(middle=100.0, upper=200.0, lower=80.0))
 
-        self.assertEqual(got, 136.0)
+        # New relaxed logic: cost=180, structure=200 → min=180
+        self.assertEqual(got, 180.0)
 
     def test_time_tighten_reaches_middle_after_10_candles(self) -> None:
         long_strat = strategy()
@@ -756,11 +762,13 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
                                                                              boll(middle=100.0, upper=200.0,
                                                                                   lower=80.0))
 
+        # _runner_sl_time_tighten_ratio still works as a pure helper
         self.assertEqual(long_strat._runner_sl_time_tighten_ratio(10), 1.0)
-        self.assertEqual(long_sl, 200.0)
-        self.assertLessEqual(long_sl or 0.0, 200.0)
-        self.assertEqual(short_sl, 100.0)
-        self.assertGreaterEqual(short_sl or 0.0, 100.0)
+        # New relaxed logic: time tighten ratio ignored.
+        # LONG: cost=100, structure=100 → max=100 (100 < 250 → valid)
+        self.assertEqual(long_sl, 100.0)
+        # SHORT: cost=200, structure=200 → min=200 (200 > 50 → valid)
+        self.assertEqual(short_sl, 200.0)
 
     def test_three_stage_time_tighten_seeded_activation_next_real_candle_advances_to_55pct(self) -> None:
         strat = strategy()
@@ -856,9 +864,14 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
             boll(middle=100.0, upper=200.0, lower=80.0),
         )
 
-        self.assertEqual(long_calculated, 155.0)
+        # New relaxed logic: ratio ignored
+        # LONG: cost=100, structure=100 → max=100
+        self.assertEqual(long_calculated, 100.0)
+        # LONG tighten: max(160, 100) = 160
         self.assertEqual(long_strat._tighten_optional_three_stage_post_tp1_sl("LONG", 160.0, long_calculated), 160.0)
-        self.assertEqual(short_calculated, 145.0)
+        # SHORT: cost=200, structure=200 → min=200
+        self.assertEqual(short_calculated, 200.0)
+        # SHORT tighten: min(140, 200) = 140
         self.assertEqual(short_strat._tighten_optional_three_stage_post_tp1_sl("SHORT", 140.0, short_calculated), 140.0)
 
     def test_three_stage_post_tp1_sl_diag_logs_once_per_signature(self) -> None:
@@ -883,8 +896,8 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
         self.assertEqual(first, second)
         joined = "\n".join(logs.output)
         self.assertEqual(joined.count("THREE_STAGE_POST_TP1_PROTECTIVE_SL_DIAG"), 1)
-        self.assertIn("candidate_cost=98.5000", joined)
-        self.assertIn("candidate_structure=96.0000", joined)
+        self.assertIn("candidate_cost=95.0000", joined)
+        self.assertIn("candidate_structure=90.0000", joined)
         self.assertIn("net_remaining_breakeven=95.0000", joined)
 
     def test_three_stage_post_tp1_sl_diag_logs_warning_reason_when_invalid(self) -> None:
@@ -899,9 +912,11 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
         )
         snapshot = boll(middle=102.0, upper=110.0, lower=90.0, candle_ts_ms=1_000)
 
+        # With current_price=95, cost=95, structure=90 → max=95
+        # 95 >= 95 → invalid ("long_sl_not_below_current")
         with self.assertLogs("src.strategies.boll_cvd_reclaim_strategy", level="WARNING") as logs:
-            first = strat._calculate_three_stage_post_tp1_protective_sl("LONG", 98.0, snapshot)
-            second = strat._calculate_three_stage_post_tp1_protective_sl("LONG", 98.0, snapshot)
+            first = strat._calculate_three_stage_post_tp1_protective_sl("LONG", 95.0, snapshot)
+            second = strat._calculate_three_stage_post_tp1_protective_sl("LONG", 95.0, snapshot)
 
         self.assertIsNone(first)
         self.assertIsNone(second)
@@ -924,7 +939,9 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
                                                                   boll(middle=102.0, upper=112.0, lower=92.0))
 
         fallback_breakeven = (100.0 - 0.6 * (102.0 - 100.0) / 0.4) * 1.001
-        self.assertEqual(got, max((fallback_breakeven + 102.0) / 2, (92.0 + 102.0) / 2))
+        # New relaxed logic: cost = fallback_breakeven, structure = boll_lower
+        # protective_sl = max(cost, structure) = max(97.097, 92.0) = 97.097
+        self.assertAlmostEqual(got, max(fallback_breakeven, 92.0), places=3)
 
     def test_post_tp1_protective_sl_long_uses_max_candidate_with_net_breakeven(self) -> None:
         strat = strategy()
@@ -933,7 +950,8 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
         got = strat._calculate_three_stage_post_tp1_protective_sl("LONG", 105.0,
                                                                   boll(middle=102.0, upper=112.0, lower=92.0))
 
-        self.assertEqual(got, (92.0 + 102.0) / 2)
+        # New relaxed logic: cost=85, structure=92 → max(85, 92) = 92
+        self.assertAlmostEqual(got, 92.0, places=3)
 
     def test_post_tp1_protective_sl_short_uses_min_candidate_with_net_breakeven(self) -> None:
         strat = strategy()
@@ -942,7 +960,8 @@ class ThreeStageTrendRunnerStrategyTest(unittest.TestCase):
         got = strat._calculate_three_stage_post_tp1_protective_sl("SHORT", 95.0,
                                                                   boll(middle=98.0, upper=108.0, lower=88.0))
 
-        self.assertEqual(got, (108.0 + 98.0) / 2)
+        # New relaxed logic: cost=110, structure=108 → min(110, 108) = 108
+        self.assertAlmostEqual(got, 108.0, places=3)
 
     def test_three_stage_position_blocks_middle_runner_plan_after_env_change(self) -> None:
         strat = strategy(three_stage_runner_enabled=False, middle_runner_enabled=True)
@@ -1947,6 +1966,223 @@ class ThreeStageTrendRunnerTraderTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.message, "runner_already_flat")
         self.assertEqual(trader.cancelled_trend_runner_stop_ids, ["old-algo"])
         self.assertIsNone(trader.trend_runner_sl_order_id)
+
+
+# ── Trend Runner no-regression tests (protective SL relax) ─────────────
+
+class TestTrendRunnerDynamicOrdersUnchanged(unittest.TestCase):
+    """Verifies calculate_trend_runner_dynamic_orders behavior is unchanged
+    by the protective SL relaxation changes."""
+
+    def test_calculate_trend_runner_dynamic_orders_long(self):
+        from src.strategies.trend_runner import calculate_trend_runner_dynamic_orders
+
+        decision = calculate_trend_runner_dynamic_orders(
+            side="LONG",
+            boll_middle=100.0,
+            boll_upper=110.0,
+            boll_lower=90.0,
+            adjust_count=0,
+            current_sl_price=None,
+            runner_tp_initial_outer_extra_pct=0.010,
+            runner_tp_step_pct=0.001,
+            runner_tp_min_outer_extra_pct=0.004,
+            runner_sl_initial_outer_distance_ratio=1.00,
+            runner_sl_step_ratio=0.10,
+            runner_sl_min_outer_distance_ratio=0.50,
+        )
+        # TP = upper * (1 + 0.010) = 110 * 1.010 = 111.1
+        self.assertAlmostEqual(decision.tp_price, 111.1, places=4)
+        self.assertAlmostEqual(decision.tp_extra_pct, 0.010, places=4)
+        # LONG SL: boll_upper - (boll_upper - boll_middle) * sl_distance_ratio
+        # = 110 - (110-100)*1.0 = 110 - 10 = 100
+        self.assertAlmostEqual(decision.sl_price, 100.0, places=4)
+        self.assertAlmostEqual(decision.sl_distance_ratio, 1.00, places=4)
+
+    def test_calculate_trend_runner_dynamic_orders_short(self):
+        from src.strategies.trend_runner import calculate_trend_runner_dynamic_orders
+
+        decision = calculate_trend_runner_dynamic_orders(
+            side="SHORT",
+            boll_middle=100.0,
+            boll_upper=110.0,
+            boll_lower=90.0,
+            adjust_count=1,
+            current_sl_price=None,
+            runner_tp_initial_outer_extra_pct=0.010,
+            runner_tp_step_pct=0.001,
+            runner_tp_min_outer_extra_pct=0.004,
+            runner_sl_initial_outer_distance_ratio=1.00,
+            runner_sl_step_ratio=0.10,
+            runner_sl_min_outer_distance_ratio=0.50,
+        )
+        # For SHORT: outer = lower=90
+        # adjust_count=1: tp_extra = max(0.010 - 1*0.001, 0.004) = max(0.009, 0.004) = 0.009
+        # tp = 90 * (1 - 0.009) = 89.19
+        self.assertAlmostEqual(decision.tp_price, 89.19, places=4)
+        # sl_distance = max(1.0 - 1*0.10, 0.50) = max(0.90, 0.50) = 0.90
+        # SHORT SL: boll_lower + (boll_middle - boll_lower) * sl_distance_ratio
+        # = 90 + (100-90)*0.90 = 90 + 9 = 99
+        self.assertAlmostEqual(decision.sl_price, 99.0, places=4)
+
+    def test_adjust_count_affects_ratio(self):
+        from src.strategies.trend_runner import calculate_trend_runner_dynamic_orders
+
+        d0 = calculate_trend_runner_dynamic_orders(
+            side="LONG",
+            boll_middle=100.0,
+            boll_upper=110.0,
+            boll_lower=90.0,
+            adjust_count=0,
+            current_sl_price=None,
+            runner_tp_initial_outer_extra_pct=0.010,
+            runner_tp_step_pct=0.001,
+            runner_tp_min_outer_extra_pct=0.004,
+            runner_sl_initial_outer_distance_ratio=1.00,
+            runner_sl_step_ratio=0.10,
+            runner_sl_min_outer_distance_ratio=0.50,
+        )
+        d3 = calculate_trend_runner_dynamic_orders(
+            side="LONG",
+            boll_middle=100.0,
+            boll_upper=110.0,
+            boll_lower=90.0,
+            adjust_count=3,
+            current_sl_price=None,
+            runner_tp_initial_outer_extra_pct=0.010,
+            runner_tp_step_pct=0.001,
+            runner_tp_min_outer_extra_pct=0.004,
+            runner_sl_initial_outer_distance_ratio=1.00,
+            runner_sl_step_ratio=0.10,
+            runner_sl_min_outer_distance_ratio=0.50,
+        )
+        # adjust_count=3: tp_extra = max(0.010 - 3*0.001, 0.004) = max(0.007, 0.004) = 0.007
+        # TP = 110 * 1.007 = 110.77
+        self.assertAlmostEqual(d3.tp_price, 110.77, places=4)
+        # LONG SL: 110 - (110-100) * max(1.0-0.30, 0.50) = 110 - 10*0.70 = 103
+        self.assertAlmostEqual(d3.sl_price, 103.0, places=4)
+        # Verify step changed the ratios
+        self.assertLess(d3.tp_extra_pct, d0.tp_extra_pct)
+        self.assertLess(d3.sl_distance_ratio, d0.sl_distance_ratio)
+
+    def test_tp_min_floor(self):
+        from src.strategies.trend_runner import calculate_trend_runner_dynamic_orders
+
+        # High adjust_count → tp_extra hits min floor
+        d = calculate_trend_runner_dynamic_orders(
+            side="LONG",
+            boll_middle=100.0,
+            boll_upper=110.0,
+            boll_lower=90.0,
+            adjust_count=20,  # tp_extra = max(0.010-0.020, 0.004) = 0.004
+            current_sl_price=None,
+            runner_tp_initial_outer_extra_pct=0.010,
+            runner_tp_step_pct=0.001,
+            runner_tp_min_outer_extra_pct=0.004,
+            runner_sl_initial_outer_distance_ratio=1.00,
+            runner_sl_step_ratio=0.10,
+            runner_sl_min_outer_distance_ratio=0.50,
+        )
+        self.assertAlmostEqual(d.tp_extra_pct, 0.004, places=4)
+        self.assertAlmostEqual(d.sl_distance_ratio, 0.50, places=4)
+
+
+class TestTrendRunnerActiveBranchUnchanged(unittest.TestCase):
+    """Verifies the Trend Runner active branch in TpUpdateCoordinator
+    still calls _calculate_trend_runner_dynamic_orders."""
+
+    def test_active_branch_calls_dynamic_orders(self):
+        from src.strategies.tp_update_coordinator import TpUpdateCoordinator
+
+        s = strategy(runner_dynamic_enabled=True)
+        s.state.side = "LONG"
+        s.state.layers = 2
+        s.state.trend_runner_active = True
+        s.state.trend_runner_tp_price = 108.0
+        s.state.trend_runner_sl_price = 98.0
+        s.state.trend_runner_adjust_count = 0
+        s.state.avg_entry_price = 100.0
+        s.state.breakeven_price = 100.2
+        s.state.net_remaining_breakeven_price = 100.2
+
+        bo = boll(candle_ts_ms=2000)
+        cv = cvd()
+
+        with unittest.mock.patch.object(
+            s, "_calculate_trend_runner_dynamic_orders",
+            wraps=s._calculate_trend_runner_dynamic_orders,
+        ) as mock_calc:
+            result = s._maybe_update_tp(101.0, 2000, bo, cv)
+            assert result is not None
+            assert result.intent_type == "UPDATE_TP"
+            mock_calc.assert_called_once()
+
+    def test_trend_runner_uses_config_params(self):
+        """Trend Runner TP/SL uses the correct config parameters."""
+        s = strategy(
+            runner_dynamic_enabled=True,
+            runner_tp_initial_outer_extra_pct=0.015,
+            runner_tp_step_pct=0.002,
+            runner_tp_min_outer_extra_pct=0.005,
+            runner_sl_initial_outer_distance_ratio=0.90,
+            runner_sl_step_ratio=0.08,
+            runner_sl_min_outer_distance_ratio=0.40,
+        )
+        s.state.side = "LONG"
+        s.state.layers = 2
+        s.state.trend_runner_active = True
+        s.state.trend_runner_tp_price = 108.0
+        s.state.trend_runner_sl_price = 98.0
+        s.state.trend_runner_adjust_count = 0
+        s.state.avg_entry_price = 100.0
+        s.state.breakeven_price = 100.2
+        s.state.net_remaining_breakeven_price = 100.2
+
+        # Use boll with middle=100 to get predictable SL = 110-(110-100)*0.90 = 101
+        bo = boll(middle=100.0, upper=110.0, lower=90.0, candle_ts_ms=2000)
+        cv = cvd()
+
+        result = s._maybe_update_tp(101.0, 2000, bo, cv)
+        assert result is not None
+        # TP = 110 * (1 + 0.015) = 111.65
+        self.assertAlmostEqual(s.state.trend_runner_tp_price, 111.65, places=2)
+        # LONG SL: 110 - (110-100) * 0.90 = 110 - 9 = 101
+        self.assertAlmostEqual(s.state.trend_runner_sl_price, 101.0, places=2)
+
+
+class TestTrendRunnerReverseBurstUnchanged(unittest.TestCase):
+    """Trend Runner reverse burst exit logic must be unchanged."""
+
+    def test_reverse_burst_exit_reason_unchanged(self):
+        from src.strategies.trend_runner import trend_runner_market_exit_reason
+
+        decision = trend_runner_market_exit_reason(
+            side="LONG",
+            price=100.0,
+            boll_middle=100.0,
+            tp_price=110.0,
+            sl_price=95.0,
+            trend_start_ts_ms=1000,
+            ts_ms=2000,
+            runner_max_trend_seconds_after_second_tp=18000,
+        )
+        # Not touching TP/SL, no time exceeded → no exit reason
+        self.assertIsNone(decision.reason)
+
+    def test_max_time_exit_reason(self):
+        from src.strategies.trend_runner import trend_runner_market_exit_reason
+
+        decision = trend_runner_market_exit_reason(
+            side="LONG",
+            price=100.0,
+            boll_middle=100.0,
+            tp_price=110.0,
+            sl_price=95.0,
+            trend_start_ts_ms=1000,
+            ts_ms=20000000,  # Well past 18000s
+            runner_max_trend_seconds_after_second_tp=18000,
+        )
+        self.assertEqual(decision.reason, "trend_runner_max_time_after_second_tp")
 
 
 if __name__ == "__main__":

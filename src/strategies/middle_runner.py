@@ -158,8 +158,13 @@ def calculate_middle_runner_protective_sl(
     """Pure calculation of the Middle Runner protective SL.
 
     Does NOT read state, write state, or emit logs.
-    Equivalent to the original _calculate_middle_runner_protective_sl
-    calculation logic.
+
+    New logic (2025-06):
+      - candidate_cost  = cost line (net_remaining_breakeven_price or avg_entry ± fee)
+      - candidate_structure = opening-side outer band (LONG → lower, SHORT → upper)
+      - protective_sl = max(cost, structure) for LONG / min(cost, structure) for SHORT
+      - No interpolation toward middle; no clamp to middle.
+      - sl_tighten_ratio is accepted for backward compatibility but ignored.
     """
     avg_entry = avg_entry_price
     base_breakeven = net_remaining_breakeven_price
@@ -173,14 +178,13 @@ def calculate_middle_runner_protective_sl(
         )
 
     fee = breakeven_fee_buffer_pct
-    ratio = sl_tighten_ratio
+    # sl_tighten_ratio is no longer used — the SL is purely structural.
 
     if side == "LONG":
         after_partial_breakeven = base_breakeven if base_breakeven > 0 else avg_entry * (1 + fee)
-        candidate_cost = _interpolate_to_middle(after_partial_breakeven, boll_middle, ratio)
-        candidate_structure = _interpolate_to_middle(boll_lower, boll_middle, ratio)
+        candidate_cost = after_partial_breakeven
+        candidate_structure = boll_lower
         protective_sl = max(candidate_cost, candidate_structure)
-        protective_sl = min(protective_sl, boll_middle)
         if protective_sl >= current_price:
             return MiddleRunnerProtectiveSlDecision(
                 protective_sl=None,
@@ -197,10 +201,9 @@ def calculate_middle_runner_protective_sl(
 
     # SHORT
     after_partial_breakeven = base_breakeven if base_breakeven > 0 else avg_entry * (1 - fee)
-    candidate_cost = _interpolate_to_middle(after_partial_breakeven, boll_middle, ratio)
-    candidate_structure = _interpolate_to_middle(boll_upper, boll_middle, ratio)
+    candidate_cost = after_partial_breakeven
+    candidate_structure = boll_upper
     protective_sl = min(candidate_cost, candidate_structure)
-    protective_sl = max(protective_sl, boll_middle)
     if protective_sl <= current_price:
         return MiddleRunnerProtectiveSlDecision(
             protective_sl=None,

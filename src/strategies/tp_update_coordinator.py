@@ -194,17 +194,12 @@ class TpUpdateCoordinator:
         old_tp2_price = s.state.three_stage_tp2_price
         new_tp2_price, _tp2_src = s._select_three_stage_tp2_outer(s.state.side, boll)
         if s.config.three_stage_post_tp1_protective_sl_enabled:
-            s._advance_runner_sl_time_tighten_candle_count(
-                target="three_stage_post_tp1",
-                candle_ts_ms=int(getattr(boll, "candle_ts_ms", 0) or 0),
-            )
             calculated_sl = s._calculate_three_stage_post_tp1_protective_sl(s.state.side, price, boll)
-            extension_sl = s._apply_three_stage_post_tp1_extension_trigger(
-                s.state.side, price, boll, calculated_sl,
-            )
-            protective_sl = s._tighten_optional_three_stage_post_tp1_sl(
-                s.state.side, old_post_tp1_sl, extension_sl,
-            )
+            # New relaxed logic: directly adopt calculated_sl if valid,
+            # fall back to old_post_tp1_sl if invalid. No extension trigger,
+            # no tighten-only guard — allows relaxing from old middle clamp
+            # to the new opening-side outer / cost-line target.
+            protective_sl = calculated_sl if calculated_sl is not None else old_post_tp1_sl
             s.state.three_stage_post_tp1_protective_sl_price = protective_sl
         else:
             protective_sl = old_post_tp1_sl
@@ -479,13 +474,12 @@ class TpUpdateCoordinator:
         tp_mode: TpMode = "UPPER" if s.state.side == "LONG" else "LOWER"
         partial_tp_price, partial_tp_ratio, tp_plan = None, 0.0, "SINGLE"
 
-        s._advance_runner_sl_time_tighten_candle_count(
-            target="middle_runner",
-            candle_ts_ms=int(getattr(boll, "candle_ts_ms", 0) or 0),
-        )
         calculated_sl = s._calculate_middle_runner_protective_sl(s.state.side, price, boll)
-        extension_sl = s._apply_middle_runner_extension_trigger(s.state.side, price, boll, calculated_sl)
-        protective_sl = s._tighten_optional_middle_runner_sl(s.state.side, old_runner_sl, extension_sl)
+        # New relaxed logic: directly adopt calculated_sl if valid,
+        # fall back to old_runner_sl if invalid. No extension trigger,
+        # no tighten-only guard — allows relaxing from old middle clamp
+        # to the new opening-side outer / cost-line target.
+        protective_sl = calculated_sl if calculated_sl is not None else old_runner_sl
         s.state.middle_runner_final_tp_price = tp_price
         s.state.middle_runner_protective_sl_price = protective_sl
 

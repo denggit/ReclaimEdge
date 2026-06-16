@@ -238,7 +238,10 @@ class TestCalculateMiddleRunnerProtectiveSlLong(unittest.TestCase):
         self.assertEqual(decision.reason, "missing_cost_basis")
         self.assertIsNone(decision.protective_sl)
 
-    def test_protective_sl_capped_by_boll_middle(self) -> None:
+    def test_no_longer_capped_by_boll_middle(self) -> None:
+        """With relaxed logic, protective_sl is NOT clamped to middle.
+        cost=103, lower=95 → max=103 (above middle=102).
+        But 103 >= current_price=101 → invalid, returns None."""
         decision = self._call(
             current_price=101.0,
             net_remaining_breakeven_price=103.0,
@@ -246,16 +249,17 @@ class TestCalculateMiddleRunnerProtectiveSlLong(unittest.TestCase):
             boll_middle=102.0,
             boll_lower=95.0,
         )
-        if decision.protective_sl is not None:
-            self.assertLessEqual(decision.protective_sl, 102.0)
+        # New logic: cost=103 > 101=current → invalid
+        self.assertEqual(decision.reason, "long_sl_not_below_current")
+        self.assertIsNone(decision.protective_sl)
 
-    def test_higher_sl_tighten_ratio_moves_sl_closer_to_middle(self) -> None:
+    def test_sl_tighten_ratio_ignored(self) -> None:
+        """sl_tighten_ratio no longer affects the result."""
         d1 = self._call(sl_tighten_ratio=0.30)
         d2 = self._call(sl_tighten_ratio=0.80)
-        if d1.protective_sl is not None and d2.protective_sl is not None:
-            # Higher ratio → candidate values closer to middle (higher for LONG)
-            self.assertGreaterEqual(d2.candidate_cost, d1.candidate_cost)
-            self.assertGreaterEqual(d2.candidate_structure, d1.candidate_structure)
+        self.assertEqual(d1.protective_sl, d2.protective_sl)
+        self.assertEqual(d1.candidate_cost, d2.candidate_cost)
+        self.assertEqual(d1.candidate_structure, d2.candidate_structure)
 
 
 class TestCalculateMiddleRunnerProtectiveSlShort(unittest.TestCase):
@@ -319,7 +323,10 @@ class TestCalculateMiddleRunnerProtectiveSlShort(unittest.TestCase):
         self.assertEqual(decision.reason, "missing_cost_basis")
         self.assertIsNone(decision.protective_sl)
 
-    def test_protective_sl_floored_by_boll_middle(self) -> None:
+    def test_no_longer_floored_by_boll_middle(self) -> None:
+        """With relaxed logic, protective_sl is NOT floored to middle.
+        cost=96, upper=106 → min=96 (below middle=98).
+        But 96 <= current_price=97.5 → invalid, returns None."""
         decision = self._call(
             current_price=97.5,
             net_remaining_breakeven_price=96.0,
@@ -327,8 +334,9 @@ class TestCalculateMiddleRunnerProtectiveSlShort(unittest.TestCase):
             boll_middle=98.0,
             boll_upper=106.0,
         )
-        if decision.protective_sl is not None:
-            self.assertGreaterEqual(decision.protective_sl, 98.0)
+        # New logic: cost=96 < 97.5=current → invalid
+        self.assertEqual(decision.reason, "short_sl_not_above_current")
+        self.assertIsNone(decision.protective_sl)
 
 
 class TestApplyMiddleRunnerExtensionTriggerLong(unittest.TestCase):

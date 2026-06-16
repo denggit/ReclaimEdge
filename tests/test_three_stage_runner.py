@@ -244,8 +244,9 @@ class TestCalculateThreeStagePostTp1ProtectiveSlLong(unittest.TestCase):
         )
         self.assertEqual(decision.reason, "calculated")
         self.assertIsNotNone(decision.protective_sl)
-        # Protective SL should be capped at boll_middle
-        self.assertLessEqual(float(decision.protective_sl), 100.0)  # type: ignore[arg-type]
+        # New relaxed logic: no clamp to middle.
+        # cost_line=96, boll_lower=90 → protective_sl = max(96, 90) = 96.
+        self.assertEqual(float(decision.protective_sl), 96.0)  # type: ignore[arg-type]
 
     def test_long_without_net_breakeven(self) -> None:
         decision = tsr.calculate_three_stage_post_tp1_protective_sl(
@@ -267,7 +268,7 @@ class TestCalculateThreeStagePostTp1ProtectiveSlLong(unittest.TestCase):
     def test_long_sl_not_below_current(self) -> None:
         decision = tsr.calculate_three_stage_post_tp1_protective_sl(
             side="LONG",
-            current_price=98.0,
+            current_price=96.0,  # Below candidate SL to trigger invalid
             avg_entry_price=95.0,
             net_remaining_breakeven_price=97.0,
             breakeven_fee_buffer_pct=0.001,
@@ -301,7 +302,9 @@ class TestCalculateThreeStagePostTp1ProtectiveSlShort(unittest.TestCase):
         )
         self.assertEqual(decision.reason, "calculated")
         self.assertIsNotNone(decision.protective_sl)
-        self.assertGreaterEqual(float(decision.protective_sl), 100.0)  # type: ignore[arg-type]
+        # New relaxed logic: no clamp to middle.
+        # cost_line=104, boll_upper=110 → protective_sl = min(104, 110) = 104.
+        self.assertEqual(float(decision.protective_sl), 104.0)  # type: ignore[arg-type]
 
     def test_short_without_net_breakeven(self) -> None:
         decision = tsr.calculate_three_stage_post_tp1_protective_sl(
@@ -323,7 +326,7 @@ class TestCalculateThreeStagePostTp1ProtectiveSlShort(unittest.TestCase):
     def test_short_sl_not_above_current(self) -> None:
         decision = tsr.calculate_three_stage_post_tp1_protective_sl(
             side="SHORT",
-            current_price=102.0,
+            current_price=104.0,  # Above candidate SL to trigger invalid
             avg_entry_price=105.0,
             net_remaining_breakeven_price=103.0,
             breakeven_fee_buffer_pct=0.001,

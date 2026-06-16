@@ -2083,11 +2083,8 @@ class BollCvdReclaimStrategy:
         avg_entry = float(self.state.avg_entry_price or 0.0)
         base_breakeven = float(getattr(self.state, "net_remaining_breakeven_price", 0.0) or 0.0)
         fee = self.config.breakeven_fee_buffer_pct
-        ratio = (
-            self._runner_sl_time_tighten_ratio(self.state.middle_runner_sl_time_tighten_candle_count)
-            if self.config.runner_protective_sl_time_tighten_enabled
-            else 0.50
-        )
+        # sl_tighten_ratio is no longer used; pass 0.0 as a placeholder.
+        # The pure function ignores it.
         decision = middle_runner_helpers.calculate_middle_runner_protective_sl(
             side=side,
             current_price=current_price,
@@ -2097,16 +2094,16 @@ class BollCvdReclaimStrategy:
             boll_middle=boll.middle,
             boll_upper=boll.upper,
             boll_lower=boll.lower,
-            sl_tighten_ratio=ratio,
+            sl_tighten_ratio=0.0,
         )
         if decision.reason == "missing_cost_basis":
             return None
         if decision.reason != "calculated":
             # Reconstruct the raw protective SL that was found invalid for the log signature.
             _raw_sl = (
-                min(max(decision.candidate_cost, decision.candidate_structure), boll.middle)
+                max(decision.candidate_cost, decision.candidate_structure)
                 if side == "LONG"
-                else max(min(decision.candidate_cost, decision.candidate_structure), boll.middle)
+                else min(decision.candidate_cost, decision.candidate_structure)
             )
             self._log_middle_runner_sl_diagnostic_once(
                 side,
@@ -2119,14 +2116,6 @@ class BollCvdReclaimStrategy:
                 boll,
             )
             return None
-        self._log_middle_runner_sl_time_tightened_once(
-            side,
-            ratio,
-            decision.candidate_cost,
-            decision.candidate_structure,
-            decision.protective_sl,
-            boll,
-        )
         self._log_middle_runner_sl_diagnostic_once(
             side,
             "calculated",
@@ -2257,11 +2246,8 @@ class BollCvdReclaimStrategy:
         tp1_ratio = float(self.state.three_stage_tp1_ratio or 0.0)
         base_breakeven = float(getattr(self.state, "net_remaining_breakeven_price", 0.0) or 0.0)
         fee = self.config.breakeven_fee_buffer_pct
-        ratio = (
-            self._runner_sl_time_tighten_ratio(self.state.three_stage_post_tp1_sl_time_tighten_candle_count)
-            if self.config.runner_protective_sl_time_tighten_enabled
-            else 0.50
-        )
+        # sl_tighten_ratio is no longer used; pass 0.0 as a placeholder.
+        # The pure function ignores it.
         decision = three_stage_helpers.calculate_three_stage_post_tp1_protective_sl(
             side=side,
             current_price=current_price,
@@ -2273,7 +2259,7 @@ class BollCvdReclaimStrategy:
             boll_middle=boll.middle,
             boll_upper=boll.upper,
             boll_lower=boll.lower,
-            sl_tighten_ratio=ratio,
+            sl_tighten_ratio=0.0,
         )
         if decision.reason in ("missing_tp1_price", "missing_cost_basis", "invalid_tp1_ratio"):
             if current_price > 0 and base_breakeven <= 0:
@@ -2291,9 +2277,9 @@ class BollCvdReclaimStrategy:
         if decision.reason != "calculated":
             # Reconstruct the raw protective SL that was found invalid for the log signature.
             _raw_sl = (
-                min(max(decision.candidate_cost, decision.candidate_structure), boll.middle)
+                max(decision.candidate_cost, decision.candidate_structure)
                 if side == "LONG"
-                else max(min(decision.candidate_cost, decision.candidate_structure), boll.middle)
+                else min(decision.candidate_cost, decision.candidate_structure)
             )
             self._log_three_stage_post_tp1_sl_diagnostic_once(
                 side,
@@ -2306,14 +2292,6 @@ class BollCvdReclaimStrategy:
                 boll,
             )
             return None
-        self._log_three_stage_post_tp1_sl_time_tightened_once(
-            side,
-            ratio,
-            decision.candidate_cost,
-            decision.candidate_structure,
-            decision.protective_sl,
-            boll,
-        )
         self._log_three_stage_post_tp1_sl_diagnostic_once(
             side,
             "calculated",

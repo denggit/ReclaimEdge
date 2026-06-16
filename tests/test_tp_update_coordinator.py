@@ -654,3 +654,262 @@ class TestDegradeBranchExclusivity:
             assert s.state.tp_plan == "MIDDLE_RUNNER"
             assert "three_stage_pre_tp1_degraded_to_middle_runner" in result.reason
             mock_pending.assert_not_called()
+
+
+# ── 17. Middle Runner active — extension trigger / tighten removal ─────
+
+class TestMiddleRunnerActiveNoExtensionTrigger:
+    """Verifies the relaxed Middle Runner active branch no longer calls
+    extension trigger, time-tighten, or tighten-optional."""
+
+    def test_no_extension_trigger_called(self):
+        s = _strategy(tp_min_net_profit_pct=0.01)
+        _setup_position_state(
+            s, side="LONG", layers=2,
+            avg_entry_price=100.0, breakeven_price=100.2,
+            net_remaining_breakeven_price=100.2,
+        )
+        s.state.middle_runner_active = True
+        s.state.middle_runner_protective_sl_price = 99.0
+
+        boll = _boll_with_tp(
+            middle=100.0, upper=110.0, lower=90.0,
+            tp_middle=101.0, tp_upper=108.0, tp_lower=92.0,
+            candle_ts_ms=2000,
+        )
+        cvd = _cvd()
+
+        with mock.patch.object(
+            s, "_apply_middle_runner_extension_trigger",
+            side_effect=AssertionError("BUG: extension trigger should not be called"),
+        ) as mock_ext, mock.patch.object(
+            s, "_advance_runner_sl_time_tighten_candle_count",
+            side_effect=AssertionError("BUG: time tighten should not be called"),
+        ) as mock_adv, mock.patch.object(
+            s, "_tighten_optional_middle_runner_sl",
+            side_effect=AssertionError("BUG: tighten optional should not be called"),
+        ) as mock_tight:
+            result = s._maybe_update_tp(101.0, 2000, boll, cvd)
+            assert result is not None
+            assert result.intent_type == "UPDATE_TP"
+            mock_ext.assert_not_called()
+            mock_adv.assert_not_called()
+            mock_tight.assert_not_called()
+
+    def test_calculated_sl_valid_adopted_directly_even_looser(self):
+        """When calculated_sl is valid but looser than old_sl, adopt it."""
+        s = _strategy(tp_min_net_profit_pct=0.01)
+        _setup_position_state(
+            s, side="LONG", layers=2,
+            avg_entry_price=100.0, breakeven_price=100.2,
+            net_remaining_breakeven_price=100.2,
+        )
+        s.state.middle_runner_active = True
+        # Old SL was tight (near middle at 99.0)
+        s.state.middle_runner_protective_sl_price = 99.0
+
+        boll = _boll_with_tp(
+            middle=102.0, upper=110.0, lower=94.0,
+            tp_middle=101.0, tp_upper=108.0, tp_lower=92.0,
+            candle_ts_ms=2000,
+        )
+        cvd = _cvd()
+
+        result = s._maybe_update_tp(101.0, 2000, boll, cvd)
+        assert result is not None
+        assert result.intent_type == "UPDATE_TP"
+        # New SL should be max(cost_line, boll_lower)
+        # cost_line = 100.2 (net_remaining_breakeven)
+        # boll_lower = 94 → max(100.2, 94) = 100.2
+        # 100.2 > 99.0 (old SL) → looser SL is adopted
+        assert s.state.middle_runner_protective_sl_price == pytest.approx(100.2, abs=0.01)
+
+    def test_calculated_sl_invalid_keeps_old_sl(self):
+        """When calculated_sl is invalid, keep old_runner_sl."""
+        s = _strategy(tp_min_net_profit_pct=0.01)
+        _setup_position_state(
+            s, side="LONG", layers=2,
+            avg_entry_price=100.0, breakeven_price=100.2,
+            net_remaining_breakeven_price=0.0,
+        )
+        s.state.middle_runner_active = True
+        s.state.middle_runner_protective_sl_price = 98.0
+        s.state.avg_entry_price = 0.0  # Forces missing_cost_basis
+
+        boll = _boll_with_tp(
+            middle=100.0, upper=110.0, lower=90.0,
+            tp_middle=101.0, tp_upper=108.0, tp_lower=92.0,
+            candle_ts_ms=2000,
+        )
+        cvd = _cvd()
+
+        result = s._maybe_update_tp(101.0, 2000, boll, cvd)
+        assert result is not None
+        # calculated_sl returns None → keep old = 98.0
+        assert s.state.middle_runner_protective_sl_price == 98.0
+
+
+# ── 18. Three-Stage waiting TP2 — extension trigger / tighten removal ──
+
+class TestThreeStageWaitingTp2NoExtensionTrigger:
+    """Verifies the relaxed Three-Stage post-TP1 branch no longer calls
+    extension trigger, time-tighten, or tighten-optional."""
+
+    def test_no_extension_trigger_called(self):
+        s = _strategy(
+            tp_min_net_profit_pct=0.01,
+            three_stage_post_tp1_protective_sl_enabled=True,
+        )
+        _setup_position_state(
+            s, side="LONG", layers=2,
+            avg_entry_price=100.0, breakeven_price=100.2,
+            net_remaining_breakeven_price=100.2,
+        )
+        s.state.three_stage_runner_enabled_for_position = True
+        s.state.three_stage_tp1_consumed = True
+        s.state.three_stage_tp2_consumed = False
+        s.state.trend_runner_active = False
+        s.state.three_stage_tp1_ratio = 0.6
+        s.state.three_stage_tp1_price = 102.0
+        s.state.three_stage_post_tp1_protective_sl_price = 99.0
+
+        boll = _boll_with_tp(
+            middle=100.0, upper=110.0, lower=90.0,
+            tp_middle=101.0, tp_upper=108.0, tp_lower=92.0,
+            candle_ts_ms=2000,
+        )
+        cvd = _cvd()
+
+        with mock.patch.object(
+            s, "_apply_three_stage_post_tp1_extension_trigger",
+            side_effect=AssertionError("BUG: extension trigger should not be called"),
+        ) as mock_ext, mock.patch.object(
+            s, "_advance_runner_sl_time_tighten_candle_count",
+            side_effect=AssertionError("BUG: time tighten should not be called"),
+        ) as mock_adv, mock.patch.object(
+            s, "_tighten_optional_three_stage_post_tp1_sl",
+            side_effect=AssertionError("BUG: tighten optional should not be called"),
+        ) as mock_tight:
+            result = s._maybe_update_tp(101.0, 2000, boll, cvd)
+            assert result is not None
+            assert result.intent_type == "UPDATE_TP"
+            mock_ext.assert_not_called()
+            mock_adv.assert_not_called()
+            mock_tight.assert_not_called()
+
+    def test_calculated_sl_valid_adopted_directly_even_looser(self):
+        """When calculated post-TP1 SL is valid but looser than old, adopt it."""
+        s = _strategy(
+            tp_min_net_profit_pct=0.01,
+            three_stage_post_tp1_protective_sl_enabled=True,
+        )
+        _setup_position_state(
+            s, side="SHORT", layers=2,
+            avg_entry_price=100.0, breakeven_price=99.8,
+            net_remaining_breakeven_price=99.8,
+        )
+        s.state.three_stage_runner_enabled_for_position = True
+        s.state.three_stage_tp1_consumed = True
+        s.state.three_stage_tp2_consumed = False
+        s.state.trend_runner_active = False
+        s.state.three_stage_tp1_ratio = 0.6
+        s.state.three_stage_tp1_price = 98.0
+        # Old SL was tight (near middle at 101.0)
+        s.state.three_stage_post_tp1_protective_sl_price = 101.0
+
+        boll = _boll_with_tp(
+            middle=98.0, upper=106.0, lower=90.0,
+            tp_middle=99.0, tp_upper=108.0, tp_lower=92.0,
+            candle_ts_ms=2000,
+        )
+        cvd = _cvd()
+
+        result = s._maybe_update_tp(99.0, 2000, boll, cvd)
+        assert result is not None
+        assert result.intent_type == "UPDATE_TP"
+        # New SL = min(cost_line=99.8, boll_upper=106) = 99.8
+        # 99.8 < 101.0 (old SL) → looser for SHORT, adopted
+        assert s.state.three_stage_post_tp1_protective_sl_price == pytest.approx(99.8, abs=0.01)
+
+    def test_calculated_sl_invalid_keeps_old_sl(self):
+        """When calculated post-TP1 SL is invalid, keep old_post_tp1_sl."""
+        s = _strategy(
+            tp_min_net_profit_pct=0.01,
+            three_stage_post_tp1_protective_sl_enabled=True,
+        )
+        _setup_position_state(
+            s, side="LONG", layers=2,
+            avg_entry_price=0.0,  # Forces missing_cost_basis in fallback path
+            breakeven_price=99.8,
+            net_remaining_breakeven_price=0.0,
+        )
+        s.state.three_stage_runner_enabled_for_position = True
+        s.state.three_stage_tp1_consumed = True
+        s.state.three_stage_tp2_consumed = False
+        s.state.trend_runner_active = False
+        s.state.three_stage_tp1_price = None  # Forces missing_tp1_price
+        s.state.three_stage_post_tp1_protective_sl_price = 98.0
+
+        boll = _boll_with_tp(
+            middle=100.0, upper=110.0, lower=90.0,
+            tp_middle=101.0, tp_upper=108.0, tp_lower=92.0,
+            candle_ts_ms=2000,
+        )
+        cvd = _cvd()
+
+        result = s._maybe_update_tp(101.0, 2000, boll, cvd)
+        assert result is not None
+        # calculated_sl returns None → keep old = 98.0
+        assert s.state.three_stage_post_tp1_protective_sl_price == 98.0
+
+
+# ── 19. Middle Runner extension triggered flag not set ──────────────────
+
+class TestMiddleRunnerExtensionNotTriggered:
+    def test_extension_triggered_not_set_true(self):
+        """middle_runner_extension_triggered should not be set True by
+        the relaxed protective SL update path."""
+        s = _strategy(tp_min_net_profit_pct=0.01)
+        _setup_position_state(
+            s, side="LONG", layers=2,
+            avg_entry_price=100.0, breakeven_price=100.2,
+            net_remaining_breakeven_price=100.2,
+        )
+        s.state.middle_runner_active = True
+        s.state.middle_runner_extension_triggered = False
+
+        boll = _boll_with_tp(candle_ts_ms=2000)
+        cvd = _cvd()
+
+        s._maybe_update_tp(101.0, 2000, boll, cvd)
+        # Extension triggered should remain False since we no longer
+        # call the extension trigger.
+        assert s.state.middle_runner_extension_triggered is False
+
+
+class TestThreeStageExtensionNotTriggered:
+    def test_post_tp1_extension_triggered_not_set_true(self):
+        """three_stage_post_tp1_sl_extension_triggered should not be set
+        True by the relaxed protective SL update path."""
+        s = _strategy(
+            tp_min_net_profit_pct=0.01,
+            three_stage_post_tp1_protective_sl_enabled=True,
+        )
+        _setup_position_state(
+            s, side="LONG", layers=2,
+            avg_entry_price=100.0, breakeven_price=100.2,
+            net_remaining_breakeven_price=100.2,
+        )
+        s.state.three_stage_runner_enabled_for_position = True
+        s.state.three_stage_tp1_consumed = True
+        s.state.three_stage_tp2_consumed = False
+        s.state.trend_runner_active = False
+        s.state.three_stage_post_tp1_sl_extension_triggered = False
+
+        boll = _boll_with_tp(candle_ts_ms=2000)
+        cvd = _cvd()
+
+        s._maybe_update_tp(101.0, 2000, boll, cvd)
+        # Extension triggered should remain False since we no longer
+        # call the extension trigger.
+        assert s.state.three_stage_post_tp1_sl_extension_triggered is False

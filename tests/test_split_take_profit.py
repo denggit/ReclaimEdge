@@ -249,58 +249,42 @@ class SplitTakeProfitStrategyTest(unittest.TestCase):
         long_strat = strategy(middle_runner_enabled=True, breakeven_fee_buffer_pct=0.001)
         long_strat.state.avg_entry_price = 100.0
         long_sl = long_strat._calculate_middle_runner_protective_sl("LONG", 103.0, boll(middle=102.0, lower=96.0))
-        self.assertAlmostEqual(long_sl or 0, max((100.1 + 102.0) / 2, (96.0 + 102.0) / 2))
+        # New relaxed: cost=100.1, structure=96 → max(100.1, 96) = 100.1
+        self.assertAlmostEqual(long_sl or 0, max(100.1, 96.0))
         self.assertEqual(long_strat._tighten_middle_runner_sl("LONG", 101.5, 100.5), 101.5)
 
         short_strat = strategy(middle_runner_enabled=True, breakeven_fee_buffer_pct=0.001)
         short_strat.state.avg_entry_price = 100.0
         short_sl = short_strat._calculate_middle_runner_protective_sl("SHORT", 97.0, boll(middle=98.0, upper=104.0))
-        self.assertAlmostEqual(short_sl or 0, min((99.9 + 98.0) / 2, (104.0 + 98.0) / 2))
+        # New relaxed: cost=99.9, structure=104 → min(99.9, 104) = 99.9
+        self.assertAlmostEqual(short_sl or 0, min(99.9, 104.0))
         self.assertEqual(short_strat._tighten_middle_runner_sl("SHORT", 98.5, 99.5), 98.5)
 
     def test_middle_runner_sl_uses_net_remaining_breakeven_when_present(self) -> None:
-        # LONG protective SL = max(
-        #     (net_remaining_breakeven + middle) / 2,   ← candidate_1 (breakeven)
-        #     (lower + middle) / 2,                     ← candidate_2 (structure)
-        # )
+        # LONG protective SL = max(net_remaining_breakeven, boll_lower)
         long_strat = strategy(middle_runner_enabled=True, breakeven_fee_buffer_pct=0.001)
         long_strat.state = StrategyPositionState(side="LONG", avg_entry_price=100.0, net_remaining_breakeven_price=95.0)
 
-        # Scenario A: structure candidate wins (lower is tight enough)
+        # Scenario A: structure candidate wins (lower > net_breakeven)
         long_sl = long_strat._calculate_middle_runner_protective_sl("LONG", 103.0, boll(middle=102.0, lower=96.0))
-        candidate_breakeven = (95.0 + 102.0) / 2  # 98.5
-        candidate_structure = (96.0 + 102.0) / 2  # 99.0
-        self.assertEqual(long_sl, max(candidate_breakeven, candidate_structure))
+        self.assertEqual(long_sl, max(95.0, 96.0))  # = 96.0 (structure wins)
 
-        # Scenario B: breakeven candidate wins (lower is far away → structure candidate too loose)
+        # Scenario B: breakeven candidate wins (lower is far below breakeven)
         long_sl_b = long_strat._calculate_middle_runner_protective_sl("LONG", 103.0, boll(middle=102.0, lower=90.0))
-        candidate_breakeven_b = (95.0 + 102.0) / 2  # 98.5
-        candidate_structure_b = (90.0 + 102.0) / 2  # 96.0
-        self.assertEqual(long_sl_b, max(candidate_breakeven_b, candidate_structure_b))
-        # breakeven candidate wins when structure is looser
-        self.assertEqual(long_sl_b, candidate_breakeven_b)
+        self.assertEqual(long_sl_b, max(95.0, 90.0))  # = 95.0 (breakeven wins)
 
-        # SHORT protective SL = min(
-        #     (net_remaining_breakeven + middle) / 2,   ← candidate_1 (breakeven)
-        #     (upper + middle) / 2,                     ← candidate_2 (structure)
-        # )
+        # SHORT protective SL = min(net_remaining_breakeven, boll_upper)
         short_strat = strategy(middle_runner_enabled=True, breakeven_fee_buffer_pct=0.001)
         short_strat.state = StrategyPositionState(side="SHORT", avg_entry_price=100.0,
                                                   net_remaining_breakeven_price=105.0)
 
-        # Scenario C: structure candidate wins (upper is tight enough)
+        # Scenario C: structure candidate wins (upper < net_breakeven)
         short_sl = short_strat._calculate_middle_runner_protective_sl("SHORT", 97.0, boll(middle=98.0, upper=104.0))
-        s_candidate_breakeven = (105.0 + 98.0) / 2  # 101.5
-        s_candidate_structure = (104.0 + 98.0) / 2  # 101.0
-        self.assertEqual(short_sl, min(s_candidate_breakeven, s_candidate_structure))
+        self.assertEqual(short_sl, min(105.0, 104.0))  # = 104.0 (structure wins)
 
-        # Scenario D: breakeven candidate wins (upper is far away → structure candidate too loose)
+        # Scenario D: breakeven candidate wins (upper is far above breakeven)
         short_sl_d = short_strat._calculate_middle_runner_protective_sl("SHORT", 97.0, boll(middle=98.0, upper=106.0))
-        s_candidate_breakeven_d = (105.0 + 98.0) / 2  # 101.5
-        s_candidate_structure_d = (106.0 + 98.0) / 2  # 102.0
-        self.assertEqual(short_sl_d, min(s_candidate_breakeven_d, s_candidate_structure_d))
-        # breakeven candidate wins when structure is looser
-        self.assertEqual(short_sl_d, s_candidate_breakeven_d)
+        self.assertEqual(short_sl_d, min(105.0, 106.0))  # = 105.0 (breakeven wins)
 
     def test_middle_runner_uses_same_time_tighten_formula(self) -> None:
         long_strat = strategy(middle_runner_enabled=True)
@@ -326,8 +310,10 @@ class SplitTakeProfitStrategyTest(unittest.TestCase):
                                                                       boll(middle=100.0, upper=200.0, lower=80.0))
 
         self.assertEqual(long_strat._runner_sl_time_tighten_ratio(1), 0.55)
-        self.assertEqual(long_sl, 155.0)
-        self.assertEqual(short_sl, 145.0)
+        # New relaxed logic: time tighten ratio ignored. cost=100, structure=100 → max=100
+        self.assertEqual(long_sl, 100.0)
+        # New relaxed logic: cost=200, structure=200 → min=200
+        self.assertEqual(short_sl, 200.0)
 
     def test_candle_count_starts_at_zero_on_activation(self) -> None:
         strat = strategy(middle_runner_enabled=True)
@@ -379,9 +365,9 @@ class SplitTakeProfitStrategyTest(unittest.TestCase):
         self.assertEqual(joined.count("MIDDLE_RUNNER_PROTECTIVE_SL_DIAG"), 1)
         self.assertIn("net_remaining_breakeven=95.0000", joined)
         self.assertIn("breakeven_source=net_remaining_breakeven", joined)
-        self.assertIn("candidate_cost=98.5000", joined)
-        self.assertIn("candidate_structure=96.0000", joined)
-        self.assertIn("protective_sl=98.5000", joined)
+        self.assertIn("candidate_cost=95.0000", joined)
+        self.assertIn("candidate_structure=90.0000", joined)
+        self.assertIn("protective_sl=95.0000", joined)
 
     def test_middle_runner_sl_diag_logs_again_when_signature_changes(self) -> None:
         strat = strategy(middle_runner_enabled=True, breakeven_fee_buffer_pct=0.001)
@@ -458,7 +444,8 @@ class SplitTakeProfitStrategyTest(unittest.TestCase):
                                                boll(middle=103.0, upper=113.0, lower=93.0, candle_ts_ms=3_000), cvd())
         self.assertIsNotNone(active_intent)
         self.assertEqual(active_intent.tp_price, 113.0)
-        self.assertGreaterEqual(active_intent.middle_runner_protective_sl_price or 0, 101.5)
+        # New relaxed logic: cost=100.1, structure=93 → max=100.1 (looser than old 101.5, allowed)
+        self.assertAlmostEqual(active_intent.middle_runner_protective_sl_price or 0, 100.1, places=3)
 
     def test_middle_runner_pending_does_not_migrate_to_three_stage_after_env_change(self) -> None:
         strat = strategy(middle_runner_enabled=False, three_stage_runner_enabled=True, breakeven_fee_buffer_pct=0.001,
@@ -505,8 +492,8 @@ class SplitTakeProfitStrategyTest(unittest.TestCase):
             layers=1,
             last_entry_price=100.0,
             total_entry_qty=1.0,
-            total_entry_notional=100.0,
-            avg_entry_price=100.0,
+            total_entry_notional=0.0,
+            avg_entry_price=0.0,  # No cost basis → calculated_sl returns None
             tp_price=110.0,
             tp_mode="MIDDLE",
             partial_tp_consumed=True,
@@ -524,6 +511,7 @@ class SplitTakeProfitStrategyTest(unittest.TestCase):
                                                boll(middle=103.0, upper=113.0, lower=97.0, candle_ts_ms=2_000), cvd())
 
         self.assertIsNotNone(update_intent)
+        # calculated_sl returns None → keep old = 101.5
         self.assertEqual(strat.state.middle_runner_protective_sl_price, 101.5)
         self.assertEqual(update_intent.middle_runner_protective_sl_price, 101.5)
         self.assertEqual(strat.state.middle_runner_protective_sl_order_id, "algo-old")
