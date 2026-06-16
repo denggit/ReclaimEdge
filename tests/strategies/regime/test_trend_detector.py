@@ -1,0 +1,252 @@
+from __future__ import annotations
+
+from src.strategies.regime.anchored_cvd import (
+    AnchoredCvdConfig,
+    build_anchored_cvd_state,
+)
+from src.strategies.regime.compression_detector import (
+    CompressionDetector,
+    CompressionDetectorConfig,
+)
+from src.strategies.regime.trend_detector import (
+    TrendDetector,
+    TrendDetectorConfig,
+)
+from src.strategies.regime.types import (
+    BandSnapshot,
+    BreakoutSnapshot,
+    CompressionEpisode,
+    TrendState,
+)
+
+
+# ── Helpers ───────────────────────────────────────────────────────────
+
+
+def _band_snapshot(upper: float = 2100.0, middle: float = 2000.0, lower: float = 1900.0, candle_ts_ms: int = 1000) -> BandSnapshot:
+    return BandSnapshot(upper=upper, middle=middle, lower=lower, candle_ts_ms=candle_ts_ms)
+
+
+def _breakout(direction: str = "UP", ts_ms: int = 10000, price: float = 2110.0,
+               anchor_cvd: float = 100.0, anchor_volume: float = 1000.0,
+               upper: float = 2100.0, middle: float = 2000.0, lower: float = 1900.0) -> BreakoutSnapshot:
+    return BreakoutSnapshot(
+        direction=direction,  # type: ignore[arg-type]
+        ts_ms=ts_ms,
+        price=price,
+        band=_band_snapshot(upper=upper, middle=middle, lower=lower, candle_ts_ms=ts_ms),
+        anchor_cvd=anchor_cvd,
+        anchor_volume=anchor_volume,
+    )
+
+
+def _episode(
+    start_ts_ms: int = 0,
+    end_ts_ms: int = 9000,
+    valid_until_ts_ms: int = 9_000_000_000,  # far future
+    candle_count: int = 12,
+) -> CompressionEpisode:
+    return CompressionEpisode(
+        start_ts_ms=start_ts_ms,
+        end_ts_ms=end_ts_ms,
+        valid_until_ts_ms=valid_until_ts_ms,
+        compressed_candle_count=candle_count,
+        min_outer_distance_pct=0.001,
+        avg_outer_distance_pct=0.002,
+        upper_at_end=2100.0,
+        middle_at_end=2000.0,
+        lower_at_end=1900.0,
+        highest_high=2100.0,
+        lowest_low=1900.0,
+    )
+
+
+def _cvd_up_confirming(anchor_cvd: float = 100.0, current_cvd: float = 160.0,
+                       buy_vol: float = 80.0, sell_vol: float = 20.0,
+                       cvd_max: float = 160.0, cvd_min: float = 100.0,
+                       anchor_ts: int = 10000, current_ts: int = 20000):
+    return build_anchored_cvd_state(
+        anchor_ts_ms=anchor_ts,
+        current_ts_ms=current_ts,
+        anchor_cvd=anchor_cvd,
+        current_cvd=current_cvd,
+        episode_buy_volume=buy_vol,
+        episode_sell_volume=sell_vol,
+        episode_cvd_max=cvd_max,
+        episode_cvd_min=cvd_min,
+    )
+
+
+def _make_detector(
+    trend_cfg: dict | None = None,
+    comp_cfg: dict | None = None,
+    cvd_cfg: dict | None = None,
+) -> TrendDetector:
+    tcfg = TrendDetectorConfig(**(trend_cfg or {}))
+    ccfg = CompressionDetectorConfig(**(comp_cfg or {}))
+    cvd_cfg_ = AnchoredCvdConfig(**(cvd_cfg or {}))
+    return TrendDetector(tcfg, CompressionDetector(ccfg), cvd_cfg_)
+
+
+def _assess_pass(detector: TrendDetector, breakout: BreakoutSnapshot,
+                 episode: CompressionEpisode, cvd, current_ts_ms: int = 20000,
+                 **overrides):
+    """Call assess() with all "passed" flags by default."""
+    params = dict(
+        breakout=breakout,
+        compression_episode=episode,
+        anchored_cvd=cvd,
+        current_ts_ms=current_ts_ms,
+        range_expansion_passed=True,
+        volume_expansion_passed=True,
+        sustained_volume_passed=True,
+        outside_occupancy_passed=True,
+        new_extreme_count=3,
+        inside_reclaim_seconds=0.0,
+        price_reclaimed_inside=False,
+    )
+    params.update(overrides)
+    return detector.assess(**params)
+
+
+# ── Tests ─────────────────────────────────────────────────────────────
+
+
+class TestTrendUpConfirmed:
+    """Test 1: all conditions met → TREND_UP_CONFIRMED."""
+
+    def test_full_conditions_trend_up_confirmed(self):
+        detector = _make_detector()
+        bo = _breakout("UP", ts_ms=10000)
+        ep = _episode()
+        cvd = _cvd_up_confirming()
+
+        result = _assess_pass(detector, bo, ep, cvd, current_ts_ms=bo.ts_ms + 70_000)
+        assert result.is_confirmed is True
+        assert result.trend_state == TrendState.TREND_UP_CONFIRMED
+
+
+class TestTrendCandidateWaiting:
+    """Test 2: conditions met but min_seconds not reached → TREND_UP_CANDIDATE."""
+
+    def test_min_seconds_not_reached_stays_expanding(self):
+        detector = _make_detector()
+        bo = _breakout("UP", ts_ms=10000)
+        ep = _episode()
+        cvd = _cvd_up_confirming(anchor_ts=10000, current_ts=10010)
+
+        # Only 10ms after breakout — well under 60s
+        result = _assess_pass(detector, bo, ep, cvd, current_ts_ms=10010)
+        assert result.is_confirmed is False
+        assert result.is_candidate is False
+        # Still in POST_COMPRESSION_EXPANDING because min_seconds not passed
+        assert result.trend_state == TrendState.POST_COMPRESSION_EXPANDING
+
+    def test_min_seconds_reached_but_occupancy_not_passed_stays_candidate(self):
+        detector = _make_detector()
+        bo = _breakout("UP", ts_ms=10000)
+        ep = _episode()
+        cvd = _cvd_up_confirming()
+
+        # 70s after breakout, but outside occupancy fails
+        result = _assess_pass(detector, bo, ep, cvd, current_ts_ms=bo.ts_ms + 70_000,
+                              outside_occupancy_passed=False)
+        assert result.is_failed is True
+        assert result.reason == "outside_occupancy_insufficient"
+
+
+class TestTrendFailedInsideReclaim:
+    """Test 3: price reclaimed inside too long → TREND_FAILED."""
+
+    def test_inside_reclaim_too_long(self):
+        detector = _make_detector({"max_inside_reclaim_seconds": 3})
+        bo = _breakout("UP", ts_ms=10000)
+        ep = _episode()
+        cvd = _cvd_up_confirming()
+
+        result = _assess_pass(detector, bo, ep, cvd, current_ts_ms=bo.ts_ms + 70_000,
+                              price_reclaimed_inside=True, inside_reclaim_seconds=5.0)
+        assert result.is_failed is True
+        assert result.reason == "inside_reclaim_too_long"
+
+
+class TestTrendFailedCvdDiverges:
+    """Test 4: anchored CVD diverges against breakout → TREND_FAILED."""
+
+    def test_cvd_diverges_fails_trend(self):
+        detector = _make_detector()
+        bo = _breakout("UP", ts_ms=10000, anchor_cvd=100.0)
+        ep = _episode()
+        # CVD going down while price goes up → diverges
+        cvd = build_anchored_cvd_state(
+            anchor_ts_ms=10000, current_ts_ms=bo.ts_ms + 70_000,
+            anchor_cvd=100.0, current_cvd=90.0,
+            episode_buy_volume=30.0, episode_sell_volume=70.0,
+            episode_cvd_max=100.0, episode_cvd_min=90.0,
+        )
+
+        result = _assess_pass(detector, bo, ep, cvd, current_ts_ms=bo.ts_ms + 70_000)
+        assert result.is_failed is True
+        assert "cvd_diverges" in result.reason
+
+
+class TestCompressionExpiredNoTrend:
+    """Test 5: compression expired → no trend."""
+
+    def test_compression_expired(self):
+        detector = _make_detector()
+        bo = _breakout("UP", ts_ms=10000)
+        # Episode already expired (valid_until in the past)
+        ep = _episode(valid_until_ts_ms=5000)
+        cvd = _cvd_up_confirming()
+
+        result = _assess_pass(detector, bo, ep, cvd, current_ts_ms=bo.ts_ms + 70_000)
+        assert result.is_failed is True
+        assert result.reason == "compression_expired"
+
+
+class TestCompressionEndedButStillValid:
+    """Test 6: compression ended 60 min ago, within valid_after_seconds → trend allowed."""
+
+    def test_compression_ended_60m_ago_still_allowed(self):
+        # Create detector with 7200s valid_after
+        detector = _make_detector(comp_cfg={"valid_after_seconds": 7200})
+        bo = _breakout("UP", ts_ms=100000)
+        ep = _episode(
+            start_ts_ms=0,
+            end_ts_ms=10000,  # compression ended 90s before breakout
+            valid_until_ts_ms=10000 + 7200 * 1000,  # valid for 2 hours
+        )
+        cvd = _cvd_up_confirming(anchor_ts=100000, current_ts=100000 + 70_000)
+
+        result = _assess_pass(detector, bo, ep, cvd, current_ts_ms=100000 + 70_000)
+        assert result.is_confirmed is True
+        assert result.trend_state == TrendState.TREND_UP_CONFIRMED
+
+
+class TestNoCompressionEpisodeNoTrend:
+    """Test: no compression episode → no trend."""
+
+    def test_no_episode(self):
+        detector = _make_detector()
+        bo = _breakout("UP", ts_ms=10000)
+        cvd = _cvd_up_confirming()
+
+        result = _assess_pass(detector, bo, None, cvd, current_ts_ms=bo.ts_ms + 70_000)
+        assert result.is_failed is True
+        assert result.reason == "no_recent_compression"
+
+
+class TestMaxConfirmSecondsExceeded:
+    """Test: confirm_max_seconds exceeded → failed."""
+
+    def test_max_seconds_exceeded(self):
+        detector = _make_detector({"confirm_max_seconds": 180})
+        bo = _breakout("UP", ts_ms=10000)
+        ep = _episode()
+        cvd = _cvd_up_confirming()
+
+        # 200s after breakout → exceeds 180s max
+        result = _assess_pass(detector, bo, ep, cvd, current_ts_ms=bo.ts_ms + 200_000)
+        assert result.is_failed is True
+        assert result.reason == "confirm_max_seconds_exceeded"
