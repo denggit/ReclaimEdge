@@ -81,8 +81,6 @@ def _select_recoverable_reduce_only_orders(
     return selected
 
 
-# Sidecar startup recovery has been removed.
-# This file now only retains main TP startup recovery.
 
 
 async def apply_main_tp_startup_recovery(
@@ -117,8 +115,6 @@ async def apply_main_tp_startup_recovery(
             "MAIN_TP_ORDER_ID_MISSING_ON_STARTUP | reason=pending_order_check_failed error=%s trading_halted=true manual_intervention_required=true",
             exc)
         return
-    # Sidecar TP order IDs are no longer tracked — all pending reduce-only
-    # orders are considered unprotected.
     protected_ids: set[str] = set()
     reduce_only_orders = _select_recoverable_reduce_only_orders(
         pending_orders,

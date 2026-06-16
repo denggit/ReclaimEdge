@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-
 from typing import Literal
 
-PositionSide = Literal["LONG", "SHORT"]
 from src.utils.log import get_logger
 
+PositionSide = Literal["LONG", "SHORT"]
 logger = get_logger(__name__)
 
 

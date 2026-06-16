@@ -85,7 +85,6 @@ async def _send_delayed_market_exit_alert(
                 side=side,
                 layer=None,
                 has_position=True,
-                sidecar_dirty=False,
                 manual_intervention_required=manual_intervention_required,
                 message=message,
                 extra=extra or {},
@@ -366,8 +365,6 @@ async def run_delayed_market_exit_phase(
             )
             execution_state.trading_halted = True
             execution_state.halt_reason = "order_failure_delayed_market_exit_failed"
-            if reason and "sidecar" in reason:
-                strategy.state.sidecar_dirty = True
             save_position_id = execution_state.current_position_id
             save_cash_before = execution_state.cash_before_position
             state_for_save = copy.deepcopy(strategy.state)

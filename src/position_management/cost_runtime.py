@@ -133,17 +133,6 @@ def record_core_position_reduction_exit(
     )
 
 
-def record_sidecar_tp_fill_exit(
-        strategy_state,
-        leg: dict[str, Any],
-        status: dict[str, Any],
-        *,
-        fee_buffer_pct: float = DEFAULT_NET_REMAINING_FEE_BUFFER_PCT,
-) -> None:
-    """Sidecar runtime removed. This function is a no-op kept for backward compatibility."""
-    return
-
-
 def _coerce_positive_float(value: Any) -> float | None:
     try:
         parsed = float(value)

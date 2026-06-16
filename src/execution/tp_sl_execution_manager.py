@@ -6,7 +6,6 @@ from typing import Any, TYPE_CHECKING
 from src.execution.tp_sl_core_tp_manager import CoreTakeProfitManager
 from src.execution.tp_sl_market_exit_manager import MarketExitManager
 from src.execution.tp_sl_protective_stop_manager import ProtectiveStopManager
-from src.execution.tp_sl_sidecar_manager import SidecarTpManager
 from src.execution.trading_client_port import TradingClientPort
 from src.utils.log import get_logger
 
@@ -24,7 +23,6 @@ class TpSlExecutionManager:
         self.protective_stops = ProtectiveStopManager(trader, self.trading_client)
         self.market_exit = MarketExitManager(trader, self.trading_client)
         self.core_tp = CoreTakeProfitManager(trader, self.protective_stops, self.trading_client)
-        self.sidecar = SidecarTpManager(trader, self.trading_client)
 
     # ------------------------------------------------------------------
     # main TP / SL execution entry points
@@ -232,30 +230,6 @@ class TpSlExecutionManager:
                 except Exception:
                     logger.exception("Failed to cancel existing reduce-only order | ordId=%s", ord_id)
 
-    # ------------------------------------------------------------------
-    # sidecar fixed TP
-    # ------------------------------------------------------------------
-
-    async def place_sidecar_fixed_take_profit(
-            self,
-            *,
-            side: PositionSide,
-            contracts: str | Decimal,
-            tp_price: float,
-            client_order_id: str | None = None,
-    ) -> str:
-        return await self.sidecar.place_sidecar_fixed_take_profit(
-            side=side,
-            contracts=contracts,
-            tp_price=tp_price,
-            client_order_id=client_order_id,
-        )
-
-    async def cancel_sidecar_take_profit(self, order_id: str | None) -> bool:
-        return await self.sidecar.cancel_sidecar_take_profit(order_id)
-
-    async def fetch_sidecar_order_status(self, order_id: str) -> dict[str, Any]:
-        return await self.sidecar.fetch_sidecar_order_status(order_id)
 
     # ------------------------------------------------------------------
     # cancel protective stops

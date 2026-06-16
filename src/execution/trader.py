@@ -571,44 +571,6 @@ class Trader:
     async def cancel_existing_reduce_only_orders(self) -> None:
         return await self._require_tp_sl_manager().cancel_existing_reduce_only_orders()
 
-    async def place_sidecar_market_order(self, *, side: PositionSide, eth_qty: float) -> dict[str, Any]:
-        contracts = self.eth_qty_to_contracts(Decimal(str(eth_qty)))
-        result = await self.trading_client.place_market_order(
-            side=side,
-            qty=contracts,
-            reduce_only=False,
-            client_order_id="",
-        )
-        order_id = result.order_id
-        if order_id is None:
-            raise RuntimeError("sidecar_market_entry_missing_order_id")
-        return {
-            "order_id": order_id,
-            "contracts": self.decimal_to_str(contracts),
-            "qty": float(contracts * self.contract_multiplier),
-        }
-
-    async def place_sidecar_fixed_take_profit(
-            self,
-            *,
-            side: PositionSide,
-            contracts: str | Decimal,
-            tp_price: float,
-            client_order_id: str | None = None,
-    ) -> str:
-        return await self._require_tp_sl_manager().place_sidecar_fixed_take_profit(
-            side=side,
-            contracts=contracts,
-            tp_price=tp_price,
-            client_order_id=client_order_id,
-        )
-
-    async def cancel_sidecar_take_profit(self, order_id: str | None) -> bool:
-        return await self._require_tp_sl_manager().cancel_sidecar_take_profit(order_id)
-
-    async def fetch_sidecar_order_status(self, order_id: str) -> dict[str, Any]:
-        return await self._require_tp_sl_manager().fetch_sidecar_order_status(order_id)
-
     async def fetch_pending_orders(self) -> list[dict[str, Any]]:
         """Legacy wrapper — delegates to TradingClientPort.fetch_open_orders().
 

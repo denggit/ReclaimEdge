@@ -82,7 +82,6 @@ class ExecutionCommandProcessor:
                     side=side,
                     layer=layer,
                     has_position=has_position,
-                    sidecar_dirty=False,
                     manual_intervention_required=manual_intervention_required,
                     message=message,
                     extra=extra or {},

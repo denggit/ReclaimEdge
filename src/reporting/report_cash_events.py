@@ -28,8 +28,6 @@ def cash_drift_reason_label(reason: str) -> str:
     """Return a human-readable Chinese label for ACCOUNT_CASH_DRIFT reason strings."""
     if not reason:
         return "未知原因"
-    if "sidecar_tp_filled" in reason:
-        return "持仓中副仓止盈导致现金变化"
     keywords = ["has_position", "strategy_layers", "current_position_id", "order_settle"]
     if any(kw in reason for kw in keywords):
         return "持仓/补仓/订单结算期间的可用现金变化，非转账行为"
@@ -109,6 +107,6 @@ def render_cash_events_section_html(
 </table>
 <p style='color:#777;font-size:11px;margin-top:4px;'>
   📥 真实转入/转出 = 仅统计空仓安全状态下确认的真实转账，共 {len(transfer_events)} 笔，净额 {fmt(net_transfer, 4)} USDT。<br>
-  ⚡ 持仓中现金漂移 = 保证金占用/订单结算/sidecar-core 仓位同步导致的可用现金变化，非转账行为，不计入净转入/转出，共 {len(drift_events)} 笔。
+  ⚡ 持仓中现金漂移 = 保证金占用/订单结算/仓位同步导致的可用现金变化，非转账行为，不计入净转入/转出，共 {len(drift_events)} 笔。
 </p>
 """.strip()

@@ -60,7 +60,6 @@ class HaltAlertPayload:
     side: str | None = None
     layer: int | None = None
     has_position: bool = False
-    sidecar_dirty: bool = False  # kept for backward compat, always False
     manual_intervention_required: bool = False
     message: str = ""
     ts_ms: int | None = None
@@ -144,7 +143,6 @@ def _build_html(payload: HaltAlertPayload) -> str:
     mode_label = {
         FULL_HALT: "FULL_HALT — all trading frozen",
         "ENTRY_HALT_POSITION_MANAGEMENT_ALLOWED": "ENTRY_HALT — position management only",
-        # SIDECAR_DIRTY_HALT removed — Sidecar runtime removed
     }.get(payload.halt_mode, payload.halt_mode)
 
     # Build extra rows
@@ -164,7 +162,6 @@ def _build_html(payload: HaltAlertPayload) -> str:
 <tr><td><b>side</b></td><td>{html.escape(str(payload.side))}</td></tr>
 <tr><td><b>layer</b></td><td>{html.escape(str(payload.layer))}</td></tr>
 <tr><td><b>has_position</b></td><td>{payload.has_position}</td></tr>
-<tr><td><b>sidecar_dirty</b></td><td>{payload.sidecar_dirty}</td></tr>
 <tr><td><b>manual_intervention_required</b></td><td style="color:#c00;font-weight:bold;">{payload.manual_intervention_required}</td></tr>
 <tr><td><b>core_position_management_allowed</b></td><td>{core_pm}</td></tr>
 <tr><td><b>message</b></td><td>{html.escape(payload.message)}</td></tr>
@@ -175,8 +172,6 @@ def _build_html(payload: HaltAlertPayload) -> str:
 <ol>
 <li>Check current OKX position (contracts, side, avg entry).</li>
 <li>Check active reduce-only / algo orders on OKX.</li>
-<li>Check sidecar legs — if OPEN_UNPROTECTED, the core position may be partially unprotected.</li>
-<li>If sidecar TP failed: manually close sidecar exposure OR restart the system.</li>
 <li>Manually market-close the remaining position if risk tolerance is exceeded.</li>
 </ol>
 

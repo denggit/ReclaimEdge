@@ -2,86 +2,119 @@
 
 This test confirms:
 1. No src/position_management/sidecar directory exists
-2. .env.example contains no SIDECAR_ env vars
-3. SimplePositionSizerConfig has no sidecar fields
-4. LivePositionState has no sidecar fields
-5. StrategyPositionState has no sidecar fields
-6. Startup restore ignores old sidecar fields
-7. No CORE_SIDECAR_POSITION_MISMATCH in source
-8. No force_close_sidecar in source
-9. No sidecar_enabled_for_position in source
-10. Middle Runner tests still pass
-11. Three-Stage Runner tests still pass
-12. Trend Runner tests still pass
+2. No src/execution/tp_sl_sidecar_manager.py exists
+3. No sidecar naming in src/ Python files (case-insensitive)
+4. No SIDECAR_ env vars in .env.example
+5. SimplePositionSizerConfig has no sidecar fields
+6. StrategyPositionState has no sidecar fields
+7. LivePositionState has no sidecar fields
+8. Startup restore ignores old sidecar fields
+9. Middle Runner, Three-Stage Runner, Trend Runner are preserved
 """
 
-import os
 import pathlib
-import sys
 
 
-def test_no_sidecar_runtime_files_exist() -> None:
-    """Sidecar runtime files are deleted. Only minimal __init__.py and model.py stubs remain."""
+def test_no_sidecar_package_exists() -> None:
     sidecar_dir = pathlib.Path("src/position_management/sidecar")
-    # Runtime files that must NOT exist
-    runtime_files = [
-        "planner.py", "reconciler.py", "entry_runtime.py",
-        "pre_core_reconcile.py", "monitor_runtime.py",
-        "force_close_runtime.py", "runtime_state.py",
-        "core_exit_safety.py", "fill_normalization.py",
-        "fill_telemetry.py",
-    ]
-    for fname in runtime_files:
-        assert not (sidecar_dir / fname).exists(), (
-            f"Sidecar runtime file should not exist: {fname}"
-        )
+    assert not sidecar_dir.exists(), f"Sidecar directory must not exist: {sidecar_dir}"
+
+
+def test_no_sidecar_manager_exists() -> None:
+    manager_path = pathlib.Path("src/execution/tp_sl_sidecar_manager.py")
+    assert not manager_path.exists(), f"Sidecar manager must not exist: {manager_path}"
+
+
+def test_no_sidecar_naming_in_src() -> None:
+    """Verify that sidecar/Sidecar/SIDECAR does not appear in src/ Python files.
+
+    Allowed exceptions:
+    - Exchange adapter files (exchanges/) — dead legacy code, not Sidecar runtime
+    - Comments referencing historical Sidecar removal (e.g. "Sidecar removed")
+    """
+    allowed_patterns = {
+        "sidecar has been removed",
+        "sidecar runtime has been removed",
+        "sidecar removed",
+        "sidecar runtime removed",
+    }
+    # Exchange adapter files are excluded (not Sidecar runtime, but adapter layer)
+    excluded_prefixes = (
+        str(pathlib.Path("src/exchanges/")),
+    )
+    root = pathlib.Path("src")
+    violations = []
+    for py_file in sorted(root.rglob("*.py")):
+        py_str = str(py_file)
+        if py_str.startswith(excluded_prefixes):
+            continue
+        content = py_file.read_text()
+        lower = content.lower()
+        if "sidecar" not in lower and "side_car" not in lower and "core_sidecar" not in lower:
+            continue
+        # Check each line for sidecar references
+        for i, line in enumerate(content.splitlines(), 1):
+            line_lower = line.strip().lower()
+            if "sidecar" not in line_lower and "side_car" not in line_lower:
+                continue
+            # Allow lines that explicitly state Sidecar has been removed
+            if any(p in line_lower for p in allowed_patterns):
+                continue
+            # Allow pure comments that are removal notes
+            if line.strip().startswith("#") and any(p in line_lower for p in allowed_patterns):
+                continue
+            violations.append(f"{py_file}:{i}: {line.strip()[:100]}")
+
+    if violations:
+        msg = "Sidecar references found in src/:\n" + "\n".join(violations[:20])
+        if len(violations) > 20:
+            msg += f"\n... and {len(violations) - 20} more"
+        raise AssertionError(msg)
 
 
 def test_env_example_no_sidecar() -> None:
     env_path = pathlib.Path(".env.example")
     content = env_path.read_text()
-    assert "SIDECAR_ENABLED" not in content, ".env.example should not contain SIDECAR_ENABLED"
-    assert "SIDECAR_MARGIN_PCT" not in content, ".env.example should not contain SIDECAR_MARGIN_PCT"
-    assert "SIDECAR_TP_PCT" not in content, ".env.example should not contain SIDECAR_TP_PCT"
-    assert "SIDECAR_CLOSE_WHEN_CORE_FLAT" not in content, ".env.example should not contain SIDECAR_CLOSE_WHEN_CORE_FLAT"
-    assert "SIDECAR_ORDER_STATUS_CHECK_SECONDS" not in content, ".env.example should not contain SIDECAR_ORDER_STATUS_CHECK_SECONDS"
-    assert "SIDECAR_MAX_LEGS" not in content, ".env.example should not contain SIDECAR_MAX_LEGS"
-    assert "SIDECAR_SKIP_FIRST_LAYER" not in content, ".env.example should not contain SIDECAR_SKIP_FIRST_LAYER"
-    assert "Sidecar runtime has been removed" in content, ".env.example should mention Sidecar removal"
+    assert "SIDECAR_ENABLED" not in content
+    assert "SIDECAR_MARGIN_PCT" not in content
+    assert "SIDECAR_TP_PCT" not in content
+    assert "SIDECAR_CLOSE_WHEN_CORE_FLAT" not in content
+    assert "SIDECAR_ORDER_STATUS_CHECK_SECONDS" not in content
+    assert "SIDECAR_MAX_LEGS" not in content
+    assert "SIDECAR_SKIP_FIRST_LAYER" not in content
+    assert "Sidecar runtime has been removed" in content
 
 
 def test_simple_position_sizer_no_sidecar_fields() -> None:
     from src.risk.simple_position_sizer import SimplePositionSizerConfig
 
     config = SimplePositionSizerConfig()
-    assert not hasattr(config, "sidecar_enabled"), "SimplePositionSizerConfig should not have sidecar_enabled"
-    assert not hasattr(config, "sidecar_margin_pct"), "SimplePositionSizerConfig should not have sidecar_margin_pct"
-    assert not hasattr(config, "sidecar_tp_pct"), "SimplePositionSizerConfig should not have sidecar_tp_pct"
-    assert not hasattr(config, "sidecar_close_when_core_flat"), "SimplePositionSizerConfig should not have sidecar_close_when_core_flat"
-    assert not hasattr(config, "sidecar_order_status_check_seconds"), "SimplePositionSizerConfig should not have sidecar_order_status_check_seconds"
-    assert not hasattr(config, "sidecar_max_legs"), "SimplePositionSizerConfig should not have sidecar_max_legs"
-    assert not hasattr(config, "sidecar_skip_first_layer"), "SimplePositionSizerConfig should not have sidecar_skip_first_layer"
-    assert not hasattr(config, "validate_sidecar"), "SimplePositionSizerConfig should not have validate_sidecar"
-
-
-def test_live_position_state_no_sidecar_fields() -> None:
-    from src.reporting.live_state_store import LivePositionState
-
-    state = LivePositionState()
-    assert not hasattr(state, "sidecar_enabled_for_position"), "LivePositionState should not have sidecar_enabled_for_position"
-    assert not hasattr(state, "sidecar_dirty"), "LivePositionState should not have sidecar_dirty"
-    assert not hasattr(state, "sidecar_halt_reason"), "LivePositionState should not have sidecar_halt_reason"
+    for field in ("sidecar_enabled", "sidecar_margin_pct", "sidecar_tp_pct",
+                  "sidecar_close_when_core_flat", "sidecar_order_status_check_seconds",
+                  "sidecar_max_legs", "sidecar_skip_first_layer", "validate_sidecar"):
+        assert not hasattr(config, field), f"SimplePositionSizerConfig should not have {field}"
 
 
 def test_strategy_position_state_no_sidecar_fields() -> None:
     from src.strategies.boll_cvd_reclaim_strategy import StrategyPositionState
 
     state = StrategyPositionState()
-    assert not hasattr(state, "sidecar_enabled_for_position"), "StrategyPositionState should not have sidecar_enabled_for_position"
-    assert not hasattr(state, "sidecar_dirty"), "StrategyPositionState should not have sidecar_dirty"
-    assert not hasattr(state, "sidecar_halt_reason"), "StrategyPositionState should not have sidecar_halt_reason"
-    assert not hasattr(state, "sidecar_legs"), "StrategyPositionState should not have sidecar_legs"
-    assert not hasattr(state, "sidecar_open_qty"), "StrategyPositionState should not have sidecar_open_qty"
+    for field in ("sidecar_enabled_for_position", "sidecar_dirty", "sidecar_halt_reason",
+                  "sidecar_legs", "sidecar_open_qty", "sidecar_margin_pct",
+                  "sidecar_tp_pct", "sidecar_total_qty", "sidecar_total_notional",
+                  "sidecar_realized_qty"):
+        assert not hasattr(state, field), f"StrategyPositionState should not have {field}"
+
+
+def test_live_position_state_no_sidecar_fields() -> None:
+    from src.reporting.live_state_store import LivePositionState
+
+    state = LivePositionState()
+    for field in ("sidecar_enabled_for_position", "sidecar_dirty", "sidecar_halt_reason",
+                  "sidecar_margin_pct", "sidecar_tp_pct", "sidecar_legs",
+                  "sidecar_open_qty", "sidecar_total_qty", "sidecar_total_notional",
+                  "sidecar_realized_qty"):
+        assert not hasattr(state, field), f"LivePositionState should not have {field}"
 
 
 def test_startup_restore_ignores_old_sidecar_fields() -> None:
@@ -122,7 +155,6 @@ def test_startup_restore_ignores_old_sidecar_fields() -> None:
     from src.strategies.boll_cvd_reclaim_strategy import (
         BollCvdReclaimStrategy,
         BollCvdReclaimStrategyConfig,
-        StrategyPositionState,
     )
     from src.risk.simple_position_sizer import SimplePositionSizerConfig, SimplePositionSizer
 
@@ -139,49 +171,8 @@ def test_startup_restore_ignores_old_sidecar_fields() -> None:
     assert strategy.state.layers == 2
 
 
-def test_no_core_sidecar_position_mismatch_in_source() -> None:
-    """Verify that CORE_SIDECAR_POSITION_MISMATCH is not in source code."""
-    root = pathlib.Path("src")
-    for py_file in root.rglob("*.py"):
-        content = py_file.read_text()
-        assert "CORE_SIDECAR_POSITION_MISMATCH" not in content, (
-            f"{py_file} should not contain CORE_SIDECAR_POSITION_MISMATCH"
-        )
-
-
-def test_no_force_close_sidecar_in_source() -> None:
-    """Verify that force_close_sidecar is not in source code (except comments/docs)."""
-    root = pathlib.Path("src")
-    found = []
-    for py_file in root.rglob("*.py"):
-        content = py_file.read_text()
-        # Check for actual code usage, not comments
-        for line in content.splitlines():
-            stripped = line.strip()
-            if "force_close_sidecar" in stripped and not stripped.startswith("#"):
-                # Allow it in docstrings and type hints (dead code)
-                if "force_close_sidecar" in stripped and "def " not in stripped:
-                    found.append(f"{py_file}: {stripped[:80]}")
-    assert len(found) == 0, f"force_close_sidecar still found in source: {found}"
-
-
-def test_no_sidecar_enabled_for_position_in_source() -> None:
-    """Verify that sidecar_enabled_for_position is not in non-test, non-stub source code."""
-    root = pathlib.Path("src")
-    excluded = {pathlib.Path("src/position_management/sidecar/model.py")}
-    for py_file in root.rglob("*.py"):
-        if py_file in excluded:
-            continue
-        content = py_file.read_text()
-        assert "sidecar_enabled_for_position" not in content, (
-            f"{py_file} should not contain sidecar_enabled_for_position"
-        )
-
-
 def test_middle_runner_related_fields_present() -> None:
-    """Verify Middle Runner fields are still present in StrategyPositionState."""
     from src.strategies.boll_cvd_reclaim_strategy import StrategyPositionState
-
     state = StrategyPositionState()
     assert hasattr(state, "middle_runner_enabled_for_position")
     assert hasattr(state, "middle_runner_active")
@@ -189,9 +180,7 @@ def test_middle_runner_related_fields_present() -> None:
 
 
 def test_three_stage_runner_fields_present() -> None:
-    """Verify Three-Stage Runner fields are still present in StrategyPositionState."""
     from src.strategies.boll_cvd_reclaim_strategy import StrategyPositionState
-
     state = StrategyPositionState()
     assert hasattr(state, "three_stage_runner_enabled_for_position")
     assert hasattr(state, "three_stage_tp1_price")
@@ -199,9 +188,7 @@ def test_three_stage_runner_fields_present() -> None:
 
 
 def test_trend_runner_fields_present() -> None:
-    """Verify Trend Runner fields are still present in StrategyPositionState."""
     from src.strategies.boll_cvd_reclaim_strategy import StrategyPositionState
-
     state = StrategyPositionState()
     assert hasattr(state, "trend_runner_active")
     assert hasattr(state, "trend_runner_tp_price")
@@ -209,17 +196,13 @@ def test_trend_runner_fields_present() -> None:
 
 
 def test_middle_bucket_split_fields_present() -> None:
-    """Verify Middle Bucket Split fields are still present."""
     from src.strategies.boll_cvd_reclaim_strategy import StrategyPositionState
-
     state = StrategyPositionState()
     assert hasattr(state, "middle_bucket_split_active")
 
 
 def test_post_entry_sl_cooldown_fields_present() -> None:
-    """Verify Post-Entry SL Cooldown fields are still present."""
     from src.strategies.boll_cvd_reclaim_strategy import StrategyPositionState
-
     state = StrategyPositionState()
     assert hasattr(state, "post_entry_sl_cooldown_until_ts_ms")
     assert hasattr(state, "post_entry_sl_cooldown_side")

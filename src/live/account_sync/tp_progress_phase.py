@@ -11,7 +11,6 @@ from src.live.startup_recovery import basic_restore as startup_basic_restore
 from src.position_management import cost_runtime as position_cost_runtime
 from src.position_management import runner_live_helpers
 from src.position_management import tp_progress as tp_progress_helpers
-# Sidecar runtime removed — sidecar_open_qty is always 0.0
 from src.reporting.live_state_store import LiveStateStore
 from src.reporting.trade_journal import LiveTradeJournal
 from src.strategies.boll_cvd_reclaim_strategy import StrategyPositionState
@@ -49,7 +48,7 @@ def run_account_sync_tp_progress_phase(
         last_logged_position_key: Any,
 ) -> AccountSyncTpProgressResult:
     # Position reduction detection must run every account sync,
-    # even when pending orders exist (e.g. TP2 / Sidecar TP still
+    # even when pending orders exist (e.g. TP2 still
     # pending after TP1 fill). The mark_* helpers are internally
     # idempotent via consumed/active flags.
     trader.position_contracts = core_position.contracts
@@ -96,7 +95,7 @@ def run_account_sync_tp_progress_phase(
     if pending_order_count > 0 and three_stage_event is not None:
         logger.warning(
             "THREE_STAGE_POSITION_REDUCTION_DETECTED_WITH_PENDING_ORDERS | "
-            "event=%s pending_order_count=%s side=%s old_total_eth_qty=%.8f new_core_eth_qty=%.8f core_contracts=%s net_contracts=%s sidecar_open_eth_qty=%.8f",
+            "event=%s pending_order_count=%s side=%s old_total_eth_qty=%.8f new_core_eth_qty=%.8f core_contracts=%s net_contracts=%s",
             three_stage_event,
             pending_order_count,
             core_position.side,
@@ -124,7 +123,7 @@ def run_account_sync_tp_progress_phase(
                                                                                           base_sl)
                     protective_sl = strategy._tighten_optional_three_stage_post_tp1_sl(core_position.side, base_sl,
                                                                                        extension_sl)
-                # Global protective SL must cover OKX net position (core + sidecar)
+                # Global protective SL must cover OKX net position
                 if not position.has_position or position.side != core_position.side or position.contracts <= 0:
                     execution_state.trading_halted = True
                     execution_state.halt_reason = "three_stage_post_tp1_global_sl_net_position_missing"
@@ -237,7 +236,7 @@ def run_account_sync_tp_progress_phase(
                 if runner_boll is not None and core_position.side is not None
                 else None
             )
-            # Global protective SL must cover OKX net position (core + sidecar)
+            # Global protective SL must cover OKX net position
             if not position.has_position or position.side != core_position.side or position.contracts <= 0:
                 execution_state.trading_halted = True
                 execution_state.halt_reason = "middle_runner_global_sl_net_position_missing"
@@ -293,7 +292,7 @@ def run_account_sync_tp_progress_phase(
             if runner_boll is not None and core_position.side is not None
             else None
         )
-        # Global protective SL must cover OKX net position (core + sidecar)
+        # Global protective SL must cover OKX net position
         if not position.has_position or position.side != core_position.side or position.contracts <= 0:
             execution_state.trading_halted = True
             execution_state.halt_reason = "middle_runner_global_sl_net_position_missing"

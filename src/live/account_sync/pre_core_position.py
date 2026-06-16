@@ -151,9 +151,6 @@ async def run_account_sync_pre_core_position_phase(
     cash_transfer_payload: dict[str, Any] | None = None
     cash_drift_payload: dict[str, Any] | None = None
 
-    # Sidecar runtime has been removed.
-    # core_position is now always the raw OKX position.
-
     async with state_lock:
         pending_order_count = execution_state.pending_order_count
         core_position_view_helpers.apply_core_position_view_to_state(strategy.state, core_position)

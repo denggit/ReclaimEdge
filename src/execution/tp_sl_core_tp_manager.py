@@ -150,12 +150,12 @@ class CoreTakeProfitManager:
             logger.exception("Failed to refresh position before replacing TP")
             if managed_core_contracts is not None and managed_core_contracts > 0:
                 logger.error(
-                    "REPLACE_TP_NET_POSITION_FETCH_FAILED | cannot determine net position for global SL; refusing to proceed with managed_core_contracts as fallback; sidecar may be unprotected manual_intervention_required=true core=%s",
+                    "REPLACE_TP_NET_POSITION_FETCH_FAILED | cannot determine net position for global SL; refusing to proceed with managed_core_contracts as fallback manual_intervention_required=true core=%s",
                     t.decimal_to_str(managed_core_contracts),
                 )
                 raise RuntimeError(
                     "failed_to_fetch_net_position_for_global_sl: "
-                    "cannot use managed_core_contracts as net position for SL in Sidecar mode"
+                    "cannot use managed_core_contracts as net position for SL"
                 )
             return LiveTradeResult(
                 False,

@@ -234,18 +234,10 @@ async def prepare_account_sync_flat_settlement_phase(
             None,
             "trend_runner_market_exit_waiting_flat",
             "three_stage_post_tp1_sl_failed_market_exit_waiting_flat",
-            "sidecar_tp_place_failed_market_exit_waiting_flat",
-            "sidecar_tp_rate_limited_market_exit_waiting_flat",
-            "sidecar_core_exit_delayed_market_exit_waiting_flat",
             "order_failure_delayed_market_exit_waiting_flat",
             "delayed_market_exit_waiting_flat",
             "rolling_loss_soft_halt",
             "rolling_loss_hard_halt",
-            # Delayed market exit armed reasons are clearable on flat
-            # because the position no longer exists.
-            "sidecar_tp_place_failed_delayed_market_exit_armed",
-            "sidecar_tp_place_rate_limited_delayed_market_exit_armed",
-            "sidecar_core_exit_alignment_failed_delayed_market_exit_armed",
             "three_stage_post_tp1_sl_failed_delayed_market_exit_armed",
             "middle_runner_sl_failed_delayed_market_exit_armed",
             "middle_bucket_fast_sl_failed_delayed_market_exit_armed",
@@ -318,9 +310,6 @@ async def finalize_account_sync_flat_settlement_phase(
                     can_apply_rolling_halt = flat_previous_halt_reason in {
                         None,
                         "trend_runner_market_exit_waiting_flat",
-                        "sidecar_tp_place_failed_market_exit_waiting_flat",
-                        "sidecar_tp_rate_limited_market_exit_waiting_flat",
-                        "sidecar_core_exit_delayed_market_exit_waiting_flat",
                         "order_failure_delayed_market_exit_waiting_flat",
                         "delayed_market_exit_waiting_flat",
                         "rolling_loss_soft_halt",

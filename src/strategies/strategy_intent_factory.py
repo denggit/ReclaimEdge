@@ -20,9 +20,6 @@ class StrategyIntentFactory:
 
     Extracted from BollCvdReclaimStrategy to keep intent-construction
     logic in a single place without changing any trigger logic.
-
-    Sidecar runtime has been removed. managed_core_* helpers now return
-    safe defaults.
     """
 
     def __init__(self, strategy: BollCvdReclaimStrategy) -> None:
