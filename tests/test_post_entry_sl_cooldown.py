@@ -654,7 +654,7 @@ def test_env_example_has_side_default() -> None:
     env_example_path = os.path.join(
         os.path.dirname(__file__), "..", ".env.example"
     )
-    with open(env_example_path) as f:
+    with open(env_example_path, encoding="utf-8") as f:
         content = f.read()
     assert "POST_ENTRY_SL_COOLDOWN_SCOPE=SIDE" in content
     assert "POST_ENTRY_SL_COOLDOWN_SCOPE=GLOBAL" not in content

@@ -148,7 +148,7 @@ class TestNoLegacyShockStrategyInLiveRuntime:
     ]
 
     def test_live_runner_uses_risk_first_reclaim_strategy_not_shock_strategy(self) -> None:
-        source = Path(ROOT / "scripts/run_boll_cvd_live.py").read_text()
+        source = Path(ROOT / "scripts/run_boll_cvd_live.py").read_text(encoding="utf-8")
         assert "BollCvdShockReclaimStrategy" not in source, (
             "scripts/run_boll_cvd_live.py must NOT reference BollCvdShockReclaimStrategy"
         )
@@ -165,7 +165,7 @@ class TestNoLegacyShockStrategyInLiveRuntime:
             filepath = ROOT / rel_path
             if not filepath.exists():
                 continue
-            source = filepath.read_text()
+            source = filepath.read_text(encoding="utf-8")
             if "boll_cvd_shock_reclaim_strategy" in source:
                 for i, line in enumerate(source.split("\n"), 1):
                     if "boll_cvd_shock_reclaim_strategy" in line:

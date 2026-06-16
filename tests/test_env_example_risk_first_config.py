@@ -19,6 +19,8 @@ import os
 import re
 import unittest
 
+from src.strategies.boll_cvd_reclaim_strategy import BollCvdReclaimStrategyConfig
+
 
 class TestEnvExampleRiskFirstConfig(unittest.TestCase):
     """Risk-first config assertions on .env.example."""
@@ -31,7 +33,7 @@ class TestEnvExampleRiskFirstConfig(unittest.TestCase):
             os.path.dirname(os.path.abspath(__file__)), "..", ".env.example",
         )
         if os.path.exists(env_path):
-            with open(env_path) as f:
+            with open(env_path, encoding="utf-8") as f:
                 cls._env_text = f.read()
 
     # ── LEVERAGE ────────────────────────────────────────────────────────
@@ -146,3 +148,27 @@ class TestEnvExampleRiskFirstConfig(unittest.TestCase):
         if self._env_text is None:
             raise unittest.SkipTest(".env.example not found")
         self._assert_active_key_value("POST_ENTRY_SL_COOLDOWN_ENABLED", "true")
+
+    def test_env_example_contains_reclaim_v2_follow_through_vars(self) -> None:
+        if self._env_text is None:
+            raise unittest.SkipTest(".env.example not found")
+        self._assert_active_key_value("ENTRY_RECLAIM_MIN_CVD_RECOVERY", "0")
+        self._assert_active_key_value("ENTRY_RECLAIM_MIN_CVD_FOLLOW_THROUGH", "0")
+        self._assert_active_key_value("ENTRY_RECLAIM_MAX_INSIDE_DEPTH_RATIO", "0.15")
+
+
+# ── Config default value tests (no env set) ────────────────────────────
+
+
+def test_entry_max_stop_distance_pct_default_is_zero() -> None:
+    """Without ENTRY_MAX_STOP_DISTANCE_PCT env, config default must be 0."""
+    cfg = BollCvdReclaimStrategyConfig()
+    assert cfg.entry_max_stop_distance_pct == 0.0
+
+
+def test_entry_reclaim_v2_new_config_defaults() -> None:
+    """New Reclaim V2 follow-through config defaults."""
+    cfg = BollCvdReclaimStrategyConfig()
+    assert cfg.entry_reclaim_min_cvd_recovery == 0.0
+    assert cfg.entry_reclaim_min_cvd_follow_through == 0.0
+    assert cfg.entry_reclaim_max_inside_depth_ratio == 0.15

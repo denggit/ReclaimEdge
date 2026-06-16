@@ -182,3 +182,80 @@ def test_cvd_recovery_short() -> None:
     )
     assert decision.confirmed is True
     assert decision.cvd_recovery == 300_000.0
+
+
+# ── Config: min_price_extension_pct ─────────────────────────────────────
+
+def test_divergence_respects_min_price_extension_pct() -> None:
+    """Price extension below min_price_extension_pct must NOT confirm."""
+    from src.strategies.reclaim_anchored_divergence import AnchoredDivergenceConfig
+
+    config = AnchoredDivergenceConfig(
+        min_price_extension_pct=0.001,  # 0.1% required
+        min_cvd_recovery=0,
+    )
+    # Price only extends 0.05% below previous (below 0.1% threshold)
+    decision = evaluate_anchored_divergence(
+        side="LONG",
+        previous_extreme_price=100.0,
+        previous_anchored_cvd=-1_000_000.0,
+        current_extreme_price=99.95,  # only 0.05% lower
+        current_anchored_cvd=-800_000.0,  # CVD recovery is good
+        config=config,
+    )
+    assert decision.confirmed is False
+    assert decision.reason == "no_new_low"
+
+
+def test_divergence_respects_min_cvd_recovery() -> None:
+    """CVD recovery below min_cvd_recovery must NOT confirm."""
+    from src.strategies.reclaim_anchored_divergence import AnchoredDivergenceConfig
+
+    config = AnchoredDivergenceConfig(
+        min_price_extension_pct=0.0,
+        min_cvd_recovery=500_000,  # need at least 500k CVD recovery
+    )
+    # CVD recovers only 200k (from -1M to -800k), below 500k threshold
+    decision = evaluate_anchored_divergence(
+        side="LONG",
+        previous_extreme_price=100.0,
+        previous_anchored_cvd=-1_000_000.0,
+        current_extreme_price=99.0,  # good price extension
+        current_anchored_cvd=-800_000.0,  # but only 200k recovery
+        config=config,
+    )
+    assert decision.confirmed is False
+    assert decision.reason == "cvd_not_recovered"
+
+
+def test_divergence_short_respects_min_cvd_recovery() -> None:
+    """SHORT: CVD reversal below min_cvd_recovery must NOT confirm."""
+    from src.strategies.reclaim_anchored_divergence import AnchoredDivergenceConfig
+
+    config = AnchoredDivergenceConfig(
+        min_price_extension_pct=0.0,
+        min_cvd_recovery=500_000,
+    )
+    decision = evaluate_anchored_divergence(
+        side="SHORT",
+        previous_extreme_price=100.0,
+        previous_anchored_cvd=1_000_000.0,
+        current_extreme_price=101.0,
+        current_anchored_cvd=800_000.0,  # only 200k reversal
+        config=config,
+    )
+    assert decision.confirmed is False
+    assert decision.reason == "cvd_not_reversed"
+
+
+def test_divergence_default_config_no_minimums() -> None:
+    """Without config, defaults (0 min_price_extension, 0 min_cvd_recovery) apply."""
+    decision = evaluate_anchored_divergence(
+        side="LONG",
+        previous_extreme_price=100.0,
+        previous_anchored_cvd=-1_000_000.0,
+        current_extreme_price=99.999,  # tiny extension
+        current_anchored_cvd=-999_999.0,  # tiny recovery
+    )
+    # Default config has both at 0 → any extension + any recovery = confirmed
+    assert decision.confirmed is True

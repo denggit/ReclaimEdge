@@ -28,11 +28,12 @@ def _cvd(ts_ms=1000, price=1901, fast_cvd=1.0, previous_fast_cvd=0.0,
          cross_positive=True, cross_negative=False,
          cvd_increasing=True, cvd_decreasing=False,
          no_new_low=True, no_new_high=True,
-         up_burst=False, down_burst=False) -> CvdSnapshot:
+         up_burst=False, down_burst=False,
+         size=1.0) -> CvdSnapshot:
     return CvdSnapshot(
         ts_ms=ts_ms, price=price,
         side="buy" if buy_ratio >= sell_ratio else "sell",
-        size=1.0, signed_delta=1.0, total_cvd=10.0,
+        size=size, signed_delta=1.0, total_cvd=10.0,
         fast_cvd=fast_cvd, previous_fast_cvd=previous_fast_cvd,
         buy_volume=buy_volume, sell_volume=sell_volume,
         buy_ratio=buy_ratio, sell_ratio=sell_ratio,
@@ -232,3 +233,58 @@ def test_missing_extreme_returns_none() -> None:
     sl, mode = strat._select_entry_stop_price(side="LONG", entry_price=100.0)
     assert sl is None
     assert mode == "MISSING_EXTREME"
+
+
+# ── POC volume uses cvd.size ───────────────────────────────────────────
+
+def test_poc_volume_uses_cvd_size_not_rolling_window() -> None:
+    """POC volume must come from cvd.size (current tick), not buy_volume+sell_volume (rolling window)."""
+    strat = _strategy(entry_sweep_profile_enabled=True, entry_sweep_profile_bucket_pct=0.001)
+    from src.strategies.sweep_volume_profile import SweepVolumeProfile
+
+    sp = SweepVolumeProfile(bucket_pct=0.001)
+    strat.state.lower_sweep_profile = sp
+
+    # Simulate a tick: cvd.size determines POC, even though buy_volume + sell_volume is huge
+    cvd = _cvd(
+        ts_ms=1000, price=1900.0,
+        size=50.0,  # current tick volume → this should determine POC bucket weight
+        buy_volume=999999.0,  # large rolling window buy volume — should NOT influence POC
+        sell_volume=999999.0,  # large rolling window sell volume — should NOT influence POC
+    )
+    strat._record_sweep_volume("LOWER", 1900.0, cvd)
+    assert sp.poc_price() is not None
+
+    # Add a competing tick with larger cvd.size at a different price
+    cvd2 = _cvd(
+        ts_ms=2000, price=1910.0,
+        size=100.0,  # higher tick volume → should make 1910.0 bucket the POC
+        buy_volume=1.0,
+        sell_volume=1.0,
+    )
+    strat._record_sweep_volume("LOWER", 1910.0, cvd2)
+
+    poc = sp.poc_price()
+    assert poc is not None
+    # The POC should be near 1910 because that's where the most cvd.size went
+    bucket_size_1910 = 1910.0 * 0.001
+    expected_bucket = round(1910.0 / bucket_size_1910) * bucket_size_1910
+    assert abs(poc - expected_bucket) < 0.01
+
+
+def test_poc_volume_uses_cvd_size_upper() -> None:
+    """Same for UPPER side — cvd.size not buy_volume+sell_volume."""
+    strat = _strategy(entry_sweep_profile_enabled=True, entry_sweep_profile_bucket_pct=0.001)
+    from src.strategies.sweep_volume_profile import SweepVolumeProfile
+
+    sp = SweepVolumeProfile(bucket_pct=0.001)
+    strat.state.upper_sweep_profile = sp
+
+    cvd = _cvd(
+        ts_ms=1000, price=2100.0,
+        size=75.0,
+        buy_volume=500000.0,
+        sell_volume=500000.0,
+    )
+    strat._record_sweep_volume("UPPER", 2100.0, cvd)
+    assert sp.poc_price() is not None
