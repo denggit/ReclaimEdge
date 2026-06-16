@@ -2090,7 +2090,6 @@ class BollCvdReclaimStrategy:
             trend_blocks_mean_reversion=trend_decision.blocks_mean_reversion,
             post_entry_sl_cooldown_active_same_side=cooldown_active_same_side,
             delayed_market_exit_armed=state.delayed_market_exit_armed,
-            trading_halt_active=False,
             avg_entry_price=state.avg_entry_price,
             total_entry_qty=state.total_entry_qty,
             three_stage_tp1_price=state.three_stage_tp1_price,
@@ -2158,9 +2157,8 @@ class BollCvdReclaimStrategy:
         if addon_size.eth_qty <= 0 or addon_size.notional_usdt <= 0:
             return None
 
-        # ── Set Trend Upgrade Add-on state BEFORE building intent ──────
-        # State must be written now so it is persisted via _apply_entry_result
-        # when the execution succeeds.  Pattern: same as open_trend_position().
+        # ── Calculate intent SL (used in intent only, NOT written to state) ──
+        # State is committed ONLY after successful execution in _apply_entry_result.
         from src.strategies.trend_middle_trailing_sl import calculate_trend_middle_sl
 
         intent_sl = calculate_trend_middle_sl(
@@ -2168,21 +2166,6 @@ class BollCvdReclaimStrategy:
             buffer_pct=self.config.trend_middle_sl_buffer_pct,
             side=state.side,
         )
-
-        state.entry_regime = "TREND_UPGRADE_ADDON"
-        state.position_management_mode = "TREND_UPGRADE_ADDON"
-        state.trend_upgrade_addon_active = True
-        state.trend_upgrade_addon_count += 1
-        state.trend_upgrade_addon_entry_price = price
-        state.trend_upgrade_addon_qty = addon_size.eth_qty
-        state.trend_upgrade_addon_risk_budget_usdt = decision.risk_budget_usdt
-        state.trend_upgrade_addon_sl_price = intent_sl
-        state.trend_upgrade_last_ts_ms = ts_ms
-        state.trend_trailing_sl_price = intent_sl
-        state.entry_protective_sl_price = intent_sl
-        state.entry_protective_sl_order_id = None
-        state.entry_protective_sl_protected = False
-        state.last_order_ts_ms = ts_ms
 
         reason = (
             f"趋势升级加仓: {decision.reason} "

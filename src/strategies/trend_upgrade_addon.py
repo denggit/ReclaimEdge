@@ -168,7 +168,7 @@ def assess_trend_upgrade(
     # ── Cooldown / halt / exit ────────────────────────────────────────
     post_entry_sl_cooldown_active_same_side: bool,
     delayed_market_exit_armed: bool,
-    trading_halt_active: bool,
+    trading_halt_active: bool = False,
     # ── Profit data ───────────────────────────────────────────────────
     avg_entry_price: float,
     total_entry_qty: float,

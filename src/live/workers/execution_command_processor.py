@@ -797,6 +797,27 @@ class ExecutionCommandProcessor:
                 result=result,
                 current_position_id=current_position_id,
             )
+            # ── Trend Upgrade Add-on state ───────────────────────────────
+            # Apply add-on state ONLY on successful execution, never before.
+            if getattr(command.intent, "entry_regime", None) == "TREND_UPGRADE_ADDON":
+                from src.position_management.trend_upgrade_runtime import (
+                    apply_trend_upgrade_addon_state,
+                    update_core_position_cost_for_addon,
+                )
+                apply_trend_upgrade_addon_state(
+                    self.strategy.state,
+                    intent=command.intent,
+                    result=result,
+                )
+                addon_qty = float(getattr(command.intent.size, "eth_qty", 0.0) or 0.0)
+                addon_notional = float(getattr(command.intent.size, "notional_usdt", 0.0) or 0.0)
+                addon_price = float(command.intent.price)
+                update_core_position_cost_for_addon(
+                    self.strategy.state,
+                    addon_qty=addon_qty,
+                    addon_notional=addon_notional,
+                    addon_price=addon_price,
+                )
             strategy_state_for_save = copy.deepcopy(self.strategy.state)
             equity = self.account_snapshot.equity
         entry_status = "CORE_FILLED_OK"

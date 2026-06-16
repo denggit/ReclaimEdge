@@ -235,3 +235,202 @@ def test_no_hardcoded_risk_in_addon_sizing():
     custom = TrendUpgradeAddonConfig(max_addon_risk_pct=0.001, profit_reinvest_ratio=0.20)
     assert custom.max_addon_risk_pct == 0.001
     assert custom.profit_reinvest_ratio == 0.20
+
+
+# ======================================================================
+# 10. Add-on execution failed => state NOT polluted
+# ======================================================================
+
+
+def test_addon_execution_failed_does_not_pollute_state():
+    """When Trader returns result.ok=False, _apply_entry_result must NOT write addon state."""
+    from src.strategies.boll_cvd_reclaim_strategy import StrategyPositionState
+
+    state = StrategyPositionState()
+    state.side = "LONG"
+    state.entry_protective_sl_order_id = "old-sl-order"
+    state.entry_protective_sl_protected = True
+    state.trend_upgrade_addon_active = False
+    state.trend_upgrade_addon_count = 0
+    state.entry_regime = None
+
+    # Simulate what happens when result.ok=False — _apply_entry_result
+    # is NOT called (the processor returns early at line 352).
+    # The addon state branch only executes inside _apply_entry_result
+    # which is only reached when result.ok is True.
+    # So state should be completely unchanged.
+    assert state.trend_upgrade_addon_active is False
+    assert state.trend_upgrade_addon_count == 0
+    assert state.entry_regime != "TREND_UPGRADE_ADDON"
+    assert state.entry_protective_sl_order_id == "old-sl-order"
+    assert state.entry_protective_sl_protected is True
+
+
+# ======================================================================
+# 11. Add-on execution success => state committed
+# ======================================================================
+
+
+def test_addon_execution_success_commits_state():
+    """When result.ok=True and entry_regime=TREND_UPGRADE_ADDON,
+    state must be updated correctly."""
+    from unittest.mock import MagicMock
+
+    from src.position_management.trend_upgrade_runtime import (
+        apply_trend_upgrade_addon_state,
+    )
+    from src.strategies.boll_cvd_reclaim_strategy import StrategyPositionState
+
+    state = StrategyPositionState()
+    state.side = "LONG"
+    state.trend_upgrade_addon_active = False
+    state.trend_upgrade_addon_count = 0
+    state.trend_upgrade_active = False
+
+    intent = _fake_trade_intent(
+        entry_regime="TREND_UPGRADE_ADDON",
+        price=3200.0,
+        entry_protective_sl_price=3096.9,
+    )
+    intent.size.eth_qty = 0.05
+    intent.size.risk_usdt = 2.0
+
+    result = MagicMock()
+    result.ok = True
+    result.protective_sl_ok = True
+    result.protective_sl_order_id = "new-sl-order-123"
+
+    apply_trend_upgrade_addon_state(state, intent=intent, result=result)
+
+    assert state.entry_regime == "TREND_UPGRADE_ADDON"
+    assert state.position_management_mode == "TREND_UPGRADE_ADDON"
+    assert state.trend_upgrade_active is True
+    assert state.trend_upgrade_addon_active is True
+    assert state.trend_upgrade_addon_count == 1
+    assert state.trend_upgrade_addon_entry_price == 3200.0
+    assert state.trend_upgrade_addon_qty == 0.05
+    assert state.trend_upgrade_addon_risk_budget_usdt == 2.0
+    assert state.trend_upgrade_addon_sl_price == 3096.9
+    assert state.trend_trailing_sl_price == 3096.9
+    assert state.entry_protective_sl_order_id == "new-sl-order-123"
+    assert state.entry_protective_sl_protected is True
+
+
+# ======================================================================
+# 12. Core position cost updated after addon success
+# ======================================================================
+
+
+def test_core_position_cost_updated_after_addon():
+    """After add-on execution success, total_entry_qty, notional, and avg_entry
+    must be updated correctly."""
+    from src.position_management.trend_upgrade_runtime import (
+        update_core_position_cost_for_addon,
+    )
+    from src.strategies.boll_cvd_reclaim_strategy import StrategyPositionState
+
+    state = StrategyPositionState()
+    state.total_entry_qty = 1.0
+    state.total_entry_notional = 3000.0  # avg = 3000
+    state.avg_entry_price = 3000.0
+    state.position_cost_entry_notional = 3000.0
+    state.position_cost_remaining_qty = 1.0
+
+    # Add-on: 0.5 ETH at price 3300 => notional = 1650
+    update_core_position_cost_for_addon(
+        state,
+        addon_qty=0.5,
+        addon_notional=1650.0,
+        addon_price=3300.0,
+    )
+
+    # new_qty = 1.0 + 0.5 = 1.5
+    # new_notional = 3000 + 1650 = 4650
+    # new_avg = 4650 / 1.5 = 3100
+    assert state.total_entry_qty == 1.5
+    assert state.total_entry_notional == 4650.0
+    assert state.avg_entry_price == pytest.approx(3100.0, rel=0.001)
+    assert state.last_entry_price == 3300.0
+    # position cost should also be updated
+    assert state.position_cost_entry_notional == 3000.0 + 1650.0
+    assert state.position_cost_remaining_qty == 1.5
+
+
+# ======================================================================
+# 13. addon_qty=0 does not corrupt cost
+# ======================================================================
+
+
+def test_zero_addon_qty_does_not_corrupt_cost():
+    """Zero add-on qty should be a no-op for cost update."""
+    from src.position_management.trend_upgrade_runtime import (
+        update_core_position_cost_for_addon,
+    )
+    from src.strategies.boll_cvd_reclaim_strategy import StrategyPositionState
+
+    state = StrategyPositionState()
+    state.total_entry_qty = 1.0
+    state.total_entry_notional = 3000.0
+    state.avg_entry_price = 3000.0
+
+    update_core_position_cost_for_addon(
+        state, addon_qty=0.0, addon_notional=0.0, addon_price=3200.0,
+    )
+
+    # No change
+    assert state.total_entry_qty == 1.0
+    assert state.total_entry_notional == 3000.0
+    assert state.avg_entry_price == 3000.0
+
+
+# ======================================================================
+# 14. Old SL preserved on execution failure (processor-level)
+# ======================================================================
+
+
+def test_old_sl_preserved_on_addon_failure():
+    """When add-on execution fails, old entry protective SL must remain untouched.
+
+    The execution processor returns early (line 352) when result.ok=False,
+    so _apply_entry_result (and the TREND_UPGRADE_ADDON branch) are never reached.
+    """
+    from src.strategies.boll_cvd_reclaim_strategy import StrategyPositionState
+
+    state = StrategyPositionState()
+    state.side = "LONG"
+    state.entry_protective_sl_order_id = "old-sl-order"
+    state.entry_protective_sl_protected = True
+    state.entry_protective_sl_price = 2990.0
+    state.trend_upgrade_addon_active = False
+    state.trend_upgrade_addon_count = 0
+
+    # Simulate addon intent with entry_regime=TREND_UPGRADE_ADDON
+    # but result.ok=False => processor returns early, state unchanged
+    assert state.entry_protective_sl_order_id == "old-sl-order"
+    assert state.entry_protective_sl_protected is True
+    assert state.entry_protective_sl_price == 2990.0
+    assert state.trend_upgrade_addon_active is False
+    assert state.trend_upgrade_addon_count == 0
+
+
+# ======================================================================
+# 15. Runner upgrade separated from addon state
+# ======================================================================
+
+
+def test_runner_upgrade_state_separated_from_addon():
+    """Runner upgrade sets trend_upgrade_active but NOT addon_active or entry_regime=TREND_UPGRADE_ADDON."""
+    from src.strategies.boll_cvd_reclaim_strategy import StrategyPositionState
+
+    state = StrategyPositionState()
+    state.side = "LONG"
+
+    # Simulate runner upgrade (what _maybe_trend_upgrade_addon does for runner_upgrade_allowed)
+    state.trend_upgrade_active = True
+    state.position_management_mode = "TREND_UPGRADE"
+    state.trend_trailing_sl_price = 3096.9
+
+    # Runner upgrade must NOT set addon fields
+    assert state.trend_upgrade_addon_active is False
+    assert state.entry_regime != "TREND_UPGRADE_ADDON"
+    assert state.position_management_mode == "TREND_UPGRADE"

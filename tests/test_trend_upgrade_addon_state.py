@@ -215,3 +215,80 @@ def test_position_management_mode_values():
     for mode in valid_modes:
         state = LivePositionState(position_management_mode=mode)
         assert state.position_management_mode == mode
+
+
+# ======================================================================
+# 7. Entry regime values include TREND_UPGRADE and TREND_UPGRADE_ADDON
+# ======================================================================
+
+
+def test_entry_regime_includes_trend_upgrade_values():
+    """entry_regime supports TREND_UPGRADE and TREND_UPGRADE_ADDON."""
+    from src.strategies.boll_cvd_reclaim_strategy import StrategyPositionState
+
+    for regime in ("TREND_UPGRADE", "TREND_UPGRADE_ADDON"):
+        state = StrategyPositionState(entry_regime=regime)
+        assert state.entry_regime == regime
+
+
+# ======================================================================
+# 8. trend_upgrade_addon_count persists correctly
+# ======================================================================
+
+
+def test_trend_upgrade_addon_count_persistence():
+    """trend_upgrade_addon_count increments and persists correctly."""
+    from src.strategies.boll_cvd_reclaim_strategy import StrategyPositionState
+
+    state = StrategyPositionState()
+    assert state.trend_upgrade_addon_count == 0
+
+    state.trend_upgrade_addon_count += 1
+    assert state.trend_upgrade_addon_count == 1
+
+    state.trend_upgrade_addon_count += 1
+    assert state.trend_upgrade_addon_count == 2
+
+
+# ======================================================================
+# 9. from_strategy_state round-trips all trend upgrade addon fields
+# ======================================================================
+
+
+def test_from_strategy_state_round_trips_addon_fields():
+    """from_strategy_state maps trend_upgrade_addon_* fields correctly."""
+    from src.strategies.boll_cvd_reclaim_strategy import StrategyPositionState
+
+    strategy_state = StrategyPositionState(
+        side="LONG",
+        entry_regime="TREND_UPGRADE_ADDON",
+        position_management_mode="TREND_UPGRADE_ADDON",
+        trend_upgrade_active=True,
+        trend_upgrade_addon_active=True,
+        trend_upgrade_addon_count=3,
+        trend_upgrade_addon_entry_price=3200.0,
+        trend_upgrade_addon_qty=0.05,
+        trend_upgrade_addon_risk_budget_usdt=2.5,
+        trend_upgrade_addon_sl_price=3096.9,
+        trend_upgrade_last_ts_ms=2000000,
+        trend_trailing_sl_price=3096.9,
+    )
+
+    live_state = LiveStateStore.from_strategy_state(
+        position_id="test-addon-roundtrip",
+        symbol="ETH-USDT-SWAP",
+        strategy_state=strategy_state,
+        cash_before_position=None,
+    )
+
+    assert live_state.entry_regime == "TREND_UPGRADE_ADDON"
+    assert live_state.position_management_mode == "TREND_UPGRADE_ADDON"
+    assert live_state.trend_upgrade_active is True
+    assert live_state.trend_upgrade_addon_active is True
+    assert live_state.trend_upgrade_addon_count == 3
+    assert live_state.trend_upgrade_addon_entry_price == 3200.0
+    assert live_state.trend_upgrade_addon_qty == 0.05
+    assert live_state.trend_upgrade_addon_risk_budget_usdt == 2.5
+    assert live_state.trend_upgrade_addon_sl_price == 3096.9
+    assert live_state.trend_upgrade_last_ts_ms == 2000000
+    assert live_state.trend_trailing_sl_price == 3096.9
