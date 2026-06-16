@@ -17,7 +17,7 @@ from src.live.halt_modes import (
 )
 from src.monitors.boll_band_breakout_monitor import MarketTickEvent
 from src.position_management import core_position_view as core_position_view_helpers
-from src.strategies.boll_cvd_shock_reclaim_strategy import BollCvdShockReclaimStrategy
+from src.strategies.boll_cvd_reclaim_strategy import BollCvdReclaimStrategy
 from src.utils.log import get_logger
 
 logger = get_logger(__name__)
@@ -51,7 +51,7 @@ async def strategy_tick_worker(
         account_snapshot: live_runtime_types.AccountSnapshot,
         execution_state: live_runtime_types.ExecutionState,
         cvd: CvdTracker,
-        strategy: BollCvdShockReclaimStrategy,
+        strategy: BollCvdReclaimStrategy,
         heartbeat_seconds: float,
         account_stale_warn_seconds: float,
         strategy_lag_warn_seconds: float,

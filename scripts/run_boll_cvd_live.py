@@ -48,8 +48,10 @@ from src.risk.simple_position_sizer import (  # noqa: E402
 )
 from src.risk.rolling_loss_guard import RollingLossGuard  # noqa: E402
 from src.risk import rolling_loss_live as rolling_loss_live_helpers  # noqa: E402
-from src.strategies.boll_cvd_reclaim_strategy import BollCvdReclaimStrategyConfig  # noqa: E402
-from src.strategies.boll_cvd_shock_reclaim_strategy import BollCvdShockReclaimStrategy  # noqa: E402
+from src.strategies.boll_cvd_reclaim_strategy import (  # noqa: E402
+    BollCvdReclaimStrategy,
+    BollCvdReclaimStrategyConfig,
+)
 from src.utils.email_sender import EmailSender  # noqa: E402
 from src.utils.log import get_logger  # noqa: E402
 
@@ -95,7 +97,7 @@ async def main() -> None:
     try:
         await trader.initialize()
         sizer = SimplePositionSizer(SimplePositionSizerConfig.from_account_equity(trader.account_equity_usdt))
-        strategy = BollCvdShockReclaimStrategy(BollCvdReclaimStrategyConfig.from_env(), sizer)
+        strategy = BollCvdReclaimStrategy(BollCvdReclaimStrategyConfig.from_env(), sizer)
         startup_position = await trader.fetch_position_snapshot()
         startup_cash = await live_flat_balance.fetch_usdt_cash_balance(trader)
         rolling_loss_guard.load_or_initialize(live_time_utils.utc_ms(), trader.account_equity_usdt)

@@ -136,3 +136,45 @@ class TestNoLegacyOkxEnvInBusinessLayer:
         assert not violations, (
             f"OKX legacy env vars found in forbidden files:\n" + "\n".join(violations)
         )
+
+
+class TestNoLegacyShockStrategyInLiveRuntime:
+    """Live runtime must NOT import or instantiate BollCvdShockReclaimStrategy."""
+
+    LIVE_RUNTIME_FILES = [
+        "scripts/run_boll_cvd_live.py",
+        "src/live/workers/strategy_tick_worker.py",
+        "src/live/workers/execution_worker.py",
+    ]
+
+    def test_live_runner_uses_risk_first_reclaim_strategy_not_shock_strategy(self) -> None:
+        source = Path(ROOT / "scripts/run_boll_cvd_live.py").read_text()
+        assert "BollCvdShockReclaimStrategy" not in source, (
+            "scripts/run_boll_cvd_live.py must NOT reference BollCvdShockReclaimStrategy"
+        )
+        assert "boll_cvd_shock_reclaim_strategy" not in source, (
+            "scripts/run_boll_cvd_live.py must NOT import boll_cvd_shock_reclaim_strategy"
+        )
+        assert "BollCvdReclaimStrategy" in source, (
+            "scripts/run_boll_cvd_live.py must use BollCvdReclaimStrategy"
+        )
+
+    def test_live_runtime_does_not_import_legacy_shock_strategy(self) -> None:
+        violations = []
+        for rel_path in self.LIVE_RUNTIME_FILES:
+            filepath = ROOT / rel_path
+            if not filepath.exists():
+                continue
+            source = filepath.read_text()
+            if "boll_cvd_shock_reclaim_strategy" in source:
+                for i, line in enumerate(source.split("\n"), 1):
+                    if "boll_cvd_shock_reclaim_strategy" in line:
+                        violations.append(f"{rel_path}:{i}: {line.strip()}")
+            if "BollCvdShockReclaimStrategy" in source:
+                for i, line in enumerate(source.split("\n"), 1):
+                    if "BollCvdShockReclaimStrategy" in line:
+                        violations.append(f"{rel_path}:{i}: {line.strip()}")
+        assert not violations, (
+            "Legacy BollCvdShockReclaimStrategy found in live runtime files:\n"
+            + "\n".join(violations)
+        )

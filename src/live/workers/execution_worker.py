@@ -10,7 +10,7 @@ from src.live.workers import execution_failure as execution_failure_handler
 from src.live.workers.execution_command_processor import ExecutionCommandProcessor
 from src.reporting.live_state_store import LiveStateStore
 from src.reporting.trade_journal import LiveTradeJournal
-from src.strategies.boll_cvd_shock_reclaim_strategy import BollCvdShockReclaimStrategy
+from src.strategies.boll_cvd_reclaim_strategy import BollCvdReclaimStrategy
 from src.utils.email_sender import EmailSender
 from src.utils.log import get_logger
 
@@ -24,7 +24,7 @@ async def execution_worker(
     execution_state: live_runtime_types.ExecutionState,
     account_snapshot: live_runtime_types.AccountSnapshot,
     trader: LiveTraderProtocol,
-    strategy: BollCvdShockReclaimStrategy,
+    strategy: BollCvdReclaimStrategy,
     journal: LiveTradeJournal,
     state_store: LiveStateStore,
     email_sender: EmailSender,
