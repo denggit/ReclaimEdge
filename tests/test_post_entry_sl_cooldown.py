@@ -95,7 +95,7 @@ def _strategy(**overrides) -> BollCvdReclaimStrategy:
         entry_reclaim_inside_band=True,
         post_entry_sl_cooldown_enabled=True,
         post_entry_sl_cooldown_seconds=1800,
-        post_entry_sl_cooldown_scope="GLOBAL",
+        post_entry_sl_cooldown_scope="SIDE",
     )
     cfg_kwargs.update(overrides)
     cfg = BollCvdReclaimStrategyConfig(**cfg_kwargs)
@@ -622,3 +622,130 @@ def test_no_entry_sl_order_id_not_candidate() -> None:
         and strat.state.entry_protective_sl_order_id is not None
     )
     assert entry_sl_cooldown_candidate is False  # no SL order → not candidate
+
+
+# ── Test: default config scope is SIDE ─────────────────────────────────
+
+
+def test_default_config_scope_is_side() -> None:
+    """BollCvdReclaimStrategyConfig default post_entry_sl_cooldown_scope must be SIDE."""
+    cfg = BollCvdReclaimStrategyConfig()
+    assert cfg.post_entry_sl_cooldown_scope == "SIDE"
+
+
+# ── Test: from_env default scope is SIDE ────────────────────────────────
+
+
+def test_from_env_default_scope_is_side(monkeypatch) -> None:
+    """from_env should default to SIDE when POST_ENTRY_SL_COOLDOWN_SCOPE is not set."""
+    import os
+    # Remove env var if set
+    monkeypatch.delenv("POST_ENTRY_SL_COOLDOWN_SCOPE", raising=False)
+    cfg = BollCvdReclaimStrategyConfig.from_env()
+    assert cfg.post_entry_sl_cooldown_scope == "SIDE"
+
+
+# ── Test: .env.example has POST_ENTRY_SL_COOLDOWN_SCOPE=SIDE ────────────
+
+
+def test_env_example_has_side_default() -> None:
+    """.env.example must contain POST_ENTRY_SL_COOLDOWN_SCOPE=SIDE."""
+    import os
+    env_example_path = os.path.join(
+        os.path.dirname(__file__), "..", ".env.example"
+    )
+    with open(env_example_path) as f:
+        content = f.read()
+    assert "POST_ENTRY_SL_COOLDOWN_SCOPE=SIDE" in content
+    assert "POST_ENTRY_SL_COOLDOWN_SCOPE=GLOBAL" not in content
+
+
+# ── Test: invalid scope raises RuntimeError ──────────────────────────────
+
+
+def test_invalid_scope_raises() -> None:
+    """Invalid post_entry_sl_cooldown_scope should raise RuntimeError."""
+    import pytest
+    with pytest.raises(RuntimeError, match="POST_ENTRY_SL_COOLDOWN_SCOPE"):
+        BollCvdReclaimStrategyConfig(post_entry_sl_cooldown_scope="INVALID")
+
+
+# ── Test: scope=GLOBAL with SHORT cooldown blocks both sides ────────────
+
+
+def test_cooldown_global_short_blocks_both_sides() -> None:
+    """Scope=GLOBAL with SHORT cooldown blocks both SHORT and LONG entries."""
+    strat = _strategy(post_entry_sl_cooldown_scope="GLOBAL")
+    ts_now = 100_000
+    strat.arm_post_entry_sl_cooldown(ts_now, "SHORT", "entry_protective_sl_flat")
+
+    # Both sides blocked
+    assert strat._post_entry_sl_cooldown_ok("SHORT", ts_now + 1000) is False
+    assert strat._post_entry_sl_cooldown_ok("LONG", ts_now + 1000) is False
+
+
+# ── Test: scope=SIDE + cooldown_side=SHORT + LONG setup → OPEN_LONG ─────
+
+
+def test_on_tick_side_short_cooldown_produces_open_long() -> None:
+    """scope=SIDE, SHORT cooldown active, LONG setup satisfied → OPEN_LONG intent."""
+    strat = _strategy(post_entry_sl_cooldown_scope="SIDE")
+    ts_now = 100_000
+    strat.arm_post_entry_sl_cooldown(ts_now, "SHORT", "entry_protective_sl_flat")
+    boll = _boll()
+
+    # Arm lower band for LONG
+    strat.on_tick(1900 * 0.9985, ts_now + 1000, boll,
+                  _cvd(ts_ms=ts_now + 1000, price=1900 * 0.9985))
+    # Enter LONG on reclaim
+    long_reclaim = boll.lower * 1.001
+    cvd = _cvd(ts_ms=ts_now + 2000, price=long_reclaim,
+               cross_positive=True, cvd_increasing=True,
+               buy_ratio=0.7, sell_ratio=0.3, no_new_low=True)
+    intents = strat.on_tick(long_reclaim, ts_now + 2000, boll, cvd)
+    long_intents = [i for i in intents if i.side == "LONG"]
+    assert len(long_intents) >= 1  # LONG allowed despite SHORT cooldown
+
+
+# ── Test: scope=GLOBAL cooldown produces no OPEN intents ─────────────────
+
+
+def test_on_tick_global_cooldown_produces_no_open_intents() -> None:
+    """scope=GLOBAL, cooldown active → no OPEN_LONG or OPEN_SHORT intents."""
+    strat = _strategy(post_entry_sl_cooldown_scope="GLOBAL")
+    ts_now = 100_000
+    strat.arm_post_entry_sl_cooldown(ts_now, "LONG", "entry_protective_sl_flat")
+    boll = _boll()
+
+    # Arm lower band for LONG
+    strat.on_tick(1900 * 0.9985, ts_now + 1000, boll,
+                  _cvd(ts_ms=ts_now + 1000, price=1900 * 0.9985))
+    # Try LONG reclaim
+    long_reclaim = boll.lower * 1.001
+    cvd = _cvd(ts_ms=ts_now + 2000, price=long_reclaim,
+               cross_positive=True, cvd_increasing=True,
+               buy_ratio=0.7, sell_ratio=0.3, no_new_low=True)
+    intents = strat.on_tick(long_reclaim, ts_now + 2000, boll, cvd)
+    open_intents = [i for i in intents if i.intent_type in ("OPEN_LONG", "OPEN_SHORT")]
+    assert len(open_intents) == 0  # GLOBAL blocks all entries
+
+
+# ── Test: live state persistence preserves cooldown_side ─────────────────
+
+
+def test_live_state_persistence_preserves_cooldown_side() -> None:
+    """LiveStateStore save/restore must not drop cooldown_side."""
+    strat = _strategy(post_entry_sl_cooldown_scope="SIDE")
+    ts_now = 100_000
+    strat.arm_post_entry_sl_cooldown(ts_now, "SHORT", "entry_protective_sl_flat")
+
+    saved = LiveStateStore.from_strategy_state(
+        position_id="test-pos-1",
+        symbol="ETH-USDT-SWAP",
+        strategy_state=strat.state,
+        cash_before_position=5000.0,
+    )
+
+    assert saved.post_entry_sl_cooldown_side == "SHORT"
+    assert saved.post_entry_sl_cooldown_until_ts_ms == ts_now + 1_800_000
+    assert saved.post_entry_sl_cooldown_reason == "entry_protective_sl_flat"

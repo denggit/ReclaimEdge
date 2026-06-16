@@ -134,7 +134,7 @@ class BollCvdReclaimStrategyConfig:
     # ── Post-Entry SL Cooldown ────────────────────────────────────────
     post_entry_sl_cooldown_enabled: bool = True
     post_entry_sl_cooldown_seconds: int = 1800
-    post_entry_sl_cooldown_scope: str = "GLOBAL"
+    post_entry_sl_cooldown_scope: str = "SIDE"
 
     def __post_init__(self) -> None:
         if (
@@ -292,7 +292,7 @@ class BollCvdReclaimStrategyConfig:
             # ── Post-Entry SL Cooldown ────────────────────────────────
             post_entry_sl_cooldown_enabled=_env_bool("POST_ENTRY_SL_COOLDOWN_ENABLED", True),
             post_entry_sl_cooldown_seconds=int(os.getenv("POST_ENTRY_SL_COOLDOWN_SECONDS", "1800")),
-            post_entry_sl_cooldown_scope=os.getenv("POST_ENTRY_SL_COOLDOWN_SCOPE", "GLOBAL").strip().upper(),
+            post_entry_sl_cooldown_scope=os.getenv("POST_ENTRY_SL_COOLDOWN_SCOPE", "SIDE").strip().upper(),
         )
 
 
