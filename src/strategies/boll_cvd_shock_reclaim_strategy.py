@@ -37,6 +37,15 @@ class BollCvdShockReclaimStrategy(BollCvdReclaimStrategy):
         super().__init__(config, sizer)
         self.switch_grace_seconds = float(os.getenv("BOLL_SWITCH_GRACE_SECONDS", "300"))
         self.first_add_block_bypass_multiplier = float(os.getenv("FIRST_ADD_BLOCK_BYPASS_MULTIPLIER", "5"))
+        # ── ADD config fields (removed from BollCvdReclaimStrategyConfig, stored as instance attrs) ──
+        self.add_gap_mode: str = str(getattr(config, "add_gap_mode", "linear") or "linear")
+        self.add_gap_base_pct: float = float(getattr(config, "add_gap_base_pct", 0.003) or 0.003)
+        self.add_gap_step_pct: float = float(getattr(config, "add_gap_step_pct", 0.001) or 0.001)
+        self.first_add_block_seconds: int = int(getattr(config, "first_add_block_seconds", 1800) or 1800)
+        self.add_min_interval_seconds: int = int(getattr(config, "add_min_interval_seconds", 600) or 600)
+        self.add_freeze_chain_enabled: bool = bool(getattr(config, "add_freeze_chain_enabled", True))
+        self.add_min_interval_bypass_multiplier: float = float(
+            getattr(config, "add_min_interval_bypass_multiplier", 2.0) or 2.0)
         self._last_switch_on_ts_ms: int = 0
         self._last_switch_on_candle_ts_ms: int = 0
         self._last_add_freeze_skip_log_ts_ms: int = 0
@@ -133,8 +142,8 @@ class BollCvdShockReclaimStrategy(BollCvdReclaimStrategy):
             self.state.first_entry_ts_ms = ts_ms
             decision = add_freeze_chain.start_add_freeze_after_first_entry(
                 ts_ms=ts_ms,
-                add_freeze_chain_enabled=self.config.add_freeze_chain_enabled,
-                first_add_block_seconds=self.config.first_add_block_seconds,
+                add_freeze_chain_enabled=self.add_freeze_chain_enabled,
+                first_add_block_seconds=self.first_add_block_seconds,
             )
             if decision.enabled:
                 self.state.add_freeze_until_ts_ms = decision.freeze_until_ts_ms
@@ -144,7 +153,7 @@ class BollCvdShockReclaimStrategy(BollCvdReclaimStrategy):
                     side,
                     self.state.layers,
                     self.state.add_freeze_until_ts_ms,
-                    self.config.first_add_block_seconds,
+                    self.first_add_block_seconds,
                     self.state.first_entry_ts_ms,
                 )
         else:
@@ -153,6 +162,30 @@ class BollCvdShockReclaimStrategy(BollCvdReclaimStrategy):
         if previous_layers > 0 and self._extreme_retest_config.enabled:
             self._maybe_revalidate_extreme_retest_anchor_after_add()
         return intent
+
+    # ── ADD layer gate helpers (delegate to add_layer_gates) ──────────────
+
+    def _add_layer_gap_pct_for_target_layer(self, target_layer: int) -> float:
+        return add_layer_gates.add_layer_gap_pct_for_target_layer(
+            target_layer=target_layer,
+            add_gap_mode=self.add_gap_mode,
+            add_gap_base_pct=self.add_gap_base_pct,
+            add_gap_step_pct=self.add_gap_step_pct,
+        )
+
+    def _add_min_interval_bypass_gap_pct_for_target_layer(self, target_layer: int) -> float:
+        return add_layer_gates.add_min_interval_bypass_gap_pct_for_target_layer(
+            target_layer=target_layer,
+            add_gap_mode=self.add_gap_mode,
+            add_gap_base_pct=self.add_gap_base_pct,
+            add_gap_step_pct=self.add_gap_step_pct,
+        )
+
+    def _add_elapsed_seconds(self, ts_ms: int) -> float:
+        return add_layer_gates.add_elapsed_seconds(ts_ms=ts_ms, last_order_ts_ms=self.state.last_order_ts_ms)
+
+    def _adverse_gap_pct(self, side: PositionSide, price: float) -> float:
+        return add_layer_gates.adverse_gap_pct(side=side, price=price, last_entry_price=self.state.last_entry_price)
 
     def _add_timing_passed(self, side: PositionSide, price: float, ts_ms: int, target_layer: int) -> tuple[bool, str]:
         last = self.state.last_entry_price
@@ -171,18 +204,18 @@ class BollCvdShockReclaimStrategy(BollCvdReclaimStrategy):
             last_entry_price=self.state.last_entry_price,
             last_order_ts_ms=self.state.last_order_ts_ms,
             first_entry_ts_ms=int(getattr(self.state, "first_entry_ts_ms", 0) or 0),
-            add_freeze_chain_enabled=self.config.add_freeze_chain_enabled,
+            add_freeze_chain_enabled=self.add_freeze_chain_enabled,
             add_freeze_until_ts_ms=int(getattr(self.state, "add_freeze_until_ts_ms", 0) or 0),
             add_freeze_penalty_count=int(getattr(self.state, "add_freeze_penalty_count", 0) or 0),
-            first_add_block_seconds=self.config.first_add_block_seconds,
-            add_min_interval_seconds=self.config.add_min_interval_seconds,
-            add_min_interval_bypass_multiplier=self.config.add_min_interval_bypass_multiplier,
+            first_add_block_seconds=self.first_add_block_seconds,
+            add_min_interval_seconds=self.add_min_interval_seconds,
+            add_min_interval_bypass_multiplier=self.add_min_interval_bypass_multiplier,
             first_add_block_bypass_multiplier=self.first_add_block_bypass_multiplier,
             target_layer_gap_pct=target_layer_gap_pct,
         )
 
         if decision.ok and decision.reason == "first_add_block_bypassed":
-            if not self.config.add_freeze_chain_enabled:
+            if not self.add_freeze_chain_enabled:
                 logger.warning(
                     "FIRST_ADD_BLOCK_BYPASSED | side=%s price=%.4f layers=%s target_layer=%s last_entry=%.4f first_elapsed_seconds=%.1f required_seconds=%s adverse_gap_pct=%.4f%% required_gap_pct=%.4f%% multiplier=%.2f",
                     side,
@@ -191,7 +224,7 @@ class BollCvdShockReclaimStrategy(BollCvdReclaimStrategy):
                     target_layer,
                     last,
                     decision.first_elapsed_seconds,
-                    self.config.first_add_block_seconds,
+                    self.first_add_block_seconds,
                     decision.adverse_gap_pct * 100,
                     decision.required_gap_pct * 100,
                     decision.multiplier,
@@ -205,7 +238,7 @@ class BollCvdShockReclaimStrategy(BollCvdReclaimStrategy):
                     target_layer,
                     last,
                     decision.freeze_remaining_seconds,
-                    self.config.first_add_block_seconds,
+                    self.first_add_block_seconds,
                     decision.adverse_gap_pct * 100,
                     decision.required_gap_pct * 100,
                     decision.multiplier,
@@ -229,7 +262,7 @@ class BollCvdShockReclaimStrategy(BollCvdReclaimStrategy):
 
     def _add_freeze_active(self, ts_ms: int) -> bool:
         return add_freeze_chain.add_freeze_active(
-            add_freeze_chain_enabled=self.config.add_freeze_chain_enabled,
+            add_freeze_chain_enabled=self.add_freeze_chain_enabled,
             add_freeze_until_ts_ms=int(getattr(self.state, "add_freeze_until_ts_ms", 0) or 0),
             ts_ms=ts_ms,
         )
@@ -253,14 +286,14 @@ class BollCvdShockReclaimStrategy(BollCvdReclaimStrategy):
             layers=self.state.layers,
             penalty_count=int(getattr(self.state, "add_freeze_penalty_count", 0) or 0),
             first_add_block_bypass_multiplier=self.first_add_block_bypass_multiplier,
-            add_min_interval_bypass_multiplier=self.config.add_min_interval_bypass_multiplier,
+            add_min_interval_bypass_multiplier=self.add_min_interval_bypass_multiplier,
         )
 
     def _extend_add_freeze_after_successful_add(self, ts_ms: int, *, was_active_freeze: bool) -> None:
         decision = add_freeze_chain.extend_add_freeze_after_successful_add(
             ts_ms=ts_ms,
-            add_freeze_chain_enabled=self.config.add_freeze_chain_enabled,
-            add_min_interval_seconds=self.config.add_min_interval_seconds,
+            add_freeze_chain_enabled=self.add_freeze_chain_enabled,
+            add_min_interval_seconds=self.add_min_interval_seconds,
             add_freeze_until_ts_ms=int(getattr(self.state, "add_freeze_until_ts_ms", 0) or 0),
             add_freeze_penalty_count=int(getattr(self.state, "add_freeze_penalty_count", 0) or 0),
             was_active_freeze=was_active_freeze,
@@ -275,7 +308,7 @@ class BollCvdShockReclaimStrategy(BollCvdReclaimStrategy):
             self.state.add_freeze_until_ts_ms,
             self._add_freeze_remaining_seconds(ts_ms),
             self.state.add_freeze_penalty_count,
-            self.config.add_min_interval_seconds,
+            self.add_min_interval_seconds,
             was_active_freeze,
         )
 
@@ -327,7 +360,7 @@ class BollCvdShockReclaimStrategy(BollCvdReclaimStrategy):
                 target_layer,
                 last,
                 self._add_freeze_remaining_seconds(ts_ms),
-                self.config.add_min_interval_seconds,
+                self.add_min_interval_seconds,
                 adverse_gap_pct * 100,
                 required_gap_pct * 100,
                 multiplier,
@@ -347,7 +380,7 @@ class BollCvdShockReclaimStrategy(BollCvdReclaimStrategy):
                 target_layer,
                 last,
                 first_elapsed_seconds,
-                self.config.first_add_block_seconds,
+                self.first_add_block_seconds,
                 adverse_gap_pct * 100,
                 required_gap_pct * 100,
                 self.first_add_block_bypass_multiplier,
@@ -389,7 +422,7 @@ class BollCvdShockReclaimStrategy(BollCvdReclaimStrategy):
                     cvd.burst_volume_ratio,
                     cvd.burst_range_pct,
                     cvd.baseline_range_pct,
-                    self.config.max_entry_distance_from_extreme_pct * 100,
+                    0.0,
                     self.config.max_armed_seconds,
                     cvd.fast_cvd,
                 )
@@ -439,7 +472,7 @@ class BollCvdShockReclaimStrategy(BollCvdReclaimStrategy):
                     cvd.burst_volume_ratio,
                     cvd.burst_range_pct,
                     cvd.baseline_range_pct,
-                    self.config.max_entry_distance_from_extreme_pct * 100,
+                    0.0,
                     self.config.max_armed_seconds,
                     cvd.fast_cvd,
                 )
@@ -764,7 +797,7 @@ class BollCvdShockReclaimStrategy(BollCvdReclaimStrategy):
                 side, price, pattern, anchor_price,
                 self.state.layers, target_layer, last,
                 self._first_entry_elapsed_seconds(ts_ms),
-                self.config.first_add_block_seconds,
+                self.first_add_block_seconds,
                 adverse_gap_pct * 100,
             )
             return
@@ -778,7 +811,7 @@ class BollCvdShockReclaimStrategy(BollCvdReclaimStrategy):
                 side, price, pattern, anchor_price,
                 self.state.layers, target_layer, last,
                 self._add_elapsed_seconds(ts_ms),
-                self.config.add_min_interval_seconds,
+                self.add_min_interval_seconds,
                 adverse_gap_pct * 100,
             )
             return

@@ -8,7 +8,6 @@ from src.indicators.cvd_tracker import CvdSnapshot
 from src.monitors.boll_band_breakout_monitor import BollSnapshot
 from src.position_management.cost_basis import calculate_remaining_breakeven_price
 from src.risk.simple_position_sizer import PositionSize, SimplePositionSizer
-from src.strategies import add_layer_gates
 from src.strategies import middle_runner as middle_runner_helpers
 from src.strategies import three_stage_runner as three_stage_helpers
 from src.strategies import tp_plan_selector
@@ -20,9 +19,7 @@ logger = get_logger(__name__)
 
 TradeIntentType = Literal[
     "OPEN_LONG",
-    "ADD_LONG",
     "OPEN_SHORT",
-    "ADD_SHORT",
     "UPDATE_TP",
     "MARKET_EXIT_RUNNER",
 ]
@@ -47,17 +44,8 @@ def _interpolate_to_middle(anchor: float, middle: float, ratio: float) -> float:
 class BollCvdReclaimStrategyConfig:
     min_buy_ratio: float = 0.55
     min_sell_ratio: float = 0.55
-    add_gap_mode: str = "linear"
-    add_gap_base_pct: float = 0.003
-    add_gap_step_pct: float = 0.001
-    add_min_avg_improvement_pct: float = 0.0012
     order_cooldown_seconds: int = 10
-    first_add_block_seconds: int = 1800
-    add_min_interval_seconds: int = 600
-    add_freeze_chain_enabled: bool = True
-    add_min_interval_bypass_multiplier: float = 2.0
     tp_update_interval_seconds: int = 900
-    max_entry_distance_from_extreme_pct: float = 0.002
     max_armed_seconds: int = 900
     breakeven_fee_buffer_pct: float = 0.001
     tp_min_net_profit_pct: float = 0.004
@@ -148,25 +136,7 @@ class BollCvdReclaimStrategyConfig:
     post_entry_sl_cooldown_seconds: int = 1800
     post_entry_sl_cooldown_scope: str = "GLOBAL"
 
-    # ── Extreme Retest Add ────────────────────────────────────────────
-    extreme_retest_add_enabled: bool = False
-    extreme_retest_pivot_left_bars: int = 2
-    extreme_retest_pivot_right_bars: int = 2
-    extreme_retest_anchor_max_age_candles: int = 12
-    extreme_retest_sweep_max_age_seconds: float = 900.0
-    extreme_retest_near_extreme_pct: float = 0.0015
-    extreme_retest_reclaim_pct: float = 0.0005
-    extreme_retest_min_reverse_ratio: float = 0.55
-    extreme_retest_one_add_per_anchor: bool = True
-
     def __post_init__(self) -> None:
-        mode = str(self.add_gap_mode or "linear").strip().lower()
-        if mode != "linear":
-            raise RuntimeError(f"ADD_GAP_MODE={self.add_gap_mode!r} is not supported; currently supports only 'linear'")
-        if self.add_gap_base_pct <= 0:
-            raise RuntimeError(f"ADD_GAP_BASE_PCT={self.add_gap_base_pct} must be > 0")
-        if self.add_gap_step_pct < 0:
-            raise RuntimeError(f"ADD_GAP_STEP_PCT={self.add_gap_step_pct} must be >= 0")
         if (
                 self.three_stage_pre_tp1_degrade_enabled
                 and self.three_stage_pre_tp1_single_after_seconds <= self.three_stage_pre_tp1_middle_runner_after_seconds
@@ -238,17 +208,8 @@ class BollCvdReclaimStrategyConfig:
         return cls(
             min_buy_ratio=float(os.getenv("CVD_MIN_BUY_RATIO", "0.55")),
             min_sell_ratio=float(os.getenv("CVD_MIN_SELL_RATIO", "0.55")),
-            add_gap_mode=os.getenv("ADD_GAP_MODE", "linear"),
-            add_gap_base_pct=float(os.getenv("ADD_GAP_BASE_PCT", "0.003")),
-            add_gap_step_pct=float(os.getenv("ADD_GAP_STEP_PCT", "0.001")),
-            add_min_avg_improvement_pct=float(os.getenv("ADD_MIN_AVG_IMPROVEMENT_PCT", "0.0012")),
             order_cooldown_seconds=int(os.getenv("ORDER_COOLDOWN_SECONDS", "10")),
-            first_add_block_seconds=int(os.getenv("FIRST_ADD_BLOCK_SECONDS", "1800")),
-            add_min_interval_seconds=int(os.getenv("ADD_MIN_INTERVAL_SECONDS", "600")),
-            add_freeze_chain_enabled=_env_bool("ADD_FREEZE_CHAIN_ENABLED", True),
-            add_min_interval_bypass_multiplier=float(os.getenv("ADD_MIN_INTERVAL_BYPASS_MULTIPLIER", "2")),
             tp_update_interval_seconds=int(os.getenv("TP_UPDATE_INTERVAL_SECONDS", "900")),
-            max_entry_distance_from_extreme_pct=float(os.getenv("MAX_ENTRY_DISTANCE_FROM_EXTREME_PCT", "0.002")),
             max_armed_seconds=int(os.getenv("MAX_ARMED_SECONDS", "900")),
             breakeven_fee_buffer_pct=float(os.getenv("BREAKEVEN_FEE_BUFFER_PCT", "0.001")),
             tp_min_net_profit_pct=float(os.getenv("TP_MIN_NET_PROFIT_PCT", "0.004")),
@@ -315,16 +276,6 @@ class BollCvdReclaimStrategyConfig:
             three_stage_tp2_use_structure_boll=_env_bool("THREE_STAGE_TP2_USE_STRUCTURE_BOLL", True),
             # ── Entry RR Target ──────────────────────────────────────
             entry_rr_target=os.getenv("ENTRY_RR_TARGET", "STRUCTURE_MIDDLE").strip().upper(),
-            # ── Extreme Retest Add ────────────────────────────────────
-            extreme_retest_add_enabled=_env_bool("EXTREME_RETEST_ADD_ENABLED", False),
-            extreme_retest_pivot_left_bars=int(os.getenv("EXTREME_RETEST_PIVOT_LEFT_BARS", "2")),
-            extreme_retest_pivot_right_bars=int(os.getenv("EXTREME_RETEST_PIVOT_RIGHT_BARS", "2")),
-            extreme_retest_anchor_max_age_candles=int(os.getenv("EXTREME_RETEST_ANCHOR_MAX_AGE_CANDLES", "12")),
-            extreme_retest_sweep_max_age_seconds=float(os.getenv("EXTREME_RETEST_SWEEP_MAX_AGE_SECONDS", "900")),
-            extreme_retest_near_extreme_pct=float(os.getenv("EXTREME_RETEST_NEAR_EXTREME_PCT", "0.0015")),
-            extreme_retest_reclaim_pct=float(os.getenv("EXTREME_RETEST_RECLAIM_PCT", "0.0005")),
-            extreme_retest_min_reverse_ratio=float(os.getenv("EXTREME_RETEST_MIN_REVERSE_RATIO", "0.55")),
-            extreme_retest_one_add_per_anchor=_env_bool("EXTREME_RETEST_ONE_ADD_PER_ANCHOR", True),
             # ── CVD Structure Entry ──────────────────────────────────
             entry_cvd_structure_mode=os.getenv("ENTRY_CVD_STRUCTURE_MODE", "DIVERGENCE_OR_ABSORPTION").strip().upper(),
             entry_cvd_divergence_enabled=_env_bool("ENTRY_CVD_DIVERGENCE_ENABLED", True),
@@ -453,8 +404,8 @@ class StrategyPositionState:
     tp_price: Optional[float] = None
     last_order_ts_ms: int = 0
     first_entry_ts_ms: int = 0
-    add_freeze_until_ts_ms: int = 0
-    add_freeze_penalty_count: int = 0
+    add_freeze_until_ts_ms: int = 0  # DEPRECATED: no-add mode, kept for live_state_store compat
+    add_freeze_penalty_count: int = 0  # DEPRECATED: no-add mode, kept for live_state_store compat
     last_tp_update_ts_ms: int = 0
     last_tp_update_candle_ts_ms: int = 0
     lower_armed: bool = False
@@ -628,7 +579,7 @@ class StrategyPositionState:
     delayed_market_exit_exit_attempt_count: int = 0
     delayed_market_exit_last_exit_message: str | None = None
 
-    # ── Extreme Retest Add state ──────────────────────────────────────
+    # ── Extreme Retest Add state (DEPRECATED: kept for live_state_store backward compat) ──
     extreme_retest_anchor_side: Optional[str] = None
     extreme_retest_anchor_kind: Optional[str] = None
     extreme_retest_anchor_price: Optional[float] = None
@@ -767,9 +718,8 @@ class BollCvdReclaimStrategy:
                 self.state.lower_reference_fast_cvd = cvd.fast_cvd
             _fast_cvd_str = f" fast_cvd={cvd.fast_cvd:.8f}" if cvd is not None else ""
             logger.info(
-                "LOWER_ARMED | price=%.4f lower=%.4f middle=%.4f max_entry_distance=%.4f%% max_armed=%ss%s",
+                "LOWER_ARMED | price=%.4f lower=%.4f middle=%.4f max_armed=%ss%s",
                 price, boll.lower, boll.middle,
-                self.config.max_entry_distance_from_extreme_pct * 100,
                 self.config.max_armed_seconds, _fast_cvd_str,
             )
             # First arm is the first extreme — allow absorption evaluation
@@ -800,9 +750,8 @@ class BollCvdReclaimStrategy:
                 self.state.upper_reference_fast_cvd = cvd.fast_cvd
             _fast_cvd_str = f" fast_cvd={cvd.fast_cvd:.8f}" if cvd is not None else ""
             logger.info(
-                "UPPER_ARMED | price=%.4f upper=%.4f middle=%.4f max_entry_distance=%.4f%% max_armed=%ss%s",
+                "UPPER_ARMED | price=%.4f upper=%.4f middle=%.4f max_armed=%ss%s",
                 price, boll.upper, boll.middle,
-                self.config.max_entry_distance_from_extreme_pct * 100,
                 self.config.max_armed_seconds, _fast_cvd_str,
             )
             # First arm is the first extreme — allow absorption evaluation
@@ -1393,18 +1342,6 @@ class BollCvdReclaimStrategy:
         )
         return cvd_direction_ok
 
-    def _near_lower_extreme(self, price: float) -> bool:
-        extreme = self.state.lower_extreme_price
-        if extreme is None:
-            return False
-        return price <= extreme * (1 + self.config.max_entry_distance_from_extreme_pct)
-
-    def _near_upper_extreme(self, price: float) -> bool:
-        extreme = self.state.upper_extreme_price
-        if extreme is None:
-            return False
-        return price >= extreme * (1 - self.config.max_entry_distance_from_extreme_pct)
-
 
     def _entry_protective_sl_price(self, side: PositionSide) -> float | None:
         if side == "LONG":
@@ -1477,72 +1414,6 @@ class BollCvdReclaimStrategy:
                                  cvd: CvdSnapshot) -> TradeIntent | None:
         return self._entry_add_flow().maybe_open_or_add_short(price, ts_ms, boll, cvd)
 
-    def _add_layer_gap_pct_for_target_layer(self, target_layer: int) -> float:
-        return add_layer_gates.add_layer_gap_pct_for_target_layer(
-            target_layer=target_layer,
-            add_gap_mode=self.config.add_gap_mode,
-            add_gap_base_pct=self.config.add_gap_base_pct,
-            add_gap_step_pct=self.config.add_gap_step_pct,
-        )
-
-    def _add_min_interval_bypass_gap_pct_for_target_layer(self, target_layer: int) -> float:
-        return add_layer_gates.add_min_interval_bypass_gap_pct_for_target_layer(
-            target_layer=target_layer,
-            add_gap_mode=self.config.add_gap_mode,
-            add_gap_base_pct=self.config.add_gap_base_pct,
-            add_gap_step_pct=self.config.add_gap_step_pct,
-        )
-
-    def _add_gap_passed(self, side: PositionSide, price: float, target_layer: int) -> tuple[bool, float, float]:
-        decision = add_layer_gates.check_add_gap(
-            side=side,
-            price=price,
-            last_entry_price=self.state.last_entry_price,
-            target_layer=target_layer,
-            add_gap_mode=self.config.add_gap_mode,
-            add_gap_base_pct=self.config.add_gap_base_pct,
-            add_gap_step_pct=self.config.add_gap_step_pct,
-        )
-        return decision.ok, decision.gap_pct, decision.required_price
-
-    def _add_avg_improvement_passed(self, side: PositionSide, price: float, target_layer: int) -> tuple[
-        bool, float, float]:
-        size = self.sizer.calculate(price, layer_index=target_layer)
-        add_qty = size.eth_qty
-        decision = add_layer_gates.check_add_avg_improvement(
-            side=side,
-            price=price,
-            required_improvement_pct=self.config.add_min_avg_improvement_pct,
-            old_qty=self.state.total_entry_qty,
-            old_notional=self.state.total_entry_notional,
-            old_avg=self.state.avg_entry_price,
-            add_qty=add_qty,
-        )
-        return decision.ok, decision.improvement_pct, decision.projected_avg
-
-    def _add_timing_passed(self, side: PositionSide, price: float, ts_ms: int, target_layer: int) -> tuple[bool, str]:
-        decision = add_layer_gates.check_base_add_timing(
-            side=side,
-            price=price,
-            ts_ms=ts_ms,
-            target_layer=target_layer,
-            layers=self.state.layers,
-            last_entry_price=self.state.last_entry_price,
-            last_order_ts_ms=self.state.last_order_ts_ms,
-            first_add_block_seconds=self.config.first_add_block_seconds,
-            add_min_interval_seconds=self.config.add_min_interval_seconds,
-            add_gap_mode=self.config.add_gap_mode,
-            add_gap_base_pct=self.config.add_gap_base_pct,
-            add_gap_step_pct=self.config.add_gap_step_pct,
-        )
-        return decision.ok, decision.reason
-
-    def _add_elapsed_seconds(self, ts_ms: int) -> float:
-        return add_layer_gates.add_elapsed_seconds(ts_ms=ts_ms, last_order_ts_ms=self.state.last_order_ts_ms)
-
-    def _adverse_gap_pct(self, side: PositionSide, price: float) -> float:
-        return add_layer_gates.adverse_gap_pct(side=side, price=price, last_entry_price=self.state.last_entry_price)
-
     def _log_add_skip_once_per_window(
             self,
             *,
@@ -1567,48 +1438,6 @@ class BollCvdReclaimStrategy:
             self.state.layers,
         )
 
-    def _log_add_timing_skipped(self, side: PositionSide, reason: str, price: float, ts_ms: int,
-                                target_layer: int) -> None:
-        last = self.state.last_entry_price if self.state.last_entry_price is not None else 0.0
-        elapsed_seconds = self._add_elapsed_seconds(ts_ms)
-        if reason == "first_add_block":
-            logger.info(
-                "ADD_SKIPPED | reason=first_add_block side=%s price=%.4f layers=%s target_layer=%s last_entry=%.4f elapsed_seconds=%.1f required_seconds=%s",
-                side,
-                price,
-                self.state.layers,
-                target_layer,
-                last,
-                elapsed_seconds,
-                self.config.first_add_block_seconds,
-            )
-            return
-        if reason == "add_interval":
-            adverse_gap_pct = self._adverse_gap_pct(side, price)
-            bypass_gap_pct = self._add_min_interval_bypass_gap_pct_for_target_layer(target_layer)
-            logger.info(
-                "ADD_SKIPPED | reason=add_interval side=%s price=%.4f layers=%s target_layer=%s last_entry=%.4f elapsed_seconds=%.1f required_seconds=%s adverse_gap_pct=%.4f%% bypass_gap_pct=%.4f%%",
-                side,
-                price,
-                self.state.layers,
-                target_layer,
-                last,
-                elapsed_seconds,
-                self.config.add_min_interval_seconds,
-                adverse_gap_pct * 100,
-                bypass_gap_pct * 100,
-            )
-            return
-        logger.info(
-            "ADD_SKIPPED | reason=%s side=%s price=%.4f layers=%s target_layer=%s last_entry=%.4f elapsed_seconds=%.1f",
-            reason,
-            side,
-            price,
-            self.state.layers,
-            target_layer,
-            last,
-            elapsed_seconds,
-        )
 
     def _open_position(
             self,

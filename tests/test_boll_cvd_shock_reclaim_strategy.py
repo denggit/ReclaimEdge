@@ -66,10 +66,29 @@ def cvd_snapshot(*, up_burst: bool = False, down_burst: bool = False) -> CvdSnap
     )
 
 
+# Fields removed from BollCvdReclaimStrategyConfig in risk-first no-add mode.
+# Tests pass them as overrides for the shock strategy, which reads them via getattr.
+_REMOVED_CONFIG_KEYS: frozenset[str] = frozenset({
+    "add_gap_mode", "add_gap_base_pct", "add_gap_step_pct",
+    "add_min_avg_improvement_pct", "first_add_block_seconds",
+    "add_min_interval_seconds", "add_freeze_chain_enabled",
+    "add_min_interval_bypass_multiplier",
+    "max_entry_distance_from_extreme_pct",
+    "extreme_retest_add_enabled", "extreme_retest_pivot_left_bars",
+    "extreme_retest_pivot_right_bars", "extreme_retest_anchor_max_age_candles",
+    "extreme_retest_sweep_max_age_seconds", "extreme_retest_near_extreme_pct",
+    "extreme_retest_reclaim_pct", "extreme_retest_min_reverse_ratio",
+    "extreme_retest_one_add_per_anchor",
+})
+
+
 def strategy(**overrides) -> BollCvdShockReclaimStrategy:
     values = dict(min_outside_pct=0.001)
     values.update(overrides)
-    config = BollCvdReclaimStrategyConfig(**values)
+    # Filter out config fields removed from BollCvdReclaimStrategyConfig;
+    # the shock strategy reads them via getattr with safe defaults.
+    filtered = {k: v for k, v in values.items() if k not in _REMOVED_CONFIG_KEYS}
+    config = BollCvdReclaimStrategyConfig(**filtered)
     sizer = SimplePositionSizer(SimplePositionSizerConfig())
     return BollCvdShockReclaimStrategy(config, sizer)
 
@@ -123,7 +142,9 @@ class BollCvdShockReclaimStrategyTest(unittest.TestCase):
         self.assertEqual(third, [])
 
     def test_first_entry_starts_add_freeze_chain(self) -> None:
-        strat = strategy(first_add_block_seconds=2700, add_min_interval_seconds=1800)
+        strat = strategy()
+        strat.first_add_block_seconds = 2700
+        strat.add_min_interval_seconds = 1800
         ts_ms = 100_000
 
         strat._open_position("LONG", "OPEN_LONG", 100.0, ts_ms, boll_snapshot(), cvd_snapshot(), "test")
@@ -133,7 +154,8 @@ class BollCvdShockReclaimStrategyTest(unittest.TestCase):
         self.assertEqual(strat.state.add_freeze_penalty_count, 0)
 
     def test_first_add_in_freeze_requires_first_bypass_multiplier(self) -> None:
-        strat = strategy(first_add_block_seconds=2700)
+        strat = strategy()
+        strat.first_add_block_seconds = 2700
         strat.state.layers = 1
         strat.state.last_entry_price = 100.0
         strat.state.last_order_ts_ms = 100_000
@@ -149,7 +171,8 @@ class BollCvdShockReclaimStrategyTest(unittest.TestCase):
     def test_second_add_same_freeze_requires_3x(self) -> None:
         # L3 linear gap = 0.004, multiplier = 2+1 = 3, required = 0.012
         # Price 99.0 → gap=1% < 1.2% → blocked. Price 98.79 → gap=1.21% >= 1.2% → allowed
-        strat = strategy(add_min_interval_bypass_multiplier=2.0)
+        strat = strategy()
+        strat.add_min_interval_bypass_multiplier = 2.0
         strat.state.layers = 2
         strat.state.last_entry_price = 100.0
         strat.state.add_freeze_until_ts_ms = 2_000_000
@@ -164,7 +187,8 @@ class BollCvdShockReclaimStrategyTest(unittest.TestCase):
         self.assertEqual(enough_reason, "add_freeze_bypassed")
 
     def test_add_freeze_skipped_log_is_throttled_by_time_and_key(self) -> None:
-        strat = strategy(add_min_interval_bypass_multiplier=2.0)
+        strat = strategy()
+        strat.add_min_interval_bypass_multiplier = 2.0
         strat.state.layers = 2
         strat.state.last_entry_price = 100.0
         strat.state.add_freeze_until_ts_ms = 2_000_000

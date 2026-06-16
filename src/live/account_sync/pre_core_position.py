@@ -307,7 +307,26 @@ async def run_account_sync_pre_core_position_phase(
                 "trend_runner_exit_reason": getattr(strategy.state, "trend_runner_exit_reason", None),
                 "entry_sl_cooldown_candidate": entry_sl_cooldown_candidate,
                 "post_entry_sl_cooldown_enabled": post_entry_sl_cooldown_enabled,
+                # ── Entry SL exit classifier fields ──────────────────────
+                "manual_close_detected": False,
+                "exit_reason": None,
+                "filled_order_id": None,
+                "filled_algo_id": None,
+                "allow_loss_heuristic": True,
             }
+            logger.info(
+                "FLAT_DETECTED_PENDING_CLASSIFICATION | side=%s layers=%s tp1_consumed=%s tp2_consumed=%s "
+                "trend_runner_exit=%s manual_close=%s filled_order=%s filled_algo=%s candidate=%s",
+                strategy.state.side,
+                strategy.state.layers,
+                three_stage_tp1_consumed,
+                bool(getattr(strategy.state, "three_stage_tp2_consumed", False)),
+                getattr(strategy.state, "trend_runner_exit_reason", None),
+                False,
+                None,
+                None,
+                entry_sl_cooldown_candidate,
+            )
             execution_state.trading_halted = True
             last_flat_detected_monotonic = now
             logger.warning("POSITION_SYNC_CHANGED | flat_on_okx=true. Confirming settled balance before FLAT journal.")

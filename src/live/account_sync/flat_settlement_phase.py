@@ -10,6 +10,7 @@ from src.live import delayed_market_exit as dme
 from src.live import runtime_types as live_runtime_types
 from src.live import time_utils as live_time_utils
 from src.live.account_sync import flat_balance as live_flat_balance
+from src.live.account_sync.entry_sl_exit_classifier import classify_entry_sl_exit_for_cooldown
 from src.reporting.live_state_store import LiveStateStore
 from src.reporting.trade_journal import LiveTradeJournal
 from src.risk import rolling_loss_live as rolling_loss_live_helpers
@@ -147,39 +148,66 @@ async def prepare_account_sync_flat_settlement_phase(
             logger.warning("MIDDLE_BUCKET_FAST_SL_CANCELLED | reason=flat_sl_cancel_failed algoId=%s",
                            middle_bucket_fast_sl_order_id)
 
-    # ── Post-entry SL cooldown: arm if candidate and realized loss ────
+    # ── Post-entry SL cooldown: classify exit via dedicated classifier ──
     # The decision is made here (after settled balance is visible) rather
     # than in pre_core_position so we can use actual realized PnL to
     # distinguish an entry protective SL loss from a TP fill or manual close.
     entry_sl_cooldown_candidate = bool(pending_flat_payload.get("entry_sl_cooldown_candidate", False))
-    if entry_sl_cooldown_candidate:
-        cash_before_pos = pending_flat_payload.get("cash_before_position")
-        if cash_before_pos is not None:
-            try:
-                realized_delta = float(settled.cash) - float(cash_before_pos)
-            except (TypeError, ValueError):
-                realized_delta = 0.0
-            if realized_delta < 0:
-                flat_side = str(pending_flat_payload.get("side") or "UNKNOWN")
-                strategy.arm_post_entry_sl_cooldown(
-                    ts_ms=live_time_utils.utc_ms(),
-                    side=flat_side,
-                    reason="entry_protective_sl_loss_flat",
-                )
-                logger.warning(
-                    "POST_ENTRY_SL_COOLDOWN_ARMED_ON_SETTLED_LOSS | side=%s "
-                    "cash_before=%.4f cash_after=%.4f realized=%.4f",
-                    flat_side, float(cash_before_pos), settled.cash, realized_delta,
-                )
-            else:
-                logger.info(
-                    "POST_ENTRY_SL_COOLDOWN_SKIPPED_NOT_LOSS | side=%s "
-                    "cash_before=%.4f cash_after=%.4f realized=%.4f",
-                    pending_flat_payload.get("side", "-"),
-                    float(cash_before_pos) if cash_before_pos else 0.0,
-                    settled.cash,
-                    realized_delta,
-                )
+    cash_before_pos = pending_flat_payload.get("cash_before_position")
+    realized_delta: float | None = None
+    if cash_before_pos is not None:
+        try:
+            realized_delta = float(settled.cash) - float(cash_before_pos)
+        except (TypeError, ValueError):
+            realized_delta = 0.0
+
+    flat_side = str(pending_flat_payload.get("side") or "UNKNOWN")
+
+    classification = classify_entry_sl_exit_for_cooldown(
+        entry_sl_cooldown_candidate=entry_sl_cooldown_candidate,
+        entry_protective_sl_order_id=pending_flat_payload.get("entry_protective_sl_order_id"),
+        filled_order_id=pending_flat_payload.get("filled_order_id"),
+        filled_algo_id=pending_flat_payload.get("filled_algo_id"),
+        exit_reason=pending_flat_payload.get("exit_reason"),
+        realized_delta=realized_delta,
+        partial_tp_consumed=bool(pending_flat_payload.get("partial_tp_consumed", False)),
+        three_stage_tp1_consumed=bool(pending_flat_payload.get("three_stage_tp1_consumed", False)),
+        three_stage_tp2_consumed=bool(pending_flat_payload.get("three_stage_tp2_consumed", False)),
+        trend_runner_exit_reason=pending_flat_payload.get("trend_runner_exit_reason"),
+        manual_close_detected=bool(pending_flat_payload.get("manual_close_detected", False)),
+        allow_loss_heuristic=bool(pending_flat_payload.get("allow_loss_heuristic", True)),
+    )
+
+    if classification.should_arm_cooldown:
+        strategy.arm_post_entry_sl_cooldown(
+            ts_ms=live_time_utils.utc_ms(),
+            side=flat_side,
+            reason=classification.reason,
+        )
+        if classification.confidence == "EXACT":
+            logger.warning(
+                "POST_ENTRY_SL_COOLDOWN_ARMED_EXACT | side=%s reason=%s confidence=%s "
+                "cash_before=%.4f cash_after=%.4f realized=%.4f",
+                flat_side, classification.reason, classification.confidence,
+                float(cash_before_pos) if cash_before_pos else 0.0, settled.cash,
+                realized_delta if realized_delta is not None else 0.0,
+            )
+        elif classification.confidence == "HEURISTIC":
+            logger.warning(
+                "POST_ENTRY_SL_COOLDOWN_ARMED_HEURISTIC | side=%s reason=%s confidence=%s "
+                "cash_before=%.4f cash_after=%.4f realized=%.4f",
+                flat_side, classification.reason, classification.confidence,
+                float(cash_before_pos) if cash_before_pos else 0.0, settled.cash,
+                realized_delta if realized_delta is not None else 0.0,
+            )
+    else:
+        logger.info(
+            "POST_ENTRY_SL_COOLDOWN_SKIPPED | side=%s reason=%s confidence=%s "
+            "cash_before=%.4f cash_after=%.4f realized=%.4f",
+            flat_side, classification.reason, classification.confidence,
+            float(cash_before_pos) if cash_before_pos else 0.0, settled.cash,
+            realized_delta if realized_delta is not None else 0.0,
+        )
 
     async with state_lock:
         result_flat_previous_halt_reason = execution_state.halt_reason if execution_state.trading_halted else None
