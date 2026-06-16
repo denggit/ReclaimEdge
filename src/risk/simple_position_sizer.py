@@ -130,6 +130,77 @@ class SimplePositionSizer:
             sizing_mode="margin",
         )
 
+    def calculate_with_risk_budget(
+        self,
+        price: float,
+        stop_price: float,
+        risk_budget_usdt: float,
+        layer_index: int = 1,
+    ) -> PositionSize:
+        """Calculate position size from an explicit risk budget.
+
+        This method is for Trend Upgrade Add-on sizing ONLY.  It does NOT
+        read TRADE_RISK_PCT or any layer/add multiplier — the caller
+        provides the exact risk budget.
+
+        Args:
+            price: Entry price.
+            stop_price: Protective SL price.
+            risk_budget_usdt: Maximum USD risk for this add-on.
+            layer_index: Layer index for metadata (default 1).
+
+        Returns:
+            A ``PositionSize`` with ``sizing_mode="risk_budget"``.
+
+        Raises:
+            RuntimeError: if risk calculation produces zero or negative notional.
+        """
+        safe_layer_index = max(int(layer_index), 1)
+        if price <= 0:
+            return PositionSize(
+                margin_usdt=0.0,
+                notional_usdt=0.0,
+                eth_qty=0.0,
+                layer_index=safe_layer_index,
+                layer_multiplier=1.0,
+                sizing_mode="risk_budget",
+                risk_usdt=risk_budget_usdt,
+            )
+
+        if stop_price <= 0 or stop_price == price:
+            return PositionSize(
+                margin_usdt=0.0,
+                notional_usdt=0.0,
+                eth_qty=0.0,
+                layer_index=safe_layer_index,
+                layer_multiplier=1.0,
+                sizing_mode="risk_budget",
+                risk_usdt=risk_budget_usdt,
+                stop_price=float(stop_price),
+            )
+
+        stop_distance_pct = abs(float(price) - float(stop_price)) / float(price)
+        effective_risk_pct = stop_distance_pct + self.config.fee_slippage_buffer_pct
+        if effective_risk_pct <= 0:
+            raise RuntimeError("risk_budget_sizing_requires_positive_effective_risk_pct")
+        notional = risk_budget_usdt / effective_risk_pct
+        if self.config.max_order_notional_usdt > 0:
+            notional = min(notional, self.config.max_order_notional_usdt)
+        margin = notional / self.config.leverage
+        eth_qty = notional / price
+        return PositionSize(
+            margin_usdt=margin,
+            notional_usdt=notional,
+            eth_qty=eth_qty,
+            layer_index=safe_layer_index,
+            layer_multiplier=1.0,
+            sizing_mode="risk_budget",
+            risk_usdt=risk_budget_usdt,
+            stop_price=float(stop_price),
+            stop_distance_pct=stop_distance_pct,
+            effective_risk_pct=effective_risk_pct,
+        )
+
 
 def _env_bool(name: str, default: bool) -> bool:
     value = os.getenv(name)

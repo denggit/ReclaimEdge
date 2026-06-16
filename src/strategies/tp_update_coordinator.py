@@ -80,11 +80,14 @@ class TpUpdateCoordinator:
         if s.state.side is None or s.state.layers <= 0:
             return None
 
-        # ── Trend Breakout trailing SL branch ──────────────────────────
+        # ── Trend Breakout / Trend Upgrade trailing SL branch ────────────
         # MUST come before candle de-dup so trend SL updates are NOT blocked
         # by the generic TP candle timestamp check.  Trend SL updates use
         # TREND_SL_UPDATE_INTERVAL_SECONDS independently.
-        if getattr(s.state, "entry_regime", None) == "TREND_BREAKOUT":
+        # Covers: TREND_BREAKOUT, TREND_UPGRADE, TREND_UPGRADE_ADDON
+        _regime = getattr(s.state, "entry_regime", None)
+        _mgmt_mode = getattr(s.state, "position_management_mode", None)
+        if _regime in ("TREND_BREAKOUT", "TREND_UPGRADE", "TREND_UPGRADE_ADDON") or _mgmt_mode in ("TREND_UPGRADE", "TREND_UPGRADE_ADDON"):
             return self._maybe_update_trend_trailing_sl(
                 price, ts_ms, boll, cvd, force_reconcile=False,
             )

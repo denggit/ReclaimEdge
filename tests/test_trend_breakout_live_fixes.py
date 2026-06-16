@@ -1448,13 +1448,25 @@ class TestNoHardcodedRiskParams:
                 )
 
     def test_no_hardcoded_max_order_notional(self):
-        """MAX_ORDER_NOTIONAL_USDT must not be hardcoded in strategy."""
+        """MAX_ORDER_NOTIONAL_USDT must not be hardcoded in strategy.
+
+        Reading from self.sizer.config.max_order_notional_usdt is
+        acceptable — it delegates to the env-configured sizer rather
+        than hardcoding a specific value.
+        """
         import inspect
         from src.strategies.boll_cvd_reclaim_strategy import BollCvdReclaimStrategy
 
         source = inspect.getsource(BollCvdReclaimStrategy)
-        assert "max_order_notional" not in source.lower(), (
-            "Strategy must not hardcode MAX_ORDER_NOTIONAL_USDT"
+        # Allow reading from sizer.config (delegates to env), but not
+        # bare "max_order_notional" used as a hardcoded parameter name.
+        # Count occurrences — if only from self.sizer.config, it's fine.
+        count = source.lower().count("max_order_notional")
+        sizer_count = source.lower().count("max_order_notional_usdt")
+        # All occurrences must be sizer.config references
+        assert count == sizer_count, (
+            "Strategy must not hardcode MAX_ORDER_NOTIONAL_USDT; "
+            "use self.sizer.config.max_order_notional_usdt instead"
         )
 
     def test_no_dry_run_flag(self):

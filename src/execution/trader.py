@@ -308,7 +308,8 @@ class Trader:
             return await self._execute_update_trend_sl(intent)
 
         # ── OPEN_LONG / OPEN_SHORT ─────────────────────────────────────
-        is_trend_entry = getattr(intent, "entry_regime", None) == "TREND_BREAKOUT"
+        _regime = getattr(intent, "entry_regime", None)
+        is_trend_entry = _regime in ("TREND_BREAKOUT", "TREND_UPGRADE_ADDON")
 
         contracts = self.eth_qty_to_contracts(Decimal(str(intent.size.eth_qty)))
         result = await self.trading_client.place_market_order(
@@ -382,14 +383,15 @@ class Trader:
             )
         entry_sl_order_id = sl_id
 
-        # ── Trend breakout entries: NO fixed TP ────────────────────────
+        # ── Trend / Trend Upgrade entries: NO fixed TP ──────────────────
         if is_trend_entry:
             logger.warning(
                 "TREND_ENTRY_NO_FIXED_TP | side=%s order_id=%s sl_order_id=%s "
-                "sl_price=%.4f contracts=%s",
+                "sl_price=%.4f contracts=%s regime=%s",
                 intent.side, order_id, entry_sl_order_id,
                 float(entry_sl_price) if entry_sl_price is not None else 0.0,
                 self.decimal_to_str(contracts),
+                _regime,
             )
             return LiveTradeResult(
                 ok=True,

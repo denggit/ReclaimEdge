@@ -130,6 +130,17 @@ class LivePositionState:
     trend_trailing_sl_price: float | None = None
     trend_last_sl_update_ts_ms: int = 0
 
+    # ── Trend Upgrade Add-on fields ────────────────────────────────────
+    trend_upgrade_active: bool = False
+    trend_upgrade_addon_active: bool = False
+    trend_upgrade_addon_count: int = 0
+    trend_upgrade_addon_entry_price: float | None = None
+    trend_upgrade_addon_qty: float = 0.0
+    trend_upgrade_addon_risk_budget_usdt: float = 0.0
+    trend_upgrade_addon_sl_price: float | None = None
+    trend_upgrade_last_ts_ms: int = 0
+    position_management_mode: str | None = None
+
 
 class LiveStateStore:
     """Small JSON state store for restart recovery.
@@ -309,6 +320,17 @@ class LiveStateStore:
             entry_regime=getattr(strategy_state, "entry_regime", None),
             trend_trailing_sl_price=getattr(strategy_state, "trend_trailing_sl_price", None),
             trend_last_sl_update_ts_ms=int(getattr(strategy_state, "trend_last_sl_update_ts_ms", 0) or 0),
+            # ── Trend Upgrade Add-on fields ────────────────────────────────
+            trend_upgrade_active=bool(getattr(strategy_state, "trend_upgrade_active", False)),
+            trend_upgrade_addon_active=bool(getattr(strategy_state, "trend_upgrade_addon_active", False)),
+            trend_upgrade_addon_count=int(getattr(strategy_state, "trend_upgrade_addon_count", 0) or 0),
+            trend_upgrade_addon_entry_price=getattr(strategy_state, "trend_upgrade_addon_entry_price", None),
+            trend_upgrade_addon_qty=float(getattr(strategy_state, "trend_upgrade_addon_qty", 0.0) or 0.0),
+            trend_upgrade_addon_risk_budget_usdt=float(
+                getattr(strategy_state, "trend_upgrade_addon_risk_budget_usdt", 0.0) or 0.0),
+            trend_upgrade_addon_sl_price=getattr(strategy_state, "trend_upgrade_addon_sl_price", None),
+            trend_upgrade_last_ts_ms=int(getattr(strategy_state, "trend_upgrade_last_ts_ms", 0) or 0),
+            position_management_mode=getattr(strategy_state, "position_management_mode", None),
         )
 
 

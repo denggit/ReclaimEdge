@@ -170,6 +170,16 @@ class BollCvdReclaimStrategyConfig:
     trend_cvd_min_sell_ratio: float = 0.58
     trend_cvd_max_pullback_ratio: float = 0.45
 
+    # ── Trend Upgrade Add-on ──────────────────────────────────────────
+    trend_upgrade_addon_enabled: bool = False
+    trend_upgrade_profit_reinvest_ratio: float = 0.30
+    trend_upgrade_max_addon_risk_pct: float = 0.002
+    trend_upgrade_max_total_notional_multiplier: float = 1.0
+    trend_upgrade_require_tp1_consumed: bool = True
+    trend_upgrade_require_tp2_consumed: bool = True
+    trend_upgrade_min_runner_remaining_ratio: float = 0.05
+    trend_upgrade_min_trend_confidence: float = 0.80
+
     def __post_init__(self) -> None:
         if (
                 self.three_stage_pre_tp1_degrade_enabled
@@ -286,6 +296,28 @@ class BollCvdReclaimStrategyConfig:
                     f"MIDDLE_BUCKET_SPLIT_FAST_RATIO={_fr} is out of range [0.05, 0.95]; "
                     f"this is a live position ratio — refusing to proceed with dangerous value"
                 )
+        # ── Trend Upgrade Add-on validation ────────────────────────────
+        if self.trend_upgrade_addon_enabled:
+            if not (0 < self.trend_upgrade_profit_reinvest_ratio <= 1):
+                raise RuntimeError(
+                    f"TREND_UPGRADE_PROFIT_REINVEST_RATIO={self.trend_upgrade_profit_reinvest_ratio} must be in (0, 1]"
+                )
+            if not (0 < self.trend_upgrade_max_addon_risk_pct <= 0.05):
+                raise RuntimeError(
+                    f"TREND_UPGRADE_MAX_ADDON_RISK_PCT={self.trend_upgrade_max_addon_risk_pct} must be in (0, 0.05]"
+                )
+            if not (0 < self.trend_upgrade_max_total_notional_multiplier <= 5):
+                raise RuntimeError(
+                    f"TREND_UPGRADE_MAX_TOTAL_NOTIONAL_MULTIPLIER={self.trend_upgrade_max_total_notional_multiplier} must be in (0, 5]"
+                )
+            if not (0.01 <= self.trend_upgrade_min_runner_remaining_ratio <= 1):
+                raise RuntimeError(
+                    f"TREND_UPGRADE_MIN_RUNNER_REMAINING_RATIO={self.trend_upgrade_min_runner_remaining_ratio} must be in [0.01, 1]"
+                )
+            if not (0.5 <= self.trend_upgrade_min_trend_confidence <= 1):
+                raise RuntimeError(
+                    f"TREND_UPGRADE_MIN_TREND_CONFIDENCE={self.trend_upgrade_min_trend_confidence} must be in [0.5, 1]"
+                )
 
     @classmethod
     def from_env(cls) -> "BollCvdReclaimStrategyConfig":
@@ -398,6 +430,17 @@ class BollCvdReclaimStrategyConfig:
             trend_cvd_min_buy_ratio=float(os.getenv("TREND_CVD_MIN_BUY_RATIO", "0.58")),
             trend_cvd_min_sell_ratio=float(os.getenv("TREND_CVD_MIN_SELL_RATIO", "0.58")),
             trend_cvd_max_pullback_ratio=float(os.getenv("TREND_CVD_MAX_PULLBACK_RATIO", "0.45")),
+            # ── Trend Upgrade Add-on ──────────────────────────────────
+            trend_upgrade_addon_enabled=_env_bool("TREND_UPGRADE_ADDON_ENABLED", False),
+            trend_upgrade_profit_reinvest_ratio=float(os.getenv("TREND_UPGRADE_PROFIT_REINVEST_RATIO", "0.30")),
+            trend_upgrade_max_addon_risk_pct=float(os.getenv("TREND_UPGRADE_MAX_ADDON_RISK_PCT", "0.002")),
+            trend_upgrade_max_total_notional_multiplier=float(
+                os.getenv("TREND_UPGRADE_MAX_TOTAL_NOTIONAL_MULTIPLIER", "1.0")),
+            trend_upgrade_require_tp1_consumed=_env_bool("TREND_UPGRADE_REQUIRE_TP1_CONSUMED", True),
+            trend_upgrade_require_tp2_consumed=_env_bool("TREND_UPGRADE_REQUIRE_TP2_CONSUMED", True),
+            trend_upgrade_min_runner_remaining_ratio=float(
+                os.getenv("TREND_UPGRADE_MIN_RUNNER_REMAINING_RATIO", "0.05")),
+            trend_upgrade_min_trend_confidence=float(os.getenv("TREND_UPGRADE_MIN_TREND_CONFIDENCE", "0.80")),
         )
 
 
@@ -679,10 +722,23 @@ class StrategyPositionState:
     delayed_market_exit_last_exit_message: str | None = None
 
     # ── Trend Breakout Entry state ────────────────────────────────────────
-    entry_regime: str | None = None  # None | "MEAN_REVERSION" | "TREND_BREAKOUT"
+    entry_regime: str | None = None  # None | "MEAN_REVERSION" | "TREND_BREAKOUT" | "TREND_UPGRADE" | "TREND_UPGRADE_ADDON"
     trend_breakout_active: bool = False
     trend_trailing_sl_price: float | None = None
     trend_last_sl_update_ts_ms: int = 0
+
+    # ── Trend Upgrade Add-on state ─────────────────────────────────────────
+    trend_upgrade_active: bool = False
+    trend_upgrade_addon_active: bool = False
+    trend_upgrade_addon_count: int = 0
+    trend_upgrade_addon_entry_price: float | None = None
+    trend_upgrade_addon_qty: float = 0.0
+    trend_upgrade_addon_risk_budget_usdt: float = 0.0
+    trend_upgrade_addon_sl_price: float | None = None
+    trend_upgrade_last_ts_ms: int = 0
+    # ── Position management mode: tracks the active management strategy ──
+    # "MEAN_REVERSION" | "TREND_BREAKOUT" | "TREND_UPGRADE" | "TREND_UPGRADE_ADDON" | None
+    position_management_mode: str | None = None
 
     # ── Extreme Retest Add state (DEPRECATED: kept for live_state_store backward compat) ──
     extreme_retest_anchor_side: Optional[str] = None
@@ -756,8 +812,13 @@ class BollCvdReclaimStrategy:
         if tp_intent is not None:
             intents.append(tp_intent)
 
-        # Already in a position — no new entries
+        # Already in a position — update trend detectors and check Trend Upgrade
         if self.state.side is not None:
+            # Always refresh trend detectors even when holding position
+            self._maybe_update_trend_detectors(price, ts_ms, boll, cvd)
+            trend_upgrade_intent = self._maybe_trend_upgrade_addon(price, ts_ms, boll, cvd)
+            if trend_upgrade_intent is not None:
+                intents.append(trend_upgrade_intent)
             return intents
 
         if not boll.alert_switch_on:
@@ -1914,6 +1975,361 @@ class BollCvdReclaimStrategy:
             reason=reason,
             trend_sl_price=trend_sl,
         )
+
+    def _maybe_trend_upgrade_addon(
+        self,
+        price: float,
+        ts_ms: int,
+        boll: BollSnapshot,
+        cvd: CvdSnapshot,
+    ) -> TradeIntent | None:
+        """Check for Trend Upgrade Add-on eligibility when holding a position.
+
+        This method is called from ``on_tick`` when ``state.side is not None``.
+        It uses the pure-logic ``TrendUpgradeAddonAssessor`` (via
+        ``assess_trend_upgrade``) to evaluate:
+
+        1. Whether the existing runner can switch to TREND_UPGRADE management.
+        2. Whether an independent risk-sized add-on can be placed.
+
+        Neither step uses legacy ADD_LONG / ADD_SHORT logic.
+        """
+        from src.strategies.trend_upgrade_addon import (
+            TrendUpgradeAddonConfig,
+            assess_trend_upgrade,
+        )
+
+        state = self.state
+
+        if not self.config.trend_upgrade_addon_enabled:
+            return None
+
+        if state.side is None:
+            return None
+
+        # ── Check if Three-Stage runner was active ──────────────────────
+        # Only positions with Three-Stage runner enabled (or trend_runner_active)
+        # qualify for trend upgrade.
+        has_three_stage_runner = (
+            state.three_stage_runner_enabled_for_position
+            or state.trend_runner_active
+        )
+        if not has_three_stage_runner:
+            return None
+
+        # ── Build trend upgrade config ──────────────────────────────────
+        addon_config = TrendUpgradeAddonConfig(
+            enabled=self.config.trend_upgrade_addon_enabled,
+            profit_reinvest_ratio=self.config.trend_upgrade_profit_reinvest_ratio,
+            max_addon_risk_pct=self.config.trend_upgrade_max_addon_risk_pct,
+            max_total_notional_multiplier=self.config.trend_upgrade_max_total_notional_multiplier,
+            require_tp1_consumed=self.config.trend_upgrade_require_tp1_consumed,
+            require_tp2_consumed=self.config.trend_upgrade_require_tp2_consumed,
+            min_runner_remaining_ratio=self.config.trend_upgrade_min_runner_remaining_ratio,
+            min_trend_confidence=self.config.trend_upgrade_min_trend_confidence,
+        )
+
+        # ── Get trend assessment from assessor ──────────────────────────
+        # Detectors are already updated by _maybe_update_trend_detectors
+        # called just before this method from on_tick.
+        assessor = self._get_trend_assessor()
+        if assessor is None:
+            return None
+
+        metrics_tracker = self._get_trend_metrics_tracker()
+        if metrics_tracker is None:
+            return None
+
+        m = metrics_tracker.snapshot()
+        trend_decision = assessor.assess(
+            price=price, ts_ms=ts_ms,
+            boll_upper=boll.upper, boll_middle=boll.middle, boll_lower=boll.lower,
+            fast_cvd=cvd.fast_cvd, buy_ratio=cvd.buy_ratio, sell_ratio=cvd.sell_ratio,
+            episode_buy_volume=m.episode_buy_volume,
+            episode_sell_volume=m.episode_sell_volume,
+            episode_cvd_max=m.episode_cvd_max,
+            episode_cvd_min=m.episode_cvd_min,
+            range_expansion_passed=m.range_expansion_passed,
+            volume_expansion_passed=m.volume_expansion_passed,
+            sustained_volume_passed=m.sustained_volume_passed,
+            outside_occupancy_passed=m.outside_occupancy_passed,
+            new_extreme_count=m.new_extreme_count,
+            inside_reclaim_seconds=m.inside_reclaim_seconds,
+            price_reclaimed_inside=m.price_reclaimed_inside,
+        )
+
+        # ── Cooldown check (same-side) ──────────────────────────────────
+        cooldown_active_same_side = (
+            self.config.post_entry_sl_cooldown_enabled
+            and state.post_entry_sl_cooldown_until_ts_ms > 0
+            and ts_ms < state.post_entry_sl_cooldown_until_ts_ms
+            and state.post_entry_sl_cooldown_side == state.side
+        )
+
+        current_total_notional = (
+            state.total_entry_notional if state.total_entry_notional > 0
+            else state.total_entry_qty * price
+        )
+
+        decision = assess_trend_upgrade(
+            config=addon_config,
+            has_position=True,
+            position_side=state.side,
+            entry_regime=state.entry_regime,
+            three_stage_runner_enabled_for_position=state.three_stage_runner_enabled_for_position,
+            three_stage_tp1_consumed=state.three_stage_tp1_consumed,
+            three_stage_tp2_consumed=state.three_stage_tp2_consumed,
+            three_stage_tp1_ratio=state.three_stage_tp1_ratio,
+            three_stage_tp2_ratio=state.three_stage_tp2_ratio,
+            three_stage_runner_ratio=state.three_stage_runner_ratio,
+            trend_runner_active=state.trend_runner_active,
+            trend_confirmed=trend_decision.is_trend_breakout,
+            trend_direction=trend_decision.direction,
+            trend_confidence=trend_decision.confidence,
+            trend_state=trend_decision.trend_state.value,
+            trend_blocks_mean_reversion=trend_decision.blocks_mean_reversion,
+            post_entry_sl_cooldown_active_same_side=cooldown_active_same_side,
+            delayed_market_exit_armed=state.delayed_market_exit_armed,
+            trading_halt_active=False,
+            avg_entry_price=state.avg_entry_price,
+            total_entry_qty=state.total_entry_qty,
+            three_stage_tp1_price=state.three_stage_tp1_price,
+            three_stage_tp2_price=state.three_stage_tp2_price,
+            equity_usdt=self.sizer.account_equity_usdt,
+            leverage=float(self.sizer.config.leverage),
+            fee_slippage_buffer_pct=self.config.entry_fee_slippage_buffer_pct,
+            max_order_notional_usdt=self.sizer.config.max_order_notional_usdt,
+            current_total_notional=current_total_notional,
+            boll_middle=boll.middle,
+            trend_middle_sl_buffer_pct=self.config.trend_middle_sl_buffer_pct,
+            price=price,
+            ts_ms=ts_ms,
+        )
+
+        if not decision.allowed:
+            return None
+
+        # ── Runner upgrade: switch management mode ──────────────────────
+        if decision.runner_upgrade_allowed and not state.trend_upgrade_active:
+            logger.warning(
+                "TREND_UPGRADE_RUNNER_ACTIVATED | side=%s entry_regime=%s "
+                "reason=%s confidence=%.2f trend_sl=%.4f",
+                state.side, state.entry_regime,
+                decision.reason, decision.confidence,
+                decision.trend_sl_price if decision.trend_sl_price is not None else 0.0,
+            )
+            state.trend_upgrade_active = True
+            state.position_management_mode = "TREND_UPGRADE"
+            if state.entry_regime in (None, "MEAN_REVERSION"):
+                state.entry_regime = "TREND_UPGRADE"
+            if decision.trend_sl_price is not None:
+                state.trend_trailing_sl_price = decision.trend_sl_price
+            state.trend_upgrade_last_ts_ms = ts_ms
+
+        # ── Add-on: place independent risk-sized entry ──────────────────
+        if decision.addon_allowed and not state.trend_upgrade_addon_active:
+            # Rate-limit add-on: at most one Trend Upgrade Add-on per position
+            # per upgrade episode.  trend_upgrade_addon_active is set after
+            # successful execution, so the decision gate prevents double-fire.
+            pass  # Add-on is allowed, proceed below
+
+        if not decision.addon_allowed:
+            return None
+
+        if state.trend_upgrade_addon_active:
+            # Already have an active add-on — no duplicate
+            return None
+
+        if decision.trend_sl_price is None:
+            return None
+
+        # ── Calculate add-on size with independent risk budget ──────────
+        try:
+            addon_size = self.sizer.calculate_with_risk_budget(
+                price=price,
+                stop_price=decision.trend_sl_price,
+                risk_budget_usdt=decision.risk_budget_usdt,
+                layer_index=1,
+            )
+        except RuntimeError:
+            logger.exception("TREND_UPGRADE_ADDON_SIZING_FAILED | side=%s", state.side)
+            return None
+
+        if addon_size.eth_qty <= 0 or addon_size.notional_usdt <= 0:
+            return None
+
+        # ── Set Trend Upgrade Add-on state BEFORE building intent ──────
+        # State must be written now so it is persisted via _apply_entry_result
+        # when the execution succeeds.  Pattern: same as open_trend_position().
+        from src.strategies.trend_middle_trailing_sl import calculate_trend_middle_sl
+
+        intent_sl = calculate_trend_middle_sl(
+            boll_middle=boll.middle,
+            buffer_pct=self.config.trend_middle_sl_buffer_pct,
+            side=state.side,
+        )
+
+        state.entry_regime = "TREND_UPGRADE_ADDON"
+        state.position_management_mode = "TREND_UPGRADE_ADDON"
+        state.trend_upgrade_addon_active = True
+        state.trend_upgrade_addon_count += 1
+        state.trend_upgrade_addon_entry_price = price
+        state.trend_upgrade_addon_qty = addon_size.eth_qty
+        state.trend_upgrade_addon_risk_budget_usdt = decision.risk_budget_usdt
+        state.trend_upgrade_addon_sl_price = intent_sl
+        state.trend_upgrade_last_ts_ms = ts_ms
+        state.trend_trailing_sl_price = intent_sl
+        state.entry_protective_sl_price = intent_sl
+        state.entry_protective_sl_order_id = None
+        state.entry_protective_sl_protected = False
+        state.last_order_ts_ms = ts_ms
+
+        reason = (
+            f"趋势升级加仓: {decision.reason} "
+            f"方向={state.side} 置信度={decision.confidence:.2f} "
+            f"risk_budget={decision.risk_budget_usdt:.2f}"
+        )
+
+        intent = TradeIntent(
+            intent_type="OPEN_LONG" if state.side == "LONG" else "OPEN_SHORT",
+            side=state.side,
+            price=price,
+            layer_index=state.layers,
+            tp_price=0.0,  # No fixed TP for trend upgrade add-on
+            reason=reason,
+            size=addon_size,
+            fast_cvd=cvd.fast_cvd,
+            previous_fast_cvd=cvd.previous_fast_cvd,
+            buy_ratio=cvd.buy_ratio,
+            sell_ratio=cvd.sell_ratio,
+            boll_upper=boll.upper,
+            boll_middle=boll.middle,
+            boll_lower=boll.lower,
+            ts_ms=ts_ms,
+            avg_entry_price=state.avg_entry_price,
+            breakeven_price=state.breakeven_price,
+            tp_mode=state.tp_mode,
+            tp_plan=state.tp_plan,
+            entry_protective_sl_price=intent_sl,
+            entry_regime="TREND_UPGRADE_ADDON",
+            # ── Carry existing position state ──────────────────────────
+            three_stage_tp1_price=state.three_stage_tp1_price,
+            three_stage_tp2_price=state.three_stage_tp2_price,
+            three_stage_tp1_consumed=state.three_stage_tp1_consumed,
+            three_stage_tp2_consumed=state.three_stage_tp2_consumed,
+            trend_runner_active=state.trend_runner_active,
+        )
+
+        logger.warning(
+            "TREND_UPGRADE_ADDON_INTENT | side=%s price=%.4f sl=%.4f "
+            "addon_qty=%.6f addon_notional=%.2f risk_budget=%.2f reason=%s",
+            state.side, price, intent_sl,
+            addon_size.eth_qty, addon_size.notional_usdt,
+            decision.risk_budget_usdt, decision.reason,
+        )
+
+        return intent
+
+    def _maybe_update_trend_detectors(
+        self,
+        price: float,
+        ts_ms: int,
+        boll: BollSnapshot,
+        cvd: CvdSnapshot,
+    ) -> None:
+        """Update trend detectors with current tick data.
+
+        Called on every tick regardless of position to keep compression
+        detector and metrics tracker current.  Does NOT produce decisions.
+        """
+        if not self.config.trend_breakout_enabled:
+            return
+
+        assessor = self._get_trend_assessor()
+        if assessor is None:
+            return
+
+        metrics_tracker = self._get_trend_metrics_tracker()
+        if metrics_tracker is None:
+            return
+
+        assessor.feed_band(BandSnapshot(
+            upper=boll.upper, middle=boll.middle, lower=boll.lower,
+            candle_ts_ms=boll.candle_ts_ms, source="closed_or_frozen",
+        ))
+
+        # ── Compute current breakout direction ──────────────────────────
+        if price > boll.upper:
+            current_direction = "UP"
+        elif price < boll.lower:
+            current_direction = "DOWN"
+        else:
+            current_direction = None
+
+        baseline_volume_rate = (
+            cvd.baseline_volume / 60.0 if cvd.baseline_volume > 0 else 0.0
+        )
+        tick_volume = float(cvd.buy_volume + cvd.sell_volume)
+
+        # ── Initialise or update metrics tracker ────────────────────────
+        if current_direction is not None and not metrics_tracker.initialised:
+            metrics_tracker.anchor(
+                ts_ms=ts_ms, price=price,
+                fast_cvd=cvd.fast_cvd,
+                cumulative_buy_volume=cvd.cumulative_buy_volume,
+                cumulative_sell_volume=cvd.cumulative_sell_volume,
+                direction=current_direction,
+                boll_upper=boll.upper, boll_lower=boll.lower,
+                pre_breakout_range=max(cvd.baseline_range_pct, 0.0),
+                pre_breakout_volume=max(cvd.baseline_volume, 0.0),
+            )
+        elif current_direction is not None and metrics_tracker.initialised:
+            if metrics_tracker.direction != current_direction:
+                logger.info(
+                    "TREND_METRICS_DIRECTION_SWITCH | old=%s new=%s price=%.4f ts_ms=%s",
+                    metrics_tracker.direction, current_direction, price, ts_ms,
+                )
+                metrics_tracker.reset()
+                metrics_tracker.anchor(
+                    ts_ms=ts_ms, price=price,
+                    fast_cvd=cvd.fast_cvd,
+                    cumulative_buy_volume=cvd.cumulative_buy_volume,
+                    cumulative_sell_volume=cvd.cumulative_sell_volume,
+                    direction=current_direction,
+                    boll_upper=boll.upper, boll_lower=boll.lower,
+                    pre_breakout_range=max(cvd.baseline_range_pct, 0.0),
+                    pre_breakout_volume=max(cvd.baseline_volume, 0.0),
+                )
+            else:
+                metrics_tracker.update(
+                    ts_ms=ts_ms, price=price,
+                    fast_cvd=cvd.fast_cvd,
+                    cumulative_buy_volume=cvd.cumulative_buy_volume,
+                    cumulative_sell_volume=cvd.cumulative_sell_volume,
+                    boll_upper=boll.upper, boll_middle=boll.middle,
+                    boll_lower=boll.lower,
+                    burst_move_ratio=cvd.burst_move_ratio,
+                    burst_volume_ratio=cvd.burst_volume_ratio,
+                    baseline_range_pct=cvd.baseline_range_pct,
+                    baseline_volume=cvd.baseline_volume,
+                    baseline_volume_rate=baseline_volume_rate,
+                    tick_volume=tick_volume,
+                )
+        elif current_direction is None and metrics_tracker.initialised:
+            metrics_tracker.update(
+                ts_ms=ts_ms, price=price,
+                fast_cvd=cvd.fast_cvd,
+                cumulative_buy_volume=cvd.cumulative_buy_volume,
+                cumulative_sell_volume=cvd.cumulative_sell_volume,
+                boll_upper=boll.upper, boll_middle=boll.middle,
+                boll_lower=boll.lower,
+                burst_move_ratio=cvd.burst_move_ratio,
+                burst_volume_ratio=cvd.burst_volume_ratio,
+                baseline_range_pct=cvd.baseline_range_pct,
+                baseline_volume=cvd.baseline_volume,
+                baseline_volume_rate=baseline_volume_rate,
+                tick_volume=tick_volume,
+            )
 
     def reset_trend_state(self) -> None:
         """Reset all trend breakout internal state."""
