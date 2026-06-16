@@ -20,6 +20,16 @@ from src.strategies.regime.types import (
     RegimeDecisionType,
     TrendState,
 )
+from src.strategies.anchored_orderflow import (
+    AnchoredOrderflowSnapshot,
+    AnchoredOrderflowTracker,
+)
+from src.strategies.reclaim_anchored_divergence import (
+    AnchoredDivergenceConfig,
+    AnchoredDivergenceDecision,
+    evaluate_anchored_divergence,
+)
+from src.strategies.sweep_volume_profile import SweepVolumeProfile
 from src.strategies.tp_lifecycle import is_pre_tp1_lifecycle
 from src.strategies.trend_breakout import TrendBreakoutAssessor, TrendBreakoutDecision
 from src.strategies.trend_breakout_metrics import (
@@ -152,6 +162,17 @@ class BollCvdReclaimStrategyConfig:
     post_entry_sl_cooldown_seconds: int = 1800
     post_entry_sl_cooldown_scope: str = "SIDE"
 
+    # ── Reclaim V2 ────────────────────────────────────────────────────
+    entry_reclaim_v2_enabled: bool = True
+    entry_reclaim_require_anchored_divergence: bool = True
+    # ── Sweep Volume Profile / POC ────────────────────────────────────
+    entry_sweep_profile_enabled: bool = True
+    entry_sweep_profile_bucket_pct: float = 0.0002
+    entry_poc_stop_enabled: bool = True
+    entry_poc_stop_min_tail_pct: float = 0.003
+    entry_poc_stop_buffer_pct: float = 0.001
+    entry_extreme_stop_buffer_pct: float = 0.001
+
     # ── Trend Breakout Entry ────────────────────────────────────────────
     trend_breakout_enabled: bool = False
     trend_middle_trailing_sl_enabled: bool = True
@@ -234,6 +255,23 @@ class BollCvdReclaimStrategyConfig:
         if self.post_entry_sl_cooldown_scope not in {"GLOBAL", "SIDE"}:
             raise RuntimeError(
                 f"POST_ENTRY_SL_COOLDOWN_SCOPE={self.post_entry_sl_cooldown_scope!r} must be GLOBAL or SIDE"
+            )
+        # ── Reclaim V2 validation ──────────────────────────────────────
+        if self.entry_sweep_profile_bucket_pct <= 0:
+            raise RuntimeError(
+                f"ENTRY_SWEEP_PROFILE_BUCKET_PCT={self.entry_sweep_profile_bucket_pct} must be > 0"
+            )
+        if self.entry_poc_stop_min_tail_pct < 0:
+            raise RuntimeError(
+                f"ENTRY_POC_STOP_MIN_TAIL_PCT={self.entry_poc_stop_min_tail_pct} must be >= 0"
+            )
+        if self.entry_poc_stop_buffer_pct < 0:
+            raise RuntimeError(
+                f"ENTRY_POC_STOP_BUFFER_PCT={self.entry_poc_stop_buffer_pct} must be >= 0"
+            )
+        if self.entry_extreme_stop_buffer_pct < 0:
+            raise RuntimeError(
+                f"ENTRY_EXTREME_STOP_BUFFER_PCT={self.entry_extreme_stop_buffer_pct} must be >= 0"
             )
         # ── Trend Breakout validation ────────────────────────────────────
         if self.trend_middle_sl_buffer_pct < 0:
@@ -413,6 +451,15 @@ class BollCvdReclaimStrategyConfig:
             post_entry_sl_cooldown_enabled=_env_bool("POST_ENTRY_SL_COOLDOWN_ENABLED", True),
             post_entry_sl_cooldown_seconds=int(os.getenv("POST_ENTRY_SL_COOLDOWN_SECONDS", "1800")),
             post_entry_sl_cooldown_scope=os.getenv("POST_ENTRY_SL_COOLDOWN_SCOPE", "SIDE").strip().upper(),
+            # ── Reclaim V2 ──────────────────────────────────────────────
+            entry_reclaim_v2_enabled=_env_bool("ENTRY_RECLAIM_V2_ENABLED", True),
+            entry_reclaim_require_anchored_divergence=_env_bool("ENTRY_RECLAIM_REQUIRE_ANCHORED_DIVERGENCE", True),
+            entry_sweep_profile_enabled=_env_bool("ENTRY_SWEEP_PROFILE_ENABLED", True),
+            entry_sweep_profile_bucket_pct=float(os.getenv("ENTRY_SWEEP_PROFILE_BUCKET_PCT", "0.0002")),
+            entry_poc_stop_enabled=_env_bool("ENTRY_POC_STOP_ENABLED", True),
+            entry_poc_stop_min_tail_pct=float(os.getenv("ENTRY_POC_STOP_MIN_TAIL_PCT", "0.003")),
+            entry_poc_stop_buffer_pct=float(os.getenv("ENTRY_POC_STOP_BUFFER_PCT", "0.001")),
+            entry_extreme_stop_buffer_pct=float(os.getenv("ENTRY_EXTREME_STOP_BUFFER_PCT", "0.001")),
             # ── Trend Breakout Entry ────────────────────────────────────
             trend_breakout_enabled=_env_bool("TREND_BREAKOUT_ENABLED", False),
             trend_middle_trailing_sl_enabled=_env_bool("TREND_MIDDLE_TRAILING_SL_ENABLED", True),
@@ -600,6 +647,45 @@ class StrategyPositionState:
     upper_reclaim_cycle_count: int = 0
     lower_reclaim_confirmed_logged: bool = False
     upper_reclaim_confirmed_logged: bool = False
+
+    # ── Reclaim V2: event-anchored cumulative CVD divergence ──────────
+    # LOWER / LONG side
+    lower_outside_observed: bool = False
+    lower_anchor_price: float | None = None
+    lower_anchor_ts_ms: int = 0
+    lower_anchor_cumulative_cvd: float | None = None
+
+    lower_first_extreme_price: float | None = None
+    lower_first_extreme_ts_ms: int = 0
+    lower_first_extreme_anchored_cvd: float | None = None
+
+    lower_previous_extreme_price: float | None = None
+    lower_previous_extreme_ts_ms: int = 0
+    lower_previous_extreme_anchored_cvd: float | None = None
+
+    lower_anchored_divergence_confirmed: bool = False
+    lower_anchored_divergence_ts_ms: int = 0
+
+    lower_sweep_profile: object | None = None  # SweepVolumeProfile
+
+    # UPPER / SHORT side
+    upper_outside_observed: bool = False
+    upper_anchor_price: float | None = None
+    upper_anchor_ts_ms: int = 0
+    upper_anchor_cumulative_cvd: float | None = None
+
+    upper_first_extreme_price: float | None = None
+    upper_first_extreme_ts_ms: int = 0
+    upper_first_extreme_anchored_cvd: float | None = None
+
+    upper_previous_extreme_price: float | None = None
+    upper_previous_extreme_ts_ms: int = 0
+    upper_previous_extreme_anchored_cvd: float | None = None
+
+    upper_anchored_divergence_confirmed: bool = False
+    upper_anchored_divergence_ts_ms: int = 0
+
+    upper_sweep_profile: object | None = None  # SweepVolumeProfile
 
     # ── Post-Entry SL Cooldown state ────────────────────────────────
     post_entry_sl_cooldown_until_ts_ms: int = 0
@@ -799,6 +885,9 @@ class BollCvdReclaimStrategy:
         self.trend_assessor: TrendBreakoutAssessor | None = None
         self.trend_metrics_tracker: TrendBreakoutMetricsTracker | None = None
         self._last_throttled_log_ts_ms: dict[str, int] = {}
+        # ── Reclaim V2 anchored orderflow trackers ─────────────────────
+        self._lower_orderflow = AnchoredOrderflowTracker()
+        self._upper_orderflow = AnchoredOrderflowTracker()
 
     def _log_info_throttled(self, key: str, interval_ms: int, ts_ms: int, message: str, *args) -> None:
         """Log at INFO level at most once per interval_ms for each unique key."""
@@ -987,6 +1076,16 @@ class BollCvdReclaimStrategy:
     def _update_lower_outside(self, price: float, ts_ms: int, boll: BollSnapshot,
                                cvd: CvdSnapshot | None) -> None:
         """Handle a tick where price is below the lower BOLL band."""
+        # ── Reclaim V2 path ─────────────────────────────────────────────
+        if self.config.entry_reclaim_v2_enabled:
+            self._update_lower_outside_v2(price, ts_ms, boll, cvd)
+            self._update_lower_deep_enough(boll)
+            # Still run old absorption/divergence check for logging only
+            if cvd is not None and not self.state.lower_deep_enough:
+                pass  # deep_enough evaluated above; skip redundant
+            return
+
+        # ── Legacy path ─────────────────────────────────────────────────
         new_extreme_detected = False
         if not self.state.lower_armed:
             # ── First arm ──────────────────────────────────────────────
@@ -1019,6 +1118,15 @@ class BollCvdReclaimStrategy:
     def _update_upper_outside(self, price: float, ts_ms: int, boll: BollSnapshot,
                                cvd: CvdSnapshot | None) -> None:
         """Handle a tick where price is above the upper BOLL band."""
+        # ── Reclaim V2 path ─────────────────────────────────────────────
+        if self.config.entry_reclaim_v2_enabled:
+            self._update_upper_outside_v2(price, ts_ms, boll, cvd)
+            self._update_upper_deep_enough(boll)
+            if cvd is not None and not self.state.upper_deep_enough:
+                pass
+            return
+
+        # ── Legacy path ─────────────────────────────────────────────────
         new_extreme_detected = False
         if not self.state.upper_armed:
             # ── First arm ──────────────────────────────────────────────
@@ -1225,7 +1333,15 @@ class BollCvdReclaimStrategy:
             )
 
     def _lower_cvd_structure_ok(self) -> bool:
-        """Check whether lower-side CVD structure is confirmed per mode."""
+        """Check whether lower-side CVD structure is confirmed per mode.
+
+        When Reclaim V2 is enabled, only event-anchored cumulative CVD
+        divergence can pass this gate.  Old absorption / fast-CVD paths
+        are logged but do NOT produce entry intents.
+        """
+        # ── Reclaim V2: anchored divergence only ────────────────────────
+        if self.config.entry_reclaim_v2_enabled:
+            return self.state.lower_anchored_divergence_confirmed
         # If neither divergence nor absorption is enabled, skip CVD structure gate
         if not self.config.entry_cvd_divergence_enabled and not self.config.entry_cvd_absorption_enabled:
             return True
@@ -1238,7 +1354,15 @@ class BollCvdReclaimStrategy:
         return self.state.lower_cvd_divergence_confirmed or self.state.lower_cvd_absorption_confirmed
 
     def _upper_cvd_structure_ok(self) -> bool:
-        """Check whether upper-side CVD structure is confirmed per mode."""
+        """Check whether upper-side CVD structure is confirmed per mode.
+
+        When Reclaim V2 is enabled, only event-anchored cumulative CVD
+        divergence can pass this gate.  Old absorption / fast-CVD paths
+        are logged but do NOT produce entry intents.
+        """
+        # ── Reclaim V2: anchored divergence only ────────────────────────
+        if self.config.entry_reclaim_v2_enabled:
+            return self.state.upper_anchored_divergence_confirmed
         # If neither divergence nor absorption is enabled, skip CVD structure gate
         if not self.config.entry_cvd_divergence_enabled and not self.config.entry_cvd_absorption_enabled:
             return True
@@ -1327,6 +1451,379 @@ class BollCvdReclaimStrategy:
                     "extreme_price=%.4f ts_ms=%s",
                     self.state.upper_reference_fast_cvd, self.state.upper_extreme_fast_cvd, extreme, ts_ms,
                 )
+
+    # ── Reclaim V2 helpers ──────────────────────────────────────────────
+
+    @staticmethod
+    def _cumulative_cvd(cvd: CvdSnapshot) -> float:
+        """Return the cumulative CVD delta (buy - sell volume)."""
+        return float(cvd.cumulative_buy_volume - cvd.cumulative_sell_volume)
+
+    def _select_entry_stop_price(
+        self,
+        *,
+        side: PositionSide,
+        entry_price: float,
+    ) -> tuple[float | None, str]:
+        """Select the entry protective stop-loss price.
+
+        Uses POC-based stop when the extreme is a distant sweep tail;
+        otherwise falls back to the classic extreme-based stop.
+
+        Returns (stop_price | None, mode_str) where mode is one of:
+        POC_OUTWARD, EXTREME_OUTWARD, EXTREME_CLASSIC.
+        """
+        if side == "LONG":
+            extreme = self.state.lower_extreme_price
+            poc = self._lower_poc_price()
+        else:
+            extreme = self.state.upper_extreme_price
+            poc = self._upper_poc_price()
+
+        # ── Classic fallback when extreme is missing ─────────────────────
+        if extreme is None or extreme <= 0 or entry_price <= 0:
+            return None, "MISSING_EXTREME"
+
+        extreme_stop = (
+            extreme * (1.0 - self.config.entry_extreme_stop_buffer_pct)
+            if side == "LONG"
+            else extreme * (1.0 + self.config.entry_extreme_stop_buffer_pct)
+        )
+
+        # ── POC stop candidate ───────────────────────────────────────────
+        if not self.config.entry_poc_stop_enabled or poc is None or poc <= 0:
+            if side == "LONG":
+                sl = extreme * (1.0 - self.config.entry_sl_buffer_pct)
+            else:
+                sl = extreme * (1.0 + self.config.entry_sl_buffer_pct)
+            return sl, "EXTREME_CLASSIC"
+
+        poc_stop = (
+            poc * (1.0 - self.config.entry_poc_stop_buffer_pct)
+            if side == "LONG"
+            else poc * (1.0 + self.config.entry_poc_stop_buffer_pct)
+        )
+
+        # ── Tail distance check ──────────────────────────────────────────
+        if side == "LONG":
+            tail_distance_pct = (poc - extreme) / entry_price
+            use_poc = (
+                tail_distance_pct >= self.config.entry_poc_stop_min_tail_pct
+                and poc_stop < entry_price
+                and poc_stop > extreme_stop
+            )
+        else:
+            tail_distance_pct = (extreme - poc) / entry_price
+            use_poc = (
+                tail_distance_pct >= self.config.entry_poc_stop_min_tail_pct
+                and poc_stop > entry_price
+                and poc_stop < extreme_stop
+            )
+
+        if use_poc:
+            logger.info(
+                "ENTRY_SL_SELECTED | side=%s mode=POC_OUTWARD entry=%.4f poc=%.4f extreme=%.4f "
+                "tail_pct=%.6f sl=%.4f",
+                side, entry_price, poc, extreme, tail_distance_pct, poc_stop,
+            )
+            return poc_stop, "POC_OUTWARD"
+
+        logger.info(
+            "ENTRY_SL_SELECTED | side=%s mode=EXTREME_OUTWARD entry=%.4f poc=%.4f extreme=%.4f "
+            "tail_pct=%.6f sl=%.4f",
+            side, entry_price, poc, extreme, tail_distance_pct, extreme_stop,
+        )
+        return extreme_stop, "EXTREME_OUTWARD"
+
+    def _lower_poc_price(self) -> float | None:
+        """Return the lower sweep profile POC price, or None."""
+        sp = self.state.lower_sweep_profile
+        if sp is None:
+            return None
+        return sp.poc_price()  # type: ignore[union-attr]
+
+    def _upper_poc_price(self) -> float | None:
+        """Return the upper sweep profile POC price, or None."""
+        sp = self.state.upper_sweep_profile
+        if sp is None:
+            return None
+        return sp.poc_price()  # type: ignore[union-attr]
+
+    # ── Reclaim V2 lower-side state machine ──────────────────────────────
+
+    def _update_lower_outside_v2(
+        self, price: float, ts_ms: int, boll: BollSnapshot, cvd: CvdSnapshot | None
+    ) -> None:
+        """Reclaim V2 lower-side (LONG) state machine.
+
+        Uses ``AnchoredOrderflowTracker`` for episode volume/CVD/extreme
+        tracking.  Evaluates anchored CVD divergence when a new lower
+        extreme is detected.
+
+        Phases:
+          anchor DOWN event → record extremes → divergence confirmed → ARMED.
+        """
+        if cvd is None:
+            return
+
+        cum_cvd = self._cumulative_cvd(cvd)
+
+        # ── Phase 1: first outside tick → anchor the tracker ────────────
+        if not self._lower_orderflow.initialised:
+            self._lower_orderflow.anchor(
+                direction="DOWN",
+                ts_ms=ts_ms,
+                price=price,
+                cumulative_cvd=cum_cvd,
+                cumulative_buy_volume=cvd.cumulative_buy_volume,
+                cumulative_sell_volume=cvd.cumulative_sell_volume,
+            )
+            self.state.lower_outside_observed = True
+            self.state.lower_anchor_price = price
+            self.state.lower_anchor_ts_ms = ts_ms
+            self.state.lower_anchor_cumulative_cvd = cum_cvd
+            self._ensure_lower_sweep_profile()
+            self._previous_lower_extreme_count = 0
+            logger.info(
+                "LOWER_OUTSIDE_OBSERVED | price=%.4f lower=%.4f anchor_cum_cvd=%.4f ts_ms=%s",
+                price, boll.lower, cum_cvd, ts_ms,
+            )
+            self._record_sweep_volume("LOWER", price, cvd)
+            return
+
+        # ── Record sweep volume every tick ─────────────────────────────
+        self._record_sweep_volume("LOWER", price, cvd)
+
+        # ── Update orderflow tracker ───────────────────────────────────
+        prev_extreme_count: int = getattr(self, "_previous_lower_extreme_count", 0)
+        snap = self._lower_orderflow.update(
+            ts_ms=ts_ms,
+            price=price,
+            cumulative_cvd=cum_cvd,
+            cumulative_buy_volume=cvd.cumulative_buy_volume,
+            cumulative_sell_volume=cvd.cumulative_sell_volume,
+        )
+        new_extreme_this_tick = snap.new_extreme_count > prev_extreme_count
+        self._previous_lower_extreme_count = snap.new_extreme_count
+
+        # Keep legacy extreme in sync
+        if snap.last_extreme_price > 0:
+            self.state.lower_extreme_price = snap.last_extreme_price
+            self.state.lower_extreme_ts_ms = ts_ms
+
+        # ── Divergence already confirmed — nothing more to do ──────────
+        if self.state.lower_anchored_divergence_confirmed:
+            return
+
+        # ── Phase 2: first extreme — record, do NOT arm ────────────────
+        if self.state.lower_first_extreme_price is None:
+            if snap.new_extreme_count >= 1 and snap.last_extreme_price > 0:
+                self.state.lower_first_extreme_price = snap.last_extreme_price
+                self.state.lower_first_extreme_ts_ms = ts_ms
+                self.state.lower_first_extreme_anchored_cvd = snap.last_extreme_anchored_cvd
+                self.state.lower_previous_extreme_price = snap.last_extreme_price
+                self.state.lower_previous_extreme_ts_ms = ts_ms
+                self.state.lower_previous_extreme_anchored_cvd = snap.last_extreme_anchored_cvd
+                logger.info(
+                    "LOWER_FIRST_EXTREME | price=%.4f anchored_cvd=%.4f ts_ms=%s",
+                    snap.last_extreme_price, snap.last_extreme_anchored_cvd, ts_ms,
+                )
+            return
+
+        # ── Phase 3: new extreme this tick → evaluate divergence ───────
+        if not new_extreme_this_tick:
+            return
+
+        prev_price = self.state.lower_previous_extreme_price
+        prev_cvd = self.state.lower_previous_extreme_anchored_cvd
+
+        decision = evaluate_anchored_divergence(
+            side="LONG",
+            previous_extreme_price=prev_price,
+            previous_anchored_cvd=prev_cvd,
+            current_extreme_price=snap.last_extreme_price,
+            current_anchored_cvd=snap.last_extreme_anchored_cvd,
+        )
+
+        if decision.confirmed:
+            self.state.lower_anchored_divergence_confirmed = True
+            self.state.lower_anchored_divergence_ts_ms = ts_ms
+            self.state.lower_armed = True
+            self.state.lower_armed_ts_ms = ts_ms
+            self.state.lower_first_armed_ts_ms = ts_ms
+            self.state.lower_cvd_divergence_confirmed = True
+            logger.info(
+                "LOWER_ANCHORED_CVD_DIVERGENCE_CONFIRMED | "
+                "prev_price=%.4f prev_cvd=%.4f curr_price=%.4f curr_cvd=%.4f "
+                "cvd_recovery=%.4f price_ext_pct=%.6f ts_ms=%s",
+                prev_price, prev_cvd,
+                snap.last_extreme_price, snap.last_extreme_anchored_cvd,
+                decision.cvd_recovery, decision.price_extension_pct, ts_ms,
+            )
+            logger.info("LOWER_ARMED | reason=anchored_divergence price=%.4f ts_ms=%s", price, ts_ms)
+        else:
+            # Update previous extreme reference for next comparison
+            self.state.lower_previous_extreme_price = snap.last_extreme_price
+            self.state.lower_previous_extreme_ts_ms = ts_ms
+            self.state.lower_previous_extreme_anchored_cvd = snap.last_extreme_anchored_cvd
+            logger.debug(
+                "LOWER_NEW_EXTREME_NO_DIVERGENCE | price=%.4f cum_cvd=%.4f "
+                "reason=%s ts_ms=%s",
+                snap.last_extreme_price, cum_cvd, decision.reason, ts_ms,
+            )
+
+    # ── Reclaim V2 upper-side state machine ──────────────────────────────
+
+    def _update_upper_outside_v2(
+        self, price: float, ts_ms: int, boll: BollSnapshot, cvd: CvdSnapshot | None
+    ) -> None:
+        """Reclaim V2 upper-side (SHORT) state machine.
+
+        Uses ``AnchoredOrderflowTracker`` for episode volume/CVD/extreme
+        tracking.  Evaluates anchored CVD divergence when a new upper
+        extreme is detected.
+
+        Phases:
+          anchor UP event → record extremes → divergence confirmed → ARMED.
+        """
+        if cvd is None:
+            return
+
+        cum_cvd = self._cumulative_cvd(cvd)
+
+        # ── Phase 1: first outside tick → anchor the tracker ────────────
+        if not self._upper_orderflow.initialised:
+            self._upper_orderflow.anchor(
+                direction="UP",
+                ts_ms=ts_ms,
+                price=price,
+                cumulative_cvd=cum_cvd,
+                cumulative_buy_volume=cvd.cumulative_buy_volume,
+                cumulative_sell_volume=cvd.cumulative_sell_volume,
+            )
+            self.state.upper_outside_observed = True
+            self.state.upper_anchor_price = price
+            self.state.upper_anchor_ts_ms = ts_ms
+            self.state.upper_anchor_cumulative_cvd = cum_cvd
+            self._ensure_upper_sweep_profile()
+            self._previous_upper_extreme_count = 0
+            logger.info(
+                "UPPER_OUTSIDE_OBSERVED | price=%.4f upper=%.4f anchor_cum_cvd=%.4f ts_ms=%s",
+                price, boll.upper, cum_cvd, ts_ms,
+            )
+            self._record_sweep_volume("UPPER", price, cvd)
+            return
+
+        # ── Record sweep volume every tick ─────────────────────────────
+        self._record_sweep_volume("UPPER", price, cvd)
+
+        # ── Update orderflow tracker ───────────────────────────────────
+        prev_extreme_count: int = getattr(self, "_previous_upper_extreme_count", 0)
+        snap = self._upper_orderflow.update(
+            ts_ms=ts_ms,
+            price=price,
+            cumulative_cvd=cum_cvd,
+            cumulative_buy_volume=cvd.cumulative_buy_volume,
+            cumulative_sell_volume=cvd.cumulative_sell_volume,
+        )
+        new_extreme_this_tick = snap.new_extreme_count > prev_extreme_count
+        self._previous_upper_extreme_count = snap.new_extreme_count
+
+        if snap.last_extreme_price > 0:
+            self.state.upper_extreme_price = snap.last_extreme_price
+            self.state.upper_extreme_ts_ms = ts_ms
+
+        # ── Divergence already confirmed ───────────────────────────────
+        if self.state.upper_anchored_divergence_confirmed:
+            return
+
+        # ── Phase 2: first extreme ─────────────────────────────────────
+        if self.state.upper_first_extreme_price is None:
+            if snap.new_extreme_count >= 1 and snap.last_extreme_price > 0:
+                self.state.upper_first_extreme_price = snap.last_extreme_price
+                self.state.upper_first_extreme_ts_ms = ts_ms
+                self.state.upper_first_extreme_anchored_cvd = snap.last_extreme_anchored_cvd
+                self.state.upper_previous_extreme_price = snap.last_extreme_price
+                self.state.upper_previous_extreme_ts_ms = ts_ms
+                self.state.upper_previous_extreme_anchored_cvd = snap.last_extreme_anchored_cvd
+                logger.info(
+                    "UPPER_FIRST_EXTREME | price=%.4f anchored_cvd=%.4f ts_ms=%s",
+                    snap.last_extreme_price, snap.last_extreme_anchored_cvd, ts_ms,
+                )
+            return
+
+        # ── Phase 3: new extreme this tick → evaluate divergence ───────
+        if not new_extreme_this_tick:
+            return
+
+        prev_price = self.state.upper_previous_extreme_price
+        prev_cvd = self.state.upper_previous_extreme_anchored_cvd
+
+        decision = evaluate_anchored_divergence(
+            side="SHORT",
+            previous_extreme_price=prev_price,
+            previous_anchored_cvd=prev_cvd,
+            current_extreme_price=snap.last_extreme_price,
+            current_anchored_cvd=snap.last_extreme_anchored_cvd,
+        )
+
+        if decision.confirmed:
+            self.state.upper_anchored_divergence_confirmed = True
+            self.state.upper_anchored_divergence_ts_ms = ts_ms
+            self.state.upper_armed = True
+            self.state.upper_armed_ts_ms = ts_ms
+            self.state.upper_first_armed_ts_ms = ts_ms
+            self.state.upper_cvd_divergence_confirmed = True
+            logger.info(
+                "UPPER_ANCHORED_CVD_DIVERGENCE_CONFIRMED | "
+                "prev_price=%.4f prev_cvd=%.4f curr_price=%.4f curr_cvd=%.4f "
+                "cvd_recovery=%.4f price_ext_pct=%.6f ts_ms=%s",
+                prev_price, prev_cvd,
+                snap.last_extreme_price, snap.last_extreme_anchored_cvd,
+                decision.cvd_recovery, decision.price_extension_pct, ts_ms,
+            )
+            logger.info("UPPER_ARMED | reason=anchored_divergence price=%.4f ts_ms=%s", price, ts_ms)
+        else:
+            self.state.upper_previous_extreme_price = snap.last_extreme_price
+            self.state.upper_previous_extreme_ts_ms = ts_ms
+            self.state.upper_previous_extreme_anchored_cvd = snap.last_extreme_anchored_cvd
+            logger.debug(
+                "UPPER_NEW_EXTREME_NO_DIVERGENCE | price=%.4f cum_cvd=%.4f "
+                "reason=%s ts_ms=%s",
+                snap.last_extreme_price, cum_cvd, decision.reason, ts_ms,
+            )
+
+    # ── Sweep profile helpers ────────────────────────────────────────────
+
+    def _ensure_lower_sweep_profile(self) -> None:
+        if self.state.lower_sweep_profile is None:
+            self.state.lower_sweep_profile = SweepVolumeProfile(
+                bucket_pct=self.config.entry_sweep_profile_bucket_pct,
+            )
+
+    def _ensure_upper_sweep_profile(self) -> None:
+        if self.state.upper_sweep_profile is None:
+            self.state.upper_sweep_profile = SweepVolumeProfile(
+                bucket_pct=self.config.entry_sweep_profile_bucket_pct,
+            )
+
+    def _record_sweep_volume(
+        self, side: str, price: float, cvd: CvdSnapshot
+    ) -> None:
+        """Record tick volume in the sweep volume profile."""
+        if not self.config.entry_sweep_profile_enabled:
+            return
+        volume = max(float(cvd.buy_volume + cvd.sell_volume), 0.0)
+        if volume <= 0:
+            return
+        if side == "LOWER":
+            self._ensure_lower_sweep_profile()
+            sp = self.state.lower_sweep_profile
+        else:
+            self._ensure_upper_sweep_profile()
+            sp = self.state.upper_sweep_profile
+        if sp is not None:
+            sp.add(price, volume)  # type: ignore[union-attr]
 
     def _check_upper_cvd_structure(self, cvd: CvdSnapshot, boll: BollSnapshot, ts_ms: int,
                                     new_extreme_detected: bool = False) -> None:
@@ -1447,6 +1944,25 @@ class BollCvdReclaimStrategy:
         self.state.lower_reclaim_ts_ms = 0
         self.state.lower_reclaim_cycle_count = 0
         self.state.lower_reclaim_confirmed_logged = False
+        # ── Clear Reclaim V2 state ──────────────────────────────────────
+        self.state.lower_outside_observed = False
+        self.state.lower_anchor_price = None
+        self.state.lower_anchor_ts_ms = 0
+        self.state.lower_anchor_cumulative_cvd = None
+        self.state.lower_first_extreme_price = None
+        self.state.lower_first_extreme_ts_ms = 0
+        self.state.lower_first_extreme_anchored_cvd = None
+        self.state.lower_previous_extreme_price = None
+        self.state.lower_previous_extreme_ts_ms = 0
+        self.state.lower_previous_extreme_anchored_cvd = None
+        self.state.lower_anchored_divergence_confirmed = False
+        self.state.lower_anchored_divergence_ts_ms = 0
+        if self.state.lower_sweep_profile is not None:
+            self.state.lower_sweep_profile.reset()  # type: ignore[union-attr]
+            self.state.lower_sweep_profile = None
+        self._lower_orderflow.reset()
+        if hasattr(self, "_previous_lower_extreme_count"):
+            delattr(self, "_previous_lower_extreme_count")
 
     def _reset_upper_armed(self) -> None:
         self.state.upper_armed = False
@@ -1465,6 +1981,25 @@ class BollCvdReclaimStrategy:
         self.state.upper_reclaim_ts_ms = 0
         self.state.upper_reclaim_cycle_count = 0
         self.state.upper_reclaim_confirmed_logged = False
+        # ── Clear Reclaim V2 state ──────────────────────────────────────
+        self.state.upper_outside_observed = False
+        self.state.upper_anchor_price = None
+        self.state.upper_anchor_ts_ms = 0
+        self.state.upper_anchor_cumulative_cvd = None
+        self.state.upper_first_extreme_price = None
+        self.state.upper_first_extreme_ts_ms = 0
+        self.state.upper_first_extreme_anchored_cvd = None
+        self.state.upper_previous_extreme_price = None
+        self.state.upper_previous_extreme_ts_ms = 0
+        self.state.upper_previous_extreme_anchored_cvd = None
+        self.state.upper_anchored_divergence_confirmed = False
+        self.state.upper_anchored_divergence_ts_ms = 0
+        if self.state.upper_sweep_profile is not None:
+            self.state.upper_sweep_profile.reset()  # type: ignore[union-attr]
+            self.state.upper_sweep_profile = None
+        self._upper_orderflow.reset()
+        if hasattr(self, "_previous_upper_extreme_count"):
+            delattr(self, "_previous_upper_extreme_count")
 
     def _long_setup(self, price: float, cvd: CvdSnapshot, boll: BollSnapshot) -> bool:
         if not self.state.lower_armed or self.state.lower_extreme_price is None:
@@ -1635,7 +2170,33 @@ class BollCvdReclaimStrategy:
         return cvd_direction_ok
 
 
-    def _entry_protective_sl_price(self, side: PositionSide) -> float | None:
+    def _entry_protective_sl_price(
+        self, side: PositionSide, *, entry_price: float = 0.0
+    ) -> float | None:
+        """Return the entry protective stop-loss price.
+
+        When Reclaim V2 is enabled, uses the adaptive POC / Extreme
+        selection logic.  Otherwise falls back to the classic extreme *
+        (1 ± buffer) formula.
+
+        ``entry_price`` is used for tail-distance calculation in POC
+        stop selection.  When 0 (e.g. called before entry price is
+        known), the extreme price is used as a proxy.
+        """
+        if self.config.entry_reclaim_v2_enabled and self.config.entry_poc_stop_enabled:
+            _ep = entry_price if entry_price > 0 else (
+                self.state.lower_extreme_price if side == "LONG" and self.state.lower_extreme_price
+                else self.state.upper_extreme_price if side == "SHORT" and self.state.upper_extreme_price
+                else 0.0
+            )
+            if _ep > 0:
+                sl, _mode = self._select_entry_stop_price(
+                    side=side, entry_price=_ep,
+                )
+                if sl is not None:
+                    return sl
+            # Fall through to classic formula when adaptive returns None
+
         if side == "LONG":
             extreme = self.state.lower_extreme_price
             if extreme is None or extreme <= 0:

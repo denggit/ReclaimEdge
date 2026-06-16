@@ -3,11 +3,21 @@
 Maintains cumulative buy/sell volume, CVD extremes, expansion/occupancy
 metrics, new-extreme count, and inside-reclaim detection for a single
 trend breakout episode.  Pure logic — no exchange calls, no I/O.
+
+Uses ``AnchoredOrderflowTracker`` for episode buy/sell volume, anchored
+cumulative CVD, new-extreme tracking, and price-move efficiency.  Trend-
+specific logic (range/volume expansion, sustained volume, outside
+occupancy, inside reclaim) stays here.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+
+from src.strategies.anchored_orderflow import (
+    AnchoredOrderflowSnapshot,
+    AnchoredOrderflowTracker,
+)
 
 
 @dataclass
@@ -33,6 +43,11 @@ class TrendBreakoutMetrics:
     episode_cvd_max: float = 0.0
     episode_cvd_min: float = 0.0
 
+    # ── Anchored orderflow (from shared tracker) ──────────────────────
+    anchored_cvd: float = 0.0
+    last_extreme_price: float = 0.0
+    last_extreme_anchored_cvd: float = 0.0
+
     # ── Internal anchor state ─────────────────────────────────────────
     _anchor_ts_ms: int = 0
     _anchor_cvd: float = 0.0
@@ -40,7 +55,6 @@ class TrendBreakoutMetrics:
     _anchor_cumulative_sell_volume: float = 0.0
     _breakout_direction: str | None = None  # "UP" | "DOWN" | None
     _prev_price: float = 0.0
-    _last_extreme_price: float = 0.0
     _price_outside: bool = False
     _outside_start_ts_ms: int = 0
     _total_outside_ms: int = 0
@@ -63,6 +77,10 @@ class TrendBreakoutMetricsTracker:
     within the last ``volume_persistence_window_seconds``, at least
     ``volume_subwindow_pass_count`` subwindows must have
     ``window_volume_ratio >= volume_subwindow_ratio_min``.
+
+    Episode buy/sell volume, anchored cumulative CVD, new-extreme count,
+    and last-extreme tracking are delegated to the shared
+    ``AnchoredOrderflowTracker``.
     """
 
     def __init__(
@@ -99,6 +117,9 @@ class TrendBreakoutMetricsTracker:
         # ── Volume subwindow accumulator ──────────────────────────────
         # Each entry: (window_start_ts_ms, window_volume, window_volume_ratio)
         self._volume_windows: list[tuple[int, float, float]] = []
+
+        # ── Shared anchored orderflow tracker ─────────────────────────
+        self._orderflow = AnchoredOrderflowTracker()
 
     # ------------------------------------------------------------------
     # Properties
@@ -139,6 +160,18 @@ class TrendBreakoutMetricsTracker:
 
         Call this when a new breakout direction is detected.
         """
+        orderflow_dir = "UP" if direction == "UP" else "DOWN"
+        cumulative_cvd = cumulative_buy_volume - cumulative_sell_volume
+
+        self._orderflow.anchor(
+            direction=orderflow_dir,
+            ts_ms=ts_ms,
+            price=price,
+            cumulative_cvd=cumulative_cvd,
+            cumulative_buy_volume=cumulative_buy_volume,
+            cumulative_sell_volume=cumulative_sell_volume,
+        )
+
         self._m = TrendBreakoutMetrics(
             _anchor_ts_ms=ts_ms,
             _anchor_cvd=fast_cvd,
@@ -146,12 +179,12 @@ class TrendBreakoutMetricsTracker:
             _anchor_cumulative_sell_volume=cumulative_sell_volume,
             _breakout_direction=direction,
             _prev_price=price,
-            _last_extreme_price=price,
             _price_outside=True,
             _outside_start_ts_ms=ts_ms,
             _total_outside_ms=0,
             episode_cvd_max=fast_cvd,
             episode_cvd_min=fast_cvd,
+            last_extreme_price=price,
         )
         self._volume_windows = []
         self._initialised = True
@@ -187,9 +220,25 @@ class TrendBreakoutMetricsTracker:
         m = self._m
         direction = m._breakout_direction
 
-        # ── Episode volume aggregates ──────────────────────────────────
-        m.episode_buy_volume = max(0.0, cumulative_buy_volume - m._anchor_cumulative_buy_volume)
-        m.episode_sell_volume = max(0.0, cumulative_sell_volume - m._anchor_cumulative_sell_volume)
+        # ── Delegated: anchored orderflow snapshot ────────────────────
+        cumulative_cvd = cumulative_buy_volume - cumulative_sell_volume
+        of_snap = self._orderflow.update(
+            ts_ms=ts_ms,
+            price=price,
+            cumulative_cvd=cumulative_cvd,
+            cumulative_buy_volume=cumulative_buy_volume,
+            cumulative_sell_volume=cumulative_sell_volume,
+        )
+
+        # Pull shared metrics from anchored orderflow
+        m.episode_buy_volume = of_snap.buy_volume
+        m.episode_sell_volume = of_snap.sell_volume
+        m.anchored_cvd = of_snap.anchored_cvd
+        m.new_extreme_count = of_snap.new_extreme_count
+        m.last_extreme_price = of_snap.last_extreme_price
+        m.last_extreme_anchored_cvd = of_snap.last_extreme_anchored_cvd
+
+        # ── Episode CVD extremes (fast_cvd concept — kept separate) ──
         m.episode_cvd_max = max(m.episode_cvd_max, fast_cvd)
         m.episode_cvd_min = min(m.episode_cvd_min, fast_cvd)
 
@@ -210,14 +259,6 @@ class TrendBreakoutMetricsTracker:
             # Still inside — update reclaim duration
             if m._inside_start_ts_ms > 0:
                 m.inside_reclaim_seconds = (ts_ms - m._inside_start_ts_ms) / 1000.0
-
-        # ── New extreme tracking ───────────────────────────────────────
-        if direction == "UP" and price > m._last_extreme_price:
-            m.new_extreme_count += 1
-            m._last_extreme_price = price
-        elif direction == "DOWN" and price < m._last_extreme_price:
-            m.new_extreme_count += 1
-            m._last_extreme_price = price
 
         # ── Range expansion (from CvdSnapshot burst_move_ratio) ───────
         if baseline_range_pct > 0:
@@ -319,3 +360,4 @@ class TrendBreakoutMetricsTracker:
         self._m = TrendBreakoutMetrics()
         self._initialised = False
         self._volume_windows = []
+        self._orderflow.reset()

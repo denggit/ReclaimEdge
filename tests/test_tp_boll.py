@@ -123,7 +123,7 @@ def _sizer() -> SimplePositionSizer:
 
 
 def _strategy(**overrides) -> BollCvdReclaimStrategy:
-    cfg = BollCvdReclaimStrategyConfig(**overrides)
+    cfg = BollCvdReclaimStrategyConfig(entry_reclaim_v2_enabled=False, **overrides)
     return BollCvdReclaimStrategy(cfg, _sizer())
 
 

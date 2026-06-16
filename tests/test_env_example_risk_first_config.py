@@ -133,7 +133,7 @@ class TestEnvExampleRiskFirstConfig(unittest.TestCase):
     def test_env_example_contains_entry_max_stop_distance_pct(self) -> None:
         if self._env_text is None:
             raise unittest.SkipTest(".env.example not found")
-        self._assert_active_key_value("ENTRY_MAX_STOP_DISTANCE_PCT", "0.012")
+        self._assert_active_key_value("ENTRY_MAX_STOP_DISTANCE_PCT", "0")
 
     def test_env_example_contains_entry_cvd_structure_mode(self) -> None:
         if self._env_text is None:

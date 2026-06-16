@@ -64,7 +64,7 @@ class FakeCvdSnapshot:
 
 def _make_strategy(**config_overrides):
     """Build a minimal BollCvdReclaimStrategy for log testing."""
-    cfg = BollCvdReclaimStrategyConfig()
+    cfg = BollCvdReclaimStrategyConfig(entry_reclaim_v2_enabled=False)
     for k, v in config_overrides.items():
         setattr(cfg, k, v)
     sizer_cfg = SimplePositionSizerConfig()

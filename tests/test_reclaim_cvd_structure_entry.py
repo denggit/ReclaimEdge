@@ -40,6 +40,7 @@ def _strategy(**overrides) -> BollCvdReclaimStrategy:
         min_outside_pct=0.001,
         entry_min_reward_risk=0.0, entry_fee_slippage_buffer_pct=0.0,
         order_cooldown_seconds=0,
+        entry_reclaim_v2_enabled=False,  # legacy path for structure tests
         entry_cvd_structure_mode="DIVERGENCE_OR_ABSORPTION",
         entry_cvd_divergence_enabled=True,
         entry_cvd_absorption_enabled=True,

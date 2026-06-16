@@ -89,6 +89,7 @@ def _strategy(**overrides) -> BollCvdReclaimStrategy:
         entry_min_reward_risk=0.0,
         entry_fee_slippage_buffer_pct=0.0,
         order_cooldown_seconds=0,
+        entry_reclaim_v2_enabled=False,  # legacy path for cooldown tests
         entry_cvd_divergence_enabled=False,  # disable for cooldown tests
         entry_cvd_absorption_enabled=False,
         entry_reclaim_confirm_seconds=0,  # no wait

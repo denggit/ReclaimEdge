@@ -112,6 +112,7 @@ def _make_strategy(
         entry_min_reward_risk=0.0,
         entry_fee_slippage_buffer_pct=0.0,
         order_cooldown_seconds=0,
+        entry_reclaim_v2_enabled=False,  # legacy path
         entry_cvd_divergence_enabled=False,
         entry_cvd_absorption_enabled=False,
         entry_reclaim_confirm_seconds=0,

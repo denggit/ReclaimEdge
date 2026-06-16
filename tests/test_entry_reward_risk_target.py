@@ -102,6 +102,7 @@ def _make_strategy(*, entry_rr_target: str = "STRUCTURE_MIDDLE",
         tp_min_net_profit_pct=tp_min_net_profit_pct,
         min_outside_pct=min_outside_pct,
         order_cooldown_seconds=0,
+        entry_reclaim_v2_enabled=False,  # legacy path
         entry_reclaim_buffer_pct=0.0,
         entry_cvd_divergence_enabled=False,
         entry_cvd_absorption_enabled=False,
@@ -234,6 +235,7 @@ def test_structure_middle_passes_but_real_tp_is_outer() -> None:
         tp_min_net_profit_pct=0.006,  # 0.6% — middle 0.4% doesn't clear it
         min_outside_pct=0.001,
         order_cooldown_seconds=0,
+        entry_reclaim_v2_enabled=False,  # legacy path
         entry_reclaim_buffer_pct=0.0,
         entry_cvd_divergence_enabled=False,
         entry_cvd_absorption_enabled=False,
