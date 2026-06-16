@@ -20,6 +20,7 @@ import pytest
 
 from src.execution.trader import LiveTradeResult, Trader
 from src.execution.trading_client_port import OrderResult
+from src.strategies.boll_cvd_reclaim_strategy import TradeIntent
 
 
 # ======================================================================
@@ -304,3 +305,138 @@ class TestSpecialIntentsDoNotRouteToPlaceMarketOrder:
         await trader.execute_intent(intent)
 
         assert len(fake.market_calls) == 0
+
+
+# ======================================================================
+# Tests: entry protective SL safety
+# ======================================================================
+
+
+class TestEntryMissingProtectiveSlSafety:
+    """When entry has no entry_protective_sl_price, immediate market exit."""
+
+    @pytest.mark.asyncio
+    async def test_missing_entry_sl_triggers_market_exit(self) -> None:
+        """Intent without entry_protective_sl_price must trigger market exit."""
+        fake = FakeTradingClient()
+        trader = _make_trader(trading_client=fake)
+        # Override: entry SL is not set
+        trader.entry_protective_sl_order_id = None
+        intent = _make_intent(intent_type="OPEN_LONG", side="LONG")
+        # Remove the entry SL price so the safety check triggers
+        intent = TradeIntent(
+            intent_type="OPEN_LONG",
+            side="LONG",
+            price=3000.0,
+            layer_index=1,
+            tp_price=3100.0,
+            reason="test",
+            size=_FakePositionSize(eth_qty=0.1),
+            fast_cvd=0.5,
+            previous_fast_cvd=0.4,
+            buy_ratio=0.6,
+            sell_ratio=0.4,
+            boll_upper=3200.0,
+            boll_middle=3000.0,
+            boll_lower=2800.0,
+            ts_ms=1700000000000,
+            avg_entry_price=3000.0,
+            breakeven_price=3005.0,
+            tp_mode="UPPER",
+            entry_protective_sl_price=None,  # MISSING — triggers safety check
+        )
+
+        # Mock market exit to return ok
+        trader.market_exit_remaining_position_with_retries = AsyncMock(
+            return_value=(True, "market_exit_order_id=exit-safety")
+        )
+
+        result = await trader.execute_intent(intent)
+
+        assert result.ok is False
+        assert result.entry_filled is True
+        assert result.tp_ok is False
+        assert result.protective_sl_ok is False
+        assert "entry_filled_but_missing_entry_protective_sl" in str(result.message)
+        # Must have attempted market exit
+        trader.market_exit_remaining_position_with_retries.assert_called()
+        call_kwargs = trader.market_exit_remaining_position_with_retries.call_args.kwargs
+        assert call_kwargs["context"] == "entry_missing_protective_sl"
+
+    @pytest.mark.asyncio
+    async def test_entry_protective_sl_failed_triggers_market_exit(self) -> None:
+        """When entry SL placement fails, market exit must be called."""
+        fake = FakeTradingClient()
+        trader = _make_trader(trading_client=fake)
+        # Override: SL placement fails
+        trader.place_entry_protective_stop_with_retries = AsyncMock(
+            return_value=(False, None, "sl_placement_failed")
+        )
+        trader.market_exit_remaining_position_with_retries = AsyncMock(
+            return_value=(True, "market_exit_order_id=exit-sl-fail")
+        )
+
+        # Intent with entry SL price (so it passes the missing check)
+        intent = _make_intent(intent_type="OPEN_LONG", side="LONG", eth_qty=0.1)
+
+        result = await trader.execute_intent(intent)
+
+        assert result.ok is False
+        assert result.entry_filled is True
+        assert result.protective_sl_ok is False
+        assert "entry_filled_but_entry_protective_sl_failed" in str(result.message)
+        trader.market_exit_remaining_position_with_retries.assert_called()
+        call_kwargs = trader.market_exit_remaining_position_with_retries.call_args.kwargs
+        assert call_kwargs["context"] == "entry_protective_sl_failed"
+
+    @pytest.mark.asyncio
+    async def test_entry_sl_ok_but_tp_failed_preserves_sl_state(self) -> None:
+        """When entry SL succeeds but TP fails, SL order_id/preserved to avoid naked position."""
+        fake = FakeTradingClient()
+        trader = _make_trader(trading_client=fake)
+        # SL placement ok
+        trader.place_entry_protective_stop_with_retries = AsyncMock(
+            return_value=(True, "entry-sl-ok", "protective_sl_placed")
+        )
+        # TP fails
+        trader.replace_take_profit = AsyncMock(
+            return_value=LiveTradeResult(
+                ok=False,
+                action="OPEN_LONG",
+                order_id="entry-1",
+                tp_order_id=None,
+                contracts="1",
+                tp_price="3100.00",
+                message="tp_failed",
+                entry_filled=True,
+                tp_ok=False,
+                protective_sl_order_id="entry-sl-ok",
+                protective_sl_price="2950.00",
+                protective_sl_ok=True,
+            )
+        )
+
+        intent = _make_intent(intent_type="OPEN_LONG", side="LONG", eth_qty=0.1)
+        result = await trader.execute_intent(intent)
+
+        assert result.ok is False
+        assert result.entry_filled is True
+        assert result.tp_ok is False
+        assert result.protective_sl_ok is True  # SL is still protected
+        assert result.protective_sl_order_id is not None
+        assert "entry_filled_but_tp_failed" in str(result.message)
+
+    @pytest.mark.asyncio
+    async def test_both_sl_and_tp_succeed_returns_full_success(self) -> None:
+        """When both entry SL and TP succeed, ok=True with all state."""
+        fake = FakeTradingClient()
+        trader = _make_trader(trading_client=fake)
+        # Both succeed (default mocks work)
+        intent = _make_intent(intent_type="OPEN_LONG", side="LONG", eth_qty=0.1)
+        result = await trader.execute_intent(intent)
+
+        assert result.ok is True
+        assert result.entry_filled is True
+        assert result.tp_ok is True
+        assert result.protective_sl_ok is True
+        assert result.protective_sl_order_id is not None

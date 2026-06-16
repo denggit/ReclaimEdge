@@ -4,7 +4,7 @@
 @Author     : Zijun Deng
 @Date       : 2026/06/14
 @File       : test_position_reads_trading_client_port.py
-@Description: Tests that MarketExitManager and NearTpExecutionManager
+@Description: Tests that MarketExitManager and ProtectiveStopManager
               position reads route through TradingClientPort.fetch_position()
               instead of trader.fetch_position_snapshot().
 """

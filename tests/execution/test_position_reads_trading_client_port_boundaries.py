@@ -5,7 +5,7 @@
 @Date       : 2026/06/14
 @File       : test_position_reads_trading_client_port_boundaries.py
 @Description: Boundary tests — verify that MarketExitManager and
-              NearTpExecutionManager position reads route through
+              ProtectiveStopManager position reads route through
               TradingClientPort.fetch_position() at the source-code level.
 """
 

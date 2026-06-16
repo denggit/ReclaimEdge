@@ -4,7 +4,7 @@
 @Author     : Zijun Deng
 @Date       : 2026/06/14
 @File       : test_reduce_only_market_exit_trading_client_port.py
-@Description: Tests that reduce-only market exit / near-TP reduce orders
+@Description: Tests that reduce-only market exit orders
               route through TradingClientPort.place_market_order(reduce_only=True)
               instead of direct OKX REST calls.
 """

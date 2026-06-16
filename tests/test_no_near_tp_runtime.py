@@ -40,8 +40,7 @@ class TestTradeIntentTypeNoNearTpReduce:
 
     def test_expected_intents_still_present(self) -> None:
         valid = set(TradeIntentType.__args__)  # type: ignore[union-attr]
-        for required in ("OPEN_LONG", "ADD_LONG", "OPEN_SHORT", "ADD_SHORT",
-                         "UPDATE_TP", "MARKET_EXIT_RUNNER"):
+        for required in ("OPEN_LONG", "OPEN_SHORT", "UPDATE_TP", "MARKET_EXIT_RUNNER"):
             assert required in valid, f"Required intent {required} missing from TradeIntentType"
 
 

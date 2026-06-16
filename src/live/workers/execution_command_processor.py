@@ -727,7 +727,7 @@ class ExecutionCommandProcessor:
         IMPORTANT: Only entry intents (OPEN/ADD) carry ``entry_protective_sl_price``.
         Non-entry intents (UPDATE_TP, MARKET_EXIT_RUNNER) do NOT
         carry this field, so their ``protective_sl_order_id`` (which belongs to
-        a middle-runner / near-TP / three-stage runner protective SL) will never
+        a middle-runner / three-stage runner protective SL) will never
         be written into ``entry_protective_sl_order_id``.
 
         Returns True if state was written, False otherwise.

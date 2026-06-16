@@ -31,6 +31,7 @@ from src.strategies.boll_cvd_reclaim_strategy import (
 def strategy(**config_overrides) -> BollCvdReclaimStrategy:
     config_values = dict(
         entry_rr_target="FINAL_TP",
+        entry_max_stop_distance_pct=0.0,
     )
     config_values.update(config_overrides)
     return BollCvdReclaimStrategy(

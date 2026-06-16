@@ -109,6 +109,41 @@ def test_env_entry_risk_pct_fallback_when_trade_risk_pct_absent() -> None:
         del os.environ["ENTRY_RISK_PCT"]
 
 
+# ── ENTRY_MAX_STOP_DISTANCE_PCT default guard ─────────────────────────
+
+
+def test_entry_max_stop_distance_pct_default_is_0012() -> None:
+    """Default config must use 0.012 (1.2%) as the safety ceiling."""
+    from src.strategies.boll_cvd_reclaim_strategy import BollCvdReclaimStrategyConfig
+
+    cfg = BollCvdReclaimStrategyConfig()
+    assert cfg.entry_max_stop_distance_pct == pytest.approx(0.012)
+
+
+def test_entry_max_stop_distance_pct_env_override() -> None:
+    """ENTRY_MAX_STOP_DISTANCE_PCT=0.02 should override the default 0.012."""
+    from src.strategies.boll_cvd_reclaim_strategy import BollCvdReclaimStrategyConfig
+
+    os.environ["ENTRY_MAX_STOP_DISTANCE_PCT"] = "0.02"
+    try:
+        cfg = BollCvdReclaimStrategyConfig.from_env()
+        assert cfg.entry_max_stop_distance_pct == pytest.approx(0.02)
+    finally:
+        del os.environ["ENTRY_MAX_STOP_DISTANCE_PCT"]
+
+
+def test_entry_max_stop_distance_pct_explicit_zero_disables_guard() -> None:
+    """ENTRY_MAX_STOP_DISTANCE_PCT=0 can still explicitly disable the ceiling."""
+    from src.strategies.boll_cvd_reclaim_strategy import BollCvdReclaimStrategyConfig
+
+    os.environ["ENTRY_MAX_STOP_DISTANCE_PCT"] = "0"
+    try:
+        cfg = BollCvdReclaimStrategyConfig.from_env()
+        assert cfg.entry_max_stop_distance_pct == 0.0
+    finally:
+        del os.environ["ENTRY_MAX_STOP_DISTANCE_PCT"]
+
+
 def test_legacy_margin_sizing_remains_fallback_without_stop() -> None:
     sizer = SimplePositionSizer(
         SimplePositionSizerConfig(

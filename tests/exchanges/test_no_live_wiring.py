@@ -266,6 +266,7 @@ SEMANTIC_MARKET_EXIT_PLACEMENT_TOKENS: list[str] = [
 ALLOWED_SEMANTIC_MARKET_EXIT_PLACEMENT_FILES: set[str] = {
     "src/execution/tp_sl_market_exit_manager.py",
     "tests/test_tp_sl_market_exit_manager_semantic_exit.py",
+    "tests/test_market_exit_manager_generic.py",
     "tests/exchanges/test_no_live_wiring.py",
     "tests/exchanges/okx/test_okx_semantic_order_body_parity.py",
 }

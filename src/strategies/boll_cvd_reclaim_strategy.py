@@ -67,7 +67,7 @@ class BollCvdReclaimStrategyConfig:
     entry_sl_buffer_pct: float = 0.0005
     entry_min_reward_risk: float = 1.0
     entry_fee_slippage_buffer_pct: float = 0.001
-    entry_max_stop_distance_pct: float = 0.0
+    entry_max_stop_distance_pct: float = 0.012
     entry_protective_sl_retry_count: int = 3
     entry_protective_sl_retry_interval_seconds: float = 1.0
     middle_runner_enabled: bool = False
@@ -196,7 +196,7 @@ class BollCvdReclaimStrategyConfig:
             entry_sl_buffer_pct=float(os.getenv("ENTRY_SL_BUFFER_PCT", "0.0005")),
             entry_min_reward_risk=float(os.getenv("ENTRY_MIN_REWARD_RISK", "1.0")),
             entry_fee_slippage_buffer_pct=float(os.getenv("ENTRY_FEE_SLIPPAGE_BUFFER_PCT", "0.001")),
-            entry_max_stop_distance_pct=float(os.getenv("ENTRY_MAX_STOP_DISTANCE_PCT", "0")),
+            entry_max_stop_distance_pct=float(os.getenv("ENTRY_MAX_STOP_DISTANCE_PCT", "0.012")),
             entry_protective_sl_retry_count=int(os.getenv("ENTRY_PROTECTIVE_SL_RETRY_COUNT", "3")),
             entry_protective_sl_retry_interval_seconds=float(os.getenv("ENTRY_PROTECTIVE_SL_RETRY_INTERVAL_SECONDS", "1")),
             middle_runner_enabled=middle_runner_enabled,

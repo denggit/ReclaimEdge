@@ -85,7 +85,7 @@ def _cvd() -> CvdSnapshot:
 
 
 def _strategy(**config_overrides) -> BollCvdReclaimStrategy:
-    config_values = dict(entry_rr_target="FINAL_TP")
+    config_values = dict(entry_rr_target="FINAL_TP", entry_max_stop_distance_pct=0.0)
     config_values.update(config_overrides)
     return BollCvdReclaimStrategy(
         BollCvdReclaimStrategyConfig(**config_values),

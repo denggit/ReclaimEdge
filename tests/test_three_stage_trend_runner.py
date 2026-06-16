@@ -25,6 +25,7 @@ def strategy(**overrides) -> BollCvdReclaimStrategy:
         breakeven_fee_buffer_pct=0.001,
         tp_min_net_profit_pct=0.002,
         entry_rr_target="FINAL_TP",
+        entry_max_stop_distance_pct=0.0,
     )
     values.update(overrides)
     return BollCvdReclaimStrategy(BollCvdReclaimStrategyConfig(**values),
