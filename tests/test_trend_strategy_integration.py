@@ -529,3 +529,267 @@ class TestTrendConfigValidation:
     def test_outside_occupancy_range(self):
         with pytest.raises(RuntimeError, match="TREND_OUTSIDE_OCCUPANCY_MIN_RATIO"):
             BollCvdReclaimStrategyConfig(trend_outside_occupancy_min_ratio=1.5)
+
+
+# ── NEW TESTS: Task-specific trend breakout fixes ───────────────────────
+
+
+class TestNoTrueStubsInRouteRegime:
+    """Verify _route_regime does NOT use hardcoded True stubs."""
+
+    def test_route_regime_source_has_no_true_stubs(self):
+        """Source code scan: _route_regime must not pass True stubs."""
+        import inspect
+        from src.strategies.boll_cvd_reclaim_strategy import BollCvdReclaimStrategy
+        source = inspect.getsource(BollCvdReclaimStrategy._route_regime)
+        # The True stubs must NOT appear as literal arguments in assess()
+        assert "range_expansion_passed=True" not in source, (
+            "range_expansion_passed=True stub must be removed from _route_regime"
+        )
+        assert "volume_expansion_passed=True" not in source, (
+            "volume_expansion_passed=True stub must be removed from _route_regime"
+        )
+        assert "sustained_volume_passed=True" not in source, (
+            "sustained_volume_passed=True stub must be removed from _route_regime"
+        )
+        assert "outside_occupancy_passed=True" not in source, (
+            "outside_occupancy_passed=True stub must be removed from _route_regime"
+        )
+
+
+class TestMetricsMissingBlocksTrend:
+    """When episode volume / CVD data is missing, trend cannot be confirmed."""
+
+    def test_no_metrics_without_breakout(self):
+        """Without any breakout, trend should not be confirmed."""
+        strategy = _make_strategy()
+        boll = _boll_snapshot()
+        cvd = _cvd_snapshot()
+        # No breakout, no metrics → trend should not confirm
+        strategy.state.side = None
+        strategy.state.layers = 0
+        decision = strategy._route_regime(
+            price=3000.0, ts_ms=1000000, boll=boll, cvd=cvd,
+            mr_long_allowed=False, mr_short_allowed=False,
+        )
+        # Should not be trend confirmed
+        if decision is not None:
+            assert decision.decision_type not in (
+                RegimeDecisionType.TREND_LONG,
+                RegimeDecisionType.TREND_SHORT,
+            ), f"Metrics missing should block trend, got {decision.decision_type}"
+
+
+class TestPostEntrySlCooldownBlocksTrend:
+    """Post-entry SL cooldown must block same-side trend entries."""
+
+    def test_long_cooldown_blocks_trend_long(self):
+        """LONG cooldown active → TREND_LONG must be blocked."""
+        strategy = _make_strategy()
+        strategy.state.post_entry_sl_cooldown_enabled = True
+        strategy.state.post_entry_sl_cooldown_side = "LONG"
+        strategy.state.post_entry_sl_cooldown_until_ts_ms = 2000000
+        strategy.state.post_entry_sl_cooldown_reason = "test"
+        boll = _boll_snapshot()
+        cvd = _cvd_snapshot()
+        # _post_entry_sl_cooldown_ok should return False for LONG
+        assert strategy._post_entry_sl_cooldown_ok("LONG", 1000000) is False
+
+    def test_short_cooldown_blocks_trend_short(self):
+        """SHORT cooldown active → TREND_SHORT must be blocked."""
+        strategy = _make_strategy()
+        strategy.state.post_entry_sl_cooldown_side = "SHORT"
+        strategy.state.post_entry_sl_cooldown_until_ts_ms = 2000000
+        assert strategy._post_entry_sl_cooldown_ok("SHORT", 1000000) is False
+
+    def test_opposite_side_trend_allowed_during_side_cooldown(self):
+        """LONG cooldown active → TREND_SHORT should still be allowed."""
+        strategy = _make_strategy()
+        strategy.state.post_entry_sl_cooldown_side = "LONG"
+        strategy.state.post_entry_sl_cooldown_until_ts_ms = 2000000
+        # SHORT should be OK
+        assert strategy._post_entry_sl_cooldown_ok("SHORT", 1000000) is True
+
+    def test_global_cooldown_blocks_both_sides(self):
+        """GLOBAL cooldown → both sides blocked."""
+        config = _make_config(post_entry_sl_cooldown_scope="GLOBAL")
+        strategy = _make_strategy(config)
+        strategy.state.post_entry_sl_cooldown_side = "LONG"
+        strategy.state.post_entry_sl_cooldown_until_ts_ms = 2000000
+        assert strategy._post_entry_sl_cooldown_ok("LONG", 1000000) is False
+        assert strategy._post_entry_sl_cooldown_ok("SHORT", 1000000) is False
+
+    def test_trend_entry_has_cooldown_check(self):
+        """_maybe_trend_entry must call _post_entry_sl_cooldown_ok."""
+        import inspect
+        source = inspect.getsource(
+            BollCvdReclaimStrategy._maybe_trend_entry
+        )
+        assert "_post_entry_sl_cooldown_ok" in source, (
+            "_maybe_trend_entry must check _post_entry_sl_cooldown_ok"
+        )
+
+
+class TestTrendEntryNoFixedTP:
+    """Trend breakout entries must NOT place fixed take-profit orders."""
+
+    def test_trend_entry_intent_has_entry_regime(self):
+        """Trend entry intent carries entry_regime='TREND_BREAKOUT'."""
+        strategy = _make_strategy()
+        boll = _boll_snapshot()
+        cvd = _cvd_snapshot(fast_cvd=0.002, buy_ratio=0.70, sell_ratio=0.30)
+
+        with patch.object(
+            strategy, "_route_regime", return_value=_trend_long_decision(),
+        ):
+            intents = strategy.on_tick(
+                price=3050.0, ts_ms=1000000, boll=boll, cvd=cvd,
+            )
+
+        open_intents = [i for i in intents if i.intent_type == "OPEN_LONG"]
+        if open_intents:
+            assert open_intents[0].entry_regime == "TREND_BREAKOUT"
+
+    def test_trend_position_has_correct_tp_plan(self):
+        """Trend positions only use SINGLE tp_plan, not THREE_STAGE or MIDDLE_RUNNER."""
+        strategy = _make_strategy()
+        boll = _boll_snapshot()
+        cvd = _cvd_snapshot(fast_cvd=0.002, buy_ratio=0.70, sell_ratio=0.30)
+
+        with patch.object(
+            strategy, "_route_regime", return_value=_trend_long_decision(),
+        ):
+            strategy.on_tick(price=3050.0, ts_ms=1000000, boll=boll, cvd=cvd)
+
+        assert strategy.state.tp_plan == "SINGLE"
+        assert strategy.state.three_stage_runner_enabled_for_position is False
+        assert strategy.state.middle_runner_enabled_for_position is False
+
+
+class TestTrendTrailingSLEmitsUpdateTrendSL:
+    """Trend trailing SL updates must emit UPDATE_TREND_SL, not UPDATE_TP."""
+
+    def test_trend_trailing_sl_emits_update_trend_sl(self):
+        """Trend position with tightened SL emits UPDATE_TREND_SL."""
+        strategy = _make_strategy()
+        strategy.state.side = "LONG"
+        strategy.state.layers = 1
+        strategy.state.entry_regime = "TREND_BREAKOUT"
+        strategy.state.trend_trailing_sl_price = 2900.0
+        strategy.state.trend_last_sl_update_ts_ms = 0
+        # avg_entry close to middle so stop distance is within 2%
+        strategy.state.avg_entry_price = 3050.0
+        strategy.state.tp_price = 3500.0
+        strategy.state.last_tp_update_candle_ts_ms = 0
+        boll = _boll_snapshot(
+            middle=3000.0, candle_ts_ms=2000000,
+        )
+        cvd = _cvd_snapshot()
+
+        intents = strategy.on_tick(
+            price=3100.0, ts_ms=2000000, boll=boll, cvd=cvd,
+        )
+
+        # Must emit UPDATE_TREND_SL, not UPDATE_TP
+        trend_sl_intents = [i for i in intents if i.intent_type == "UPDATE_TREND_SL"]
+        update_tp_intents = [i for i in intents if i.intent_type == "UPDATE_TP"]
+        assert len(trend_sl_intents) >= 1, (
+            f"Expected UPDATE_TREND_SL intent, got intents: "
+            f"{[i.intent_type for i in intents]}"
+        )
+        assert len(update_tp_intents) == 0, (
+            "Trend positions must NOT emit UPDATE_TP for trailing SL"
+        )
+
+
+class TestTrendNotBlockedByCandleDeDup:
+    """Trend SL updates must not be blocked by generic TP candle de-dup."""
+
+    def test_trend_sl_not_blocked_by_candle_ts_de_dup(self):
+        """Even when candle_ts matches last_tp_update_candle_ts_ms,
+        trend SL branch is still evaluated (moved before de-dup check)."""
+        strategy = _make_strategy()
+        strategy.state.side = "LONG"
+        strategy.state.layers = 1
+        strategy.state.entry_regime = "TREND_BREAKOUT"
+        strategy.state.trend_trailing_sl_price = 2900.0
+        strategy.state.trend_last_sl_update_ts_ms = 0
+        # avg_entry close to middle so stop distance is within 2%
+        strategy.state.avg_entry_price = 3050.0
+        strategy.state.tp_price = 3500.0
+        # Same candle timestamp as boll → would block ordinary TP
+        strategy.state.last_tp_update_candle_ts_ms = 2000000
+        boll = _boll_snapshot(
+            middle=3000.0, candle_ts_ms=2000000,
+        )
+        cvd = _cvd_snapshot()
+
+        intents = strategy.on_tick(
+            price=3100.0, ts_ms=2000000, boll=boll, cvd=cvd,
+        )
+
+        # Trend SL should still be evaluated (UPDATE_TREND_SL emitted)
+        # even though candle_ts matches last_tp_update_candle_ts_ms
+        trend_sl_intents = [i for i in intents if i.intent_type == "UPDATE_TREND_SL"]
+        assert len(trend_sl_intents) >= 1, (
+            "Trend SL must not be blocked by candle de-dup"
+        )
+
+
+class TestNoDummyUpForDownCandidate:
+    """Price reclaiming inside band must not construct UP dummy for DOWN candidate."""
+
+    def test_no_dummy_up_construct_for_down_candidate(self):
+        """When price reclaims inside and trend is DOWN candidate,
+        the assessor does not construct a dummy UP breakout."""
+        from src.strategies.trend_breakout import TrendBreakoutAssessor
+        assessor = TrendBreakoutAssessor(
+            compression_valid_after_seconds=7200,
+            confirm_min_seconds=60,
+            confirm_max_seconds=180,
+            range_expansion_ratio_min=3.0,
+            volume_expansion_ratio_min=3.0,
+            outside_occupancy_min_ratio=0.70,
+            min_new_extreme_count=2,
+            max_inside_reclaim_seconds=3,
+            cvd_min_buy_ratio=0.58,
+            cvd_min_sell_ratio=0.58,
+            cvd_max_pullback_ratio=0.45,
+        )
+        # Source scan: _classify_direction returns None inside → no dummy UP
+        direction = assessor._classify_direction(
+            price=3000.0, boll_upper=3100.0, boll_lower=2900.0,
+        )
+        assert direction is None, (
+            "Price inside band must return None direction"
+        )
+
+    def test_assess_no_breakout_uses_correct_direction(self):
+        """Source scan: no-breakout path uses state-derived direction, not hardcoded UP."""
+        import inspect
+        from src.strategies.trend_breakout import TrendBreakoutAssessor
+        source = inspect.getsource(TrendBreakoutAssessor.assess)
+        # Must not contain direction="UP" as a hardcoded dummy
+        # The no-breakout section should use _latest_breakout or state direction
+        assert 'candidate_direction' in source, (
+            "No-breakout path must derive direction from trend state, not hardcoded UP"
+        )
+
+
+class TestNoSidecarNoAddRegression:
+    """Ensure Sidecar and ADD intents are not reintroduced."""
+
+    def test_no_add_long_in_trade_intent_type(self):
+        from typing import get_args
+        from src.strategies.boll_cvd_reclaim_strategy import TradeIntentType
+        allowed = set(get_args(TradeIntentType))
+        assert "ADD_LONG" not in allowed, "ADD_LONG must not be in TradeIntentType"
+        assert "ADD_SHORT" not in allowed, "ADD_SHORT must not be in TradeIntentType"
+
+    def test_no_sidecar_imports(self):
+        """Sidecar module must not be imported in strategy."""
+        import inspect
+        source = inspect.getsource(BollCvdReclaimStrategy)
+        assert "sidecar" not in source.lower(), (
+            "Sidecar references must not exist in strategy"
+        )

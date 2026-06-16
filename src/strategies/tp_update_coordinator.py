@@ -80,6 +80,15 @@ class TpUpdateCoordinator:
         if s.state.side is None or s.state.layers <= 0:
             return None
 
+        # ── Trend Breakout trailing SL branch ──────────────────────────
+        # MUST come before candle de-dup so trend SL updates are NOT blocked
+        # by the generic TP candle timestamp check.  Trend SL updates use
+        # TREND_SL_UPDATE_INTERVAL_SECONDS independently.
+        if getattr(s.state, "entry_regime", None) == "TREND_BREAKOUT":
+            return self._maybe_update_trend_trailing_sl(
+                price, ts_ms, boll, cvd, force_reconcile=False,
+            )
+
         trend_runner_needs_initial_orders = (
             s.state.trend_runner_active
             and (s.state.trend_runner_tp_price is None or s.state.trend_runner_sl_price is None)
@@ -100,12 +109,6 @@ class TpUpdateCoordinator:
                 s.state.tp_plan,
                 boll.candle_ts_ms,
                 s.state.last_tp_update_candle_ts_ms,
-            )
-
-        # ── Trend Breakout trailing SL branch ──────────────────────────
-        if getattr(s.state, "entry_regime", None) == "TREND_BREAKOUT":
-            return self._maybe_update_trend_trailing_sl(
-                price, ts_ms, boll, cvd, force_reconcile,
             )
 
         # ── Three-Stage waiting-TP2 branch ────────────────────────────
@@ -955,13 +958,16 @@ class TpUpdateCoordinator:
 
         Only tightens the SL (never loosens).  The TP stays at SINGLE outer.
         SL update frequency is controlled by TREND_SL_UPDATE_INTERVAL_SECONDS.
+
+        Emits UPDATE_TREND_SL (NOT UPDATE_TP) so the execution layer places
+        a new protective SL rather than calling replace_take_profit().
         """
         s = self.strategy
 
         if not s.config.trend_middle_trailing_sl_enabled:
             return None
 
-        # Rate-limit SL updates
+        # Rate-limit SL updates by TREND_SL_UPDATE_INTERVAL_SECONDS
         last_update_ms = int(getattr(s.state, "trend_last_sl_update_ts_ms", 0) or 0)
         update_interval_ms = s.config.trend_sl_update_interval_seconds * 1000
         if not force_reconcile and last_update_ms > 0 and (ts_ms - last_update_ms) < update_interval_ms:
@@ -1001,7 +1007,7 @@ class TpUpdateCoordinator:
                 stop_distance_pct = (new_sl - s.state.avg_entry_price) / s.state.avg_entry_price
             if stop_distance_pct > s.config.trend_max_stop_distance_pct:
                 logger.info(
-                    "TREND_SL_UPDATE_SKIPPED | reason=exceeds_max_stop_distance "
+                    "TREND_TRAILING_SL_UPDATE_SKIPPED | reason=exceeds_max_stop_distance "
                     "side=%s candidate_sl=%.4f stop_distance_pct=%.6f max=%.6f",
                     s.state.side, new_sl, stop_distance_pct, s.config.trend_max_stop_distance_pct,
                 )
@@ -1012,10 +1018,9 @@ class TpUpdateCoordinator:
         s.state.trend_last_sl_update_ts_ms = ts_ms
         s.state.entry_protective_sl_price = new_sl
         s.state.last_tp_update_ts_ms = ts_ms
-        s.state.last_tp_update_candle_ts_ms = boll.candle_ts_ms
 
         logger.warning(
-            "TREND_TRAILING_SL_UPDATED | side=%s old_sl=%s new_sl=%.4f "
+            "TREND_TRAILING_SL_UPDATE_SIGNAL | side=%s old_sl=%s new_sl=%.4f "
             "boll_middle=%.4f buffer_pct=%.6f candle_ts=%s",
             s.state.side,
             f"{old_sl:.4f}" if old_sl is not None else "-",
@@ -1025,11 +1030,12 @@ class TpUpdateCoordinator:
             boll.candle_ts_ms,
         )
 
-        # Emit UPDATE_TP with new SL price
+        # Emit UPDATE_TREND_SL (NOT UPDATE_TP) with new SL price
         size = s.sizer.calculate(price, layer_index=s.state.layers)
-        return s._intent(
-            "UPDATE_TP", s.state.side, price, s.state.layers,
+        intent = s._intent(
+            "UPDATE_TREND_SL", s.state.side, price, s.state.layers,
             s.state.tp_price or price,
             "trend_trailing_sl_tightened",
             size, boll, cvd, ts_ms,
         )
+        return intent

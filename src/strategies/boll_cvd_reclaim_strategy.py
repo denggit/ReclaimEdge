@@ -22,6 +22,9 @@ from src.strategies.regime.types import (
 )
 from src.strategies.tp_lifecycle import is_pre_tp1_lifecycle
 from src.strategies.trend_breakout import TrendBreakoutAssessor, TrendBreakoutDecision
+from src.strategies.trend_breakout_metrics import (
+    TrendBreakoutMetricsTracker,
+)
 from src.strategies.trend_middle_trailing_sl import (
     calculate_trend_middle_sl,
 )
@@ -33,6 +36,7 @@ TradeIntentType = Literal[
     "OPEN_LONG",
     "OPEN_SHORT",
     "UPDATE_TP",
+    "UPDATE_TREND_SL",
     "MARKET_EXIT_RUNNER",
 ]
 PositionSide = Literal["LONG", "SHORT"]
@@ -735,6 +739,7 @@ class BollCvdReclaimStrategy:
         self.state = StrategyPositionState()
         self.regime_router = RegimeRouter()
         self.trend_assessor: TrendBreakoutAssessor | None = None
+        self.trend_metrics_tracker: TrendBreakoutMetricsTracker | None = None
 
     def on_tick(self, price: float, ts_ms: int, boll: BollSnapshot, cvd: CvdSnapshot) -> list[TradeIntent]:
         intents: list[TradeIntent] = []
@@ -1634,6 +1639,20 @@ class BollCvdReclaimStrategy:
             )
         return self.trend_assessor
 
+    def _get_trend_metrics_tracker(self) -> TrendBreakoutMetricsTracker | None:
+        """Lazy-initialise the TrendBreakoutMetricsTracker."""
+        if not self.config.trend_breakout_enabled:
+            return None
+        if self.trend_metrics_tracker is None:
+            self.trend_metrics_tracker = TrendBreakoutMetricsTracker(
+                range_expansion_ratio_min=self.config.trend_range_expansion_ratio_min,
+                volume_expansion_ratio_min=self.config.trend_volume_expansion_ratio_min,
+                outside_occupancy_min_ratio=self.config.trend_outside_occupancy_min_ratio,
+                min_new_extreme_count=self.config.trend_min_new_extreme_count,
+                max_inside_reclaim_seconds=self.config.trend_max_inside_reclaim_seconds,
+            )
+        return self.trend_metrics_tracker
+
     def _route_regime(
         self,
         *,
@@ -1657,6 +1676,10 @@ class BollCvdReclaimStrategy:
         if assessor is None:
             return None
 
+        metrics_tracker = self._get_trend_metrics_tracker()
+        if metrics_tracker is None:
+            return None
+
         # Feed current BOLL band into trend assessor's ring buffer
         assessor.feed_band(BandSnapshot(
             upper=boll.upper,
@@ -1666,7 +1689,78 @@ class BollCvdReclaimStrategy:
             source="closed_or_frozen",
         ))
 
-        # Run trend breakout assessment
+        # ── Compute real trend episode metrics ─────────────────────────
+        direction = assessor._latest_breakout.direction if assessor._latest_breakout else None
+        currently_outside = price > boll.upper or price < boll.lower
+
+        # Initialise or update metrics tracker based on breakout state
+        if direction is not None and not metrics_tracker.initialised:
+            metrics_tracker.anchor(
+                ts_ms=ts_ms,
+                price=price,
+                fast_cvd=cvd.fast_cvd,
+                cumulative_buy_volume=cvd.cumulative_buy_volume,
+                cumulative_sell_volume=cvd.cumulative_sell_volume,
+                direction=direction,
+                boll_upper=boll.upper,
+                boll_lower=boll.lower,
+            )
+        elif direction is not None and metrics_tracker.initialised:
+            band_range = abs(boll.upper - boll.lower)
+            metrics_tracker.update(
+                ts_ms=ts_ms,
+                price=price,
+                fast_cvd=cvd.fast_cvd,
+                cumulative_buy_volume=cvd.cumulative_buy_volume,
+                cumulative_sell_volume=cvd.cumulative_sell_volume,
+                boll_upper=boll.upper,
+                boll_middle=boll.middle,
+                boll_lower=boll.lower,
+                band_range=band_range,
+                tick_volume=float(cvd.size) if cvd.size > 0 else 0.0,
+            )
+        elif direction is None and metrics_tracker.initialised:
+            # Price reclaimed inside — still update metrics for inside tracking
+            band_range = abs(boll.upper - boll.lower)
+            metrics_tracker.update(
+                ts_ms=ts_ms,
+                price=price,
+                fast_cvd=cvd.fast_cvd,
+                cumulative_buy_volume=cvd.cumulative_buy_volume,
+                cumulative_sell_volume=cvd.cumulative_sell_volume,
+                boll_upper=boll.upper,
+                boll_middle=boll.middle,
+                boll_lower=boll.lower,
+                band_range=band_range,
+                tick_volume=float(cvd.size) if cvd.size > 0 else 0.0,
+            )
+
+        # ── Get real metrics (NOT hardcoded True) ──────────────────────
+        m = metrics_tracker.snapshot()
+        episode_buy_volume = m.episode_buy_volume
+        episode_sell_volume = m.episode_sell_volume
+        episode_cvd_max = m.episode_cvd_max
+        episode_cvd_min = m.episode_cvd_min
+
+        # Metrics are considered "missing" when the tracker hasn't been fed
+        # any real data yet (anchored CVD extremes are zero or equal to anchor).
+        metrics_missing = (
+            not metrics_tracker.initialised
+            or (episode_buy_volume == 0.0 and episode_sell_volume == 0.0
+                and episode_cvd_max == episode_cvd_min)
+        )
+
+        if metrics_missing and direction is not None:
+            logger.info(
+                "TREND_METRICS_MISSING | reason=episode_volume_cvd_not_accumulated "
+                "direction=%s price=%.4f ts_ms=%s",
+                direction, price, ts_ms,
+            )
+            # Pass metrics as-is but mark not confirmed — TrendDetector will
+            # not confirm without real CVD data.
+            # Still call assess() so state machine can track candidate/expiry.
+
+        # Run trend breakout assessment with REAL metrics
         trend_decision = assessor.assess(
             price=price,
             ts_ms=ts_ms,
@@ -1676,16 +1770,21 @@ class BollCvdReclaimStrategy:
             fast_cvd=cvd.fast_cvd,
             buy_ratio=cvd.buy_ratio,
             sell_ratio=cvd.sell_ratio,
-            # Expansion / occupancy booleans — the TrendDetector's internal
-            # state machine manages these; for now we pass True to allow the
-            # detector to evaluate CVD confirmation as the primary gate.
-            range_expansion_passed=True,
-            volume_expansion_passed=True,
-            sustained_volume_passed=True,
-            outside_occupancy_passed=True,
+            episode_buy_volume=episode_buy_volume,
+            episode_sell_volume=episode_sell_volume,
+            episode_cvd_max=episode_cvd_max,
+            episode_cvd_min=episode_cvd_min,
+            range_expansion_passed=m.range_expansion_passed,
+            volume_expansion_passed=m.volume_expansion_passed,
+            sustained_volume_passed=m.sustained_volume_passed,
+            outside_occupancy_passed=m.outside_occupancy_passed,
+            new_extreme_count=m.new_extreme_count,
+            inside_reclaim_seconds=m.inside_reclaim_seconds,
+            price_reclaimed_inside=m.price_reclaimed_inside,
         )
 
-        # Build router input
+        # ── Build router input with REAL cooldown state ────────────────
+        cooldown_side: str | None = self.state.post_entry_sl_cooldown_side  # type: ignore[assignment]
         router_input = RouterInput(
             trend_state=trend_decision.trend_state,
             trend_confirmed=trend_decision.is_trend_breakout,
@@ -1706,9 +1805,9 @@ class BollCvdReclaimStrategy:
             trend_blocks_mean_reversion=trend_decision.blocks_mean_reversion,
             mr_long_allowed=mr_long_allowed,
             mr_short_allowed=mr_short_allowed,
-            cooldown_side=None,
-            cooldown_until_ts_ms=0,
-            cooldown_scope="SIDE",
+            cooldown_side=cooldown_side,
+            cooldown_until_ts_ms=self.state.post_entry_sl_cooldown_until_ts_ms,
+            cooldown_scope=self.config.post_entry_sl_cooldown_scope,  # type: ignore[arg-type]
             ts_ms=ts_ms,
         )
 
@@ -1728,6 +1827,18 @@ class BollCvdReclaimStrategy:
         Calculates the trend middle SL, checks max stop distance,
         and delegates to EntryAddFlowCoordinator.open_trend_position().
         """
+        # ── Post-entry SL cooldown gate ─────────────────────────────────
+        if not self._post_entry_sl_cooldown_ok(side, ts_ms):
+            logger.info(
+                "TREND_ENTRY_SKIPPED_POST_ENTRY_SL_COOLDOWN | side=%s "
+                "cooldown_side=%s cooldown_until_ts_ms=%s scope=%s",
+                side,
+                self.state.post_entry_sl_cooldown_side,
+                self.state.post_entry_sl_cooldown_until_ts_ms,
+                self.config.post_entry_sl_cooldown_scope,
+            )
+            return None
+
         # Calculate trend middle SL
         trend_sl = calculate_trend_middle_sl(
             boll_middle=boll.middle,
@@ -1768,6 +1879,8 @@ class BollCvdReclaimStrategy:
         """Reset all trend breakout internal state."""
         if self.trend_assessor is not None:
             self.trend_assessor.reset()
+        if self.trend_metrics_tracker is not None:
+            self.trend_metrics_tracker.reset()
 
     def _intent_factory(self):
         if not hasattr(self, "_strategy_intent_factory"):

@@ -191,24 +191,35 @@ class TrendBreakoutAssessor:
         # 3. If no breakout direction, feed trend detector for stale-candidate
         #    tracking but return early.
         if breakout is None:
-            if self._trend_detector.state in (
+            trend_state = self._trend_detector.state
+            if trend_state in (
                 TrendState.TREND_UP_CANDIDATE,
                 TrendState.TREND_DOWN_CANDIDATE,
                 TrendState.TREND_UP_CONFIRMED,
                 TrendState.TREND_DOWN_CONFIRMED,
             ):
-                # Feed a dummy breakout to allow failure/timeout checks
-                _dummy = self._make_breakout(
-                    direction="UP",
-                    ts_ms=ts_ms,
-                    price=price,
-                    boll_upper=boll_upper,
-                    boll_middle=boll_middle,
-                    boll_lower=boll_lower,
-                    anchor_cvd=fast_cvd,
-                )
+                # Determine the actual trend direction from current state
+                if trend_state in (TrendState.TREND_UP_CANDIDATE, TrendState.TREND_UP_CONFIRMED):
+                    candidate_direction = "UP"
+                else:
+                    candidate_direction = "DOWN"
+
+                # Use _latest_breakout if available (preserves anchor data),
+                # otherwise construct a breakout in the candidate direction.
+                if self._latest_breakout is not None:
+                    _existing = self._latest_breakout
+                else:
+                    _existing = self._make_breakout(
+                        direction=candidate_direction,
+                        ts_ms=ts_ms,
+                        price=price,
+                        boll_upper=boll_upper,
+                        boll_middle=boll_middle,
+                        boll_lower=boll_lower,
+                        anchor_cvd=fast_cvd,
+                    )
                 self._trend_detector.assess(
-                    breakout=_dummy,
+                    breakout=_existing,
                     compression_episode=compression_episode,
                     anchored_cvd=self._latest_cvd_state or self._dummy_cvd(ts_ms, fast_cvd),
                     current_ts_ms=ts_ms,
@@ -218,7 +229,7 @@ class TrendBreakoutAssessor:
                     outside_occupancy_passed=outside_occupancy_passed,
                     new_extreme_count=new_extreme_count,
                     inside_reclaim_seconds=inside_reclaim_seconds,
-                    price_reclaimed_inside=price_reclaimed_inside,
+                    price_reclaimed_inside=True,
                 )
             return TrendBreakoutDecision(
                 is_trend_breakout=False,

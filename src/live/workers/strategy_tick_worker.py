@@ -23,7 +23,7 @@ from src.utils.log import get_logger
 logger = get_logger(__name__)
 
 # Retained for backward-compat references from other modules.
-POSITION_MANAGEMENT_INTENTS = {"UPDATE_TP", "MARKET_EXIT_RUNNER"}
+POSITION_MANAGEMENT_INTENTS = {"UPDATE_TP", "UPDATE_TREND_SL", "MARKET_EXIT_RUNNER"}
 
 # Intents that open or add to a position.
 ENTRY_INTENTS = {"OPEN_LONG", "OPEN_SHORT", "ADD_LONG", "ADD_SHORT"}

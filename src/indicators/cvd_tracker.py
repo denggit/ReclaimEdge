@@ -70,6 +70,8 @@ class CvdSnapshot:
     burst_volume_ratio: float
     up_burst: bool
     down_burst: bool
+    cumulative_buy_volume: float = 0.0
+    cumulative_sell_volume: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,6 +137,8 @@ class CvdTracker:
 
         self._total_cvd: float = 0.0
         self._last_fast_cvd: float = 0.0
+        self._cumulative_buy_volume: float = 0.0
+        self._cumulative_sell_volume: float = 0.0
         self._last_tick_ts_ms: int | None = None
         self._last_snapshot: CvdSnapshot | None = None
         self._last_out_of_order_log_monotonic: float = 0.0
@@ -164,6 +168,8 @@ class CvdTracker:
 
         buy_volume = size if normalized_side == "buy" else 0.0
         sell_volume = size if normalized_side == "sell" else 0.0
+        self._cumulative_buy_volume += buy_volume
+        self._cumulative_sell_volume += sell_volume
         event = Event(
             ts_ms=ts_ms,
             price=price,
@@ -241,6 +247,8 @@ class CvdTracker:
             burst_volume_ratio=burst_volume_ratio,
             up_burst=burst_net_move_pct > 0 and enough_move and enough_volume,
             down_burst=burst_net_move_pct < 0 and enough_move and enough_volume,
+            cumulative_buy_volume=self._cumulative_buy_volume,
+            cumulative_sell_volume=self._cumulative_sell_volume,
         )
         self._last_snapshot = snapshot
         self._record_update_stats(started_monotonic)

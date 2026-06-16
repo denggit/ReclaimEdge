@@ -304,6 +304,11 @@ class Trader:
             return await self.execute_market_exit_runner(intent)
         if intent.intent_type == "UPDATE_TP":
             return await self.replace_take_profit(intent)
+        if intent.intent_type == "UPDATE_TREND_SL":
+            return await self._execute_update_trend_sl(intent)
+
+        # ── OPEN_LONG / OPEN_SHORT ─────────────────────────────────────
+        is_trend_entry = getattr(intent, "entry_regime", None) == "TREND_BREAKOUT"
 
         contracts = self.eth_qty_to_contracts(Decimal(str(intent.size.eth_qty)))
         result = await self.trading_client.place_market_order(
@@ -377,6 +382,31 @@ class Trader:
             )
         entry_sl_order_id = sl_id
 
+        # ── Trend breakout entries: NO fixed TP ────────────────────────
+        if is_trend_entry:
+            logger.warning(
+                "TREND_ENTRY_NO_FIXED_TP | side=%s order_id=%s sl_order_id=%s "
+                "sl_price=%.4f contracts=%s",
+                intent.side, order_id, entry_sl_order_id,
+                float(entry_sl_price) if entry_sl_price is not None else 0.0,
+                self.decimal_to_str(contracts),
+            )
+            return LiveTradeResult(
+                ok=True,
+                action=intent.intent_type,
+                order_id=order_id,
+                tp_order_id=None,
+                contracts=self.decimal_to_str(contracts),
+                tp_price=self.price_to_str(intent.tp_price),
+                message="trend_entry_market_order_placed_and_sl_protected_no_fixed_tp",
+                entry_filled=True,
+                tp_ok=True,
+                protective_sl_order_id=entry_sl_order_id,
+                protective_sl_price=self.price_to_str(float(entry_sl_price)),
+                protective_sl_ok=True,
+            )
+
+        # ── Mean-reversion entries: place fixed TP ─────────────────────
         try:
             tp = await self.replace_take_profit(intent)
             if not tp.ok:
@@ -435,6 +465,121 @@ class Trader:
 
     async def execute_market_exit_runner(self, intent: TradeIntent) -> LiveTradeResult:
         return await self._require_tp_sl_manager().execute_market_exit_runner(intent)
+
+    async def _execute_update_trend_sl(self, intent: TradeIntent) -> LiveTradeResult:
+        """Execute an UPDATE_TREND_SL intent for trend breakout positions.
+
+        Cancels the old entry protective SL and places a new one at the
+        tightened price.  Does NOT call replace_take_profit().
+        On failure, triggers delayed market exit for safety.
+        """
+        entry_sl_price = getattr(intent, "entry_protective_sl_price", None)
+        if entry_sl_price is None or entry_sl_price <= 0:
+            logger.warning(
+                "TREND_TRAILING_SL_UPDATE_FAILED | reason=missing_entry_protective_sl_price "
+                "side=%s", intent.side,
+            )
+            return LiveTradeResult(
+                ok=False,
+                action=intent.intent_type,
+                order_id=None,
+                tp_order_id=None,
+                contracts="0",
+                tp_price=self.price_to_str(intent.tp_price),
+                message="trend_sl_update_failed_missing_sl_price",
+                protective_sl_ok=False,
+            )
+
+        # Cancel old entry protective SL
+        old_sl_id = self.entry_protective_sl_order_id
+        if old_sl_id:
+            try:
+                cancelled = await self.cancel_protective_stop(old_sl_id)
+                logger.warning(
+                    "TREND_TRAILING_SL_CANCELLED_OLD | old_sl_id=%s cancelled=%s",
+                    old_sl_id, cancelled,
+                )
+            except Exception:
+                logger.exception(
+                    "TREND_TRAILING_SL_CANCEL_OLD_FAILED | old_sl_id=%s", old_sl_id,
+                )
+
+        # Get current position contracts
+        try:
+            pos = await self.fetch_position_snapshot()
+            contracts = pos.contracts if pos.contracts > 0 else self.position_contracts
+            if contracts <= 0:
+                contracts = self.position_contracts
+        except Exception:
+            contracts = self.position_contracts
+
+        if contracts <= 0:
+            logger.warning(
+                "TREND_TRAILING_SL_UPDATE_FAILED | reason=zero_position side=%s",
+                intent.side,
+            )
+            return LiveTradeResult(
+                ok=False,
+                action=intent.intent_type,
+                order_id=None,
+                tp_order_id=None,
+                contracts="0",
+                tp_price=self.price_to_str(intent.tp_price),
+                message="trend_sl_update_failed_zero_position",
+                protective_sl_ok=False,
+            )
+
+        # Place new entry protective SL at tightened price
+        sl_ok, sl_id, sl_message = await self.place_entry_protective_stop_with_retries(
+            side=intent.side,
+            contracts=contracts,
+            stop_price=float(entry_sl_price),
+            retry_count=int(os.getenv("ENTRY_PROTECTIVE_SL_RETRY_COUNT", "3")),
+            retry_interval_seconds=float(os.getenv("ENTRY_PROTECTIVE_SL_RETRY_INTERVAL_SECONDS", "1")),
+        )
+
+        if not sl_ok or not sl_id:
+            logger.warning(
+                "TREND_TRAILING_SL_UPDATE_FAILED | reason=place_new_sl_failed "
+                "side=%s message=%s",
+                intent.side, sl_message,
+            )
+            return LiveTradeResult(
+                ok=False,
+                action=intent.intent_type,
+                order_id=None,
+                tp_order_id=None,
+                contracts=self.decimal_to_str(contracts),
+                tp_price=self.price_to_str(intent.tp_price),
+                message=f"trend_sl_update_failed_place_new_sl: {sl_message}",
+                protective_sl_order_id=None,
+                protective_sl_price=self.price_to_str(float(entry_sl_price)),
+                protective_sl_ok=False,
+            )
+
+        # Update tracked SL order ID
+        self.entry_protective_sl_order_id = sl_id
+        logger.warning(
+            "TREND_TRAILING_SL_UPDATE_OK | side=%s new_sl_id=%s new_sl_price=%.4f "
+            "contracts=%s",
+            intent.side, sl_id, float(entry_sl_price),
+            self.decimal_to_str(contracts),
+        )
+
+        return LiveTradeResult(
+            ok=True,
+            action=intent.intent_type,
+            order_id=None,
+            tp_order_id=None,
+            contracts=self.decimal_to_str(contracts),
+            tp_price=self.price_to_str(intent.tp_price),
+            message="trend_trailing_sl_updated",
+            entry_filled=False,
+            tp_ok=True,
+            protective_sl_order_id=sl_id,
+            protective_sl_price=self.price_to_str(float(entry_sl_price)),
+            protective_sl_ok=True,
+        )
 
     async def replace_take_profit(self, intent: TradeIntent) -> LiveTradeResult:
         return await self._require_tp_sl_manager().replace_take_profit(intent)

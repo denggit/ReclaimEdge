@@ -20,6 +20,7 @@ ENTRY_HALT_POSITION_MANAGEMENT_ALLOWED = "ENTRY_HALT_POSITION_MANAGEMENT_ALLOWED
 
 POSITION_MANAGEMENT_INTENTS = frozenset({
     "UPDATE_TP",
+    "UPDATE_TREND_SL",
     "MARKET_EXIT_RUNNER",
 })
 
@@ -71,6 +72,7 @@ _FULL_HALT_REASONS = frozenset({
     "middle_bucket_fast_sl_failed_delayed_market_exit_armed",
     "middle_bucket_fast_sl_invalid_delayed_market_exit_armed",
     "core_tp_place_failed_delayed_market_exit_armed",
+    "trend_sl_update_failed_delayed_market_exit_armed",
 })
 
 

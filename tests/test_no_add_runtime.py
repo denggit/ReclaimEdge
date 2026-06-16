@@ -96,7 +96,7 @@ class TestTradeIntentTypeNoAdd:
 
     def test_trade_intent_type_only_allows_open_update_exit(self) -> None:
         allowed = set(get_args(TradeIntentType))
-        assert allowed == {"OPEN_LONG", "OPEN_SHORT", "UPDATE_TP", "MARKET_EXIT_RUNNER"}, (
+        assert allowed == {"OPEN_LONG", "OPEN_SHORT", "UPDATE_TP", "UPDATE_TREND_SL", "MARKET_EXIT_RUNNER"}, (
             f"Unexpected TradeIntentType members: {allowed}"
         )
 

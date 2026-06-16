@@ -147,7 +147,7 @@ class ExecutionCommandProcessor:
 
         # ── entry cash before ────────────────────────────────────────────
         entry_cash_before = cash_before_position
-        if command.intent.intent_type != "UPDATE_TP" and current_position_id is None:
+        if command.intent.intent_type not in {"UPDATE_TP", "UPDATE_TREND_SL"} and current_position_id is None:
             entry_cash_before = await live_flat_balance.fetch_usdt_cash_balance(self.trader)
 
         # ── stale split add guard ────────────────────────────────────────
@@ -199,16 +199,29 @@ class ExecutionCommandProcessor:
         # ── execute intent ───────────────────────────────────────────────
         result = await self.trader.execute_intent(command.intent)
         if not result.ok:
-            # ── UPDATE_TP failure: arm delayed market exit ──────────────
-            if command.intent.intent_type == "UPDATE_TP":
+            # ── UPDATE_TP / UPDATE_TREND_SL failure: arm delayed market exit ──
+            if command.intent.intent_type in ("UPDATE_TP", "UPDATE_TREND_SL"):
+                _failed_intent_type = command.intent.intent_type
+                _failed_reason = (
+                    "core_tp_place_failed_delayed_market_exit_armed"
+                    if _failed_intent_type == "UPDATE_TP"
+                    else "trend_sl_update_failed_delayed_market_exit_armed"
+                )
+                _failed_source = f"{_failed_intent_type}_FAILED"
+                _failed_context = (
+                    "update_tp_replace_take_profit_failed"
+                    if _failed_intent_type == "UPDATE_TP"
+                    else "update_trend_sl_failed"
+                )
                 # Only arm if not already armed for the same reason (avoid resetting countdown).
                 already_armed_same = (
                     getattr(self.strategy.state, "delayed_market_exit_armed", False)
-                    and getattr(self.strategy.state, "delayed_market_exit_reason", None) == "core_tp_place_failed_delayed_market_exit_armed"
+                    and getattr(self.strategy.state, "delayed_market_exit_reason", None) == _failed_reason
                 )
                 if not already_armed_same:
                     logger.error(
-                        "UPDATE_TP_FAILED | position_id=%s side=%s message=%s delayed_market_exit_armed=true",
+                        "%s_FAILED | position_id=%s side=%s message=%s delayed_market_exit_armed=true",
+                        _failed_intent_type,
                         current_position_id,
                         command.intent.side,
                         getattr(result, "message", ""),
@@ -219,22 +232,22 @@ class ExecutionCommandProcessor:
                             execution_state=self.execution_state,
                             position_id=current_position_id,
                             side=command.intent.side,
-                            reason="core_tp_place_failed_delayed_market_exit_armed",
-                            context="update_tp_replace_take_profit_failed",
-                            source_event="UPDATE_TP_FAILED",
+                            reason=_failed_reason,
+                            context=_failed_context,
+                            source_event=_failed_source,
                             now_ms=command.intent.ts_ms,
                             error=getattr(result, "message", str(result)),
                         )
                     if hasattr(self.journal, "append"):
                         self.journal.append(
-                            "UPDATE_TP_FAILED_DELAYED_MARKET_EXIT_ARMED",
+                            f"{_failed_intent_type}_FAILED_DELAYED_MARKET_EXIT_ARMED",
                             {
                                 "position_id": current_position_id,
                                 "side": command.intent.side,
-                                "intent_type": "UPDATE_TP",
+                                "intent_type": _failed_intent_type,
                                 "message": getattr(result, "message", ""),
                                 "delayed_market_exit_armed": True,
-                                "halt_reason": "core_tp_place_failed_delayed_market_exit_armed",
+                                "halt_reason": _failed_reason,
                                 **arm_payload,
                             },
                             position_id=current_position_id,
@@ -248,23 +261,27 @@ class ExecutionCommandProcessor:
                         )
                     )
                     await self._send_halt_alert(
-                        halt_reason="core_tp_place_failed_delayed_market_exit_armed",
+                        halt_reason=_failed_reason,
                         side=command.intent.side,
                         layer=command.intent.layer_index,
                         manual_intervention_required=True,
                         message=(
                             "UPDATE_TP / replace_take_profit failed. "
                             "Delayed market exit armed (30 min countdown). NO immediate market exit."
+                            if _failed_intent_type == "UPDATE_TP"
+                            else "UPDATE_TREND_SL / trend trailing SL update failed. "
+                            "Delayed market exit armed (30 min countdown). NO immediate market exit."
                         ),
                         extra={
-                            "intent_type": "UPDATE_TP",
+                            "intent_type": _failed_intent_type,
                             "delayed_market_exit_armed": True,
                             "error": getattr(result, "message", str(result)),
                         },
                     )
                 else:
                     logger.warning(
-                        "UPDATE_TP_FAILED_ALREADY_ARMED | position_id=%s side=%s — delayed exit already armed, skipping re-arm",
+                        "%s_FAILED_ALREADY_ARMED | position_id=%s side=%s — delayed exit already armed, skipping re-arm",
+                        _failed_intent_type,
                         current_position_id,
                         command.intent.side,
                     )
@@ -337,6 +354,8 @@ class ExecutionCommandProcessor:
         # ── apply result ─────────────────────────────────────────────────
         if command.intent.intent_type == "UPDATE_TP":
             await self._apply_update_tp_result(command, result)
+        elif command.intent.intent_type == "UPDATE_TREND_SL":
+            await self._apply_update_trend_sl_result(command, result)
         elif command.intent.intent_type == "MARKET_EXIT_RUNNER":
             await self._apply_market_exit_runner_result(command, result)
         else:
@@ -649,6 +668,60 @@ class ExecutionCommandProcessor:
             command.intent.avg_entry_price,
             command.intent.breakeven_price,
             result.tp_order_id,
+        )
+
+    async def _apply_update_trend_sl_result(
+        self,
+        command: live_runtime_types.TradeCommand,
+        result: Any,
+    ) -> None:
+        """Apply UPDATE_TREND_SL result: update entry protective SL state."""
+        async with self.state_lock:
+            current_position_id = self.execution_state.current_position_id
+            cash_before_position = self.execution_state.cash_before_position
+            self.execution_state.last_order_ts_ms = command.intent.ts_ms
+
+            # Update entry protective SL order ID and price from result
+            sl_order_id = getattr(result, "protective_sl_order_id", None)
+            if sl_order_id:
+                self.strategy.state.entry_protective_sl_order_id = sl_order_id
+            sl_price = getattr(command.intent, "entry_protective_sl_price", None)
+            if sl_price is not None:
+                self.strategy.state.entry_protective_sl_price = sl_price
+
+            strategy_state_for_save = copy.deepcopy(self.strategy.state)
+            equity = self.account_snapshot.equity
+
+        if hasattr(self.journal, "append"):
+            self.journal.append(
+                "TREND_TRAILING_SL_UPDATED",
+                {
+                    "side": command.intent.side,
+                    "entry_protective_sl_price": getattr(
+                        command.intent, "entry_protective_sl_price", None
+                    ),
+                    "protective_sl_order_id": sl_order_id,
+                    "boll_middle": command.intent.boll_middle,
+                    "reason": command.intent.reason,
+                },
+                position_id=current_position_id,
+            )
+
+        self.state_store.save(
+            LiveStateStore.from_strategy_state(
+                position_id=current_position_id,
+                symbol=self.trader.symbol,
+                strategy_state=strategy_state_for_save,
+                cash_before_position=cash_before_position,
+            )
+        )
+        logger.warning(
+            "LIVE trend SL update success | side=%s layer=%s "
+            "entry_protective_sl_price=%s sl_order_id=%s",
+            command.intent.side,
+            command.intent.layer_index,
+            getattr(command.intent, "entry_protective_sl_price", None),
+            sl_order_id,
         )
 
     async def _apply_market_exit_runner_result(
