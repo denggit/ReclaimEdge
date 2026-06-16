@@ -810,7 +810,19 @@ class BollCvdReclaimStrategy:
     def on_tick(self, price: float, ts_ms: int, boll: BollSnapshot, cvd: CvdSnapshot) -> list[TradeIntent]:
         intents: list[TradeIntent] = []
 
+        # ── Post-entry SL cooldown blocking (pure predicates, pre-setup) ──
+        long_blocked_by_post_sl = self._post_entry_sl_cooldown_blocks_side("LONG", ts_ms)
+        short_blocked_by_post_sl = self._post_entry_sl_cooldown_blocks_side("SHORT", ts_ms)
+
         self._update_armed_state(price, ts_ms, boll, cvd)
+
+        # Discard same-side setups while post-entry-SL cooldown is active.
+        # Cooldown is not a queue — setups formed during cooldown are dropped.
+        self._discard_cooldown_blocked_setups(
+            long_blocked=long_blocked_by_post_sl,
+            short_blocked=short_blocked_by_post_sl,
+            ts_ms=ts_ms,
+        )
 
         runner_exit_intent = self._maybe_trend_runner_market_exit(price, ts_ms, boll, cvd)
         if runner_exit_intent is not None:
@@ -839,11 +851,11 @@ class BollCvdReclaimStrategy:
 
         # MR setup gates (side effects for reclaim state machine)
         long_setup_ok = (
-            self._post_entry_sl_cooldown_ok("LONG", ts_ms)
+            not long_blocked_by_post_sl
             and self._long_setup(price, cvd, boll)
         )
         short_setup_ok = (
-            self._post_entry_sl_cooldown_ok("SHORT", ts_ms)
+            not short_blocked_by_post_sl
             and self._short_setup(price, cvd, boll)
         )
 
@@ -1954,22 +1966,8 @@ class BollCvdReclaimStrategy:
         and delegates to EntryAddFlowCoordinator.open_trend_position().
         """
         # ── Post-entry SL cooldown gate ─────────────────────────────────
-        if not self._post_entry_sl_cooldown_ok(side, ts_ms):
-            self._log_info_throttled(
-                "TREND_ENTRY_SKIPPED_POST_ENTRY_SL_COOLDOWN:"
-                f"{side}:"
-                f"{self.state.post_entry_sl_cooldown_side}:"
-                f"{self.state.post_entry_sl_cooldown_until_ts_ms}:"
-                f"{self.config.post_entry_sl_cooldown_scope}",
-                60_000,
-                ts_ms,
-                "TREND_ENTRY_SKIPPED_POST_ENTRY_SL_COOLDOWN | side=%s "
-                "cooldown_side=%s cooldown_until_ts_ms=%s scope=%s",
-                side,
-                self.state.post_entry_sl_cooldown_side,
-                self.state.post_entry_sl_cooldown_until_ts_ms,
-                self.config.post_entry_sl_cooldown_scope,
-            )
+        if self._post_entry_sl_cooldown_blocks_side(side, ts_ms):
+            self._log_post_entry_sl_cooldown_discard(side=side, ts_ms=ts_ms)
             return None
 
         # Calculate trend middle SL
@@ -3853,20 +3851,22 @@ class BollCvdReclaimStrategy:
     def _cooldown_ok(self, ts_ms: int) -> bool:
         return ts_ms - self.state.last_order_ts_ms >= self.config.order_cooldown_seconds * 1000
 
-    def _post_entry_sl_cooldown_ok(self, side: PositionSide, ts_ms: int) -> bool:
-        """Check whether post-entry-SL cooldown allows a new entry.
+    def _post_entry_sl_cooldown_blocks_side(self, side: PositionSide, ts_ms: int) -> bool:
+        """Return True when post-entry-SL cooldown blocks this entry side.
 
-        Returns True if entry is allowed, False if blocked by cooldown.
+        Pure predicate: no active-state logging.
+        It may clear expired cooldown once.
         """
         if not self.config.post_entry_sl_cooldown_enabled:
-            return True
-        if self.state.post_entry_sl_cooldown_until_ts_ms <= 0:
-            return True
-        if ts_ms >= self.state.post_entry_sl_cooldown_until_ts_ms:
-            remaining_ms = max(self.state.post_entry_sl_cooldown_until_ts_ms - ts_ms, 0)
+            return False
+        until_ts_ms = int(self.state.post_entry_sl_cooldown_until_ts_ms or 0)
+        if until_ts_ms <= 0:
+            return False
+
+        if ts_ms >= until_ts_ms:
             logger.info(
                 "POST_ENTRY_SL_COOLDOWN_EXPIRED | until_ts_ms=%s ts_ms=%s side=%s reason=%s",
-                self.state.post_entry_sl_cooldown_until_ts_ms,
+                until_ts_ms,
                 ts_ms,
                 self.state.post_entry_sl_cooldown_side,
                 self.state.post_entry_sl_cooldown_reason,
@@ -3874,31 +3874,65 @@ class BollCvdReclaimStrategy:
             self.state.post_entry_sl_cooldown_until_ts_ms = 0
             self.state.post_entry_sl_cooldown_side = None
             self.state.post_entry_sl_cooldown_reason = None
-            return True
-
-        # Cooldown is active
-        scope = self.config.post_entry_sl_cooldown_scope
-        if scope == "GLOBAL" or (scope == "SIDE" and side == self.state.post_entry_sl_cooldown_side):
-            remaining_ms = max(self.state.post_entry_sl_cooldown_until_ts_ms - ts_ms, 0)
-            reason = self.state.post_entry_sl_cooldown_reason or ""
-            self._log_info_throttled(
-                "POST_ENTRY_SL_COOLDOWN_ACTIVE:"
-                f"{side}:"
-                f"{scope}:"
-                f"{self.state.post_entry_sl_cooldown_until_ts_ms}:"
-                f"{reason}",
-                60_000,
-                ts_ms,
-                "POST_ENTRY_SL_COOLDOWN_ACTIVE | side=%s scope=%s "
-                "until_ts_ms=%s remaining_ms=%s reason=%s",
-                side,
-                scope,
-                self.state.post_entry_sl_cooldown_until_ts_ms,
-                remaining_ms,
-                reason,
-            )
             return False
-        return True
+
+        scope = self.config.post_entry_sl_cooldown_scope
+        if scope == "GLOBAL":
+            return True
+        if scope == "SIDE" and side == self.state.post_entry_sl_cooldown_side:
+            return True
+        return False
+
+    def _post_entry_sl_cooldown_ok(self, side: PositionSide, ts_ms: int) -> bool:
+        """Check whether post-entry-SL cooldown allows a new entry.
+
+        Thin predicate wrapper — no active-state logging.
+        Returns True if entry is allowed, False if blocked by cooldown.
+        """
+        return not self._post_entry_sl_cooldown_blocks_side(side, ts_ms)
+
+    def _log_post_entry_sl_cooldown_discard(self, *, side: PositionSide, ts_ms: int) -> None:
+        """Throttled log for setup discard due to post-entry-SL cooldown."""
+        until_ts_ms = int(self.state.post_entry_sl_cooldown_until_ts_ms or 0)
+        reason = self.state.post_entry_sl_cooldown_reason or ""
+        scope = self.config.post_entry_sl_cooldown_scope
+        cooldown_side = self.state.post_entry_sl_cooldown_side or ""
+        remaining_ms = max(until_ts_ms - ts_ms, 0)
+
+        self._log_info_throttled(
+            "POST_ENTRY_SL_COOLDOWN_SETUP_DISCARDED:"
+            f"{side}:{scope}:{cooldown_side}:{until_ts_ms}:{reason}",
+            60_000,
+            ts_ms,
+            "POST_ENTRY_SL_COOLDOWN_SETUP_DISCARDED | side=%s scope=%s "
+            "cooldown_side=%s until_ts_ms=%s remaining_ms=%s reason=%s",
+            side,
+            scope,
+            cooldown_side,
+            until_ts_ms,
+            remaining_ms,
+            reason,
+        )
+
+    def _discard_cooldown_blocked_setups(
+        self,
+        *,
+        long_blocked: bool,
+        short_blocked: bool,
+        ts_ms: int,
+    ) -> None:
+        """Discard same-side MR setups while post-entry-SL cooldown is active.
+
+        LONG setup maps to lower-side reclaim state.
+        SHORT setup maps to upper-side reclaim state.
+        """
+        if long_blocked and self.state.lower_armed:
+            self._log_post_entry_sl_cooldown_discard(side="LONG", ts_ms=ts_ms)
+            self._reset_lower_armed()
+
+        if short_blocked and self.state.upper_armed:
+            self._log_post_entry_sl_cooldown_discard(side="SHORT", ts_ms=ts_ms)
+            self._reset_upper_armed()
 
     def arm_post_entry_sl_cooldown(self, ts_ms: int, side: str, reason: str) -> None:
         """Arm post-entry-SL cooldown after an initial entry protective SL exit."""

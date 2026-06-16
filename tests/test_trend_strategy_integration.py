@@ -620,13 +620,13 @@ class TestPostEntrySlCooldownBlocksTrend:
         assert strategy._post_entry_sl_cooldown_ok("SHORT", 1000000) is False
 
     def test_trend_entry_has_cooldown_check(self):
-        """_maybe_trend_entry must call _post_entry_sl_cooldown_ok."""
+        """_maybe_trend_entry must call _post_entry_sl_cooldown_blocks_side."""
         import inspect
         source = inspect.getsource(
             BollCvdReclaimStrategy._maybe_trend_entry
         )
-        assert "_post_entry_sl_cooldown_ok" in source, (
-            "_maybe_trend_entry must check _post_entry_sl_cooldown_ok"
+        assert "_post_entry_sl_cooldown_blocks_side" in source, (
+            "_maybe_trend_entry must check _post_entry_sl_cooldown_blocks_side"
         )
 
 

@@ -299,10 +299,9 @@ def test_reset_armed_does_not_clear_cooldown() -> None:
     ts_now = 100_000
     strat.arm_post_entry_sl_cooldown(ts_now, "LONG", "entry_protective_sl_flat")
 
-    # Arm and then reset lower
-    boll = _boll()
-    price1 = 1900 * 0.9985
-    strat.on_tick(price1, 1000, boll, _cvd(ts_ms=1000, price=price1))
+    # Directly arm lower setup (don't use on_tick — cooldown would discard it)
+    strat.state.lower_armed = True
+    strat.state.lower_extreme_price = 1897.0
     assert strat.state.lower_armed is True
     strat._reset_lower_armed()
     assert strat.state.lower_armed is False

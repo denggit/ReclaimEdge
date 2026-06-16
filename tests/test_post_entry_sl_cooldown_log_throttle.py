@@ -1,11 +1,10 @@
-"""Tests for post-entry SL cooldown log throttling.
+"""Tests for post-entry SL cooldown gate purity and log throttling.
 
 Covers:
-1. POST_ENTRY_SL_COOLDOWN_ACTIVE — throttled to 60s per unique key
-2. POST_ENTRY_SL_COOLDOWN_ACTIVE — allows re-log after 60s
-3. Different side/reason/until use different throttle keys (no cross-suppression)
-4. _log_info_throttled prints first call even with small ts_ms
-5. TREND_ENTRY_SKIPPED_POST_ENTRY_SL_COOLDOWN — throttled to 60s per unique key
+1. _post_entry_sl_cooldown_ok is a pure gate — no ACTIVE logging
+2. _log_info_throttled prints first call even with small ts_ms
+3. Cooldown gate return values are correct
+4. Different keys don't cross-suppress in throttle helper
 """
 
 from __future__ import annotations
@@ -45,12 +44,12 @@ def _arm_cooldown(
 
 
 # ======================================================================
-# 1. POST_ENTRY_SL_COOLDOWN_ACTIVE throttling — same key only one log per 60s
+# 1. _post_entry_sl_cooldown_ok is a pure gate — no ACTIVE logging
 # ======================================================================
 
 
-def test_cooldown_active_throttled_same_key_one_log_per_60s(caplog):
-    """Same side/scope/until/reason should only log ACTIVE once within 60s."""
+def test_cooldown_ok_is_pure_gate_no_active_log(caplog):
+    """_post_entry_sl_cooldown_ok must be a pure predicate — no ACTIVE logging."""
     strategy = _make_strategy(
         post_entry_sl_cooldown_enabled=True,
         post_entry_sl_cooldown_seconds=1800,
@@ -58,25 +57,23 @@ def test_cooldown_active_throttled_same_key_one_log_per_60s(caplog):
     )
     caplog.set_level(logging.INFO)
 
-    # Arm cooldown at ts_ms=100000
     _arm_cooldown(strategy, ts_ms=100_000, side="LONG", reason="negative_flat_before_partial_tp")
 
-    # Call 100 times within 60s window
+    # Call 100 times — gate must return correct values but never log ACTIVE
     for i in range(100):
         result = strategy._post_entry_sl_cooldown_ok("LONG", 100_000 + i)
-        # Return value must always be False (cooldown active)
         assert result is False, f"Iteration {i}: expected False, got {result}"
 
     active_count = sum(
         1 for r in caplog.records if "POST_ENTRY_SL_COOLDOWN_ACTIVE" in r.getMessage()
     )
-    assert active_count == 1, (
-        f"Same key should log ACTIVE once in 60s window, got {active_count}"
+    assert active_count == 0, (
+        f"_post_entry_sl_cooldown_ok must not log ACTIVE, got {active_count}"
     )
 
 
-def test_cooldown_active_global_scope_throttled(caplog):
-    """GLOBAL scope cooldown ACTIVE log should also be throttled."""
+def test_cooldown_ok_global_pure_gate_no_active_log(caplog):
+    """GLOBAL scope gate must also be pure — no ACTIVE logging."""
     strategy = _make_strategy(
         post_entry_sl_cooldown_enabled=True,
         post_entry_sl_cooldown_seconds=1800,
@@ -86,146 +83,55 @@ def test_cooldown_active_global_scope_throttled(caplog):
 
     _arm_cooldown(strategy, ts_ms=100_000, side="LONG", reason="entry_protective_sl_flat")
 
-    # GLOBAL blocks both sides — call both sides multiple times
     for i in range(50):
         result_l = strategy._post_entry_sl_cooldown_ok("LONG", 100_000 + i)
         result_s = strategy._post_entry_sl_cooldown_ok("SHORT", 100_000 + i)
         assert result_l is False
         assert result_s is False
 
-    # LONG and SHORT have different keys → each should log once
     active_count = sum(
         1 for r in caplog.records if "POST_ENTRY_SL_COOLDOWN_ACTIVE" in r.getMessage()
     )
-    assert active_count == 2, (
-        f"GLOBAL: LONG and SHORT are different keys, expected 2 ACTIVE logs, got {active_count}"
+    assert active_count == 0, (
+        f"GLOBAL gate must not log ACTIVE, got {active_count}"
     )
 
 
 # ======================================================================
-# 2. POST_ENTRY_SL_COOLDOWN_ACTIVE — allows re-log after 60s
+# 2. blocks_side correctly distinguishes sides
 # ======================================================================
 
 
-def test_cooldown_active_allows_re_log_after_60s(caplog):
-    """Same key should log ACTIVE again after 60s interval."""
+def test_blocks_side_distinguishes_sides():
+    """SIDE scope: blocks_side returns True only for matching side."""
     strategy = _make_strategy(
         post_entry_sl_cooldown_enabled=True,
         post_entry_sl_cooldown_seconds=1800,
         post_entry_sl_cooldown_scope="SIDE",
     )
-    caplog.set_level(logging.INFO)
-
-    _arm_cooldown(strategy, ts_ms=100_000, side="LONG", reason="negative_flat_before_partial_tp")
-
-    # First call at t=10000 (within cooldown)
-    strategy._post_entry_sl_cooldown_ok("LONG", 10_000)
-    # Second call at t=70001 (60s + 1ms after first)
-    strategy._post_entry_sl_cooldown_ok("LONG", 70_001)
-
-    active_count = sum(
-        1 for r in caplog.records if "POST_ENTRY_SL_COOLDOWN_ACTIVE" in r.getMessage()
-    )
-    assert active_count == 2, (
-        f"Should log ACTIVE again after 60s interval, got {active_count}"
-    )
-
-
-# ======================================================================
-# 3. Different keys don't cross-suppress
-# ======================================================================
-
-
-def test_cooldown_active_different_side_independent_keys(caplog):
-    """LONG and SHORT cooldown ACTIVE logs use different keys — no cross-suppression."""
-    strategy = _make_strategy(
-        post_entry_sl_cooldown_enabled=True,
-        post_entry_sl_cooldown_seconds=1800,
-        post_entry_sl_cooldown_scope="SIDE",
-    )
-    caplog.set_level(logging.INFO)
-
-    # Arm LONG cooldown, test both sides
     _arm_cooldown(strategy, ts_ms=100_000, side="LONG", reason="entry_protective_sl_flat")
 
-    # LONG is blocked (SIDE scope, same side)
-    result_l = strategy._post_entry_sl_cooldown_ok("LONG", 100_001)
-    assert result_l is False
-
-    # SHORT is not blocked (SIDE scope, opposite side) — should not log ACTIVE
-    result_s = strategy._post_entry_sl_cooldown_ok("SHORT", 100_001)
-    assert result_s is True  # Allowed
-
-    active_count = sum(
-        1 for r in caplog.records if "POST_ENTRY_SL_COOLDOWN_ACTIVE" in r.getMessage()
-    )
-    assert active_count == 1, (
-        f"Only LONG should trigger ACTIVE, got {active_count}"
-    )
+    # LONG is blocked (same side)
+    assert strategy._post_entry_sl_cooldown_blocks_side("LONG", 100_001) is True
+    # SHORT is not blocked (opposite side, SIDE scope)
+    assert strategy._post_entry_sl_cooldown_blocks_side("SHORT", 100_001) is False
 
 
-def test_cooldown_active_different_until_ts_ms_independent_keys(caplog):
-    """Different until_ts_ms values produce different keys — each logs independently."""
-    strategy1 = _make_strategy(
+def test_blocks_side_global_blocks_both():
+    """GLOBAL scope: blocks_side returns True for both sides."""
+    strategy = _make_strategy(
         post_entry_sl_cooldown_enabled=True,
         post_entry_sl_cooldown_seconds=1800,
-        post_entry_sl_cooldown_scope="SIDE",
+        post_entry_sl_cooldown_scope="GLOBAL",
     )
-    strategy2 = _make_strategy(
-        post_entry_sl_cooldown_enabled=True,
-        post_entry_sl_cooldown_seconds=3600,  # different cooldown → different until_ts_ms
-        post_entry_sl_cooldown_scope="SIDE",
-    )
-    caplog.set_level(logging.INFO)
+    _arm_cooldown(strategy, ts_ms=100_000, side="LONG", reason="entry_protective_sl_flat")
 
-    # Arm at same ts, different durations → different until_ts_ms
-    _arm_cooldown(strategy1, ts_ms=100_000, side="LONG", reason="entry_protective_sl_flat")
-    _arm_cooldown(strategy2, ts_ms=100_000, side="LONG", reason="entry_protective_sl_flat")
-
-    # Both strategies have different until_ts_ms → different keys → each logs
-    strategy1._post_entry_sl_cooldown_ok("LONG", 100_001)
-    strategy2._post_entry_sl_cooldown_ok("LONG", 100_001)
-
-    active_count = sum(
-        1 for r in caplog.records if "POST_ENTRY_SL_COOLDOWN_ACTIVE" in r.getMessage()
-    )
-    # Two different strategies with different until_ts_ms → 2 ACTIVE logs
-    assert active_count == 2, (
-        f"Different until_ts_ms should log independently, got {active_count}"
-    )
-
-
-def test_cooldown_active_different_reason_independent_keys(caplog):
-    """Different reason values produce different keys — each logs independently."""
-    strategy1 = _make_strategy(
-        post_entry_sl_cooldown_enabled=True,
-        post_entry_sl_cooldown_seconds=1800,
-        post_entry_sl_cooldown_scope="SIDE",
-    )
-    strategy2 = _make_strategy(
-        post_entry_sl_cooldown_enabled=True,
-        post_entry_sl_cooldown_seconds=1800,
-        post_entry_sl_cooldown_scope="SIDE",
-    )
-    caplog.set_level(logging.INFO)
-
-    _arm_cooldown(strategy1, ts_ms=100_000, side="LONG", reason="entry_protective_sl_flat")
-    _arm_cooldown(strategy2, ts_ms=100_000, side="LONG", reason="negative_flat_before_partial_tp")
-
-    strategy1._post_entry_sl_cooldown_ok("LONG", 100_001)
-    strategy2._post_entry_sl_cooldown_ok("LONG", 100_001)
-
-    active_count = sum(
-        1 for r in caplog.records if "POST_ENTRY_SL_COOLDOWN_ACTIVE" in r.getMessage()
-    )
-    # Different reasons → different keys → 2 ACTIVE logs
-    assert active_count == 2, (
-        f"Different reasons should log independently, got {active_count}"
-    )
+    assert strategy._post_entry_sl_cooldown_blocks_side("LONG", 100_001) is True
+    assert strategy._post_entry_sl_cooldown_blocks_side("SHORT", 100_001) is True
 
 
 # ======================================================================
-# 4. _log_info_throttled prints first call even with small ts_ms
+# 3. _log_info_throttled prints first call even with small ts_ms
 # ======================================================================
 
 
@@ -259,58 +165,59 @@ def test_log_info_throttled_first_call_zero_ts_ms(caplog):
     )
 
 
-# ======================================================================
-# 5. TREND_ENTRY_SKIPPED_POST_ENTRY_SL_COOLDOWN throttling
-# ======================================================================
-
-
-def test_trend_entry_skipped_log_throttled(caplog):
-    """TREND_ENTRY_SKIPPED_POST_ENTRY_SL_COOLDOWN should be throttled to 60s."""
-    strategy = _make_strategy(
-        post_entry_sl_cooldown_enabled=True,
-        post_entry_sl_cooldown_seconds=1800,
-        post_entry_sl_cooldown_scope="SIDE",
-    )
+def test_log_info_throttled_limits_same_key(caplog):
+    """Same key within interval_ms only logs once."""
+    strategy = _make_strategy()
     caplog.set_level(logging.INFO)
 
-    _arm_cooldown(strategy, ts_ms=100_000, side="LONG", reason="entry_protective_sl_flat")
-
-    # _post_entry_sl_cooldown_ok returns False → simulates what _maybe_trend_entry sees
-    # But _maybe_trend_entry has its own throttled log.
-    # We simulate the same pattern: call _post_entry_sl_cooldown_ok + log the skip
     for i in range(10):
-        if not strategy._post_entry_sl_cooldown_ok("LONG", 100_000 + i * 1000):
-            strategy._log_info_throttled(
-                "TREND_ENTRY_SKIPPED_POST_ENTRY_SL_COOLDOWN:"
-                f"LONG:"
-                f"{strategy.state.post_entry_sl_cooldown_side}:"
-                f"{strategy.state.post_entry_sl_cooldown_until_ts_ms}:"
-                f"{strategy.config.post_entry_sl_cooldown_scope}",
-                60_000,
-                100_000 + i * 1000,
-                "TREND_ENTRY_SKIPPED_POST_ENTRY_SL_COOLDOWN | side=%s "
-                "cooldown_side=%s cooldown_until_ts_ms=%s scope=%s",
-                "LONG",
-                strategy.state.post_entry_sl_cooldown_side,
-                strategy.state.post_entry_sl_cooldown_until_ts_ms,
-                strategy.config.post_entry_sl_cooldown_scope,
-            )
+        strategy._log_info_throttled(
+            "THROTTLE_TEST_KEY",
+            30_000,
+            1000000 + i * 1000,
+            "THROTTLE_TEST | iteration=%s ts_ms=%s",
+            i, 1000000 + i * 1000,
+        )
 
-    skip_count = sum(
-        1 for r in caplog.records if "TREND_ENTRY_SKIPPED_POST_ENTRY_SL_COOLDOWN" in r.getMessage()
+    log_count = sum(
+        1 for r in caplog.records if "THROTTLE_TEST" in r.getMessage()
     )
-    assert skip_count == 1, (
-        f"TREND_ENTRY_SKIPPED should be throttled to 1 in 60s, got {skip_count}"
+    assert log_count == 1, f"Same key should log once in 30s window, got {log_count}"
+
+
+def test_log_info_throttled_allows_after_interval(caplog):
+    """Same key logs again after interval_ms has passed."""
+    strategy = _make_strategy()
+    caplog.set_level(logging.INFO)
+
+    strategy._log_info_throttled("TEST_KEY", 30_000, 1000000, "TEST | first")
+    strategy._log_info_throttled("TEST_KEY", 30_000, 1030001, "TEST | second")
+
+    test_count = sum(1 for r in caplog.records if "TEST" in r.getMessage())
+    assert test_count == 2, f"Should log again after interval, got {test_count}"
+
+
+def test_log_info_throttled_different_keys_log_separately(caplog):
+    """Different keys log independently."""
+    strategy = _make_strategy()
+    caplog.set_level(logging.INFO)
+
+    strategy._log_info_throttled("KEY_A", 30_000, 1000000, "LOGGED | key=A")
+    strategy._log_info_throttled("KEY_B", 30_000, 1001000, "LOGGED | key=B")
+
+    log_count = sum(
+        1 for r in caplog.records if "LOGGED" in r.getMessage()
     )
+    assert log_count == 2, f"Different keys should each log once, got {log_count}"
 
 
 # ======================================================================
-# 6. Cooldown return logic is unchanged
+# 4. Cooldown return logic is unchanged
 # ======================================================================
 
 
 def test_cooldown_return_logic_unchanged():
-    """Verify cooldown return values are correct after throttling changes."""
+    """Verify cooldown return values are correct after refactoring."""
     strategy = _make_strategy(
         post_entry_sl_cooldown_enabled=True,
         post_entry_sl_cooldown_seconds=1800,
@@ -336,7 +243,7 @@ def test_cooldown_return_logic_unchanged():
 
 
 def test_cooldown_return_logic_global_unchanged():
-    """Verify GLOBAL scope return values are correct after throttling changes."""
+    """Verify GLOBAL scope return values are correct after refactoring."""
     strategy = _make_strategy(
         post_entry_sl_cooldown_enabled=True,
         post_entry_sl_cooldown_seconds=1800,
