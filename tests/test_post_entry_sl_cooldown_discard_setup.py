@@ -489,3 +489,128 @@ def test_discard_no_armed_state_no_log(caplog):
         1 for r in caplog.records if "POST_ENTRY_SL_COOLDOWN_SETUP_DISCARDED" in r.getMessage()
     )
     assert discard_count == 0, "No log when nothing is armed"
+
+
+# ======================================================================
+# Source-level prevention: no LOWER_ARMED / UPPER_ARMED during cooldown
+# ======================================================================
+
+
+def test_long_cooldown_no_lower_armed_log(caplog):
+    """When LONG is blocked by cooldown and price < lower, LOWER_ARMED must NOT appear."""
+    strat = _make_strategy(post_entry_sl_cooldown_scope="SIDE")
+    _arm_cooldown(strat, ts_ms=100_000, side="LONG", reason="entry_protective_sl_flat")
+    caplog.set_level(logging.INFO)
+
+    boll = _boll()
+    price_below = boll.lower * 0.9985
+    strat.on_tick(price_below, 100_001, boll, _cvd(ts_ms=100_001, price=price_below))
+
+    # State must be unarmed
+    assert strat.state.lower_armed is False, "LONG cooldown must prevent lower_armed"
+    assert strat.state.lower_extreme_price is None
+
+    # LOWER_ARMED log must NOT appear
+    armed_log_count = sum(
+        1 for r in caplog.records if "LOWER_ARMED" in r.getMessage()
+    )
+    assert armed_log_count == 0, (
+        f"LOWER_ARMED must not appear during cooldown, got {armed_log_count}"
+    )
+
+    # DISCARDED log must appear
+    discard_count = sum(
+        1 for r in caplog.records if "POST_ENTRY_SL_COOLDOWN_SETUP_DISCARDED" in r.getMessage()
+    )
+    assert discard_count == 1, (
+        f"DISCARDED log must appear when setup is blocked, got {discard_count}"
+    )
+
+
+def test_short_cooldown_no_upper_armed_log(caplog):
+    """When SHORT is blocked by cooldown and price > upper, UPPER_ARMED must NOT appear."""
+    strat = _make_strategy(post_entry_sl_cooldown_scope="SIDE")
+    _arm_cooldown(strat, ts_ms=100_000, side="SHORT", reason="entry_protective_sl_flat")
+    caplog.set_level(logging.INFO)
+
+    boll = _boll()
+    price_above = boll.upper * 1.0015
+    strat.on_tick(price_above, 100_001, boll,
+                  _cvd(ts_ms=100_001, price=price_above,
+                       cross_positive=False, cross_negative=False,
+                       cvd_increasing=False, cvd_decreasing=False))
+
+    # State must be unarmed
+    assert strat.state.upper_armed is False, "SHORT cooldown must prevent upper_armed"
+    assert strat.state.upper_extreme_price is None
+
+    # UPPER_ARMED log must NOT appear
+    armed_log_count = sum(
+        1 for r in caplog.records if "UPPER_ARMED" in r.getMessage()
+    )
+    assert armed_log_count == 0, (
+        f"UPPER_ARMED must not appear during cooldown, got {armed_log_count}"
+    )
+
+    # DISCARDED log must appear
+    discard_count = sum(
+        1 for r in caplog.records if "POST_ENTRY_SL_COOLDOWN_SETUP_DISCARDED" in r.getMessage()
+    )
+    assert discard_count == 1
+
+
+def test_global_cooldown_no_armed_log_either_side(caplog):
+    """GLOBAL cooldown must prevent both LOWER_ARMED and UPPER_ARMED."""
+    strat = _make_strategy(post_entry_sl_cooldown_scope="GLOBAL")
+    _arm_cooldown(strat, ts_ms=100_000, side="LONG", reason="entry_protective_sl_flat")
+    caplog.set_level(logging.INFO)
+
+    boll = _boll()
+    price_below = boll.lower * 0.9985
+    strat.on_tick(price_below, 100_001, boll, _cvd(ts_ms=100_001, price=price_below))
+
+    # Neither side should be armed
+    assert strat.state.lower_armed is False
+    assert strat.state.upper_armed is False
+
+    # Neither ARMED log should appear
+    lower_armed = sum(1 for r in caplog.records if "LOWER_ARMED" in r.getMessage())
+    upper_armed = sum(1 for r in caplog.records if "UPPER_ARMED" in r.getMessage())
+    assert lower_armed == 0, f"No LOWER_ARMED in GLOBAL cooldown, got {lower_armed}"
+    assert upper_armed == 0, f"No UPPER_ARMED in GLOBAL cooldown, got {upper_armed}"
+
+
+# ======================================================================
+# 100 ticks — no log spamming
+# ======================================================================
+
+
+def test_100_ticks_no_armed_log_spam(caplog):
+    """100 ticks of price < lower during LONG cooldown: no LOWER_ARMED, ≤1 DISCARDED."""
+    strat = _make_strategy(post_entry_sl_cooldown_scope="SIDE")
+    _arm_cooldown(strat, ts_ms=100_000, side="LONG", reason="entry_protective_sl_flat")
+    caplog.set_level(logging.INFO)
+
+    boll = _boll()
+    price_below = boll.lower * 0.9985
+
+    for i in range(100):
+        ts = 100_000 + i
+        strat.on_tick(price_below, ts, boll, _cvd(ts_ms=ts, price=price_below))
+        assert strat.state.lower_armed is False, f"Tick {i}: lower_armed must stay False"
+
+    # LOWER_ARMED must NEVER appear
+    armed_count = sum(
+        1 for r in caplog.records if "LOWER_ARMED" in r.getMessage()
+    )
+    assert armed_count == 0, (
+        f"LOWER_ARMED must not appear in 100 cooldown ticks, got {armed_count}"
+    )
+
+    # DISCARDED throttled to ≤1 in 60s window
+    discard_count = sum(
+        1 for r in caplog.records if "POST_ENTRY_SL_COOLDOWN_SETUP_DISCARDED" in r.getMessage()
+    )
+    assert discard_count == 1, (
+        f"DISCARDED throttled to 1 in 60s, got {discard_count}"
+    )

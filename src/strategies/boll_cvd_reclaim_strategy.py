@@ -814,14 +814,22 @@ class BollCvdReclaimStrategy:
         long_blocked_by_post_sl = self._post_entry_sl_cooldown_blocks_side("LONG", ts_ms)
         short_blocked_by_post_sl = self._post_entry_sl_cooldown_blocks_side("SHORT", ts_ms)
 
-        self._update_armed_state(price, ts_ms, boll, cvd)
-
-        # Discard same-side setups while post-entry-SL cooldown is active.
-        # Cooldown is not a queue — setups formed during cooldown are dropped.
+        # Defensive: clean up any pre-existing armed state for blocked sides
+        # (armed before cooldown was triggered).  _update_armed_state() will
+        # prevent new setups from being created for blocked sides.
         self._discard_cooldown_blocked_setups(
             long_blocked=long_blocked_by_post_sl,
             short_blocked=short_blocked_by_post_sl,
             ts_ms=ts_ms,
+        )
+
+        self._update_armed_state(
+            price,
+            ts_ms,
+            boll,
+            cvd,
+            long_blocked_by_post_sl=long_blocked_by_post_sl,
+            short_blocked_by_post_sl=short_blocked_by_post_sl,
         )
 
         runner_exit_intent = self._maybe_trend_runner_market_exit(price, ts_ms, boll, cvd)
@@ -906,8 +914,16 @@ class BollCvdReclaimStrategy:
 
         return intents
 
-    def _update_armed_state(self, price: float, ts_ms: int, boll: BollSnapshot,
-                            cvd: CvdSnapshot | None = None) -> None:
+    def _update_armed_state(
+        self,
+        price: float,
+        ts_ms: int,
+        boll: BollSnapshot,
+        cvd: CvdSnapshot | None = None,
+        *,
+        long_blocked_by_post_sl: bool = False,
+        short_blocked_by_post_sl: bool = False,
+    ) -> None:
         self._expire_armed_state(ts_ms)
 
         # ── Total setup timeout check ──────────────────────────────────
@@ -922,6 +938,18 @@ class BollCvdReclaimStrategy:
             self._reset_upper_armed()
 
         if price < boll.lower:
+            # price below lower maps to LONG mean-reversion setup
+            if long_blocked_by_post_sl:
+                self._log_post_entry_sl_cooldown_discard(side="LONG", ts_ms=ts_ms)
+                if self.state.lower_armed:
+                    self._reset_lower_armed()
+
+                # Still reset opposite upper setup — market broke opposite side
+                if self.state.upper_armed:
+                    logger.info("UPPER_ARMED_RESET | reason=opposite_lower_break price=%.4f", price)
+                    self._reset_upper_armed()
+                return
+
             self._update_lower_outside(price, ts_ms, boll, cvd)
             if self.state.upper_armed:
                 logger.info("UPPER_ARMED_RESET | reason=opposite_lower_break price=%.4f", price)
@@ -929,6 +957,18 @@ class BollCvdReclaimStrategy:
             return
 
         if price > boll.upper:
+            # price above upper maps to SHORT mean-reversion setup
+            if short_blocked_by_post_sl:
+                self._log_post_entry_sl_cooldown_discard(side="SHORT", ts_ms=ts_ms)
+                if self.state.upper_armed:
+                    self._reset_upper_armed()
+
+                # Still reset opposite lower setup — market broke opposite side
+                if self.state.lower_armed:
+                    logger.info("LOWER_ARMED_RESET | reason=opposite_upper_break price=%.4f", price)
+                    self._reset_lower_armed()
+                return
+
             self._update_upper_outside(price, ts_ms, boll, cvd)
             if self.state.lower_armed:
                 logger.info("LOWER_ARMED_RESET | reason=opposite_upper_break price=%.4f", price)
