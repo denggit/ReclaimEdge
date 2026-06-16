@@ -176,15 +176,6 @@ async def main() -> None:
         trader=trader,
         journal=journal,
     )
-    await startup_order_recovery.apply_sidecar_startup_recovery(
-        strategy=strategy,
-        execution_state=execution_state,
-        saved_state=trusted_saved_state,
-        startup_position=startup_position,
-        trader=trader,
-        journal=journal,
-        state_store=state_store,
-    )
     startup_core_position = startup_position
     core_position_view_helpers.apply_core_position_view_to_state(strategy.state, startup_core_position)
     account_snapshot.position = startup_core_position

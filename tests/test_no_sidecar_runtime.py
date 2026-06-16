@@ -207,3 +207,13 @@ def test_post_entry_sl_cooldown_fields_present() -> None:
     assert hasattr(state, "post_entry_sl_cooldown_until_ts_ms")
     assert hasattr(state, "post_entry_sl_cooldown_side")
     assert hasattr(state, "post_entry_sl_cooldown_reason")
+
+
+def test_run_boll_cvd_live_has_no_sidecar_startup_recovery_call() -> None:
+    source = pathlib.Path("scripts/run_boll_cvd_live.py").read_text()
+    assert "apply_sidecar_startup_recovery" not in source
+
+
+def test_order_recovery_has_no_sidecar_public_api_dependency() -> None:
+    source = pathlib.Path("src/live/startup_recovery/order_recovery.py").read_text()
+    assert "sidecar" not in source.lower()
