@@ -24,6 +24,11 @@ from src.strategies.anchored_orderflow import (
     AnchoredOrderflowSnapshot,
     AnchoredOrderflowTracker,
 )
+from src.strategies.confirmed_extreme import (
+    ConfirmedExtreme,
+    ConfirmedExtremeConfig,
+    ConfirmedExtremeTracker,
+)
 from src.strategies.reclaim_anchored_divergence import (
     AnchoredDivergenceConfig,
     AnchoredDivergenceDecision,
@@ -178,6 +183,12 @@ class BollCvdReclaimStrategyConfig:
     reclaim_extreme_log_interval_seconds: int = 10
     reclaim_no_entry_log_interval_seconds: int = 60
 
+    # ── Confirmed swing extreme (delayed confirmation) ─────────────────
+    entry_extreme_confirm_mode: str = "RETRACE_OR_STABLE"
+    entry_extreme_confirm_retrace_pct: float = 0.0008
+    entry_extreme_confirm_stable_seconds: int = 8
+    entry_extreme_min_price_extension_pct: float = 0.0002
+
     # ── Trend Breakout Entry ────────────────────────────────────────────
     trend_breakout_enabled: bool = False
     trend_middle_trailing_sl_enabled: bool = True
@@ -285,6 +296,24 @@ class BollCvdReclaimStrategyConfig:
         if self.entry_extreme_stop_buffer_pct < 0:
             raise RuntimeError(
                 f"ENTRY_EXTREME_STOP_BUFFER_PCT={self.entry_extreme_stop_buffer_pct} must be >= 0"
+            )
+        # ── Confirmed swing extreme validation ────────────────────────
+        if self.entry_extreme_confirm_mode not in {"RETRACE_OR_STABLE"}:
+            raise RuntimeError(
+                f"ENTRY_EXTREME_CONFIRM_MODE={self.entry_extreme_confirm_mode!r} "
+                f"must be RETRACE_OR_STABLE"
+            )
+        if self.entry_extreme_confirm_retrace_pct <= 0:
+            raise RuntimeError(
+                f"ENTRY_EXTREME_CONFIRM_RETRACE_PCT={self.entry_extreme_confirm_retrace_pct} must be > 0"
+            )
+        if self.entry_extreme_confirm_stable_seconds <= 0:
+            raise RuntimeError(
+                f"ENTRY_EXTREME_CONFIRM_STABLE_SECONDS={self.entry_extreme_confirm_stable_seconds} must be > 0"
+            )
+        if self.entry_extreme_min_price_extension_pct < 0:
+            raise RuntimeError(
+                f"ENTRY_EXTREME_MIN_PRICE_EXTENSION_PCT={self.entry_extreme_min_price_extension_pct} must be >= 0"
             )
         # ── Trend Breakout validation ────────────────────────────────────
         if self.trend_middle_sl_buffer_pct < 0:
@@ -500,6 +529,11 @@ class BollCvdReclaimStrategyConfig:
             entry_reclaim_max_inside_depth_ratio=float(os.getenv("ENTRY_RECLAIM_MAX_INSIDE_DEPTH_RATIO", "0.15")),
             reclaim_extreme_log_interval_seconds=int(os.getenv("RECLAIM_EXTREME_LOG_INTERVAL_SECONDS", "10")),
             reclaim_no_entry_log_interval_seconds=int(os.getenv("RECLAIM_NO_ENTRY_LOG_INTERVAL_SECONDS", "60")),
+            # ── Confirmed swing extreme ──────────────────────────────────
+            entry_extreme_confirm_mode=os.getenv("ENTRY_EXTREME_CONFIRM_MODE", "RETRACE_OR_STABLE").strip().upper(),
+            entry_extreme_confirm_retrace_pct=float(os.getenv("ENTRY_EXTREME_CONFIRM_RETRACE_PCT", "0.0008")),
+            entry_extreme_confirm_stable_seconds=int(os.getenv("ENTRY_EXTREME_CONFIRM_STABLE_SECONDS", "8")),
+            entry_extreme_min_price_extension_pct=float(os.getenv("ENTRY_EXTREME_MIN_PRICE_EXTENSION_PCT", "0.0002")),
             # ── Trend Breakout Entry ────────────────────────────────────
             trend_breakout_enabled=_env_bool("TREND_BREAKOUT_ENABLED", False),
             trend_middle_trailing_sl_enabled=_env_bool("TREND_MIDDLE_TRAILING_SL_ENABLED", True),
@@ -718,6 +752,11 @@ class StrategyPositionState:
     lower_previous_extreme_ts_ms: int = 0
     lower_previous_extreme_anchored_cvd: float | None = None
 
+    # ── Delayed confirmed swing extreme ─────────────────────────────
+    lower_previous_confirmed_extreme_price: float | None = None
+    lower_previous_confirmed_extreme_ts_ms: int = 0
+    lower_previous_confirmed_extreme_anchored_cvd: float | None = None
+
     lower_anchored_divergence_confirmed: bool = False
     lower_anchored_divergence_ts_ms: int = 0
 
@@ -736,6 +775,11 @@ class StrategyPositionState:
     upper_previous_extreme_price: float | None = None
     upper_previous_extreme_ts_ms: int = 0
     upper_previous_extreme_anchored_cvd: float | None = None
+
+    # ── Delayed confirmed swing extreme ─────────────────────────────
+    upper_previous_confirmed_extreme_price: float | None = None
+    upper_previous_confirmed_extreme_ts_ms: int = 0
+    upper_previous_confirmed_extreme_anchored_cvd: float | None = None
 
     upper_anchored_divergence_confirmed: bool = False
     upper_anchored_divergence_ts_ms: int = 0
@@ -997,6 +1041,15 @@ class BollCvdReclaimStrategy:
         # ── Reclaim V2 anchored orderflow trackers ─────────────────────
         self._lower_orderflow = AnchoredOrderflowTracker()
         self._upper_orderflow = AnchoredOrderflowTracker()
+        # ── Delayed confirmed swing extreme trackers ─────────────────
+        _ce_cfg = ConfirmedExtremeConfig(
+            confirm_mode=config.entry_extreme_confirm_mode,
+            confirm_retrace_pct=config.entry_extreme_confirm_retrace_pct,
+            confirm_stable_seconds=config.entry_extreme_confirm_stable_seconds,
+            min_price_extension_pct=config.entry_extreme_min_price_extension_pct,
+        )
+        self._lower_confirmed_extreme_tracker = ConfirmedExtremeTracker(side="LOWER", config=_ce_cfg)
+        self._upper_confirmed_extreme_tracker = ConfirmedExtremeTracker(side="UPPER", config=_ce_cfg)
 
     def _log_info_throttled(self, key: str, interval_ms: int, ts_ms: int, message: str, *args) -> None:
         """Log at INFO level at most once per interval_ms for each unique key."""
@@ -1772,12 +1825,13 @@ class BollCvdReclaimStrategy:
     ) -> None:
         """Reclaim V2 lower-side (LONG) state machine.
 
-        Uses ``AnchoredOrderflowTracker`` for episode volume/CVD/extreme
-        tracking.  Evaluates anchored CVD divergence when a new lower
-        extreme is detected.
+        Uses ``AnchoredOrderflowTracker`` for episode volume/CVD tracking
+        and ``ConfirmedExtremeTracker`` for delayed swing extreme
+        confirmation.  Divergence is evaluated ONLY when a swing extreme
+        is confirmed (retrace or stable), not on every tick-level new low.
 
         Phases:
-          anchor DOWN event → record extremes → divergence confirmed → ARMED.
+          anchor DOWN → confirmed swing extremes → divergence → ARMED.
         """
         if cvd is None:
             return
@@ -1800,6 +1854,7 @@ class BollCvdReclaimStrategy:
             self.state.lower_anchor_cumulative_cvd = cum_cvd
             self._ensure_lower_sweep_profile()
             self._previous_lower_extreme_count = 0
+            self._lower_confirmed_extreme_tracker.reset()
             logger.info(
                 "LOWER_OUTSIDE_OBSERVED | price=%.4f lower=%.4f anchor_cum_cvd=%.4f ts_ms=%s",
                 price, boll.lower, cum_cvd, ts_ms,
@@ -1820,7 +1875,7 @@ class BollCvdReclaimStrategy:
         self.state.lower_reclaim_rejected_until_next_outside = False
         self.state.lower_reclaim_cvd_follow_through_logged = False
 
-        # ── Update orderflow tracker ───────────────────────────────────
+        # ── Update orderflow tracker (for SL / POC / latest extreme display)
         prev_extreme_count: int = getattr(self, "_previous_lower_extreme_count", 0)
         snap = self._lower_orderflow.update(
             ts_ms=ts_ms,
@@ -1832,14 +1887,13 @@ class BollCvdReclaimStrategy:
         new_extreme_this_tick = snap.new_extreme_count > prev_extreme_count
         self._previous_lower_extreme_count = snap.new_extreme_count
 
-        # Only update extreme_ts_ms on truly new extremes (not every outside tick)
+        # Update running extreme display (still from tick-level snap)
         if new_extreme_this_tick and snap.last_extreme_price > 0:
             self.state.lower_extreme_price = snap.last_extreme_price
             self.state.lower_extreme_ts_ms = ts_ms
 
         # ── Divergence already confirmed — handle re-break ─────────────
         if self.state.lower_anchored_divergence_confirmed:
-            # Cancel in-progress reclaim on re-break
             if self.state.lower_reclaim_seen:
                 self.state.lower_reclaim_seen = False
                 self.state.lower_reclaim_ts_ms = 0
@@ -1849,7 +1903,6 @@ class BollCvdReclaimStrategy:
                     "price=%.4f lower=%.4f ts_ms=%s",
                     price, boll.lower, ts_ms,
                 )
-            # Check for new extreme beyond divergence extreme → invalidate old divergence
             div_extreme = self.state.lower_divergence_extreme_price
             if div_extreme is not None and price < div_extreme:
                 self.state.lower_anchored_divergence_confirmed = False
@@ -1858,9 +1911,18 @@ class BollCvdReclaimStrategy:
                 self.state.lower_armed_ts_ms = 0
                 self.state.lower_cvd_divergence_confirmed = False
                 # Promote divergence extreme as previous for re-evaluation
+                self.state.lower_previous_confirmed_extreme_price = div_extreme
+                self.state.lower_previous_confirmed_extreme_ts_ms = self.state.lower_divergence_extreme_ts_ms
+                self.state.lower_previous_confirmed_extreme_anchored_cvd = (
+                    self.state.lower_divergence_extreme_anchored_cvd
+                )
+                # Also sync legacy fields
                 self.state.lower_previous_extreme_price = div_extreme
                 self.state.lower_previous_extreme_ts_ms = self.state.lower_divergence_extreme_ts_ms
-                self.state.lower_previous_extreme_anchored_cvd = self.state.lower_divergence_extreme_anchored_cvd
+                self.state.lower_previous_extreme_anchored_cvd = (
+                    self.state.lower_divergence_extreme_anchored_cvd
+                )
+                self.state.lower_first_extreme_price = None  # reset first extreme for re-eval
                 logger.info(
                     "LOWER_DIVERGENCE_INVALIDATED | reason=new_extreme_beyond_divergence "
                     "price=%.4f div_extreme=%.4f ts_ms=%s",
@@ -1870,38 +1932,70 @@ class BollCvdReclaimStrategy:
             else:
                 return
 
-        # ── Phase 2: first extreme — must be deep enough, do NOT arm ────
+        # ── Feed confirmed extreme tracker ─────────────────────────────
+        confirmed = self._lower_confirmed_extreme_tracker.update(
+            price=price,
+            anchored_cvd=snap.anchored_cvd,
+            ts_ms=ts_ms,
+        )
+
+        if confirmed is None:
+            return  # No confirmed swing extreme yet — skip divergence
+
+        # ── Confirmed extreme obtained — log ──────────────────────────
+        logger.info(
+            "LOWER_CONFIRMED_EXTREME | price=%.4f anchored_cvd=%.4f "
+            "confirm_reason=%s candidate_ts_ms=%s confirm_ts_ms=%s",
+            confirmed.price, confirmed.anchored_cvd,
+            confirmed.confirm_reason, confirmed.ts_ms, confirmed.confirm_ts_ms,
+        )
+
+        # ── Phase 2: first confirmed extreme — must be deep enough ─────
         if self.state.lower_first_extreme_price is None:
-            if snap.new_extreme_count >= 1 and snap.last_extreme_price > 0:
-                is_deep_enough = price <= boll.lower * (1 - self.config.min_outside_pct)
-                if not is_deep_enough:
-                    # Not deep enough yet — continue observing, don't record first extreme
-                    return
-                self.state.lower_first_extreme_price = snap.last_extreme_price
-                self.state.lower_first_extreme_ts_ms = ts_ms
-                self.state.lower_first_extreme_anchored_cvd = snap.last_extreme_anchored_cvd
-                self.state.lower_previous_extreme_price = snap.last_extreme_price
-                self.state.lower_previous_extreme_ts_ms = ts_ms
-                self.state.lower_previous_extreme_anchored_cvd = snap.last_extreme_anchored_cvd
-                logger.info(
-                    "LOWER_FIRST_VALID_EXTREME | price=%.4f anchored_cvd=%.4f deep_enough=True ts_ms=%s",
-                    snap.last_extreme_price, snap.last_extreme_anchored_cvd, ts_ms,
+            is_deep_enough = confirmed.price <= boll.lower * (1 - self.config.min_outside_pct)
+            if not is_deep_enough:
+                logger.debug(
+                    "LOWER_CONFIRMED_EXTREME_NOT_DEEP | price=%.4f lower=%.4f ts_ms=%s",
+                    confirmed.price, boll.lower, ts_ms,
                 )
+                return
+            self.state.lower_first_extreme_price = confirmed.price
+            self.state.lower_first_extreme_ts_ms = confirmed.ts_ms
+            self.state.lower_first_extreme_anchored_cvd = confirmed.anchored_cvd
+            # Set as previous for next divergence comparison
+            self.state.lower_previous_confirmed_extreme_price = confirmed.price
+            self.state.lower_previous_confirmed_extreme_ts_ms = confirmed.ts_ms
+            self.state.lower_previous_confirmed_extreme_anchored_cvd = confirmed.anchored_cvd
+            # Sync legacy fields
+            self.state.lower_previous_extreme_price = confirmed.price
+            self.state.lower_previous_extreme_ts_ms = confirmed.ts_ms
+            self.state.lower_previous_extreme_anchored_cvd = confirmed.anchored_cvd
+            logger.info(
+                "LOWER_FIRST_CONFIRMED_EXTREME | price=%.4f anchored_cvd=%.4f "
+                "confirm_reason=%s deep_enough=True ts_ms=%s",
+                confirmed.price, confirmed.anchored_cvd,
+                confirmed.confirm_reason, ts_ms,
+            )
             return
 
-        # ── Phase 3: new extreme this tick → evaluate divergence ───────
-        if not new_extreme_this_tick:
-            return
+        # ── Phase 3: confirmed extreme → evaluate divergence ──────────
+        prev_price = self.state.lower_previous_confirmed_extreme_price
+        prev_cvd = self.state.lower_previous_confirmed_extreme_anchored_cvd
 
-        prev_price = self.state.lower_previous_extreme_price
-        prev_cvd = self.state.lower_previous_extreme_anchored_cvd
+        logger.info(
+            "LOWER_DIVERGENCE_CHECK | prev_extreme=%.4f prev_cvd=%.4f "
+            "curr_extreme=%.4f curr_cvd=%.4f confirm_reason=%s ts_ms=%s",
+            prev_price or 0.0, prev_cvd or 0.0,
+            confirmed.price, confirmed.anchored_cvd,
+            confirmed.confirm_reason, ts_ms,
+        )
 
         decision = evaluate_anchored_divergence(
             side="LONG",
             previous_extreme_price=prev_price,
             previous_anchored_cvd=prev_cvd,
-            current_extreme_price=snap.last_extreme_price,
-            current_anchored_cvd=snap.last_extreme_anchored_cvd,
+            current_extreme_price=confirmed.price,
+            current_anchored_cvd=confirmed.anchored_cvd,
             config=AnchoredDivergenceConfig(
                 min_price_extension_pct=self.config.entry_reclaim_new_extreme_buffer_pct,
                 min_cvd_recovery=self.config.entry_reclaim_min_cvd_recovery,
@@ -1931,9 +2025,9 @@ class BollCvdReclaimStrategy:
             self.state.lower_first_armed_ts_ms = ts_ms
             self.state.lower_cvd_divergence_confirmed = True
             # Save divergence extreme + reference band
-            self.state.lower_divergence_extreme_price = snap.last_extreme_price
-            self.state.lower_divergence_extreme_ts_ms = ts_ms
-            self.state.lower_divergence_extreme_anchored_cvd = snap.last_extreme_anchored_cvd
+            self.state.lower_divergence_extreme_price = confirmed.price
+            self.state.lower_divergence_extreme_ts_ms = confirmed.ts_ms
+            self.state.lower_divergence_extreme_anchored_cvd = confirmed.anchored_cvd
             self.state.lower_divergence_ref_lower = boll.lower
             self.state.lower_divergence_ref_middle = boll.middle
             logger.info(
@@ -1941,20 +2035,24 @@ class BollCvdReclaimStrategy:
                 "prev_price=%.4f prev_cvd=%.4f curr_price=%.4f curr_cvd=%.4f "
                 "cvd_recovery=%.4f price_ext_pct=%.6f ref_lower=%.4f ref_middle=%.4f ts_ms=%s",
                 prev_price, prev_cvd,
-                snap.last_extreme_price, snap.last_extreme_anchored_cvd,
+                confirmed.price, confirmed.anchored_cvd,
                 decision.cvd_recovery, decision.price_extension_pct,
                 boll.lower, boll.middle, ts_ms,
             )
             logger.info("LOWER_ARMED | reason=anchored_divergence price=%.4f ts_ms=%s", price, ts_ms)
         else:
-            # Update previous extreme reference for next comparison
-            self.state.lower_previous_extreme_price = snap.last_extreme_price
-            self.state.lower_previous_extreme_ts_ms = ts_ms
-            self.state.lower_previous_extreme_anchored_cvd = snap.last_extreme_anchored_cvd
+            # Update previous confirmed extreme reference for next comparison
+            self.state.lower_previous_confirmed_extreme_price = confirmed.price
+            self.state.lower_previous_confirmed_extreme_ts_ms = confirmed.ts_ms
+            self.state.lower_previous_confirmed_extreme_anchored_cvd = confirmed.anchored_cvd
+            # Sync legacy fields
+            self.state.lower_previous_extreme_price = confirmed.price
+            self.state.lower_previous_extreme_ts_ms = confirmed.ts_ms
+            self.state.lower_previous_extreme_anchored_cvd = confirmed.anchored_cvd
             logger.debug(
-                "LOWER_NEW_EXTREME_NO_DIVERGENCE | price=%.4f cum_cvd=%.4f "
+                "LOWER_NO_DIVERGENCE | price=%.4f anchored_cvd=%.4f "
                 "reason=%s ts_ms=%s",
-                snap.last_extreme_price, cum_cvd, decision.reason, ts_ms,
+                confirmed.price, confirmed.anchored_cvd, decision.reason, ts_ms,
             )
 
         # ── Throttled extreme snapshot log (after divergence evaluation) ──
@@ -1969,12 +2067,13 @@ class BollCvdReclaimStrategy:
     ) -> None:
         """Reclaim V2 upper-side (SHORT) state machine.
 
-        Uses ``AnchoredOrderflowTracker`` for episode volume/CVD/extreme
-        tracking.  Evaluates anchored CVD divergence when a new upper
-        extreme is detected.
+        Uses ``AnchoredOrderflowTracker`` for episode volume/CVD tracking
+        and ``ConfirmedExtremeTracker`` for delayed swing extreme
+        confirmation.  Divergence is evaluated ONLY when a swing extreme
+        is confirmed (retrace or stable), not on every tick-level new high.
 
         Phases:
-          anchor UP event → record extremes → divergence confirmed → ARMED.
+          anchor UP → confirmed swing extremes → divergence → ARMED.
         """
         if cvd is None:
             return
@@ -1997,6 +2096,7 @@ class BollCvdReclaimStrategy:
             self.state.upper_anchor_cumulative_cvd = cum_cvd
             self._ensure_upper_sweep_profile()
             self._previous_upper_extreme_count = 0
+            self._upper_confirmed_extreme_tracker.reset()
             logger.info(
                 "UPPER_OUTSIDE_OBSERVED | price=%.4f upper=%.4f anchor_cum_cvd=%.4f ts_ms=%s",
                 price, boll.upper, cum_cvd, ts_ms,
@@ -2017,7 +2117,7 @@ class BollCvdReclaimStrategy:
         self.state.upper_reclaim_rejected_until_next_outside = False
         self.state.upper_reclaim_cvd_follow_through_logged = False
 
-        # ── Update orderflow tracker ───────────────────────────────────
+        # ── Update orderflow tracker (for SL / POC / latest extreme display)
         prev_extreme_count: int = getattr(self, "_previous_upper_extreme_count", 0)
         snap = self._upper_orderflow.update(
             ts_ms=ts_ms,
@@ -2029,14 +2129,13 @@ class BollCvdReclaimStrategy:
         new_extreme_this_tick = snap.new_extreme_count > prev_extreme_count
         self._previous_upper_extreme_count = snap.new_extreme_count
 
-        # Only update extreme_ts_ms on truly new extremes (not every outside tick)
+        # Update running extreme display (still from tick-level snap)
         if new_extreme_this_tick and snap.last_extreme_price > 0:
             self.state.upper_extreme_price = snap.last_extreme_price
             self.state.upper_extreme_ts_ms = ts_ms
 
         # ── Divergence already confirmed — handle re-break ─────────────
         if self.state.upper_anchored_divergence_confirmed:
-            # Cancel in-progress reclaim on re-break
             if self.state.upper_reclaim_seen:
                 self.state.upper_reclaim_seen = False
                 self.state.upper_reclaim_ts_ms = 0
@@ -2046,7 +2145,6 @@ class BollCvdReclaimStrategy:
                     "price=%.4f upper=%.4f ts_ms=%s",
                     price, boll.upper, ts_ms,
                 )
-            # Check for new extreme beyond divergence extreme → invalidate old divergence
             div_extreme = self.state.upper_divergence_extreme_price
             if div_extreme is not None and price > div_extreme:
                 self.state.upper_anchored_divergence_confirmed = False
@@ -2054,9 +2152,19 @@ class BollCvdReclaimStrategy:
                 self.state.upper_armed = False
                 self.state.upper_armed_ts_ms = 0
                 self.state.upper_cvd_divergence_confirmed = False
+                # Promote divergence extreme as previous for re-evaluation
+                self.state.upper_previous_confirmed_extreme_price = div_extreme
+                self.state.upper_previous_confirmed_extreme_ts_ms = self.state.upper_divergence_extreme_ts_ms
+                self.state.upper_previous_confirmed_extreme_anchored_cvd = (
+                    self.state.upper_divergence_extreme_anchored_cvd
+                )
+                # Also sync legacy fields
                 self.state.upper_previous_extreme_price = div_extreme
                 self.state.upper_previous_extreme_ts_ms = self.state.upper_divergence_extreme_ts_ms
-                self.state.upper_previous_extreme_anchored_cvd = self.state.upper_divergence_extreme_anchored_cvd
+                self.state.upper_previous_extreme_anchored_cvd = (
+                    self.state.upper_divergence_extreme_anchored_cvd
+                )
+                self.state.upper_first_extreme_price = None  # reset first extreme for re-eval
                 logger.info(
                     "UPPER_DIVERGENCE_INVALIDATED | reason=new_extreme_beyond_divergence "
                     "price=%.4f div_extreme=%.4f ts_ms=%s",
@@ -2066,38 +2174,70 @@ class BollCvdReclaimStrategy:
             else:
                 return
 
-        # ── Phase 2: first extreme — must be deep enough, do NOT arm ────
+        # ── Feed confirmed extreme tracker ─────────────────────────────
+        confirmed = self._upper_confirmed_extreme_tracker.update(
+            price=price,
+            anchored_cvd=snap.anchored_cvd,
+            ts_ms=ts_ms,
+        )
+
+        if confirmed is None:
+            return  # No confirmed swing extreme yet — skip divergence
+
+        # ── Confirmed extreme obtained — log ──────────────────────────
+        logger.info(
+            "UPPER_CONFIRMED_EXTREME | price=%.4f anchored_cvd=%.4f "
+            "confirm_reason=%s candidate_ts_ms=%s confirm_ts_ms=%s",
+            confirmed.price, confirmed.anchored_cvd,
+            confirmed.confirm_reason, confirmed.ts_ms, confirmed.confirm_ts_ms,
+        )
+
+        # ── Phase 2: first confirmed extreme — must be deep enough ─────
         if self.state.upper_first_extreme_price is None:
-            if snap.new_extreme_count >= 1 and snap.last_extreme_price > 0:
-                is_deep_enough = price >= boll.upper * (1 + self.config.min_outside_pct)
-                if not is_deep_enough:
-                    # Not deep enough yet — continue observing, don't record first extreme
-                    return
-                self.state.upper_first_extreme_price = snap.last_extreme_price
-                self.state.upper_first_extreme_ts_ms = ts_ms
-                self.state.upper_first_extreme_anchored_cvd = snap.last_extreme_anchored_cvd
-                self.state.upper_previous_extreme_price = snap.last_extreme_price
-                self.state.upper_previous_extreme_ts_ms = ts_ms
-                self.state.upper_previous_extreme_anchored_cvd = snap.last_extreme_anchored_cvd
-                logger.info(
-                    "UPPER_FIRST_VALID_EXTREME | price=%.4f anchored_cvd=%.4f deep_enough=True ts_ms=%s",
-                    snap.last_extreme_price, snap.last_extreme_anchored_cvd, ts_ms,
+            is_deep_enough = confirmed.price >= boll.upper * (1 + self.config.min_outside_pct)
+            if not is_deep_enough:
+                logger.debug(
+                    "UPPER_CONFIRMED_EXTREME_NOT_DEEP | price=%.4f upper=%.4f ts_ms=%s",
+                    confirmed.price, boll.upper, ts_ms,
                 )
+                return
+            self.state.upper_first_extreme_price = confirmed.price
+            self.state.upper_first_extreme_ts_ms = confirmed.ts_ms
+            self.state.upper_first_extreme_anchored_cvd = confirmed.anchored_cvd
+            # Set as previous for next divergence comparison
+            self.state.upper_previous_confirmed_extreme_price = confirmed.price
+            self.state.upper_previous_confirmed_extreme_ts_ms = confirmed.ts_ms
+            self.state.upper_previous_confirmed_extreme_anchored_cvd = confirmed.anchored_cvd
+            # Sync legacy fields
+            self.state.upper_previous_extreme_price = confirmed.price
+            self.state.upper_previous_extreme_ts_ms = confirmed.ts_ms
+            self.state.upper_previous_extreme_anchored_cvd = confirmed.anchored_cvd
+            logger.info(
+                "UPPER_FIRST_CONFIRMED_EXTREME | price=%.4f anchored_cvd=%.4f "
+                "confirm_reason=%s deep_enough=True ts_ms=%s",
+                confirmed.price, confirmed.anchored_cvd,
+                confirmed.confirm_reason, ts_ms,
+            )
             return
 
-        # ── Phase 3: new extreme this tick → evaluate divergence ───────
-        if not new_extreme_this_tick:
-            return
+        # ── Phase 3: confirmed extreme → evaluate divergence ──────────
+        prev_price = self.state.upper_previous_confirmed_extreme_price
+        prev_cvd = self.state.upper_previous_confirmed_extreme_anchored_cvd
 
-        prev_price = self.state.upper_previous_extreme_price
-        prev_cvd = self.state.upper_previous_extreme_anchored_cvd
+        logger.info(
+            "UPPER_DIVERGENCE_CHECK | prev_extreme=%.4f prev_cvd=%.4f "
+            "curr_extreme=%.4f curr_cvd=%.4f confirm_reason=%s ts_ms=%s",
+            prev_price or 0.0, prev_cvd or 0.0,
+            confirmed.price, confirmed.anchored_cvd,
+            confirmed.confirm_reason, ts_ms,
+        )
 
         decision = evaluate_anchored_divergence(
             side="SHORT",
             previous_extreme_price=prev_price,
             previous_anchored_cvd=prev_cvd,
-            current_extreme_price=snap.last_extreme_price,
-            current_anchored_cvd=snap.last_extreme_anchored_cvd,
+            current_extreme_price=confirmed.price,
+            current_anchored_cvd=confirmed.anchored_cvd,
             config=AnchoredDivergenceConfig(
                 min_price_extension_pct=self.config.entry_reclaim_new_extreme_buffer_pct,
                 min_cvd_recovery=self.config.entry_reclaim_min_cvd_recovery,
@@ -2127,9 +2267,9 @@ class BollCvdReclaimStrategy:
             self.state.upper_first_armed_ts_ms = ts_ms
             self.state.upper_cvd_divergence_confirmed = True
             # Save divergence extreme + reference band
-            self.state.upper_divergence_extreme_price = snap.last_extreme_price
-            self.state.upper_divergence_extreme_ts_ms = ts_ms
-            self.state.upper_divergence_extreme_anchored_cvd = snap.last_extreme_anchored_cvd
+            self.state.upper_divergence_extreme_price = confirmed.price
+            self.state.upper_divergence_extreme_ts_ms = confirmed.ts_ms
+            self.state.upper_divergence_extreme_anchored_cvd = confirmed.anchored_cvd
             self.state.upper_divergence_ref_upper = boll.upper
             self.state.upper_divergence_ref_middle = boll.middle
             logger.info(
@@ -2137,19 +2277,24 @@ class BollCvdReclaimStrategy:
                 "prev_price=%.4f prev_cvd=%.4f curr_price=%.4f curr_cvd=%.4f "
                 "cvd_recovery=%.4f price_ext_pct=%.6f ref_upper=%.4f ref_middle=%.4f ts_ms=%s",
                 prev_price, prev_cvd,
-                snap.last_extreme_price, snap.last_extreme_anchored_cvd,
+                confirmed.price, confirmed.anchored_cvd,
                 decision.cvd_recovery, decision.price_extension_pct,
                 boll.upper, boll.middle, ts_ms,
             )
             logger.info("UPPER_ARMED | reason=anchored_divergence price=%.4f ts_ms=%s", price, ts_ms)
         else:
-            self.state.upper_previous_extreme_price = snap.last_extreme_price
-            self.state.upper_previous_extreme_ts_ms = ts_ms
-            self.state.upper_previous_extreme_anchored_cvd = snap.last_extreme_anchored_cvd
+            # Update previous confirmed extreme reference for next comparison
+            self.state.upper_previous_confirmed_extreme_price = confirmed.price
+            self.state.upper_previous_confirmed_extreme_ts_ms = confirmed.ts_ms
+            self.state.upper_previous_confirmed_extreme_anchored_cvd = confirmed.anchored_cvd
+            # Sync legacy fields
+            self.state.upper_previous_extreme_price = confirmed.price
+            self.state.upper_previous_extreme_ts_ms = confirmed.ts_ms
+            self.state.upper_previous_extreme_anchored_cvd = confirmed.anchored_cvd
             logger.debug(
-                "UPPER_NEW_EXTREME_NO_DIVERGENCE | price=%.4f cum_cvd=%.4f "
+                "UPPER_NO_DIVERGENCE | price=%.4f anchored_cvd=%.4f "
                 "reason=%s ts_ms=%s",
-                snap.last_extreme_price, cum_cvd, decision.reason, ts_ms,
+                confirmed.price, confirmed.anchored_cvd, decision.reason, ts_ms,
             )
 
         # ── Throttled extreme snapshot log (after divergence evaluation) ──
@@ -2662,6 +2807,10 @@ class BollCvdReclaimStrategy:
         self.state.lower_previous_extreme_price = None
         self.state.lower_previous_extreme_ts_ms = 0
         self.state.lower_previous_extreme_anchored_cvd = None
+        # ── Clear confirmed extreme state ────────────────────────────
+        self.state.lower_previous_confirmed_extreme_price = None
+        self.state.lower_previous_confirmed_extreme_ts_ms = 0
+        self.state.lower_previous_confirmed_extreme_anchored_cvd = None
         self.state.lower_anchored_divergence_confirmed = False
         self.state.lower_anchored_divergence_ts_ms = 0
         self.state.lower_divergence_extreme_price = None
@@ -2690,6 +2839,7 @@ class BollCvdReclaimStrategy:
             self.state.lower_sweep_profile.reset()  # type: ignore[union-attr]
             self.state.lower_sweep_profile = None
         self._lower_orderflow.reset()
+        self._lower_confirmed_extreme_tracker.reset()
         if hasattr(self, "_previous_lower_extreme_count"):
             delattr(self, "_previous_lower_extreme_count")
 
@@ -2723,6 +2873,10 @@ class BollCvdReclaimStrategy:
         self.state.upper_previous_extreme_price = None
         self.state.upper_previous_extreme_ts_ms = 0
         self.state.upper_previous_extreme_anchored_cvd = None
+        # ── Clear confirmed extreme state ────────────────────────────
+        self.state.upper_previous_confirmed_extreme_price = None
+        self.state.upper_previous_confirmed_extreme_ts_ms = 0
+        self.state.upper_previous_confirmed_extreme_anchored_cvd = None
         self.state.upper_anchored_divergence_confirmed = False
         self.state.upper_anchored_divergence_ts_ms = 0
         self.state.upper_divergence_extreme_price = None
@@ -2751,6 +2905,7 @@ class BollCvdReclaimStrategy:
             self.state.upper_sweep_profile.reset()  # type: ignore[union-attr]
             self.state.upper_sweep_profile = None
         self._upper_orderflow.reset()
+        self._upper_confirmed_extreme_tracker.reset()
         if hasattr(self, "_previous_upper_extreme_count"):
             delattr(self, "_previous_upper_extreme_count")
 

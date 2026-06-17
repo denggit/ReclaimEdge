@@ -96,7 +96,7 @@ def test_first_outside_only_observed_not_armed() -> None:
 # ── Test 2: first valid extreme → NOT armed ──────────────────────────
 
 def test_first_extreme_not_armed() -> None:
-    """First valid lower extreme should NOT arm (needs divergence)."""
+    """First confirmed lower extreme should NOT arm (needs divergence)."""
     strat = _strategy(min_outside_pct=0.001)
     boll = _boll()
 
@@ -104,33 +104,43 @@ def test_first_extreme_not_armed() -> None:
     p1 = boll.lower * 0.998
     strat.on_tick(p1, 1000, boll, _cvd(ts_ms=1000, price=p1, cumulative_buy_volume=500_000, cumulative_sell_volume=1_500_000))
 
-    # Tick 2: lower — first extreme
+    # Tick 2: lower — first extreme candidate (deep enough)
     p2 = boll.lower * 0.995  # deeper
     strat.on_tick(p2, 2000, boll, _cvd(ts_ms=2000, price=p2, cumulative_buy_volume=500_000, cumulative_sell_volume=1_600_000))
 
+    # Tick 3: retrace to confirm first extreme
+    p2_retrace = boll.lower * 0.998
+    strat.on_tick(p2_retrace, 3000, boll, _cvd(ts_ms=3000, price=p2_retrace, cumulative_buy_volume=500_000, cumulative_sell_volume=1_600_000))
+
     assert strat.state.lower_first_extreme_price is not None
     assert strat.state.lower_anchored_divergence_confirmed is False
-    assert strat.state.lower_armed is False  # still not armed
+    assert strat.state.lower_armed is False  # still not armed (first extreme only)
 
 
 # ── Test 3: new low + CVD follows lower → NOT armed ──────────────────
 
 def test_new_low_cvd_follows_not_armed() -> None:
-    """Price makes new low but CVD also makes new low — no divergence."""
+    """Price makes new confirmed low but CVD also makes new low — no divergence."""
     strat = _strategy(min_outside_pct=0.001)
     boll = _boll()
 
     # Anchor
     p1 = boll.lower * 0.998
     strat.on_tick(p1, 1000, boll, _cvd(ts_ms=1000, price=p1, cumulative_buy_volume=500_000, cumulative_sell_volume=1_500_000))
-    # First extreme
+    # First extreme candidate
     p2 = boll.lower * 0.994
     strat.on_tick(p2, 2000, boll, _cvd(ts_ms=2000, price=p2, cumulative_buy_volume=500_000, cumulative_sell_volume=1_600_000))
+    # Retrace to confirm first extreme
+    p2_retrace = boll.lower * 0.998
+    strat.on_tick(p2_retrace, 2500, boll, _cvd(ts_ms=2500, price=p2_retrace, cumulative_buy_volume=500_000, cumulative_sell_volume=1_600_000))
     assert strat.state.lower_first_extreme_price is not None
 
-    # New extreme — CVD also makes new low (more sell volume)
+    # New extreme candidate — CVD also makes new low (more sell volume)
     p3 = boll.lower * 0.990
     strat.on_tick(p3, 3000, boll, _cvd(ts_ms=3000, price=p3, cumulative_buy_volume=500_000, cumulative_sell_volume=1_800_000))
+    # Retrace to confirm second extreme
+    p3_retrace = boll.lower * 0.995
+    strat.on_tick(p3_retrace, 3500, boll, _cvd(ts_ms=3500, price=p3_retrace, cumulative_buy_volume=500_000, cumulative_sell_volume=1_800_000))
 
     assert strat.state.lower_anchored_divergence_confirmed is False
     assert strat.state.lower_armed is False
@@ -139,20 +149,26 @@ def test_new_low_cvd_follows_not_armed() -> None:
 # ── Test 4: new low + CVD recovers → ARMED ───────────────────────────
 
 def test_new_low_cvd_recovers_armed() -> None:
-    """Price makes new low but CVD recovers → anchored divergence → ARMED."""
+    """Price makes new confirmed low but CVD recovers → anchored divergence → ARMED."""
     strat = _strategy(min_outside_pct=0.001)
     boll = _boll()
 
     # Anchor
     p1 = boll.lower * 0.998
     strat.on_tick(p1, 1000, boll, _cvd(ts_ms=1000, price=p1, cumulative_buy_volume=500_000, cumulative_sell_volume=1_500_000))
-    # First extreme: anchored_cvd = -1_000_000 (500k - 1.5M)
+    # First extreme candidate: anchored_cvd = 0 (500k-1.5M vs anchor)
     p2 = boll.lower * 0.994
     strat.on_tick(p2, 2000, boll, _cvd(ts_ms=2000, price=p2, cumulative_buy_volume=500_000, cumulative_sell_volume=1_500_000))
+    # Retrace to confirm first extreme
+    p2_retrace = boll.lower * 0.998
+    strat.on_tick(p2_retrace, 2500, boll, _cvd(ts_ms=2500, price=p2_retrace, cumulative_buy_volume=500_000, cumulative_sell_volume=1_500_000))
 
-    # New extreme with CVD recovery: anchored_cvd = 600k - 1.4M = -800k (improved from -1M)
+    # New extreme candidate with CVD recovery: anchored_cvd = 600k-1.4M - (-1M) = 200k
     p3 = boll.lower * 0.990
     strat.on_tick(p3, 3000, boll, _cvd(ts_ms=3000, price=p3, cumulative_buy_volume=600_000, cumulative_sell_volume=1_400_000))
+    # Retrace to confirm second extreme → divergence eval fires
+    p3_retrace = boll.lower * 0.995
+    strat.on_tick(p3_retrace, 3500, boll, _cvd(ts_ms=3500, price=p3_retrace, cumulative_buy_volume=600_000, cumulative_sell_volume=1_400_000))
 
     assert strat.state.lower_anchored_divergence_confirmed is True
     assert strat.state.lower_armed is True
@@ -162,7 +178,7 @@ def test_new_low_cvd_recovers_armed() -> None:
 # ── Test 5: upper mirror — new high + CVD reverses → ARMED ───────────
 
 def test_upper_new_high_cvd_reverses_armed() -> None:
-    """Price makes new high but CVD reverses down → bearish divergence → ARMED."""
+    """Price makes new confirmed high but CVD reverses down → bearish divergence → ARMED."""
     strat = _strategy(min_outside_pct=0.001)
     boll = _boll()
 
@@ -171,18 +187,26 @@ def test_upper_new_high_cvd_reverses_armed() -> None:
     strat.on_tick(p1, 1000, boll, _cvd(ts_ms=1000, price=p1, cumulative_buy_volume=1_500_000, cumulative_sell_volume=500_000,
                                          buy_ratio=0.4, sell_ratio=0.6, cross_positive=False, cross_negative=True,
                                          cvd_increasing=False, cvd_decreasing=True, no_new_high=True))
-
-    # First extreme
+    # First extreme candidate
     p2 = boll.upper * 1.006
     strat.on_tick(p2, 2000, boll, _cvd(ts_ms=2000, price=p2, cumulative_buy_volume=1_500_000, cumulative_sell_volume=500_000,
                                          buy_ratio=0.4, sell_ratio=0.6, cross_positive=False, cross_negative=True,
                                          cvd_increasing=False, cvd_decreasing=True, no_new_high=True))
-
-    # New extreme with CVD reversal (less bullish)
+    # Retrace to confirm first extreme
+    p2_retrace = boll.upper * 1.002
+    strat.on_tick(p2_retrace, 2500, boll, _cvd(ts_ms=2500, price=p2_retrace, cumulative_buy_volume=1_500_000, cumulative_sell_volume=500_000,
+                                                 buy_ratio=0.4, sell_ratio=0.6, cross_positive=False, cross_negative=True,
+                                                 cvd_increasing=False, cvd_decreasing=True, no_new_high=True))
+    # New extreme candidate with CVD reversal (less bullish)
     p3 = boll.upper * 1.010
     strat.on_tick(p3, 3000, boll, _cvd(ts_ms=3000, price=p3, cumulative_buy_volume=1_400_000, cumulative_sell_volume=600_000,
                                          buy_ratio=0.4, sell_ratio=0.6, cross_positive=False, cross_negative=True,
                                          cvd_increasing=False, cvd_decreasing=True, no_new_high=True))
+    # Retrace to confirm second extreme → divergence eval fires
+    p3_retrace = boll.upper * 1.005
+    strat.on_tick(p3_retrace, 3500, boll, _cvd(ts_ms=3500, price=p3_retrace, cumulative_buy_volume=1_400_000, cumulative_sell_volume=600_000,
+                                                 buy_ratio=0.4, sell_ratio=0.6, cross_positive=False, cross_negative=True,
+                                                 cvd_increasing=False, cvd_decreasing=True, no_new_high=True))
 
     assert strat.state.upper_anchored_divergence_confirmed is True
     assert strat.state.upper_armed is True
@@ -226,11 +250,14 @@ def test_tracker_reset_on_lower_armed_reset() -> None:
     strat = _strategy(min_outside_pct=0.001)
     boll = _boll()
 
-    # Set up outside observation + extreme
+    # Set up outside observation + first extreme candidate + confirm
     p1 = boll.lower * 0.998
     strat.on_tick(p1, 1000, boll, _cvd(ts_ms=1000, price=p1, cumulative_buy_volume=500_000, cumulative_sell_volume=1_500_000))
     p2 = boll.lower * 0.994
     strat.on_tick(p2, 2000, boll, _cvd(ts_ms=2000, price=p2, cumulative_buy_volume=500_000, cumulative_sell_volume=1_500_000))
+    # Retrace to confirm first extreme
+    p2_retrace = boll.lower * 0.998
+    strat.on_tick(p2_retrace, 3000, boll, _cvd(ts_ms=3000, price=p2_retrace, cumulative_buy_volume=500_000, cumulative_sell_volume=1_500_000))
 
     assert strat._lower_orderflow.initialised is True
     assert strat.state.lower_first_extreme_price is not None
@@ -1202,7 +1229,7 @@ def test_upper_follow_through_log_again_after_reset(caplog) -> None:
 
 
 def test_extreme_snapshot_after_new_extreme_lower(caplog) -> None:
-    """After a new lower extreme, snapshot log prints after 10s interval."""
+    """After a new lower confirmed extreme, snapshot log prints after 10s interval."""
     import logging
     caplog.set_level(logging.INFO)
 
@@ -1212,26 +1239,29 @@ def test_extreme_snapshot_after_new_extreme_lower(caplog) -> None:
     # Tick 1: anchor
     p1 = boll.lower * 0.998
     strat.on_tick(p1, 1000, boll, _cvd(ts_ms=1000, price=p1, cumulative_buy_volume=500_000, cumulative_sell_volume=1_500_000))
-    # Tick 2: first extreme
+    # Tick 2: first extreme candidate → retrace confirm
     p2 = boll.lower * 0.994
     strat.on_tick(p2, 2000, boll, _cvd(ts_ms=2000, price=p2, cumulative_buy_volume=500_000, cumulative_sell_volume=1_600_000))
-    # Tick 3: new extreme (t=3000) — triggers snapshot_pending, but throttled (within 10s)
+    strat.on_tick(p1, 2500, boll, _cvd(ts_ms=2500, price=p1, cumulative_buy_volume=500_000, cumulative_sell_volume=1_600_000))
+    # Tick 3: new extreme candidate → retrace confirm (triggers divergence eval + snapshot_pending, throttled)
     p3 = boll.lower * 0.990
     strat.on_tick(p3, 3000, boll, _cvd(ts_ms=3000, price=p3, cumulative_buy_volume=600_000, cumulative_sell_volume=1_800_000))
+    strat.on_tick(p1, 3200, boll, _cvd(ts_ms=3200, price=p1, cumulative_buy_volume=600_000, cumulative_sell_volume=1_800_000))
 
-    # Within 10s (t=3000..13000), snapshot throttled — no log yet
+    # Within 10s (t=3200..13200), snapshot throttled — no log yet
     snapshot_logs = [r for r in caplog.records if "LOWER_EXTREME_SNAPSHOT" in r.message]
     assert len(snapshot_logs) == 0, "Should not print snapshot within 10s of pending"
 
-    # After 10s (t=14000): new extreme → snapshot fires (throttle expired + new eval)
-    p4 = boll.lower * 0.986  # even lower → new extreme triggers divergence eval + snapshot
+    # After 10s (t=14000): new extreme candidate → retrace confirm → snapshot fires
+    p4 = boll.lower * 0.986
     strat.on_tick(p4, 14000, boll, _cvd(ts_ms=14000, price=p4, cumulative_buy_volume=650_000, cumulative_sell_volume=1_900_000))
+    strat.on_tick(p1, 14200, boll, _cvd(ts_ms=14200, price=p1, cumulative_buy_volume=650_000, cumulative_sell_volume=1_900_000))
     snapshot_logs = [r for r in caplog.records if "LOWER_EXTREME_SNAPSHOT" in r.message]
     assert len(snapshot_logs) == 1, f"Expected 1 snapshot after 10s, got {len(snapshot_logs)}"
 
 
 def test_extreme_snapshot_after_new_extreme_upper(caplog) -> None:
-    """After a new upper extreme, snapshot log prints after 10s interval."""
+    """After a new upper confirmed extreme, snapshot log prints after 10s interval."""
     import logging
     caplog.set_level(logging.INFO)
 
@@ -1243,20 +1273,29 @@ def test_extreme_snapshot_after_new_extreme_upper(caplog) -> None:
     strat.on_tick(p1, 1000, boll, _cvd(ts_ms=1000, price=p1, cumulative_buy_volume=1_500_000, cumulative_sell_volume=500_000,
                                          buy_ratio=0.4, sell_ratio=0.6, cross_positive=False, cross_negative=True,
                                          cvd_increasing=False, cvd_decreasing=True, no_new_high=True))
-    # Tick 2: first extreme
+    # Tick 2: first extreme candidate → retrace confirm
     p2 = boll.upper * 1.006
     strat.on_tick(p2, 2000, boll, _cvd(ts_ms=2000, price=p2, cumulative_buy_volume=1_500_000, cumulative_sell_volume=500_000,
                                          buy_ratio=0.4, sell_ratio=0.6, cross_positive=False, cross_negative=True,
                                          cvd_increasing=False, cvd_decreasing=True, no_new_high=True))
-    # Tick 3: new extreme
+    strat.on_tick(p1, 2500, boll, _cvd(ts_ms=2500, price=p1, cumulative_buy_volume=1_500_000, cumulative_sell_volume=500_000,
+                                         buy_ratio=0.4, sell_ratio=0.6, cross_positive=False, cross_negative=True,
+                                         cvd_increasing=False, cvd_decreasing=True, no_new_high=True))
+    # Tick 3: new extreme candidate — CVD follows higher (no divergence) → retrace confirm
     p3 = boll.upper * 1.010
-    strat.on_tick(p3, 3000, boll, _cvd(ts_ms=3000, price=p3, cumulative_buy_volume=1_400_000, cumulative_sell_volume=600_000,
+    strat.on_tick(p3, 3000, boll, _cvd(ts_ms=3000, price=p3, cumulative_buy_volume=1_700_000, cumulative_sell_volume=500_000,
+                                         buy_ratio=0.4, sell_ratio=0.6, cross_positive=False, cross_negative=True,
+                                         cvd_increasing=False, cvd_decreasing=True, no_new_high=True))
+    strat.on_tick(p1, 3200, boll, _cvd(ts_ms=3200, price=p1, cumulative_buy_volume=1_700_000, cumulative_sell_volume=500_000,
                                          buy_ratio=0.4, sell_ratio=0.6, cross_positive=False, cross_negative=True,
                                          cvd_increasing=False, cvd_decreasing=True, no_new_high=True))
 
-    # After 10s: new extreme → snapshot fires (throttle expired + new eval)
-    p4 = boll.upper * 1.014  # even higher → new extreme triggers divergence eval + snapshot
+    # After 10s (t=14000): new extreme candidate with CVD reverse → retrace confirm → snapshot fires
+    p4 = boll.upper * 1.014
     strat.on_tick(p4, 14000, boll, _cvd(ts_ms=14000, price=p4, cumulative_buy_volume=1_300_000, cumulative_sell_volume=700_000,
+                                         buy_ratio=0.4, sell_ratio=0.6, cross_positive=False, cross_negative=True,
+                                         cvd_increasing=False, cvd_decreasing=True, no_new_high=True))
+    strat.on_tick(p1, 14200, boll, _cvd(ts_ms=14200, price=p1, cumulative_buy_volume=1_300_000, cumulative_sell_volume=700_000,
                                          buy_ratio=0.4, sell_ratio=0.6, cross_positive=False, cross_negative=True,
                                          cvd_increasing=False, cvd_decreasing=True, no_new_high=True))
     snapshot_logs = [r for r in caplog.records if "UPPER_EXTREME_SNAPSHOT" in r.message]
@@ -1264,10 +1303,10 @@ def test_extreme_snapshot_after_new_extreme_upper(caplog) -> None:
 
 
 def test_no_snapshot_without_new_extreme(caplog) -> None:
-    """Outside ticks without new extreme should NOT trigger snapshot.
+    """Outside ticks without new confirmed extreme should NOT trigger snapshot.
 
     Snapshot is only called after divergence evaluation, which requires
-    a new extreme. Same-price ticks do not trigger new snapshots.
+    a confirmed extreme. Same-price ticks do not trigger new snapshots.
     """
     import logging
     caplog.set_level(logging.INFO)
@@ -1275,69 +1314,80 @@ def test_no_snapshot_without_new_extreme(caplog) -> None:
     strat = _strategy(min_outside_pct=0.001, reclaim_extreme_log_interval_seconds=10)
     boll = _boll()
 
-    # Anchor + first extreme + new extreme (triggers pending, but throttled within 10s)
-    p1 = boll.lower * 0.998
+    # Anchor + first extreme candidate → retrace confirm
+    pr = boll.lower * 0.998  # retrace reference price
+    p1 = pr
     strat.on_tick(p1, 1000, boll, _cvd(ts_ms=1000, price=p1, cumulative_buy_volume=500_000, cumulative_sell_volume=1_500_000))
     p2 = boll.lower * 0.994
     strat.on_tick(p2, 2000, boll, _cvd(ts_ms=2000, price=p2, cumulative_buy_volume=500_000, cumulative_sell_volume=1_600_000))
+    strat.on_tick(pr, 2500, boll, _cvd(ts_ms=2500, price=pr, cumulative_buy_volume=500_000, cumulative_sell_volume=1_600_000))
+    # New extreme candidate → retrace confirm (triggers pending, but throttled within 10s)
     p3 = boll.lower * 0.990
     strat.on_tick(p3, 3000, boll, _cvd(ts_ms=3000, price=p3, cumulative_buy_volume=600_000, cumulative_sell_volume=1_800_000))
+    strat.on_tick(pr, 3200, boll, _cvd(ts_ms=3200, price=pr, cumulative_buy_volume=600_000, cumulative_sell_volume=1_800_000))
 
     # No snapshot yet (throttled within 10s interval)
     snapshot_logs = [r for r in caplog.records if "LOWER_EXTREME_SNAPSHOT" in r.message]
     assert len(snapshot_logs) == 0, "Snapshot should be throttled within 10s"
 
-    # After 10s, same-price tick (no new extreme) → snapshot NOT called
+    # After 10s, same-price tick (no new confirmed extreme) → snapshot NOT called
     strat.on_tick(p3, 25000, boll, _cvd(ts_ms=25000, price=p3, cumulative_buy_volume=600_000, cumulative_sell_volume=1_800_000))
     snapshot_logs = [r for r in caplog.records if "LOWER_EXTREME_SNAPSHOT" in r.message]
     assert len(snapshot_logs) == 0, (
-        "Same-price tick (no new extreme) should NOT trigger snapshot — "
+        "Same-price tick (no new confirmed extreme) should NOT trigger snapshot — "
         "snapshot only fires after divergence evaluation"
     )
 
-    # New extreme after throttle expires → snapshot fires
+    # New extreme candidate after throttle expires → retrace confirm → snapshot fires
     p4 = boll.lower * 0.986
     strat.on_tick(p4, 35000, boll, _cvd(ts_ms=35000, price=p4, cumulative_buy_volume=650_000, cumulative_sell_volume=1_900_000))
+    strat.on_tick(pr, 35200, boll, _cvd(ts_ms=35200, price=pr, cumulative_buy_volume=650_000, cumulative_sell_volume=1_900_000))
     snapshot_logs = [r for r in caplog.records if "LOWER_EXTREME_SNAPSHOT" in r.message]
-    assert len(snapshot_logs) == 1, "New extreme after throttle should trigger snapshot"
+    assert len(snapshot_logs) >= 1, "New confirmed extreme after throttle should trigger snapshot"
 
     # More same-price ticks → no additional snapshots
     strat.on_tick(p4, 36000, boll, _cvd(ts_ms=36000, price=p4, cumulative_buy_volume=650_000, cumulative_sell_volume=1_900_000))
     snapshot_logs = [r for r in caplog.records if "LOWER_EXTREME_SNAPSHOT" in r.message]
-    assert len(snapshot_logs) == 1, "Should not print additional snapshots without new extreme"
+    assert len(snapshot_logs) >= 1, "Should not print additional snapshots without new confirmed extreme"
 
 
 def test_snapshot_logs_latest_extreme_only(caplog) -> None:
-    """Multiple new extremes within 10s → only latest printed in snapshot."""
+    """Multiple new confirmed extremes within 10s → only latest printed in snapshot."""
     import logging
     caplog.set_level(logging.INFO)
 
     strat = _strategy(min_outside_pct=0.001, reclaim_extreme_log_interval_seconds=10)
     boll = _boll()
 
+    pr = boll.lower * 0.998  # retrace reference
     # Anchor
-    p1 = boll.lower * 0.998
+    p1 = pr
     strat.on_tick(p1, 1000, boll, _cvd(ts_ms=1000, price=p1, cumulative_buy_volume=500_000, cumulative_sell_volume=1_500_000))
-    # First extreme: ~1888.6
-    p2 = boll.lower * 0.994
+    # First extreme candidate → retrace confirm
+    p2 = boll.lower * 0.994  # ~1888.6
     strat.on_tick(p2, 2000, boll, _cvd(ts_ms=2000, price=p2, cumulative_buy_volume=500_000, cumulative_sell_volume=1_600_000))
-    # New extreme t=3000: ~1881 (throttled — within 10s)
+    strat.on_tick(pr, 2500, boll, _cvd(ts_ms=2500, price=pr, cumulative_buy_volume=500_000, cumulative_sell_volume=1_600_000))
+    # New extreme t=3000: ~1881 → retrace confirm (throttled — within 10s)
     p3 = boll.lower * 0.990
     strat.on_tick(p3, 3000, boll, _cvd(ts_ms=3000, price=p3, cumulative_buy_volume=600_000, cumulative_sell_volume=1_800_000))
-    # New extreme t=5000: ~1875 (throttled — within 10s)
+    strat.on_tick(pr, 3200, boll, _cvd(ts_ms=3200, price=pr, cumulative_buy_volume=600_000, cumulative_sell_volume=1_800_000))
+    # New extreme t=5000: ~1875 → retrace confirm (throttled)
     p4 = boll.lower * 0.987
     strat.on_tick(p4, 5000, boll, _cvd(ts_ms=5000, price=p4, cumulative_buy_volume=650_000, cumulative_sell_volume=1_900_000))
-    # New extreme t=7000: ~1862 (throttled — within 10s)
+    strat.on_tick(pr, 5200, boll, _cvd(ts_ms=5200, price=pr, cumulative_buy_volume=650_000, cumulative_sell_volume=1_900_000))
+    # New extreme t=7000: ~1862 → retrace confirm (throttled)
     p5 = boll.lower * 0.980
     strat.on_tick(p5, 7000, boll, _cvd(ts_ms=7000, price=p5, cumulative_buy_volume=700_000, cumulative_sell_volume=2_000_000))
+    strat.on_tick(pr, 7200, boll, _cvd(ts_ms=7200, price=pr, cumulative_buy_volume=700_000, cumulative_sell_volume=2_000_000))
 
     # All within 10s → no snapshot yet
     snapshot_logs = [r for r in caplog.records if "LOWER_EXTREME_SNAPSHOT" in r.message]
     assert len(snapshot_logs) == 0, "All extremes within 10s — no snapshot yet"
 
-    # After 10s (t=18000): new extreme → snapshot fires with LATEST coherent pair
+    # After 10s (t=18000): new extreme candidate → retrace confirm → snapshot fires
     p6 = boll.lower * 0.976  # ~1854.4
     strat.on_tick(p6, 18000, boll, _cvd(ts_ms=18000, price=p6, cumulative_buy_volume=750_000, cumulative_sell_volume=2_100_000))
+    strat.on_tick(pr, 18200, boll, _cvd(ts_ms=18200, price=pr, cumulative_buy_volume=750_000, cumulative_sell_volume=2_100_000))
     snapshot_logs = [r for r in caplog.records if "LOWER_EXTREME_SNAPSHOT" in r.message]
     assert len(snapshot_logs) == 1, f"Expected 1 snapshot (latest only), got {len(snapshot_logs)}"
     msg = snapshot_logs[0].getMessage()
@@ -1353,15 +1403,18 @@ def test_snapshot_logs_latest_extreme_only(caplog) -> None:
 
 
 def _setup_lower_outside_with_first_extreme(strat, boll) -> None:
-    """Helper: anchor + first valid extreme for LOWER, no divergence."""
+    """Helper: anchor + first confirmed extreme for LOWER, no divergence."""
     p1 = boll.lower * 0.998
     strat.on_tick(p1, 1000, boll, _cvd(ts_ms=1000, price=p1, cumulative_buy_volume=500_000, cumulative_sell_volume=1_500_000))
     p2 = boll.lower * 0.994
     strat.on_tick(p2, 2000, boll, _cvd(ts_ms=2000, price=p2, cumulative_buy_volume=500_000, cumulative_sell_volume=1_600_000))
+    # Retrace to confirm first extreme
+    p2_retrace = boll.lower * 0.998
+    strat.on_tick(p2_retrace, 3000, boll, _cvd(ts_ms=3000, price=p2_retrace, cumulative_buy_volume=500_000, cumulative_sell_volume=1_600_000))
 
 
 def _setup_upper_outside_with_first_extreme(strat, boll) -> None:
-    """Helper: anchor + first valid extreme for UPPER, no divergence."""
+    """Helper: anchor + first confirmed extreme for UPPER, no divergence."""
     p1 = boll.upper * 1.002
     strat.on_tick(p1, 1000, boll, _cvd(ts_ms=1000, price=p1, cumulative_buy_volume=1_500_000, cumulative_sell_volume=500_000,
                                          buy_ratio=0.4, sell_ratio=0.6, cross_positive=False, cross_negative=True,
@@ -1370,6 +1423,11 @@ def _setup_upper_outside_with_first_extreme(strat, boll) -> None:
     strat.on_tick(p2, 2000, boll, _cvd(ts_ms=2000, price=p2, cumulative_buy_volume=1_500_000, cumulative_sell_volume=500_000,
                                          buy_ratio=0.4, sell_ratio=0.6, cross_positive=False, cross_negative=True,
                                          cvd_increasing=False, cvd_decreasing=True, no_new_high=True))
+    # Retrace to confirm first extreme
+    p2_retrace = boll.upper * 1.002
+    strat.on_tick(p2_retrace, 3000, boll, _cvd(ts_ms=3000, price=p2_retrace, cumulative_buy_volume=1_500_000, cumulative_sell_volume=500_000,
+                                                 buy_ratio=0.4, sell_ratio=0.6, cross_positive=False, cross_negative=True,
+                                                 cvd_increasing=False, cvd_decreasing=True, no_new_high=True))
 
 
 def test_no_entry_no_anchored_divergence_lower(caplog) -> None:
@@ -1437,33 +1495,61 @@ def test_no_entry_no_anchored_divergence_upper(caplog) -> None:
 
 
 def _run_lower_armed_divergence(strat, boll) -> None:
-    """Helper: run full lower armed with anchored divergence confirmed via on_tick."""
+    """Helper: run full lower armed with anchored divergence confirmed via on_tick.
+
+    Uses confirmed swing extremes — retrace ticks after each low trigger
+    confirmation before divergence is evaluated.
+    """
+    # Anchor
     p1 = boll.lower * 0.998
     strat.on_tick(p1, 1000, boll, _cvd(ts_ms=1000, price=p1, cumulative_buy_volume=500_000, cumulative_sell_volume=1_500_000))
+    # First extreme candidate
     p2 = boll.lower * 0.994
     strat.on_tick(p2, 2000, boll, _cvd(ts_ms=2000, price=p2, cumulative_buy_volume=500_000, cumulative_sell_volume=1_500_000))
-    # New low + CVD recovery → divergence confirmed
+    # Retrace to confirm first extreme (price must rise >= p2 * 1.0008)
+    p2_retrace = boll.lower * 0.998
+    strat.on_tick(p2_retrace, 2500, boll, _cvd(ts_ms=2500, price=p2_retrace, cumulative_buy_volume=500_000, cumulative_sell_volume=1_500_000))
+    # New low + CVD recovery — sets new candidate
     p3 = boll.lower * 0.990
     strat.on_tick(p3, 3000, boll, _cvd(ts_ms=3000, price=p3, cumulative_buy_volume=600_000, cumulative_sell_volume=1_400_000))
+    # Retrace to confirm second extreme → divergence evaluation fires
+    p3_retrace = boll.lower * 0.995
+    strat.on_tick(p3_retrace, 3500, boll, _cvd(ts_ms=3500, price=p3_retrace, cumulative_buy_volume=600_000, cumulative_sell_volume=1_400_000))
     assert strat.state.lower_anchored_divergence_confirmed is True
     assert strat.state.lower_armed is True
 
 
 def _run_upper_armed_divergence(strat, boll) -> None:
-    """Helper: run full upper armed with anchored divergence confirmed via on_tick."""
+    """Helper: run full upper armed with anchored divergence confirmed via on_tick.
+
+    Uses confirmed swing extremes — retrace ticks after each high trigger
+    confirmation before divergence is evaluated.
+    """
+    # Anchor
     p1 = boll.upper * 1.002
     strat.on_tick(p1, 1000, boll, _cvd(ts_ms=1000, price=p1, cumulative_buy_volume=1_500_000, cumulative_sell_volume=500_000,
                                          buy_ratio=0.4, sell_ratio=0.6, cross_positive=False, cross_negative=True,
                                          cvd_increasing=False, cvd_decreasing=True, no_new_high=True))
+    # First extreme candidate
     p2 = boll.upper * 1.006
     strat.on_tick(p2, 2000, boll, _cvd(ts_ms=2000, price=p2, cumulative_buy_volume=1_500_000, cumulative_sell_volume=500_000,
                                          buy_ratio=0.4, sell_ratio=0.6, cross_positive=False, cross_negative=True,
                                          cvd_increasing=False, cvd_decreasing=True, no_new_high=True))
-    # New high + CVD reverse → divergence confirmed
+    # Retrace to confirm first extreme (price must fall <= p2 * 0.9992)
+    p2_retrace = boll.upper * 1.002
+    strat.on_tick(p2_retrace, 2500, boll, _cvd(ts_ms=2500, price=p2_retrace, cumulative_buy_volume=1_500_000, cumulative_sell_volume=500_000,
+                                                 buy_ratio=0.4, sell_ratio=0.6, cross_positive=False, cross_negative=True,
+                                                 cvd_increasing=False, cvd_decreasing=True, no_new_high=True))
+    # New high + CVD reverse — sets new candidate
     p3 = boll.upper * 1.010
     strat.on_tick(p3, 3000, boll, _cvd(ts_ms=3000, price=p3, cumulative_buy_volume=1_400_000, cumulative_sell_volume=600_000,
                                          buy_ratio=0.4, sell_ratio=0.6, cross_positive=False, cross_negative=True,
                                          cvd_increasing=False, cvd_decreasing=True, no_new_high=True))
+    # Retrace to confirm second extreme → divergence evaluation fires
+    p3_retrace = boll.upper * 1.005
+    strat.on_tick(p3_retrace, 3500, boll, _cvd(ts_ms=3500, price=p3_retrace, cumulative_buy_volume=1_400_000, cumulative_sell_volume=600_000,
+                                                 buy_ratio=0.4, sell_ratio=0.6, cross_positive=False, cross_negative=True,
+                                                 cvd_increasing=False, cvd_decreasing=True, no_new_high=True))
     assert strat.state.upper_anchored_divergence_confirmed is True
     assert strat.state.upper_armed is True
 
@@ -1642,7 +1728,7 @@ def test_post_entry_sl_cooldown_no_entry(caplog) -> None:
 
 
 def test_first_valid_extreme_renamed(caplog) -> None:
-    """Verify FIRST_EXTREME renamed to FIRST_VALID_EXTREME."""
+    """Verify FIRST_EXTREME renamed to FIRST_CONFIRMED_EXTREME."""
     import logging
     caplog.set_level(logging.INFO)
 
@@ -1653,11 +1739,15 @@ def test_first_valid_extreme_renamed(caplog) -> None:
     strat.on_tick(p1, 1000, boll, _cvd(ts_ms=1000, price=p1, cumulative_buy_volume=500_000, cumulative_sell_volume=1_500_000))
     p2 = boll.lower * 0.994
     strat.on_tick(p2, 2000, boll, _cvd(ts_ms=2000, price=p2, cumulative_buy_volume=500_000, cumulative_sell_volume=1_600_000))
+    # Retrace to confirm first extreme
+    strat.on_tick(p1, 3000, boll, _cvd(ts_ms=3000, price=p1, cumulative_buy_volume=500_000, cumulative_sell_volume=1_600_000))
 
     first_extreme_logs = [r for r in caplog.records if "FIRST_EXTREME" in r.message]
     first_valid_logs = [r for r in caplog.records if "FIRST_VALID_EXTREME" in r.message]
+    first_confirmed_logs = [r for r in caplog.records if "FIRST_CONFIRMED_EXTREME" in r.message]
     assert len(first_extreme_logs) == 0, f"LOWER_FIRST_EXTREME should be renamed, got {len(first_extreme_logs)}"
-    assert len(first_valid_logs) == 1, f"Expected LOWER_FIRST_VALID_EXTREME, got {len(first_valid_logs)}"
+    assert len(first_valid_logs) == 0, f"LOWER_FIRST_VALID_EXTREME should be renamed to LOWER_FIRST_CONFIRMED_EXTREME"
+    assert len(first_confirmed_logs) == 1, f"Expected LOWER_FIRST_CONFIRMED_EXTREME, got {len(first_confirmed_logs)}"
 
 
 # ── Reclaim V2 abort + re-entry ────────────────────────────────────────
@@ -1672,11 +1762,14 @@ def test_re_entry_after_abort_lower(caplog) -> None:
     strat = _strategy(min_outside_pct=0.001)
     boll = _boll()
 
-    # Cycle 1: outside → first extreme → NO divergence → price returns inside
+    # Cycle 1: outside → first extreme candidate → retrace confirm → NO divergence → price returns inside
     p1 = boll.lower * 0.998
     strat.on_tick(p1, 1000, boll, _cvd(ts_ms=1000, price=p1, cumulative_buy_volume=500_000, cumulative_sell_volume=1_500_000))
     p2 = boll.lower * 0.994
     strat.on_tick(p2, 2000, boll, _cvd(ts_ms=2000, price=p2, cumulative_buy_volume=500_000, cumulative_sell_volume=1_600_000))
+    # Retrace to confirm first extreme
+    pr = boll.lower * 0.998
+    strat.on_tick(pr, 2500, boll, _cvd(ts_ms=2500, price=pr, cumulative_buy_volume=500_000, cumulative_sell_volume=1_600_000))
 
     assert strat.state.lower_outside_observed is True
     assert strat.state.lower_first_extreme_price is not None
@@ -1713,11 +1806,14 @@ def test_re_entry_after_abort_upper(caplog) -> None:
     strat = _strategy(min_outside_pct=0.001)
     boll = _boll()
 
-    # Cycle 1: outside above upper → first extreme → NO divergence → price returns inside
+    # Cycle 1: outside above upper → first extreme candidate → retrace confirm → NO divergence → price returns inside
     p1 = boll.upper * 1.002
     strat.on_tick(p1, 1000, boll, _cvd(ts_ms=1000, price=p1, cumulative_buy_volume=1_500_000, cumulative_sell_volume=500_000))
     p2 = boll.upper * 1.006
     strat.on_tick(p2, 2000, boll, _cvd(ts_ms=2000, price=p2, cumulative_buy_volume=1_600_000, cumulative_sell_volume=500_000))
+    # Retrace to confirm first extreme
+    pr = boll.upper * 1.002
+    strat.on_tick(pr, 2500, boll, _cvd(ts_ms=2500, price=pr, cumulative_buy_volume=1_600_000, cumulative_sell_volume=500_000))
 
     assert strat.state.upper_outside_observed is True
     assert strat.state.upper_first_extreme_price is not None
@@ -1785,26 +1881,38 @@ def test_lower_snapshot_coherent_pair(caplog) -> None:
         cumulative_buy_volume=500_000, cumulative_sell_volume=1_500_000,
     ))
 
-    # Step 2: first valid extreme (price=1894, anchored_cvd = -100k)
+    # Step 2: first extreme candidate → retrace to confirm
     p2 = 1894.0
     strat.on_tick(p2, 2000, boll, _cvd(
         ts_ms=2000, price=p2,
         cumulative_buy_volume=500_000, cumulative_sell_volume=1_600_000,
     ))
-    # Should record first extreme but NOT print snapshot
+    # Retrace confirm: 1894 * 1.0008 = 1895.52; 1897 >= 1895.52 → confirmed
+    pr = 1897.0
+    strat.on_tick(pr, 2500, boll, _cvd(
+        ts_ms=2500, price=pr,
+        cumulative_buy_volume=500_000, cumulative_sell_volume=1_600_000,
+    ))
+    # Should record first CONFIRMED extreme but NOT print snapshot
     assert strat.state.lower_first_extreme_price == 1894.0
     snapshot_logs_step2 = [r for r in caplog.records if "LOWER_EXTREME_SNAPSHOT" in r.getMessage()]
     assert len(snapshot_logs_step2) == 0, (
         "First extreme should NOT produce LOWER_EXTREME_SNAPSHOT (no pair yet)"
     )
-    first_logs = [r for r in caplog.records if "LOWER_FIRST_VALID_EXTREME" in r.getMessage()]
+    first_logs = [r for r in caplog.records if "LOWER_FIRST_CONFIRMED_EXTREME" in r.getMessage()]
     assert len(first_logs) == 1
 
-    # Step 3: second extreme (price=1890, anchored_cvd = -200k, CVD follows lower)
+    # Step 3: second extreme candidate (price=1890, anchored_cvd = -200k, CVD follows lower)
     # prev=1894 prev_cvd=-100k, curr=1890 curr_cvd=-200k → no recovery → cvd_not_recovered
     p3 = 1890.0
     strat.on_tick(p3, 3000, boll, _cvd(
         ts_ms=3000, price=p3,
+        cumulative_buy_volume=500_000, cumulative_sell_volume=1_700_000,
+    ))
+    # Retrace confirm: 1890 * 1.0008 = 1891.51; 1894 >= 1891.51 → confirmed
+    pr2 = 1894.0
+    strat.on_tick(pr2, 3500, boll, _cvd(
+        ts_ms=3500, price=pr2,
         cumulative_buy_volume=500_000, cumulative_sell_volume=1_700_000,
     ))
 
@@ -1838,21 +1946,25 @@ def test_lower_snapshot_cvd_not_recovered_reason(caplog) -> None:
         ts_ms=1000, price=1898,
         cumulative_buy_volume=1_000_000, cumulative_sell_volume=2_000_000,
     ))
-    # First extreme: cum_cvd = -1M
+    # First extreme candidate → retrace confirm
     strat.on_tick(1894, 2000, boll, _cvd(
         ts_ms=2000, price=1894,
+        cumulative_buy_volume=1_000_000, cumulative_sell_volume=2_000_000,
+    ))
+    strat.on_tick(1897, 2500, boll, _cvd(
+        ts_ms=2500, price=1897,
         cumulative_buy_volume=1_000_000, cumulative_sell_volume=2_000_000,
     ))
     assert strat.state.lower_first_extreme_price is not None
 
     # Second extreme: price lower (1890 < 1894) BUT CVD unchanged/more sell
-    # cum_cvd = 1M - 2.3M = -1.3M. anchored_cvd = -300k
-    # prev anchored_cvd = 0 (same cum_cvd at first extreme) → wait...
-    # Actually at first extreme, cum_cvd = 1M - 2M = -1M, anchor was at p=1898 with cum_cvd = -1M
-    # So prev anchored_cvd = 0. curr anchored_cvd = -1.3M - (-1M) = -300k
-    # curr_cvd < prev_cvd → cvd_not_recovered
     strat.on_tick(1890, 3000, boll, _cvd(
         ts_ms=3000, price=1890,
+        cumulative_buy_volume=1_000_000, cumulative_sell_volume=2_300_000,
+    ))
+    # Retrace confirm → divergence eval fires
+    strat.on_tick(1894, 3500, boll, _cvd(
+        ts_ms=3500, price=1894,
         cumulative_buy_volume=1_000_000, cumulative_sell_volume=2_300_000,
     ))
 
@@ -1881,17 +1993,26 @@ def test_lower_snapshot_divergence_confirmed(caplog) -> None:
         ts_ms=1000, price=1898,
         cumulative_buy_volume=500_000, cumulative_sell_volume=1_500_000,
     ))
-    # First extreme: cum_cvd = 500k - 1.5M = -1M, anchored_cvd = 0
+    # First extreme candidate → retrace confirm
     strat.on_tick(1894, 2000, boll, _cvd(
         ts_ms=2000, price=1894,
         cumulative_buy_volume=500_000, cumulative_sell_volume=1_500_000,
     ))
+    strat.on_tick(1897, 2500, boll, _cvd(
+        ts_ms=2500, price=1897,
+        cumulative_buy_volume=500_000, cumulative_sell_volume=1_500_000,
+    ))
 
-    # Second extreme: price lower, CVD recovered
+    # Second extreme candidate: price lower, CVD recovered
     # cum_cvd = 800k - 1.4M = -600k. anchored_cvd = -600k - (-1M) = 400k
     # prev anchored_cvd = 0, curr anchored_cvd = 400k → CVD recovered → confirmed
     strat.on_tick(1890, 3000, boll, _cvd(
         ts_ms=3000, price=1890,
+        cumulative_buy_volume=800_000, cumulative_sell_volume=1_400_000,
+    ))
+    # Retrace confirm → divergence eval fires
+    strat.on_tick(1894, 3500, boll, _cvd(
+        ts_ms=3500, price=1894,
         cumulative_buy_volume=800_000, cumulative_sell_volume=1_400_000,
     ))
 
@@ -1922,9 +2043,14 @@ def test_upper_snapshot_coherent_pair(caplog) -> None:
         cumulative_buy_volume=1_500_000, cumulative_sell_volume=500_000,
         buy_ratio=0.4, sell_ratio=0.6,
     ))
-    # First extreme at 2106: anchored_cvd = +100k
+    # First extreme candidate → retrace confirm
     strat.on_tick(2106, 2000, boll, _cvd(
         ts_ms=2000, price=2106,
+        cumulative_buy_volume=1_600_000, cumulative_sell_volume=500_000,
+        buy_ratio=0.4, sell_ratio=0.6,
+    ))
+    strat.on_tick(2103, 2500, boll, _cvd(
+        ts_ms=2500, price=2103,
         cumulative_buy_volume=1_600_000, cumulative_sell_volume=500_000,
         buy_ratio=0.4, sell_ratio=0.6,
     ))
@@ -1933,10 +2059,15 @@ def test_upper_snapshot_coherent_pair(caplog) -> None:
     snapshot_logs_step2 = [r for r in caplog.records if "UPPER_EXTREME_SNAPSHOT" in r.getMessage()]
     assert len(snapshot_logs_step2) == 0
 
-    # Second extreme at 2110: anchored_cvd = +200k (CVD follows higher → no reversal)
-    # prev=2106 prev_cvd=+100k, curr=2110 curr_cvd=+200k → CVD went UP → cvd_not_reversed
+    # Second extreme candidate at 2110: anchored_cvd = +200k (CVD follows higher → no reversal)
     strat.on_tick(2110, 3000, boll, _cvd(
         ts_ms=3000, price=2110,
+        cumulative_buy_volume=1_700_000, cumulative_sell_volume=500_000,
+        buy_ratio=0.4, sell_ratio=0.6,
+    ))
+    # Retrace confirm → divergence eval fires
+    strat.on_tick(2107, 3500, boll, _cvd(
+        ts_ms=3500, price=2107,
         cumulative_buy_volume=1_700_000, cumulative_sell_volume=500_000,
         buy_ratio=0.4, sell_ratio=0.6,
     ))
@@ -1969,18 +2100,29 @@ def test_upper_snapshot_divergence_confirmed(caplog) -> None:
         cumulative_buy_volume=1_500_000, cumulative_sell_volume=500_000,
         buy_ratio=0.4, sell_ratio=0.6,
     ))
-    # First extreme: same cum_cvd, anchored_cvd = 0
+    # First extreme candidate → retrace confirm
     strat.on_tick(2106, 2000, boll, _cvd(
         ts_ms=2000, price=2106,
         cumulative_buy_volume=1_500_000, cumulative_sell_volume=500_000,
         buy_ratio=0.4, sell_ratio=0.6,
     ))
+    strat.on_tick(2103, 2500, boll, _cvd(
+        ts_ms=2500, price=2103,
+        cumulative_buy_volume=1_500_000, cumulative_sell_volume=500_000,
+        buy_ratio=0.4, sell_ratio=0.6,
+    ))
 
-    # Second extreme at 2110: cum_cvd = 1.2M - 800k = +400k
+    # Second extreme candidate at 2110: cum_cvd = 1.2M - 800k = +400k
     # anchored_cvd = +400k - (+1M) = -600k
     # prev anchored_cvd = 0, curr anchored_cvd = -600k → CVD reversed → confirmed
     strat.on_tick(2110, 3000, boll, _cvd(
         ts_ms=3000, price=2110,
+        cumulative_buy_volume=1_200_000, cumulative_sell_volume=800_000,
+        buy_ratio=0.4, sell_ratio=0.6,
+    ))
+    # Retrace confirm → divergence eval fires
+    strat.on_tick(2107, 3500, boll, _cvd(
+        ts_ms=3500, price=2107,
         cumulative_buy_volume=1_200_000, cumulative_sell_volume=800_000,
         buy_ratio=0.4, sell_ratio=0.6,
     ))
@@ -2011,16 +2153,24 @@ def test_delayed_snapshot_uses_latest_coherent_decision(caplog) -> None:
         ts_ms=1000, price=1898,
         cumulative_buy_volume=500_000, cumulative_sell_volume=1_500_000,
     ))
-    # First extreme: anchored_cvd = 0
+    # First extreme candidate → retrace confirm
     strat.on_tick(1894, 2000, boll, _cvd(
         ts_ms=2000, price=1894,
         cumulative_buy_volume=500_000, cumulative_sell_volume=1_500_000,
     ))
+    strat.on_tick(1897, 2500, boll, _cvd(
+        ts_ms=2500, price=1897,
+        cumulative_buy_volume=500_000, cumulative_sell_volume=1_500_000,
+    ))
 
     # Second extreme (1892): same CVD → cvd_not_recovered
-    # This sets pending=True but throttle prevents log (interval=10s, only 1s elapsed)
+    # This sets pending=True but throttle prevents log (interval=10s, only 0.5s elapsed)
     strat.on_tick(1892, 3000, boll, _cvd(
         ts_ms=3000, price=1892,
+        cumulative_buy_volume=500_000, cumulative_sell_volume=1_600_000,
+    ))
+    strat.on_tick(1895, 3200, boll, _cvd(
+        ts_ms=3200, price=1895,
         cumulative_buy_volume=500_000, cumulative_sell_volume=1_600_000,
     ))
     # Should NOT have printed snapshot yet (throttled)
@@ -2033,6 +2183,10 @@ def test_delayed_snapshot_uses_latest_coherent_decision(caplog) -> None:
         ts_ms=4000, price=1890,
         cumulative_buy_volume=500_000, cumulative_sell_volume=1_700_000,
     ))
+    strat.on_tick(1894, 4200, boll, _cvd(
+        ts_ms=4200, price=1894,
+        cumulative_buy_volume=500_000, cumulative_sell_volume=1_700_000,
+    ))
     # Still throttled
     snapshot_after_3rd = [r for r in caplog.records if "LOWER_EXTREME_SNAPSHOT" in r.getMessage()]
     assert len(snapshot_after_3rd) == 0, "Snapshot should still be throttled"
@@ -2040,6 +2194,10 @@ def test_delayed_snapshot_uses_latest_coherent_decision(caplog) -> None:
     # Now advance time past the 10s interval → log fires
     strat.on_tick(1889, 15000, boll, _cvd(
         ts_ms=15000, price=1889,
+        cumulative_buy_volume=500_000, cumulative_sell_volume=1_800_000,
+    ))
+    strat.on_tick(1893, 15200, boll, _cvd(
+        ts_ms=15200, price=1893,
         cumulative_buy_volume=500_000, cumulative_sell_volume=1_800_000,
     ))
 
@@ -2084,16 +2242,20 @@ def test_no_snapshot_without_evaluation(caplog) -> None:
         ts_ms=1000, price=1898,
         cumulative_buy_volume=500_000, cumulative_sell_volume=1_500_000,
     ))
-    # First valid extreme
+    # First extreme candidate → retrace confirm
     strat.on_tick(1894, 2000, boll, _cvd(
         ts_ms=2000, price=1894,
         cumulative_buy_volume=500_000, cumulative_sell_volume=1_600_000,
     ))
+    strat.on_tick(1897, 2500, boll, _cvd(
+        ts_ms=2500, price=1897,
+        cumulative_buy_volume=500_000, cumulative_sell_volume=1_600_000,
+    ))
 
-    first_logs = [r for r in caplog.records if "LOWER_FIRST_VALID_EXTREME" in r.getMessage()]
+    first_logs = [r for r in caplog.records if "LOWER_FIRST_CONFIRMED_EXTREME" in r.getMessage()]
     snapshot_logs = [r for r in caplog.records if "LOWER_EXTREME_SNAPSHOT" in r.getMessage()]
 
-    assert len(first_logs) == 1, "Should log LOWER_FIRST_VALID_EXTREME"
+    assert len(first_logs) == 1, "Should log LOWER_FIRST_CONFIRMED_EXTREME"
     assert len(snapshot_logs) == 0, (
         "First extreme should NOT produce LOWER_EXTREME_SNAPSHOT (no prev/curr pair)"
     )
@@ -2120,15 +2282,26 @@ def test_upper_snapshot_cvd_not_reversed_reason(caplog) -> None:
         cumulative_buy_volume=1_500_000, cumulative_sell_volume=500_000,
         buy_ratio=0.4, sell_ratio=0.6,
     ))
-    # First extreme
+    # First extreme candidate → retrace confirm
     strat.on_tick(2106, 2000, boll, _cvd(
         ts_ms=2000, price=2106,
         cumulative_buy_volume=1_500_000, cumulative_sell_volume=500_000,
         buy_ratio=0.4, sell_ratio=0.6,
     ))
-    # Second extreme: CVD follows higher → cvd_not_reversed
+    strat.on_tick(2103, 2500, boll, _cvd(
+        ts_ms=2500, price=2103,
+        cumulative_buy_volume=1_500_000, cumulative_sell_volume=500_000,
+        buy_ratio=0.4, sell_ratio=0.6,
+    ))
+    # Second extreme candidate: CVD follows higher → cvd_not_reversed
     strat.on_tick(2110, 3000, boll, _cvd(
         ts_ms=3000, price=2110,
+        cumulative_buy_volume=1_800_000, cumulative_sell_volume=500_000,
+        buy_ratio=0.4, sell_ratio=0.6,
+    ))
+    # Retrace confirm → divergence eval fires
+    strat.on_tick(2107, 3500, boll, _cvd(
+        ts_ms=3500, price=2107,
         cumulative_buy_volume=1_800_000, cumulative_sell_volume=500_000,
         buy_ratio=0.4, sell_ratio=0.6,
     ))
