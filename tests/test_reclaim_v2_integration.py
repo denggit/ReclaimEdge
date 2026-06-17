@@ -2313,3 +2313,138 @@ def test_upper_snapshot_cvd_not_reversed_reason(caplog) -> None:
     assert "divergence_confirmed=False" in msg
     assert "divergence_reason=cvd_not_reversed" in msg
     assert "no_new_high" not in msg
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# First outside tick → confirmed extreme (V-shaped sweep)
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def test_lower_first_outside_tick_becomes_confirmed_extreme(caplog) -> None:
+    """First outside tick must seed the confirmed extreme tracker.
+
+    Scenario: V-shaped sweep where the first outside tick IS the lowest
+    point.  Without seeding, the confirmed extreme tracker misses it.
+
+    tick1: price=1780, first outside lower band → seed candidate
+    tick2: price=1785, retracing but still outside → retrace-confirm at 1780
+    """
+    import logging
+    caplog.set_level(logging.INFO)
+
+    strat = _strategy(min_outside_pct=0.001)
+    boll = _boll(lower=1900)
+
+    # Tick 1: first outside → seeds confirmed tracker with price=1780, anchored_cvd=0
+    p1 = 1780.0
+    cvd1 = _cvd(ts_ms=1000, price=p1, cumulative_buy_volume=500_000, cumulative_sell_volume=1_500_000)
+    strat._update_lower_outside_v2(price=p1, ts_ms=1000, boll=boll, cvd=cvd1)
+    assert strat.state.lower_outside_observed is True
+
+    # Tick 2: still outside but retracing → triggers retrace confirm
+    # 1780 * 1.0008 = 1781.424; p2=1785 >= 1781.424 ✓
+    p2 = 1785.0
+    cvd2 = _cvd(ts_ms=2000, price=p2, cumulative_buy_volume=500_000, cumulative_sell_volume=1_500_000)
+    strat._update_lower_outside_v2(price=p2, ts_ms=2000, boll=boll, cvd=cvd2)
+
+    # The confirmed extreme must use tick1's price, not tick2's
+    assert strat.state.lower_first_extreme_price == 1780.0, (
+        f"Expected first confirmed extreme at 1780 (tick1), "
+        f"got {strat.state.lower_first_extreme_price}"
+    )
+    assert strat.state.lower_previous_confirmed_extreme_price == 1780.0
+
+    # Verify the LOWER_CONFIRMED_EXTREME log shows retrace
+    confirm_logs = [r for r in caplog.records if "LOWER_CONFIRMED_EXTREME" in r.getMessage()]
+    assert len(confirm_logs) >= 1, "Should log LOWER_CONFIRMED_EXTREME"
+    msg = confirm_logs[0].getMessage()
+    assert "confirm_reason=retrace" in msg
+    assert "price=1780" in msg, f"Confirmed extreme should be 1780, got: {msg}"
+
+
+def test_upper_first_outside_tick_becomes_confirmed_extreme(caplog) -> None:
+    """First outside tick must seed the confirmed extreme tracker (UPPER).
+
+    Mirror of LOWER: V-shaped sweep where the first outside tick IS the
+    highest point.
+
+    tick1: price=2120, first outside upper band → seed candidate
+    tick2: price=2113, retracing but still outside → retrace-confirm at 2120
+    """
+    import logging
+    caplog.set_level(logging.INFO)
+
+    strat = _strategy(min_outside_pct=0.001)
+    boll = _boll(upper=2100)
+
+    # Tick 1: first outside → seeds confirmed tracker with price=2120, anchored_cvd=0
+    p1 = 2120.0
+    cvd1 = _cvd(ts_ms=1000, price=p1, cumulative_buy_volume=1_500_000, cumulative_sell_volume=500_000,
+                buy_ratio=0.4, sell_ratio=0.6)
+    strat._update_upper_outside_v2(price=p1, ts_ms=1000, boll=boll, cvd=cvd1)
+    assert strat.state.upper_outside_observed is True
+
+    # Tick 2: still outside but retracing → triggers retrace confirm
+    # 2120 * 0.9992 = 2118.016; p2=2113 <= 2118.016 ✓ (still > 2100 → outside)
+    p2 = 2113.0
+    cvd2 = _cvd(ts_ms=2000, price=p2, cumulative_buy_volume=1_500_000, cumulative_sell_volume=500_000,
+                buy_ratio=0.4, sell_ratio=0.6)
+    strat._update_upper_outside_v2(price=p2, ts_ms=2000, boll=boll, cvd=cvd2)
+
+    # The confirmed extreme must use tick1's price, not tick2's
+    assert strat.state.upper_first_extreme_price == 2120.0, (
+        f"Expected first confirmed extreme at 2120 (tick1), "
+        f"got {strat.state.upper_first_extreme_price}"
+    )
+    assert strat.state.upper_previous_confirmed_extreme_price == 2120.0
+
+    # Verify the UPPER_CONFIRMED_EXTREME log shows retrace
+    confirm_logs = [r for r in caplog.records if "UPPER_CONFIRMED_EXTREME" in r.getMessage()]
+    assert len(confirm_logs) >= 1, "Should log UPPER_CONFIRMED_EXTREME"
+    msg = confirm_logs[0].getMessage()
+    assert "confirm_reason=retrace" in msg
+    assert "price=2120" in msg, f"Confirmed extreme should be 2120, got: {msg}"
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Snapshot log field rename: new_extreme_count → running_tick_extreme_count
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def test_snapshot_log_uses_running_tick_extreme_count_not_new_extreme_count(caplog) -> None:
+    """Snapshot log must use running_tick_extreme_count, not new_extreme_count.
+
+    The old field name was misleading under delayed confirmed swing extreme
+    semantics.  The value is still snap.new_extreme_count (tick-level), but
+    the log label must make this clear.
+    """
+    import logging
+    caplog.set_level(logging.INFO)
+
+    strat = _strategy(min_outside_pct=0.001, reclaim_extreme_log_interval_seconds=0)
+    boll = _boll()
+
+    # Anchor + first extreme candidate → retrace confirm
+    pr = boll.lower * 0.998
+    strat.on_tick(pr, 1000, boll, _cvd(ts_ms=1000, price=pr, cumulative_buy_volume=500_000, cumulative_sell_volume=1_500_000))
+    p2 = boll.lower * 0.994
+    strat.on_tick(p2, 2000, boll, _cvd(ts_ms=2000, price=p2, cumulative_buy_volume=500_000, cumulative_sell_volume=1_600_000))
+    strat.on_tick(pr, 3000, boll, _cvd(ts_ms=3000, price=pr, cumulative_buy_volume=500_000, cumulative_sell_volume=1_600_000))
+    # New extreme candidate → retrace confirm → triggers snapshot (interval=0)
+    p3 = boll.lower * 0.990
+    strat.on_tick(p3, 4000, boll, _cvd(ts_ms=4000, price=p3, cumulative_buy_volume=600_000, cumulative_sell_volume=1_800_000))
+    strat.on_tick(pr, 5000, boll, _cvd(ts_ms=5000, price=pr, cumulative_buy_volume=600_000, cumulative_sell_volume=1_800_000))
+
+    snapshot_logs = [r for r in caplog.records if "LOWER_EXTREME_SNAPSHOT" in r.getMessage()]
+    assert len(snapshot_logs) >= 1, "Should print snapshot log"
+
+    for record in snapshot_logs:
+        msg = record.getMessage()
+        # Must NOT contain the old misleading field name
+        assert "new_extreme_count=" not in msg, (
+            f"Snapshot log must NOT contain 'new_extreme_count='. Got: {msg}"
+        )
+        # Must contain the new field name
+        assert "running_tick_extreme_count=" in msg, (
+            f"Snapshot log must contain 'running_tick_extreme_count='. Got: {msg}"
+        )

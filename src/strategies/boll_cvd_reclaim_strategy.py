@@ -1860,6 +1860,13 @@ class BollCvdReclaimStrategy:
                 price, boll.lower, cum_cvd, ts_ms,
             )
             self._record_sweep_volume("LOWER", price, cvd)
+            # Seed confirmed extreme candidate so the first outside tick
+            # can become a confirmed swing extreme if price quickly rebounds.
+            self._lower_confirmed_extreme_tracker.update(
+                price=price,
+                anchored_cvd=0.0,
+                ts_ms=ts_ms,
+            )
             return
 
         # ── Record sweep volume every tick ─────────────────────────────
@@ -2102,6 +2109,13 @@ class BollCvdReclaimStrategy:
                 price, boll.upper, cum_cvd, ts_ms,
             )
             self._record_sweep_volume("UPPER", price, cvd)
+            # Seed confirmed extreme candidate so the first outside tick
+            # can become a confirmed swing extreme if price quickly rebounds.
+            self._upper_confirmed_extreme_tracker.update(
+                price=price,
+                anchored_cvd=0.0,
+                ts_ms=ts_ms,
+            )
             return
 
         # ── Record sweep volume every tick ─────────────────────────────
@@ -2335,7 +2349,7 @@ class BollCvdReclaimStrategy:
                 "prev_extreme=%.4f prev_cvd=%.4f "
                 "curr_extreme=%.4f curr_cvd=%.4f "
                 "price_ext_pct=%.6f cvd_recovery=%.4f "
-                "new_extreme_count=%s divergence_confirmed=%s divergence_reason=%s "
+                "running_tick_extreme_count=%s divergence_confirmed=%s divergence_reason=%s "
                 "price=%.4f lower=%.4f ts_ms=%s",
                 self.state.lower_last_snapshot_prev_extreme_price or 0.0,
                 self.state.lower_last_snapshot_prev_extreme_cvd or 0.0,
@@ -2365,7 +2379,7 @@ class BollCvdReclaimStrategy:
                 "prev_extreme=%.4f prev_cvd=%.4f "
                 "curr_extreme=%.4f curr_cvd=%.4f "
                 "price_ext_pct=%.6f cvd_recovery=%.4f "
-                "new_extreme_count=%s divergence_confirmed=%s divergence_reason=%s "
+                "running_tick_extreme_count=%s divergence_confirmed=%s divergence_reason=%s "
                 "price=%.4f upper=%.4f ts_ms=%s",
                 self.state.upper_last_snapshot_prev_extreme_price or 0.0,
                 self.state.upper_last_snapshot_prev_extreme_cvd or 0.0,
