@@ -112,16 +112,21 @@ def test_env_entry_risk_pct_fallback_when_trade_risk_pct_absent() -> None:
 # ── ENTRY_MAX_STOP_DISTANCE_PCT default guard ─────────────────────────
 
 
-def test_entry_max_stop_distance_pct_default_is_0012() -> None:
-    """Default config must use 0.012 (1.2%) as the safety ceiling."""
+def test_entry_max_stop_distance_pct_default_is_disabled() -> None:
+    """Default config disables the hard max stop-distance ceiling.
+
+    Risk-based sizing already reduces position size for wider stops, so
+    the default must not reject valid reclaim entries only because the
+    POC/extreme stop is wider than the old 1.2% ceiling.
+    """
     from src.strategies.boll_cvd_reclaim_strategy import BollCvdReclaimStrategyConfig
 
     cfg = BollCvdReclaimStrategyConfig()
-    assert cfg.entry_max_stop_distance_pct == pytest.approx(0.012)
+    assert cfg.entry_max_stop_distance_pct == pytest.approx(0.0)
 
 
 def test_entry_max_stop_distance_pct_env_override() -> None:
-    """ENTRY_MAX_STOP_DISTANCE_PCT=0.02 should override the default 0.012."""
+    """ENTRY_MAX_STOP_DISTANCE_PCT=0.02 should override the default 0.0 (disabled hard ceiling)."""
     from src.strategies.boll_cvd_reclaim_strategy import BollCvdReclaimStrategyConfig
 
     os.environ["ENTRY_MAX_STOP_DISTANCE_PCT"] = "0.02"
@@ -132,8 +137,8 @@ def test_entry_max_stop_distance_pct_env_override() -> None:
         del os.environ["ENTRY_MAX_STOP_DISTANCE_PCT"]
 
 
-def test_entry_max_stop_distance_pct_explicit_zero_disables_guard() -> None:
-    """ENTRY_MAX_STOP_DISTANCE_PCT=0 can still explicitly disable the ceiling."""
+def test_entry_max_stop_distance_pct_disabled_default_lets_risk_sizing_control() -> None:
+    """Default 0.0 means risk-based sizing controls position size, not a hard ceiling."""
     from src.strategies.boll_cvd_reclaim_strategy import BollCvdReclaimStrategyConfig
 
     os.environ["ENTRY_MAX_STOP_DISTANCE_PCT"] = "0"
