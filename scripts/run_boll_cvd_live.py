@@ -27,6 +27,7 @@ from src.live.workers import strategy_tick_worker as strategy_tick_worker_module
 from src.live.startup_recovery import basic_restore as startup_basic_restore  # noqa: E402
 from src.live.startup_recovery import order_recovery as startup_order_recovery  # noqa: E402
 from src.live.startup_recovery import trust_validation as startup_trust_validation  # noqa: E402
+from src.live.trend_warmup import warmup_trend_compression_history  # noqa: E402
 from src.live.account_sync import flat_balance as live_flat_balance  # noqa: E402
 from src.position_management import core_position_view as core_position_view_helpers  # noqa: E402
 from src.position_management import runner_live_helpers  # noqa: E402
@@ -311,6 +312,29 @@ async def main() -> None:
         type(trading_client).__name__,
         type(market_data_client).__name__,
     )
+
+    # ── Warm up trend compression history from historical candles ───────
+    warmup_start_ms = live_time_utils.utc_ms()
+    try:
+        warmup_result = await warmup_trend_compression_history(
+            strategy=strategy,
+            candle_client=market_data_client,
+            symbol=rt_config.okx_inst_id,
+            interval=rt_config.kline_interval,
+            limit=int(os.getenv("CANDLE_LIMIT", "100")),
+            boll_window=int(os.getenv("BOLL_WINDOW", "20")),
+            boll_std_multiplier=float(os.getenv("BOLL_STD_MULTIPLIER", "2.0")),
+            now_ms=warmup_start_ms,
+        )
+        warmup_elapsed_ms = live_time_utils.utc_ms() - warmup_start_ms
+        if warmup_result.success:
+            logger.info(
+                "TREND_COMPRESSION_WARMUP_OK | elapsed_ms=%d band_snapshots=%d",
+                warmup_elapsed_ms,
+                warmup_result.band_snapshots,
+            )
+    except Exception:
+        logger.exception("TREND_COMPRESSION_WARMUP_FAILED | reason=unhandled_exception")
 
     try:
         await asyncio.gather(

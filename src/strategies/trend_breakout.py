@@ -127,6 +127,15 @@ class TrendBreakoutAssessor:
         if len(self._band_history) > _MAX_BAND_HISTORY:
             self._band_history = self._band_history[-_MAX_BAND_HISTORY:]
 
+    def detect_compression(self, ts_ms: int) -> CompressionEpisode | None:
+        """Run compression detection on the current band history ring buffer.
+
+        Used by live startup warmup to check whether the pre-fed historical
+        bands already form a valid compression episode.  Returns the latest
+        episode if one is detected and still valid, or ``None``.
+        """
+        return self._compression_detector.detect(self._band_history, ts_ms)
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------

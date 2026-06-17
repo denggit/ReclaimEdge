@@ -3636,6 +3636,15 @@ class BollCvdReclaimStrategy:
         if self.trend_metrics_tracker is not None:
             self.trend_metrics_tracker.reset()
 
+    def feed_trend_band_snapshot(self, band: BandSnapshot) -> None:
+        """Feed one historical/closed BOLL band into TrendBreakoutAssessor.
+
+        Used by live startup warmup only.  No trading decision is made here.
+        """
+        assessor = self._get_trend_assessor()
+        if assessor is not None:
+            assessor.feed_band(band)
+
     def _intent_factory(self):
         if not hasattr(self, "_strategy_intent_factory"):
             from src.strategies.strategy_intent_factory import StrategyIntentFactory
