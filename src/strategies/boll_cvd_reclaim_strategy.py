@@ -825,6 +825,10 @@ class StrategyPositionState:
     lower_last_extreme_divergence_confirmed: bool = False
     upper_last_extreme_divergence_confirmed: bool = False
 
+    # ── Reclaim V2 1m fractal tracking: last divergence evaluation timestamp ──
+    lower_last_divergence_evaluated_ts_ms: int = 0
+    upper_last_divergence_evaluated_ts_ms: int = 0
+
     # ── Reclaim V2 coherent snapshot cache (from same divergence evaluation) ──
     lower_last_snapshot_prev_extreme_price: float | None = None
     lower_last_snapshot_prev_extreme_cvd: float | None = None
@@ -1261,11 +1265,37 @@ class BollCvdReclaimStrategy:
             logger.info("UPPER_ARMED_RESET | reason=middle_reclaimed price=%.4f middle=%.4f", price, boll.middle)
             self._reset_upper_armed()
 
+        # ── Reclaim V2: inside-band 1m fractal tracking continuation ─
+        # When a V2 setup is active (outside observed but no divergence yet)
+        # and price has returned inside the band, continue feeding the 1m
+        # candle builder / fractal tracker so that fractal extremes can still
+        # be confirmed.  Do NOT abort prematurely — the return inside may
+        # just be the right-side candles forming the fractal pattern.
+        if (
+            self.config.entry_reclaim_v2_enabled
+            and self.state.lower_outside_observed
+            and not self.state.lower_anchored_divergence_confirmed
+            and price >= boll.lower
+            and price <= boll.upper
+        ):
+            self._update_lower_reclaim_v2_tracking(price, ts_ms, boll, cvd)
+        if (
+            self.config.entry_reclaim_v2_enabled
+            and self.state.upper_outside_observed
+            and not self.state.upper_anchored_divergence_confirmed
+            and price >= boll.lower
+            and price <= boll.upper
+        ):
+            self._update_upper_reclaim_v2_tracking(price, ts_ms, boll, cvd)
+
         # ── Reclaim V2: abort setup without divergence on inside return ─
         # When price returns inside the band without anchored divergence,
         # the setup can never become a valid entry — abort once and reset.
         # This replaces the old per-minute no_anchored_divergence heartbeat log
         # which is now a one-shot LOWER_RECLAIM_ABORTED / UPPER_RECLAIM_ABORTED.
+        #
+        # IMPORTANT: In 1m fractal mode, abort is deferred until at least one
+        # divergence evaluation has happened (checked inside the abort helpers).
         if (
             self.config.entry_reclaim_v2_enabled
             and price >= boll.lower
@@ -1285,9 +1315,11 @@ class BollCvdReclaimStrategy:
     ) -> bool:
         """Abort a lower V2 setup that returned inside without anchored divergence.
 
-        Once price returns inside the lower band without a confirmed
-        anchored divergence, the setup can never become a valid entry.
-        Log once and reset — no repeated heartbeat.
+        In 1m fractal mode, the abort is DEFERRED until at least one
+        divergence evaluation has happened — the price returning inside
+        the band may just be the right-side candles forming the fractal.
+        Once a divergence evaluation has occurred and still no divergence,
+        the inside return is a valid abort signal.
         """
         if not self.config.entry_reclaim_v2_enabled:
             return False
@@ -1299,16 +1331,21 @@ class BollCvdReclaimStrategy:
         if price < boll.lower:
             return False
 
+        # 1m fractal mode: do not abort before at least one divergence evaluation
+        if self.state.lower_last_divergence_evaluated_ts_ms <= 0:
+            return False
+
         logger.info(
             "LOWER_RECLAIM_ABORTED | reason=inside_return_without_anchored_divergence "
             "price=%.4f lower=%.4f middle=%.4f first_extreme=%.4f previous_extreme=%.4f "
-            "previous_extreme_cvd=%.4f ts_ms=%s",
+            "previous_extreme_cvd=%.4f last_evaluated_ts_ms=%s ts_ms=%s",
             price,
             boll.lower,
             boll.middle,
             self.state.lower_first_extreme_price or 0.0,
             self.state.lower_previous_extreme_price or 0.0,
             self.state.lower_previous_extreme_anchored_cvd or 0.0,
+            self.state.lower_last_divergence_evaluated_ts_ms,
             ts_ms,
         )
 
@@ -1325,6 +1362,8 @@ class BollCvdReclaimStrategy:
         """Abort an upper V2 setup that returned inside without anchored divergence.
 
         Mirror of :meth:`_abort_lower_v2_if_inside_without_divergence` for SHORT.
+        In 1m fractal mode, abort is deferred until at least one divergence
+        evaluation has happened.
         """
         if not self.config.entry_reclaim_v2_enabled:
             return False
@@ -1336,16 +1375,21 @@ class BollCvdReclaimStrategy:
         if price > boll.upper:
             return False
 
+        # 1m fractal mode: do not abort before at least one divergence evaluation
+        if self.state.upper_last_divergence_evaluated_ts_ms <= 0:
+            return False
+
         logger.info(
             "UPPER_RECLAIM_ABORTED | reason=inside_return_without_anchored_divergence "
             "price=%.4f upper=%.4f middle=%.4f first_extreme=%.4f previous_extreme=%.4f "
-            "previous_extreme_cvd=%.4f ts_ms=%s",
+            "previous_extreme_cvd=%.4f last_evaluated_ts_ms=%s ts_ms=%s",
             price,
             boll.upper,
             boll.middle,
             self.state.upper_first_extreme_price or 0.0,
             self.state.upper_previous_extreme_price or 0.0,
             self.state.upper_previous_extreme_anchored_cvd or 0.0,
+            self.state.upper_last_divergence_evaluated_ts_ms,
             ts_ms,
         )
 
@@ -1828,6 +1872,377 @@ class BollCvdReclaimStrategy:
             return None
         return sp.poc_price()  # type: ignore[union-attr]
 
+    # ── Reclaim V2 shared 1m fractal tracking helpers ────────────────────
+    # These are called both from _update_*_outside_v2 (outside ticks) and
+    # from _update_armed_state (inside continuation) so that 1m fractal
+    # extremes can be confirmed even after price returns inside the band.
+
+    def _update_lower_reclaim_v2_tracking(
+        self,
+        price: float,
+        ts_ms: int,
+        boll: BollSnapshot,
+        cvd: CvdSnapshot | None,
+    ) -> None:
+        """Continue 1m fractal extreme tracking for an active LOWER V2 setup.
+
+        Called from :meth:`_update_lower_outside_v2` (outside ticks) and
+        from :meth:`_update_armed_state` (inside continuation).
+        Feeds the 1m candle builder, fractal tracker, and runs anchored
+        CVD divergence evaluation.
+
+        Does NOT open positions — entry still goes through
+        :meth:`_long_setup_v2`.
+        """
+        if cvd is None:
+            return
+        anchor_cvd = self.state.lower_anchor_cumulative_cvd
+        if anchor_cvd is None:
+            return
+        cum_cvd = self._cumulative_cvd(cvd)
+        anchored_cvd = cum_cvd - anchor_cvd
+
+        # ── Feed 1m candle builder ─────────────────────────────────────
+        closed_candle = self._lower_1m_candle_builder.update(
+            price=price,
+            anchored_cvd=anchored_cvd,
+            ts_ms=ts_ms,
+        )
+        if closed_candle is None:
+            return  # Same minute — no closed candle yet
+
+        # ── Feed closed 1m candle to fractal tracker ───────────────────
+        extreme = self._lower_fractal_extreme_tracker.on_closed_candle(
+            closed_candle,
+            confirm_ts_ms=ts_ms,
+        )
+        if extreme is None:
+            return  # No 2L/2R fractal pattern yet
+
+        # ── 1m fractal extreme obtained — log ──────────────────────────
+        logger.info(
+            "LOWER_CONFIRMED_EXTREME | source=1m_fractal_2l2r "
+            "price=%.4f anchored_cvd=%.4f "
+            "candle_start_ts_ms=%s candle_end_ts_ms=%s "
+            "extreme_ts_ms=%s confirm_ts_ms=%s",
+            extreme.price, extreme.anchored_cvd,
+            extreme.candle_start_ts_ms, extreme.candle_end_ts_ms,
+            extreme.extreme_ts_ms, extreme.confirm_ts_ms,
+        )
+
+        # ── Phase 2: first fractal extreme — must be deep enough ───────
+        if self.state.lower_first_extreme_price is None:
+            is_deep_enough = extreme.price <= boll.lower * (1 - self.config.min_outside_pct)
+            if not is_deep_enough:
+                logger.debug(
+                    "LOWER_CONFIRMED_EXTREME_NOT_DEEP | price=%.4f lower=%.4f ts_ms=%s",
+                    extreme.price, boll.lower, ts_ms,
+                )
+                return
+            self.state.lower_first_extreme_price = extreme.price
+            self.state.lower_first_extreme_ts_ms = extreme.extreme_ts_ms
+            self.state.lower_first_extreme_anchored_cvd = extreme.anchored_cvd
+            # Set as previous for next divergence comparison
+            self.state.lower_previous_confirmed_extreme_price = extreme.price
+            self.state.lower_previous_confirmed_extreme_ts_ms = extreme.extreme_ts_ms
+            self.state.lower_previous_confirmed_extreme_anchored_cvd = extreme.anchored_cvd
+            # Sync legacy fields
+            self.state.lower_previous_extreme_price = extreme.price
+            self.state.lower_previous_extreme_ts_ms = extreme.extreme_ts_ms
+            self.state.lower_previous_extreme_anchored_cvd = extreme.anchored_cvd
+            logger.info(
+                "LOWER_FIRST_CONFIRMED_EXTREME | source=1m_fractal_2l2r "
+                "price=%.4f anchored_cvd=%.4f deep_enough=True ts_ms=%s",
+                extreme.price, extreme.anchored_cvd, ts_ms,
+            )
+            return
+
+        # ── Phase 3: divergence reference gate ─────────────────────────
+        # LOWER/LONG: only a valid NEW LOW qualifies for divergence evaluation.
+        prev_price = self.state.lower_previous_confirmed_extreme_price
+        prev_cvd = self.state.lower_previous_confirmed_extreme_anchored_cvd
+
+        if prev_price is not None and prev_price > 0:
+            required_new_low = prev_price * (1.0 - self.config.entry_reclaim_new_extreme_buffer_pct)
+            if extreme.price >= required_new_low:
+                logger.debug(
+                    "LOWER_CONFIRMED_EXTREME_IGNORED | reason=not_lower_than_previous "
+                    "source=1m_fractal_2l2r "
+                    "prev_extreme=%.4f curr_extreme=%.4f required_below=%.4f "
+                    "curr_cvd=%.4f ts_ms=%s",
+                    prev_price,
+                    extreme.price,
+                    required_new_low,
+                    extreme.anchored_cvd,
+                    ts_ms,
+                )
+                return
+
+        # ── Phase 4: evaluate anchored CVD divergence ──────────────────
+        decision = evaluate_anchored_divergence(
+            side="LONG",
+            previous_extreme_price=prev_price,
+            previous_anchored_cvd=prev_cvd,
+            current_extreme_price=extreme.price,
+            current_anchored_cvd=extreme.anchored_cvd,
+            config=AnchoredDivergenceConfig(
+                min_price_extension_pct=self.config.entry_reclaim_new_extreme_buffer_pct,
+                min_cvd_recovery=self.config.entry_reclaim_min_cvd_recovery,
+            ),
+        )
+
+        logger.info(
+            "LOWER_DIVERGENCE_EVALUATED | source=1m_fractal_2l2r "
+            "prev_extreme=%.4f prev_cvd=%.4f "
+            "curr_extreme=%.4f curr_cvd=%.4f "
+            "price_ext_pct=%.6f cvd_recovery=%.4f "
+            "confirmed=%s reason=%s ts_ms=%s",
+            prev_price or 0.0, prev_cvd or 0.0,
+            extreme.price, extreme.anchored_cvd,
+            decision.price_extension_pct, decision.cvd_recovery,
+            decision.confirmed, decision.reason, ts_ms,
+        )
+
+        # ── Record divergence evaluation timestamp ─────────────────────
+        self.state.lower_last_divergence_evaluated_ts_ms = ts_ms
+
+        # Cache divergence check result for snapshot / no-entry logs
+        self.state.lower_last_extreme_divergence_confirmed = decision.confirmed
+        self.state.lower_last_extreme_divergence_reason = decision.reason
+
+        # ── Cache coherent snapshot pair from this divergence evaluation ──
+        self.state.lower_last_snapshot_prev_extreme_price = decision.previous_extreme_price
+        self.state.lower_last_snapshot_prev_extreme_cvd = decision.previous_anchored_cvd
+        self.state.lower_last_snapshot_curr_extreme_price = decision.current_extreme_price
+        self.state.lower_last_snapshot_curr_extreme_cvd = decision.current_anchored_cvd
+        self.state.lower_last_snapshot_price_extension_pct = decision.price_extension_pct
+        self.state.lower_last_snapshot_cvd_recovery = decision.cvd_recovery
+        self.state.lower_last_snapshot_divergence_confirmed = decision.confirmed
+        self.state.lower_last_snapshot_divergence_reason = decision.reason
+        self.state.lower_extreme_snapshot_pending = True
+
+        if decision.confirmed:
+            self.state.lower_anchored_divergence_confirmed = True
+            self.state.lower_anchored_divergence_ts_ms = ts_ms
+            self.state.lower_armed = True
+            self.state.lower_armed_ts_ms = ts_ms
+            self.state.lower_first_armed_ts_ms = ts_ms
+            self.state.lower_cvd_divergence_confirmed = True
+            # Save divergence extreme + reference band
+            self.state.lower_divergence_extreme_price = extreme.price
+            self.state.lower_divergence_extreme_ts_ms = extreme.extreme_ts_ms
+            self.state.lower_divergence_extreme_anchored_cvd = extreme.anchored_cvd
+            self.state.lower_divergence_ref_lower = boll.lower
+            self.state.lower_divergence_ref_middle = boll.middle
+            logger.info(
+                "LOWER_ANCHORED_CVD_DIVERGENCE_CONFIRMED | source=1m_fractal_2l2r "
+                "prev_price=%.4f prev_cvd=%.4f curr_price=%.4f curr_cvd=%.4f "
+                "cvd_recovery=%.4f price_ext_pct=%.6f ref_lower=%.4f ref_middle=%.4f ts_ms=%s",
+                prev_price, prev_cvd,
+                extreme.price, extreme.anchored_cvd,
+                decision.cvd_recovery, decision.price_extension_pct,
+                boll.lower, boll.middle, ts_ms,
+            )
+            logger.info("LOWER_ARMED | reason=anchored_divergence price=%.4f ts_ms=%s", price, ts_ms)
+        else:
+            # Update previous confirmed extreme reference ONLY for valid new lows
+            # where CVD didn't recover (cvd_not_recovered).
+            if decision.reason == "cvd_not_recovered":
+                self.state.lower_previous_confirmed_extreme_price = extreme.price
+                self.state.lower_previous_confirmed_extreme_ts_ms = extreme.extreme_ts_ms
+                self.state.lower_previous_confirmed_extreme_anchored_cvd = extreme.anchored_cvd
+                # Sync legacy fields
+                self.state.lower_previous_extreme_price = extreme.price
+                self.state.lower_previous_extreme_ts_ms = extreme.extreme_ts_ms
+                self.state.lower_previous_extreme_anchored_cvd = extreme.anchored_cvd
+            logger.debug(
+                "LOWER_NO_DIVERGENCE | source=1m_fractal_2l2r "
+                "price=%.4f anchored_cvd=%.4f "
+                "reason=%s ts_ms=%s",
+                extreme.price, extreme.anchored_cvd, decision.reason, ts_ms,
+            )
+
+    def _update_upper_reclaim_v2_tracking(
+        self,
+        price: float,
+        ts_ms: int,
+        boll: BollSnapshot,
+        cvd: CvdSnapshot | None,
+    ) -> None:
+        """Continue 1m fractal extreme tracking for an active UPPER V2 setup.
+
+        Mirror of :meth:`_update_lower_reclaim_v2_tracking` for SHORT.
+        Called from :meth:`_update_upper_outside_v2` (outside ticks) and
+        from :meth:`_update_armed_state` (inside continuation).
+        """
+        if cvd is None:
+            return
+        anchor_cvd = self.state.upper_anchor_cumulative_cvd
+        if anchor_cvd is None:
+            return
+        cum_cvd = self._cumulative_cvd(cvd)
+        anchored_cvd = cum_cvd - anchor_cvd
+
+        # ── Feed 1m candle builder ─────────────────────────────────────
+        closed_candle = self._upper_1m_candle_builder.update(
+            price=price,
+            anchored_cvd=anchored_cvd,
+            ts_ms=ts_ms,
+        )
+        if closed_candle is None:
+            return  # Same minute — no closed candle yet
+
+        # ── Feed closed 1m candle to fractal tracker ───────────────────
+        extreme = self._upper_fractal_extreme_tracker.on_closed_candle(
+            closed_candle,
+            confirm_ts_ms=ts_ms,
+        )
+        if extreme is None:
+            return  # No 2L/2R fractal pattern yet
+
+        # ── 1m fractal extreme obtained — log ──────────────────────────
+        logger.info(
+            "UPPER_CONFIRMED_EXTREME | source=1m_fractal_2l2r "
+            "price=%.4f anchored_cvd=%.4f "
+            "candle_start_ts_ms=%s candle_end_ts_ms=%s "
+            "extreme_ts_ms=%s confirm_ts_ms=%s",
+            extreme.price, extreme.anchored_cvd,
+            extreme.candle_start_ts_ms, extreme.candle_end_ts_ms,
+            extreme.extreme_ts_ms, extreme.confirm_ts_ms,
+        )
+
+        # ── Phase 2: first fractal extreme — must be deep enough ───────
+        if self.state.upper_first_extreme_price is None:
+            is_deep_enough = extreme.price >= boll.upper * (1 + self.config.min_outside_pct)
+            if not is_deep_enough:
+                logger.debug(
+                    "UPPER_CONFIRMED_EXTREME_NOT_DEEP | price=%.4f upper=%.4f ts_ms=%s",
+                    extreme.price, boll.upper, ts_ms,
+                )
+                return
+            self.state.upper_first_extreme_price = extreme.price
+            self.state.upper_first_extreme_ts_ms = extreme.extreme_ts_ms
+            self.state.upper_first_extreme_anchored_cvd = extreme.anchored_cvd
+            # Set as previous for next divergence comparison
+            self.state.upper_previous_confirmed_extreme_price = extreme.price
+            self.state.upper_previous_confirmed_extreme_ts_ms = extreme.extreme_ts_ms
+            self.state.upper_previous_confirmed_extreme_anchored_cvd = extreme.anchored_cvd
+            # Sync legacy fields
+            self.state.upper_previous_extreme_price = extreme.price
+            self.state.upper_previous_extreme_ts_ms = extreme.extreme_ts_ms
+            self.state.upper_previous_extreme_anchored_cvd = extreme.anchored_cvd
+            logger.info(
+                "UPPER_FIRST_CONFIRMED_EXTREME | source=1m_fractal_2l2r "
+                "price=%.4f anchored_cvd=%.4f deep_enough=True ts_ms=%s",
+                extreme.price, extreme.anchored_cvd, ts_ms,
+            )
+            return
+
+        # ── Phase 3: divergence reference gate ─────────────────────────
+        # UPPER/SHORT: only a valid NEW HIGH qualifies for divergence evaluation.
+        prev_price = self.state.upper_previous_confirmed_extreme_price
+        prev_cvd = self.state.upper_previous_confirmed_extreme_anchored_cvd
+
+        if prev_price is not None and prev_price > 0:
+            required_new_high = prev_price * (1.0 + self.config.entry_reclaim_new_extreme_buffer_pct)
+            if extreme.price <= required_new_high:
+                logger.debug(
+                    "UPPER_CONFIRMED_EXTREME_IGNORED | reason=not_higher_than_previous "
+                    "source=1m_fractal_2l2r "
+                    "prev_extreme=%.4f curr_extreme=%.4f required_above=%.4f "
+                    "curr_cvd=%.4f ts_ms=%s",
+                    prev_price,
+                    extreme.price,
+                    required_new_high,
+                    extreme.anchored_cvd,
+                    ts_ms,
+                )
+                return
+
+        # ── Phase 4: evaluate anchored CVD divergence ──────────────────
+        decision = evaluate_anchored_divergence(
+            side="SHORT",
+            previous_extreme_price=prev_price,
+            previous_anchored_cvd=prev_cvd,
+            current_extreme_price=extreme.price,
+            current_anchored_cvd=extreme.anchored_cvd,
+            config=AnchoredDivergenceConfig(
+                min_price_extension_pct=self.config.entry_reclaim_new_extreme_buffer_pct,
+                min_cvd_recovery=self.config.entry_reclaim_min_cvd_recovery,
+            ),
+        )
+
+        logger.info(
+            "UPPER_DIVERGENCE_EVALUATED | source=1m_fractal_2l2r "
+            "prev_extreme=%.4f prev_cvd=%.4f "
+            "curr_extreme=%.4f curr_cvd=%.4f "
+            "price_ext_pct=%.6f cvd_recovery=%.4f "
+            "confirmed=%s reason=%s ts_ms=%s",
+            prev_price or 0.0, prev_cvd or 0.0,
+            extreme.price, extreme.anchored_cvd,
+            decision.price_extension_pct, decision.cvd_recovery,
+            decision.confirmed, decision.reason, ts_ms,
+        )
+
+        # ── Record divergence evaluation timestamp ─────────────────────
+        self.state.upper_last_divergence_evaluated_ts_ms = ts_ms
+
+        # Cache divergence check result for snapshot / no-entry logs
+        self.state.upper_last_extreme_divergence_confirmed = decision.confirmed
+        self.state.upper_last_extreme_divergence_reason = decision.reason
+
+        # ── Cache coherent snapshot pair from this divergence evaluation ──
+        self.state.upper_last_snapshot_prev_extreme_price = decision.previous_extreme_price
+        self.state.upper_last_snapshot_prev_extreme_cvd = decision.previous_anchored_cvd
+        self.state.upper_last_snapshot_curr_extreme_price = decision.current_extreme_price
+        self.state.upper_last_snapshot_curr_extreme_cvd = decision.current_anchored_cvd
+        self.state.upper_last_snapshot_price_extension_pct = decision.price_extension_pct
+        self.state.upper_last_snapshot_cvd_recovery = decision.cvd_recovery
+        self.state.upper_last_snapshot_divergence_confirmed = decision.confirmed
+        self.state.upper_last_snapshot_divergence_reason = decision.reason
+        self.state.upper_extreme_snapshot_pending = True
+
+        if decision.confirmed:
+            self.state.upper_anchored_divergence_confirmed = True
+            self.state.upper_anchored_divergence_ts_ms = ts_ms
+            self.state.upper_armed = True
+            self.state.upper_armed_ts_ms = ts_ms
+            self.state.upper_first_armed_ts_ms = ts_ms
+            self.state.upper_cvd_divergence_confirmed = True
+            # Save divergence extreme + reference band
+            self.state.upper_divergence_extreme_price = extreme.price
+            self.state.upper_divergence_extreme_ts_ms = extreme.extreme_ts_ms
+            self.state.upper_divergence_extreme_anchored_cvd = extreme.anchored_cvd
+            self.state.upper_divergence_ref_upper = boll.upper
+            self.state.upper_divergence_ref_middle = boll.middle
+            logger.info(
+                "UPPER_ANCHORED_CVD_DIVERGENCE_CONFIRMED | source=1m_fractal_2l2r "
+                "prev_price=%.4f prev_cvd=%.4f curr_price=%.4f curr_cvd=%.4f "
+                "cvd_recovery=%.4f price_ext_pct=%.6f ref_upper=%.4f ref_middle=%.4f ts_ms=%s",
+                prev_price, prev_cvd,
+                extreme.price, extreme.anchored_cvd,
+                decision.cvd_recovery, decision.price_extension_pct,
+                boll.upper, boll.middle, ts_ms,
+            )
+            logger.info("UPPER_ARMED | reason=anchored_divergence price=%.4f ts_ms=%s", price, ts_ms)
+        else:
+            # Update previous confirmed extreme reference ONLY for valid new highs
+            # where CVD didn't reverse (cvd_not_reversed).
+            if decision.reason == "cvd_not_reversed":
+                self.state.upper_previous_confirmed_extreme_price = extreme.price
+                self.state.upper_previous_confirmed_extreme_ts_ms = extreme.extreme_ts_ms
+                self.state.upper_previous_confirmed_extreme_anchored_cvd = extreme.anchored_cvd
+                # Sync legacy fields
+                self.state.upper_previous_extreme_price = extreme.price
+                self.state.upper_previous_extreme_ts_ms = extreme.extreme_ts_ms
+                self.state.upper_previous_extreme_anchored_cvd = extreme.anchored_cvd
+            logger.debug(
+                "UPPER_NO_DIVERGENCE | source=1m_fractal_2l2r "
+                "price=%.4f anchored_cvd=%.4f "
+                "reason=%s ts_ms=%s",
+                extreme.price, extreme.anchored_cvd, decision.reason, ts_ms,
+            )
+
     # ── Reclaim V2 lower-side state machine ──────────────────────────────
 
     def _update_lower_outside_v2(
@@ -1950,170 +2365,8 @@ class BollCvdReclaimStrategy:
             else:
                 return
 
-        # ── Build 1m candles from tick-level anchored CVD ──────────────
-        anchor_cvd = self.state.lower_anchor_cumulative_cvd
-        anchored_cvd = cum_cvd - anchor_cvd if anchor_cvd is not None else 0.0
-
-        closed_candle = self._lower_1m_candle_builder.update(
-            price=price,
-            anchored_cvd=anchored_cvd,
-            ts_ms=ts_ms,
-        )
-
-        if closed_candle is None:
-            return  # Same minute — no closed candle yet
-
-        # ── Feed closed 1m candle to fractal tracker ───────────────────
-        extreme = self._lower_fractal_extreme_tracker.on_closed_candle(
-            closed_candle,
-            confirm_ts_ms=ts_ms,
-        )
-
-        if extreme is None:
-            return  # No 2L/2R fractal pattern yet
-
-        # ── 1m fractal extreme obtained — log ──────────────────────────
-        logger.info(
-            "LOWER_CONFIRMED_EXTREME | source=1m_fractal_2l2r "
-            "price=%.4f anchored_cvd=%.4f "
-            "candle_start_ts_ms=%s candle_end_ts_ms=%s "
-            "extreme_ts_ms=%s confirm_ts_ms=%s",
-            extreme.price, extreme.anchored_cvd,
-            extreme.candle_start_ts_ms, extreme.candle_end_ts_ms,
-            extreme.extreme_ts_ms, extreme.confirm_ts_ms,
-        )
-
-        # ── Phase 2: first fractal extreme — must be deep enough ───────
-        if self.state.lower_first_extreme_price is None:
-            is_deep_enough = extreme.price <= boll.lower * (1 - self.config.min_outside_pct)
-            if not is_deep_enough:
-                logger.debug(
-                    "LOWER_CONFIRMED_EXTREME_NOT_DEEP | price=%.4f lower=%.4f ts_ms=%s",
-                    extreme.price, boll.lower, ts_ms,
-                )
-                return
-            self.state.lower_first_extreme_price = extreme.price
-            self.state.lower_first_extreme_ts_ms = extreme.extreme_ts_ms
-            self.state.lower_first_extreme_anchored_cvd = extreme.anchored_cvd
-            # Set as previous for next divergence comparison
-            self.state.lower_previous_confirmed_extreme_price = extreme.price
-            self.state.lower_previous_confirmed_extreme_ts_ms = extreme.extreme_ts_ms
-            self.state.lower_previous_confirmed_extreme_anchored_cvd = extreme.anchored_cvd
-            # Sync legacy fields
-            self.state.lower_previous_extreme_price = extreme.price
-            self.state.lower_previous_extreme_ts_ms = extreme.extreme_ts_ms
-            self.state.lower_previous_extreme_anchored_cvd = extreme.anchored_cvd
-            logger.info(
-                "LOWER_FIRST_CONFIRMED_EXTREME | source=1m_fractal_2l2r "
-                "price=%.4f anchored_cvd=%.4f deep_enough=True ts_ms=%s",
-                extreme.price, extreme.anchored_cvd, ts_ms,
-            )
-            return
-
-        # ── Phase 3: divergence reference gate ─────────────────────────
-        # LOWER/LONG: only a valid NEW LOW qualifies for divergence evaluation.
-        # A higher low or same low must NOT update previous reference and must
-        # NOT trigger divergence evaluation.
-        prev_price = self.state.lower_previous_confirmed_extreme_price
-        prev_cvd = self.state.lower_previous_confirmed_extreme_anchored_cvd
-
-        if prev_price is not None and prev_price > 0:
-            required_new_low = prev_price * (1.0 - self.config.entry_reclaim_new_extreme_buffer_pct)
-            if extreme.price >= required_new_low:
-                logger.debug(
-                    "LOWER_CONFIRMED_EXTREME_IGNORED | reason=not_lower_than_previous "
-                    "source=1m_fractal_2l2r "
-                    "prev_extreme=%.4f curr_extreme=%.4f required_below=%.4f "
-                    "curr_cvd=%.4f ts_ms=%s",
-                    prev_price,
-                    extreme.price,
-                    required_new_low,
-                    extreme.anchored_cvd,
-                    ts_ms,
-                )
-                return
-
-        # ── Phase 4: evaluate anchored CVD divergence ──────────────────
-        decision = evaluate_anchored_divergence(
-            side="LONG",
-            previous_extreme_price=prev_price,
-            previous_anchored_cvd=prev_cvd,
-            current_extreme_price=extreme.price,
-            current_anchored_cvd=extreme.anchored_cvd,
-            config=AnchoredDivergenceConfig(
-                min_price_extension_pct=self.config.entry_reclaim_new_extreme_buffer_pct,
-                min_cvd_recovery=self.config.entry_reclaim_min_cvd_recovery,
-            ),
-        )
-
-        logger.info(
-            "LOWER_DIVERGENCE_EVALUATED | source=1m_fractal_2l2r "
-            "prev_extreme=%.4f prev_cvd=%.4f "
-            "curr_extreme=%.4f curr_cvd=%.4f "
-            "price_ext_pct=%.6f cvd_recovery=%.4f "
-            "confirmed=%s reason=%s ts_ms=%s",
-            prev_price or 0.0, prev_cvd or 0.0,
-            extreme.price, extreme.anchored_cvd,
-            decision.price_extension_pct, decision.cvd_recovery,
-            decision.confirmed, decision.reason, ts_ms,
-        )
-
-        # Cache divergence check result for snapshot / no-entry logs
-        self.state.lower_last_extreme_divergence_confirmed = decision.confirmed
-        self.state.lower_last_extreme_divergence_reason = decision.reason
-
-        # ── Cache coherent snapshot pair from this divergence evaluation ──
-        self.state.lower_last_snapshot_prev_extreme_price = decision.previous_extreme_price
-        self.state.lower_last_snapshot_prev_extreme_cvd = decision.previous_anchored_cvd
-        self.state.lower_last_snapshot_curr_extreme_price = decision.current_extreme_price
-        self.state.lower_last_snapshot_curr_extreme_cvd = decision.current_anchored_cvd
-        self.state.lower_last_snapshot_price_extension_pct = decision.price_extension_pct
-        self.state.lower_last_snapshot_cvd_recovery = decision.cvd_recovery
-        self.state.lower_last_snapshot_divergence_confirmed = decision.confirmed
-        self.state.lower_last_snapshot_divergence_reason = decision.reason
-        self.state.lower_extreme_snapshot_pending = True
-
-        if decision.confirmed:
-            self.state.lower_anchored_divergence_confirmed = True
-            self.state.lower_anchored_divergence_ts_ms = ts_ms
-            self.state.lower_armed = True
-            self.state.lower_armed_ts_ms = ts_ms
-            self.state.lower_first_armed_ts_ms = ts_ms
-            self.state.lower_cvd_divergence_confirmed = True
-            # Save divergence extreme + reference band
-            self.state.lower_divergence_extreme_price = extreme.price
-            self.state.lower_divergence_extreme_ts_ms = extreme.extreme_ts_ms
-            self.state.lower_divergence_extreme_anchored_cvd = extreme.anchored_cvd
-            self.state.lower_divergence_ref_lower = boll.lower
-            self.state.lower_divergence_ref_middle = boll.middle
-            logger.info(
-                "LOWER_ANCHORED_CVD_DIVERGENCE_CONFIRMED | source=1m_fractal_2l2r "
-                "prev_price=%.4f prev_cvd=%.4f curr_price=%.4f curr_cvd=%.4f "
-                "cvd_recovery=%.4f price_ext_pct=%.6f ref_lower=%.4f ref_middle=%.4f ts_ms=%s",
-                prev_price, prev_cvd,
-                extreme.price, extreme.anchored_cvd,
-                decision.cvd_recovery, decision.price_extension_pct,
-                boll.lower, boll.middle, ts_ms,
-            )
-            logger.info("LOWER_ARMED | reason=anchored_divergence price=%.4f ts_ms=%s", price, ts_ms)
-        else:
-            # Update previous confirmed extreme reference ONLY for valid new lows
-            # where CVD didn't recover (cvd_not_recovered).
-            # Do NOT update for no_new_low (shouldn't reach here due to gate above).
-            if decision.reason == "cvd_not_recovered":
-                self.state.lower_previous_confirmed_extreme_price = extreme.price
-                self.state.lower_previous_confirmed_extreme_ts_ms = extreme.extreme_ts_ms
-                self.state.lower_previous_confirmed_extreme_anchored_cvd = extreme.anchored_cvd
-                # Sync legacy fields
-                self.state.lower_previous_extreme_price = extreme.price
-                self.state.lower_previous_extreme_ts_ms = extreme.extreme_ts_ms
-                self.state.lower_previous_extreme_anchored_cvd = extreme.anchored_cvd
-            logger.debug(
-                "LOWER_NO_DIVERGENCE | source=1m_fractal_2l2r "
-                "price=%.4f anchored_cvd=%.4f "
-                "reason=%s ts_ms=%s",
-                extreme.price, extreme.anchored_cvd, decision.reason, ts_ms,
-            )
+        # ── 1m candle + fractal + divergence tracking (shared helper) ──
+        self._update_lower_reclaim_v2_tracking(price, ts_ms, boll, cvd)
 
         # ── Throttled extreme snapshot log (after divergence evaluation) ──
         self._maybe_log_reclaim_extreme_snapshot(
@@ -2241,170 +2494,8 @@ class BollCvdReclaimStrategy:
             else:
                 return
 
-        # ── Build 1m candles from tick-level anchored CVD ──────────────
-        anchor_cvd = self.state.upper_anchor_cumulative_cvd
-        anchored_cvd = cum_cvd - anchor_cvd if anchor_cvd is not None else 0.0
-
-        closed_candle = self._upper_1m_candle_builder.update(
-            price=price,
-            anchored_cvd=anchored_cvd,
-            ts_ms=ts_ms,
-        )
-
-        if closed_candle is None:
-            return  # Same minute — no closed candle yet
-
-        # ── Feed closed 1m candle to fractal tracker ───────────────────
-        extreme = self._upper_fractal_extreme_tracker.on_closed_candle(
-            closed_candle,
-            confirm_ts_ms=ts_ms,
-        )
-
-        if extreme is None:
-            return  # No 2L/2R fractal pattern yet
-
-        # ── 1m fractal extreme obtained — log ──────────────────────────
-        logger.info(
-            "UPPER_CONFIRMED_EXTREME | source=1m_fractal_2l2r "
-            "price=%.4f anchored_cvd=%.4f "
-            "candle_start_ts_ms=%s candle_end_ts_ms=%s "
-            "extreme_ts_ms=%s confirm_ts_ms=%s",
-            extreme.price, extreme.anchored_cvd,
-            extreme.candle_start_ts_ms, extreme.candle_end_ts_ms,
-            extreme.extreme_ts_ms, extreme.confirm_ts_ms,
-        )
-
-        # ── Phase 2: first fractal extreme — must be deep enough ───────
-        if self.state.upper_first_extreme_price is None:
-            is_deep_enough = extreme.price >= boll.upper * (1 + self.config.min_outside_pct)
-            if not is_deep_enough:
-                logger.debug(
-                    "UPPER_CONFIRMED_EXTREME_NOT_DEEP | price=%.4f upper=%.4f ts_ms=%s",
-                    extreme.price, boll.upper, ts_ms,
-                )
-                return
-            self.state.upper_first_extreme_price = extreme.price
-            self.state.upper_first_extreme_ts_ms = extreme.extreme_ts_ms
-            self.state.upper_first_extreme_anchored_cvd = extreme.anchored_cvd
-            # Set as previous for next divergence comparison
-            self.state.upper_previous_confirmed_extreme_price = extreme.price
-            self.state.upper_previous_confirmed_extreme_ts_ms = extreme.extreme_ts_ms
-            self.state.upper_previous_confirmed_extreme_anchored_cvd = extreme.anchored_cvd
-            # Sync legacy fields
-            self.state.upper_previous_extreme_price = extreme.price
-            self.state.upper_previous_extreme_ts_ms = extreme.extreme_ts_ms
-            self.state.upper_previous_extreme_anchored_cvd = extreme.anchored_cvd
-            logger.info(
-                "UPPER_FIRST_CONFIRMED_EXTREME | source=1m_fractal_2l2r "
-                "price=%.4f anchored_cvd=%.4f deep_enough=True ts_ms=%s",
-                extreme.price, extreme.anchored_cvd, ts_ms,
-            )
-            return
-
-        # ── Phase 3: divergence reference gate ─────────────────────────
-        # UPPER/SHORT: only a valid NEW HIGH qualifies for divergence evaluation.
-        # A lower high or same high must NOT update previous reference and must
-        # NOT trigger divergence evaluation.
-        prev_price = self.state.upper_previous_confirmed_extreme_price
-        prev_cvd = self.state.upper_previous_confirmed_extreme_anchored_cvd
-
-        if prev_price is not None and prev_price > 0:
-            required_new_high = prev_price * (1.0 + self.config.entry_reclaim_new_extreme_buffer_pct)
-            if extreme.price <= required_new_high:
-                logger.debug(
-                    "UPPER_CONFIRMED_EXTREME_IGNORED | reason=not_higher_than_previous "
-                    "source=1m_fractal_2l2r "
-                    "prev_extreme=%.4f curr_extreme=%.4f required_above=%.4f "
-                    "curr_cvd=%.4f ts_ms=%s",
-                    prev_price,
-                    extreme.price,
-                    required_new_high,
-                    extreme.anchored_cvd,
-                    ts_ms,
-                )
-                return
-
-        # ── Phase 4: evaluate anchored CVD divergence ──────────────────
-        decision = evaluate_anchored_divergence(
-            side="SHORT",
-            previous_extreme_price=prev_price,
-            previous_anchored_cvd=prev_cvd,
-            current_extreme_price=extreme.price,
-            current_anchored_cvd=extreme.anchored_cvd,
-            config=AnchoredDivergenceConfig(
-                min_price_extension_pct=self.config.entry_reclaim_new_extreme_buffer_pct,
-                min_cvd_recovery=self.config.entry_reclaim_min_cvd_recovery,
-            ),
-        )
-
-        logger.info(
-            "UPPER_DIVERGENCE_EVALUATED | source=1m_fractal_2l2r "
-            "prev_extreme=%.4f prev_cvd=%.4f "
-            "curr_extreme=%.4f curr_cvd=%.4f "
-            "price_ext_pct=%.6f cvd_recovery=%.4f "
-            "confirmed=%s reason=%s ts_ms=%s",
-            prev_price or 0.0, prev_cvd or 0.0,
-            extreme.price, extreme.anchored_cvd,
-            decision.price_extension_pct, decision.cvd_recovery,
-            decision.confirmed, decision.reason, ts_ms,
-        )
-
-        # Cache divergence check result for snapshot / no-entry logs
-        self.state.upper_last_extreme_divergence_confirmed = decision.confirmed
-        self.state.upper_last_extreme_divergence_reason = decision.reason
-
-        # ── Cache coherent snapshot pair from this divergence evaluation ──
-        self.state.upper_last_snapshot_prev_extreme_price = decision.previous_extreme_price
-        self.state.upper_last_snapshot_prev_extreme_cvd = decision.previous_anchored_cvd
-        self.state.upper_last_snapshot_curr_extreme_price = decision.current_extreme_price
-        self.state.upper_last_snapshot_curr_extreme_cvd = decision.current_anchored_cvd
-        self.state.upper_last_snapshot_price_extension_pct = decision.price_extension_pct
-        self.state.upper_last_snapshot_cvd_recovery = decision.cvd_recovery
-        self.state.upper_last_snapshot_divergence_confirmed = decision.confirmed
-        self.state.upper_last_snapshot_divergence_reason = decision.reason
-        self.state.upper_extreme_snapshot_pending = True
-
-        if decision.confirmed:
-            self.state.upper_anchored_divergence_confirmed = True
-            self.state.upper_anchored_divergence_ts_ms = ts_ms
-            self.state.upper_armed = True
-            self.state.upper_armed_ts_ms = ts_ms
-            self.state.upper_first_armed_ts_ms = ts_ms
-            self.state.upper_cvd_divergence_confirmed = True
-            # Save divergence extreme + reference band
-            self.state.upper_divergence_extreme_price = extreme.price
-            self.state.upper_divergence_extreme_ts_ms = extreme.extreme_ts_ms
-            self.state.upper_divergence_extreme_anchored_cvd = extreme.anchored_cvd
-            self.state.upper_divergence_ref_upper = boll.upper
-            self.state.upper_divergence_ref_middle = boll.middle
-            logger.info(
-                "UPPER_ANCHORED_CVD_DIVERGENCE_CONFIRMED | source=1m_fractal_2l2r "
-                "prev_price=%.4f prev_cvd=%.4f curr_price=%.4f curr_cvd=%.4f "
-                "cvd_recovery=%.4f price_ext_pct=%.6f ref_upper=%.4f ref_middle=%.4f ts_ms=%s",
-                prev_price, prev_cvd,
-                extreme.price, extreme.anchored_cvd,
-                decision.cvd_recovery, decision.price_extension_pct,
-                boll.upper, boll.middle, ts_ms,
-            )
-            logger.info("UPPER_ARMED | reason=anchored_divergence price=%.4f ts_ms=%s", price, ts_ms)
-        else:
-            # Update previous confirmed extreme reference ONLY for valid new highs
-            # where CVD didn't reverse (cvd_not_reversed).
-            # Do NOT update for no_new_high (shouldn't reach here due to gate above).
-            if decision.reason == "cvd_not_reversed":
-                self.state.upper_previous_confirmed_extreme_price = extreme.price
-                self.state.upper_previous_confirmed_extreme_ts_ms = extreme.extreme_ts_ms
-                self.state.upper_previous_confirmed_extreme_anchored_cvd = extreme.anchored_cvd
-                # Sync legacy fields
-                self.state.upper_previous_extreme_price = extreme.price
-                self.state.upper_previous_extreme_ts_ms = extreme.extreme_ts_ms
-                self.state.upper_previous_extreme_anchored_cvd = extreme.anchored_cvd
-            logger.debug(
-                "UPPER_NO_DIVERGENCE | source=1m_fractal_2l2r "
-                "price=%.4f anchored_cvd=%.4f "
-                "reason=%s ts_ms=%s",
-                extreme.price, extreme.anchored_cvd, decision.reason, ts_ms,
-            )
+        # ── 1m candle + fractal + divergence tracking (shared helper) ──
+        self._update_upper_reclaim_v2_tracking(price, ts_ms, boll, cvd)
 
         # ── Throttled extreme snapshot log (after divergence evaluation) ──
         self._maybe_log_reclaim_extreme_snapshot(
@@ -2839,22 +2930,30 @@ class BollCvdReclaimStrategy:
     def _expire_armed_state(self, ts_ms: int) -> None:
         """Expire armed state using new-state-machine timeouts.
 
-        When lower_extreme_ts_ms / upper_extreme_ts_ms is available, the
-        extreme-to-reclaim timeout (entry_max_extreme_to_reclaim_seconds) is
-        used so that a new price extreme resets the 15-minute reclaim window.
-        The old max_armed_seconds is kept only as a fallback when NO extreme
-        timestamp has been recorded yet (e.g. price went outside but never
-        reached min_outside_pct depth).
+        In V2 mode, the extreme-to-reclaim timeout uses the divergence
+        extreme timestamp (``lower_divergence_extreme_ts_ms``) so the
+        clock starts when divergence was confirmed, not from an earlier
+        tick-level orderflow extreme.  Waiting-for-fractal /
+        waiting-for-divergence phases are NOT affected here — they are
+        only bounded by the total setup timeout in _update_armed_state().
 
-        The total setup lifetime (entry_max_total_setup_seconds) is enforced
-        separately in _update_armed_state() via first_armed_ts_ms.
+        The old max_armed_seconds is kept only as a fallback when NO extreme
+        timestamp has been recorded yet.
         """
         _extreme_ms = self.config.entry_max_extreme_to_reclaim_seconds * 1000
         _fallback_ms = self.config.max_armed_seconds * 1000
 
         # ── Lower side ──────────────────────────────────────────────────
         if self.state.lower_armed:
-            _extreme_ts = self.state.lower_extreme_ts_ms
+            # V2: prefer divergence extreme timestamp over tick-level extreme
+            if (
+                self.config.entry_reclaim_v2_enabled
+                and self.state.lower_anchored_divergence_confirmed
+                and self.state.lower_divergence_extreme_ts_ms > 0
+            ):
+                _extreme_ts = self.state.lower_divergence_extreme_ts_ms
+            else:
+                _extreme_ts = self.state.lower_extreme_ts_ms
             if _extreme_ts > 0 and ts_ms - _extreme_ts > _extreme_ms:
                 logger.info(
                     "LOWER_ARMED_RESET | reason=extreme_to_reclaim_timeout "
@@ -2871,7 +2970,15 @@ class BollCvdReclaimStrategy:
 
         # ── Upper side ──────────────────────────────────────────────────
         if self.state.upper_armed:
-            _extreme_ts = self.state.upper_extreme_ts_ms
+            # V2: prefer divergence extreme timestamp over tick-level extreme
+            if (
+                self.config.entry_reclaim_v2_enabled
+                and self.state.upper_anchored_divergence_confirmed
+                and self.state.upper_divergence_extreme_ts_ms > 0
+            ):
+                _extreme_ts = self.state.upper_divergence_extreme_ts_ms
+            else:
+                _extreme_ts = self.state.upper_extreme_ts_ms
             if _extreme_ts > 0 and ts_ms - _extreme_ts > _extreme_ms:
                 logger.info(
                     "UPPER_ARMED_RESET | reason=extreme_to_reclaim_timeout "
@@ -2933,6 +3040,7 @@ class BollCvdReclaimStrategy:
         self.state.lower_last_logged_extreme_price = None
         self.state.lower_last_extreme_divergence_reason = None
         self.state.lower_last_extreme_divergence_confirmed = False
+        self.state.lower_last_divergence_evaluated_ts_ms = 0
         # ── Clear coherent snapshot cache ────────────────────────────────
         self.state.lower_last_snapshot_prev_extreme_price = None
         self.state.lower_last_snapshot_prev_extreme_cvd = None
@@ -3001,6 +3109,7 @@ class BollCvdReclaimStrategy:
         self.state.upper_last_logged_extreme_price = None
         self.state.upper_last_extreme_divergence_reason = None
         self.state.upper_last_extreme_divergence_confirmed = False
+        self.state.upper_last_divergence_evaluated_ts_ms = 0
         # ── Clear coherent snapshot cache ────────────────────────────────
         self.state.upper_last_snapshot_prev_extreme_price = None
         self.state.upper_last_snapshot_prev_extreme_cvd = None

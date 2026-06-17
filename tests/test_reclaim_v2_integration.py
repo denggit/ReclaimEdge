@@ -1391,6 +1391,8 @@ def test_no_entry_no_anchored_divergence_lower(caplog) -> None:
     strat = _strategy(min_outside_pct=0.001, reclaim_no_entry_log_interval_seconds=0)
     boll = _boll()
     _setup_lower_outside_with_first_extreme(strat, boll)
+    # Simulate: divergence was evaluated but NOT confirmed (cvd_not_recovered)
+    strat.state.lower_last_divergence_evaluated_ts_ms = 1
 
     # Price moves back inside band without divergence being confirmed
     inside_price = boll.lower * 1.001  # just inside the band
@@ -1423,6 +1425,8 @@ def test_no_entry_no_anchored_divergence_upper(caplog) -> None:
     strat = _strategy(min_outside_pct=0.001, reclaim_no_entry_log_interval_seconds=0)
     boll = _boll()
     _setup_upper_outside_with_first_extreme(strat, boll)
+    # Simulate: divergence was evaluated but NOT confirmed (cvd_not_reversed)
+    strat.state.upper_last_divergence_evaluated_ts_ms = 1
 
     # Price moves back inside band
     inside_price = boll.upper * 0.999
@@ -1743,6 +1747,8 @@ def test_re_entry_after_abort_lower(caplog) -> None:
     assert strat.state.lower_outside_observed is True
     assert strat.state.lower_first_extreme_price is not None
     assert strat.state.lower_anchored_divergence_confirmed is False
+    # Simulate: divergence was evaluated but NOT confirmed
+    strat.state.lower_last_divergence_evaluated_ts_ms = 1
 
     # Price returns inside → should abort
     inside_price = boll.lower * 1.002  # slightly above lower
@@ -1780,6 +1786,8 @@ def test_re_entry_after_abort_upper(caplog) -> None:
     assert strat.state.upper_outside_observed is True
     assert strat.state.upper_first_extreme_price is not None
     assert strat.state.upper_anchored_divergence_confirmed is False
+    # Simulate: divergence was evaluated but NOT confirmed
+    strat.state.upper_last_divergence_evaluated_ts_ms = 1
 
     # Price returns inside → should abort
     inside_price = boll.upper * 0.998  # slightly below upper
@@ -2125,3 +2133,375 @@ def test_snapshot_log_uses_running_tick_extreme_count_not_new_extreme_count(capl
         assert "running_tick_extreme_count=" in msg, (
             f"Snapshot log must contain 'running_tick_extreme_count='. Got: {msg}"
         )
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 1m fractal inside-continuation tests (bug fix: keep tracking after
+# price returns inside band so fractal extremes can still confirm)
+# ═══════════════════════════════════════════════════════════════════════
+
+
+# ── 8.1: price inside 后仍继续确认 LOWER fractal ──────────────────────
+
+def test_lower_fractal_confirms_after_price_returns_inside(caplog) -> None:
+    """Price returns inside lower band after first 2 minutes but fractal
+    still confirms when right-side candles close (minutes 3-5 are inside)."""
+    import logging
+    caplog.set_level(logging.INFO)
+
+    strat = _strategy(min_outside_pct=0.001)
+    boll = _boll()
+    _OFFSET = 30000  # avoid ts_ms=0 which fails orderflow anchor_ts_ms > 0 check
+
+    # Minute 0: price below lower → anchor, LEFT-2
+    t0 = _OFFSET
+    strat.on_tick(boll.lower * 0.998, t0, boll, _cvd(ts_ms=t0, price=boll.lower * 0.998,
+                 cumulative_buy_volume=500_000, cumulative_sell_volume=1_500_000))
+    assert strat.state.lower_outside_observed is True
+
+    # Minute 1: still below lower → LEFT-1
+    t1 = _MINUTE_MS + _OFFSET
+    strat.on_tick(boll.lower * 0.996, t1, boll, _cvd(ts_ms=t1, price=boll.lower * 0.996,
+                 cumulative_buy_volume=500_000, cumulative_sell_volume=1_600_000))
+
+    # Minute 2: CANDIDATE (lowest) — still below lower
+    t2 = 2 * _MINUTE_MS + _OFFSET
+    strat.on_tick(boll.lower * 0.992, t2, boll, _cvd(ts_ms=t2, price=boll.lower * 0.992,
+                 cumulative_buy_volume=500_000, cumulative_sell_volume=1_700_000))
+
+    # Minute 3: price RETURNS INSIDE (above lower but below middle) — RIGHT-1
+    t3 = 3 * _MINUTE_MS + _OFFSET
+    inside_price = boll.lower * 1.002  # just barely inside
+    strat.on_tick(inside_price, t3, boll, _cvd(ts_ms=t3, price=inside_price,
+                 cumulative_buy_volume=500_000, cumulative_sell_volume=1_800_000))
+
+    # Minute 4: still inside — RIGHT-2 (should trigger fractal confirmation!)
+    t4 = 4 * _MINUTE_MS + _OFFSET
+    strat.on_tick(boll.lower * 1.001, t4, boll, _cvd(ts_ms=t4, price=boll.lower * 1.001,
+                 cumulative_buy_volume=500_000, cumulative_sell_volume=1_900_000))
+
+    # Minute 5: still inside
+    t5 = 5 * _MINUTE_MS + _OFFSET
+    strat.on_tick(boll.lower * 1.003, t5, boll, _cvd(ts_ms=t5, price=boll.lower * 1.003,
+                 cumulative_buy_volume=500_000, cumulative_sell_volume=2_000_000))
+
+    # Verify fractal was confirmed despite price returning inside
+    confirmed_logs = [r for r in caplog.records if "LOWER_CONFIRMED_EXTREME | source=1m_fractal_2l2r" in r.message]
+    assert len(confirmed_logs) >= 1, (
+        f"Fractal should confirm even after price returns inside, got {len(confirmed_logs)}"
+    )
+    # State should NOT be aborted
+    assert strat.state.lower_outside_observed is True
+    assert strat.state.lower_first_extreme_price is not None
+
+
+# ── 8.1b: UPPER mirror — fractal confirms after price returns inside ──
+
+def test_upper_fractal_confirms_after_price_returns_inside(caplog) -> None:
+    """UPPER mirror: fractal still confirms after price returns inside band."""
+    import logging
+    caplog.set_level(logging.INFO)
+
+    strat = _strategy(min_outside_pct=0.001)
+    boll = _boll()
+    _OFFSET = 30000
+
+    # Minute 0-2: outside upper
+    t0 = _OFFSET
+    strat.on_tick(boll.upper * 1.002, t0, boll, _cvd(ts_ms=t0, price=boll.upper * 1.002,
+                 cumulative_buy_volume=1_500_000, cumulative_sell_volume=500_000,
+                 buy_ratio=0.4, sell_ratio=0.6, cross_positive=False, cross_negative=True,
+                 cvd_increasing=False, cvd_decreasing=True, no_new_high=True))
+    assert strat.state.upper_outside_observed is True
+
+    t1 = _MINUTE_MS + _OFFSET
+    strat.on_tick(boll.upper * 1.004, t1, boll, _cvd(ts_ms=t1, price=boll.upper * 1.004,
+                 cumulative_buy_volume=1_600_000, cumulative_sell_volume=500_000,
+                 buy_ratio=0.4, sell_ratio=0.6, cross_positive=False, cross_negative=True,
+                 cvd_increasing=False, cvd_decreasing=True, no_new_high=True))
+
+    t2 = 2 * _MINUTE_MS + _OFFSET
+    strat.on_tick(boll.upper * 1.008, t2, boll, _cvd(ts_ms=t2, price=boll.upper * 1.008,
+                 cumulative_buy_volume=1_700_000, cumulative_sell_volume=500_000,
+                 buy_ratio=0.4, sell_ratio=0.6, cross_positive=False, cross_negative=True,
+                 cvd_increasing=False, cvd_decreasing=True, no_new_high=True))
+
+    # Minute 3-5: inside band
+    inside_price = boll.upper * 0.998
+    for m in range(3, 6):
+        ts = m * _MINUTE_MS + _OFFSET
+        strat.on_tick(inside_price, ts, boll, _cvd(ts_ms=ts, price=inside_price,
+                     cumulative_buy_volume=1_800_000 + m * 100_000, cumulative_sell_volume=500_000,
+                     buy_ratio=0.4, sell_ratio=0.6, cross_positive=False, cross_negative=True,
+                     cvd_increasing=False, cvd_decreasing=True, no_new_high=True))
+
+    confirmed_logs = [r for r in caplog.records if "UPPER_CONFIRMED_EXTREME | source=1m_fractal_2l2r" in r.message]
+    assert len(confirmed_logs) >= 1, (
+        f"UPPER fractal should confirm even after price returns inside, got {len(confirmed_logs)}"
+    )
+    assert strat.state.upper_outside_observed is True
+    assert strat.state.upper_first_extreme_price is not None
+
+
+# ── 8.2: inside return before divergence evaluation 不 abort ──────────
+
+def test_lower_inside_return_before_divergence_eval_no_abort(caplog) -> None:
+    """When setup is active (outside_observed=True, no divergence yet, no
+    first_extreme), price returning inside should NOT abort — it should
+    continue waiting for the 1m fractal to form."""
+    import logging
+    caplog.set_level(logging.INFO)
+
+    strat = _strategy(min_outside_pct=0.001)
+    boll = _boll()
+    _OFFSET = 30000
+
+    # Anchor: first outside tick
+    t0 = _OFFSET
+    strat.on_tick(boll.lower * 0.998, t0, boll, _cvd(ts_ms=t0, price=boll.lower * 0.998,
+                 cumulative_buy_volume=500_000, cumulative_sell_volume=1_500_000))
+    assert strat.state.lower_outside_observed is True
+    assert strat.state.lower_first_extreme_price is None  # no extreme yet
+    assert strat.state.lower_last_divergence_evaluated_ts_ms == 0  # no div eval
+
+    # Price returns inside immediately
+    inside_price = boll.lower * 1.002
+    t1 = _MINUTE_MS + _OFFSET
+    strat.on_tick(inside_price, t1, boll, _cvd(ts_ms=t1, price=inside_price,
+                 cumulative_buy_volume=500_000, cumulative_sell_volume=1_600_000))
+
+    # Must NOT abort (no divergence evaluation has happened yet)
+    abort_logs = [r for r in caplog.records if "LOWER_RECLAIM_ABORTED" in r.message]
+    assert len(abort_logs) == 0, (
+        f"Should NOT abort before divergence evaluation, got {len(abort_logs)} abort(s)"
+    )
+    # State must remain
+    assert strat.state.lower_outside_observed is True, "lower_outside_observed must remain True"
+
+
+def test_upper_inside_return_before_divergence_eval_no_abort(caplog) -> None:
+    """UPPER mirror: inside return before divergence eval → no abort."""
+    import logging
+    caplog.set_level(logging.INFO)
+
+    strat = _strategy(min_outside_pct=0.001)
+    boll = _boll()
+    _OFFSET = 30000
+
+    t0 = _OFFSET
+    strat.on_tick(boll.upper * 1.002, t0, boll, _cvd(ts_ms=t0, price=boll.upper * 1.002,
+                 cumulative_buy_volume=1_500_000, cumulative_sell_volume=500_000,
+                 buy_ratio=0.4, sell_ratio=0.6))
+    assert strat.state.upper_outside_observed is True
+    assert strat.state.upper_first_extreme_price is None
+    assert strat.state.upper_last_divergence_evaluated_ts_ms == 0
+
+    inside_price = boll.upper * 0.998
+    t1 = _MINUTE_MS + _OFFSET
+    strat.on_tick(inside_price, t1, boll, _cvd(ts_ms=t1, price=inside_price,
+                 cumulative_buy_volume=1_500_000, cumulative_sell_volume=500_000,
+                 buy_ratio=0.4, sell_ratio=0.6))
+
+    abort_logs = [r for r in caplog.records if "UPPER_RECLAIM_ABORTED" in r.message]
+    assert len(abort_logs) == 0, "Should NOT abort before divergence evaluation"
+    assert strat.state.upper_outside_observed is True
+
+
+# ── 8.3: divergence evaluated 后 no divergence 才允许 abort ───────────
+
+def test_lower_abort_after_divergence_eval_no_divergence(caplog) -> None:
+    """After divergence has been evaluated (but NOT confirmed), inside
+    return SHOULD trigger LOWER_RECLAIM_ABORTED."""
+    import logging
+    caplog.set_level(logging.INFO)
+
+    strat = _strategy(min_outside_pct=0.001)
+    boll = _boll()
+
+    # Anchor + first extreme
+    _feed_lower_fractal_sequence(strat, boll)
+    assert strat.state.lower_first_extreme_price is not None
+    assert strat.state.lower_anchored_divergence_confirmed is False
+
+    # Simulate: divergence was evaluated (cvd_not_recovered)
+    strat.state.lower_last_divergence_evaluated_ts_ms = 1000
+    # Keep state alive
+    strat.state.lower_outside_observed = True
+
+    # Now price returns inside → should abort
+    caplog.clear()
+    inside_price = boll.lower * 1.002
+    strat.on_tick(inside_price, 500000, boll, _cvd(ts_ms=500000, price=inside_price,
+                 cumulative_buy_volume=500_000, cumulative_sell_volume=2_000_000))
+
+    abort_logs = [r for r in caplog.records if "LOWER_RECLAIM_ABORTED" in r.message]
+    assert len(abort_logs) == 1, (
+        f"Should abort after divergence eval + no divergence, got {len(abort_logs)}"
+    )
+    assert "inside_return_without_anchored_divergence" in abort_logs[0].message
+    assert strat.state.lower_outside_observed is False  # reset after abort
+
+
+def test_upper_abort_after_divergence_eval_no_divergence(caplog) -> None:
+    """UPPER mirror: after divergence eval + no divergence → abort on inside return."""
+    import logging
+    caplog.set_level(logging.INFO)
+
+    strat = _strategy(min_outside_pct=0.001)
+    boll = _boll()
+
+    _feed_upper_fractal_sequence(strat, boll)
+    assert strat.state.upper_first_extreme_price is not None
+    assert strat.state.upper_anchored_divergence_confirmed is False
+    strat.state.upper_last_divergence_evaluated_ts_ms = 1000
+    strat.state.upper_outside_observed = True
+
+    caplog.clear()
+    inside_price = boll.upper * 0.998
+    strat.on_tick(inside_price, 500000, boll, _cvd(ts_ms=500000, price=inside_price,
+                 cumulative_buy_volume=2_000_000, cumulative_sell_volume=500_000,
+                 buy_ratio=0.4, sell_ratio=0.6))
+
+    abort_logs = [r for r in caplog.records if "UPPER_RECLAIM_ABORTED" in r.message]
+    assert len(abort_logs) == 1, f"Should abort after divergence eval, got {len(abort_logs)}"
+    assert strat.state.upper_outside_observed is False
+
+
+# ── 8.4: middle reclaimed 仍 reset (V2 armed: divergence confirmed) ─
+
+def test_lower_middle_reclaimed_resets_after_divergence_confirm(caplog) -> None:
+    """After divergence is confirmed and setup is armed, price reaching
+    middle must reset the LOWER setup."""
+    import logging
+    caplog.set_level(logging.INFO)
+
+    strat = _strategy(min_outside_pct=0.001)
+    boll = _boll()
+
+    # Set up armed divergence state (divergence confirmed, waiting for reclaim)
+    _setup_lower_armed_divergence(strat, ref_lower=boll.lower, ref_middle=boll.middle)
+
+    # Price goes to middle (or above)
+    strat.on_tick(boll.middle * 1.001, 60000, boll, _cvd(ts_ms=60000, price=boll.middle * 1.001,
+                 cumulative_buy_volume=600_000, cumulative_sell_volume=1_500_000))
+
+    reset_logs = [r for r in caplog.records if "LOWER_ARMED_RESET" in r.message and "middle_reclaimed" in r.message]
+    assert len(reset_logs) >= 1, f"Should reset on middle reclaimed, got {len(reset_logs)}"
+
+
+def test_upper_middle_reclaimed_resets_after_divergence_confirm(caplog) -> None:
+    """UPPER mirror: middle reclaimed resets after divergence confirm."""
+    import logging
+    caplog.set_level(logging.INFO)
+
+    strat = _strategy(min_outside_pct=0.001)
+    boll = _boll()
+
+    _setup_upper_armed_divergence(strat, ref_upper=boll.upper, ref_middle=boll.middle)
+
+    strat.on_tick(boll.middle * 0.999, 60000, boll, _cvd(ts_ms=60000, price=boll.middle * 0.999,
+                 cumulative_buy_volume=1_500_000, cumulative_sell_volume=600_000,
+                 buy_ratio=0.4, sell_ratio=0.6))
+
+    reset_logs = [r for r in caplog.records if "UPPER_ARMED_RESET" in r.message and "middle_reclaimed" in r.message]
+    assert len(reset_logs) >= 1, f"Should reset on middle reclaimed, got {len(reset_logs)}"
+
+
+# ── 8.5: divergence confirmed — inside return does NOT abort ──────────
+
+def test_lower_divergence_confirmed_inside_return_no_abort(caplog) -> None:
+    """When anchored divergence IS confirmed, inside return must NOT abort —
+    it must keep waiting for CVD follow-through entry."""
+    import logging
+    caplog.set_level(logging.INFO)
+
+    strat = _strategy(min_outside_pct=0.001)
+    boll = _boll()
+
+    _run_lower_armed_divergence(strat, boll)
+    assert strat.state.lower_anchored_divergence_confirmed is True
+    assert strat.state.lower_armed is True
+
+    # Price returns inside band — should NOT trigger LOWER_RECLAIM_ABORTED
+    inside_price = boll.lower * 1.002
+    strat.on_tick(inside_price, 300000, boll, _cvd(ts_ms=300000, price=inside_price,
+                 cumulative_buy_volume=700_000, cumulative_sell_volume=1_400_000))
+
+    abort_logs = [r for r in caplog.records if "LOWER_RECLAIM_ABORTED" in r.message]
+    assert len(abort_logs) == 0, (
+        f"Should NOT abort when divergence is confirmed, got {len(abort_logs)}"
+    )
+
+
+def test_upper_divergence_confirmed_inside_return_no_abort(caplog) -> None:
+    """UPPER mirror: divergence confirmed → inside return does NOT abort."""
+    import logging
+    caplog.set_level(logging.INFO)
+
+    strat = _strategy(min_outside_pct=0.001)
+    boll = _boll()
+
+    _run_upper_armed_divergence(strat, boll)
+    assert strat.state.upper_anchored_divergence_confirmed is True
+    assert strat.state.upper_armed is True
+
+    inside_price = boll.upper * 0.998
+    strat.on_tick(inside_price, 300000, boll, _cvd(ts_ms=300000, price=inside_price,
+                 cumulative_buy_volume=1_300_000, cumulative_sell_volume=700_000,
+                 buy_ratio=0.4, sell_ratio=0.6))
+
+    abort_logs = [r for r in caplog.records if "UPPER_RECLAIM_ABORTED" in r.message]
+    assert len(abort_logs) == 0, "Should NOT abort when divergence is confirmed"
+
+
+# ── 8.6: full on_tick path — fractal extreme only after inside return ─
+
+def test_on_tick_full_path_fractal_after_inside_return(caplog) -> None:
+    """Full on_tick path test: price goes outside, returns inside, then
+    1m fractal confirms. Verifies the full tick flow (no private method
+    calls bypassing _update_armed_state)."""
+    import logging
+    caplog.set_level(logging.INFO)
+
+    strat = _strategy(min_outside_pct=0.001)
+    boll = _boll()
+
+    # Minute 0: outside lower → anchor
+    strat.on_tick(boll.lower * 0.998, 30000, boll, _cvd(ts_ms=30000, price=boll.lower * 0.998,
+                 cumulative_buy_volume=500_000, cumulative_sell_volume=1_500_000))
+    assert strat.state.lower_outside_observed is True
+
+    # Minute 1: still outside
+    strat.on_tick(boll.lower * 0.996, 90000, boll, _cvd(ts_ms=90000, price=boll.lower * 0.996,
+                 cumulative_buy_volume=500_000, cumulative_sell_volume=1_600_000))
+
+    # Minute 2: candidate low, still outside
+    strat.on_tick(boll.lower * 0.990, 150000, boll, _cvd(ts_ms=150000, price=boll.lower * 0.990,
+                 cumulative_buy_volume=500_000, cumulative_sell_volume=1_700_000))
+
+    # Minute 3: price RETURNS INSIDE — this is the critical path!
+    inside_price = boll.lower * 1.002
+    strat.on_tick(inside_price, 210000, boll, _cvd(ts_ms=210000, price=inside_price,
+                 cumulative_buy_volume=500_000, cumulative_sell_volume=1_800_000))
+
+    # Verify: no abort happened
+    abort_logs = [r for r in caplog.records if "LOWER_RECLAIM_ABORTED" in r.message]
+    assert len(abort_logs) == 0, (
+        f"Should NOT abort — still waiting for fractal right-side candles. Got {len(abort_logs)}"
+    )
+    assert strat.state.lower_outside_observed is True
+
+    # Minute 4: still inside
+    strat.on_tick(boll.lower * 1.001, 270000, boll, _cvd(ts_ms=270000, price=boll.lower * 1.001,
+                 cumulative_buy_volume=500_000, cumulative_sell_volume=1_900_000))
+
+    # Minute 5: at this point the fractal should confirm
+    strat.on_tick(boll.lower * 1.003, 330000, boll, _cvd(ts_ms=330000, price=boll.lower * 1.003,
+                 cumulative_buy_volume=500_000, cumulative_sell_volume=2_000_000))
+
+    # Fractal should have been confirmed
+    confirmed_logs = [r for r in caplog.records if "LOWER_CONFIRMED_EXTREME" in r.message]
+    assert len(confirmed_logs) >= 1, (
+        f"Fractal should confirm via on_tick path, got {len(confirmed_logs)}"
+    )
+    assert strat.state.lower_first_extreme_price is not None

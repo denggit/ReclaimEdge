@@ -353,6 +353,8 @@ class TestReclaimV2AbortWithoutDivergence:
         state.lower_previous_extreme_price = 1790.0
         state.lower_previous_extreme_anchored_cvd = -50000.0
         state.lower_anchored_divergence_confirmed = False
+        # Simulate: divergence was evaluated but NOT confirmed
+        state.lower_last_divergence_evaluated_ts_ms = 1
         # lower_armed stays False (V2 doesn't arm without divergence)
 
         caplog.set_level(logging.INFO)
@@ -405,6 +407,8 @@ class TestReclaimV2AbortWithoutDivergence:
         state.upper_previous_extreme_price = 3350.0
         state.upper_previous_extreme_anchored_cvd = 50000.0
         state.upper_anchored_divergence_confirmed = False
+        # Simulate: divergence was evaluated but NOT confirmed
+        state.upper_last_divergence_evaluated_ts_ms = 1
 
         caplog.set_level(logging.INFO)
 
@@ -445,6 +449,8 @@ class TestReclaimV2AbortWithoutDivergence:
         state.lower_previous_extreme_price = 1790.0
         state.lower_previous_extreme_anchored_cvd = -50000.0
         state.lower_anchored_divergence_confirmed = False
+        # Simulate: divergence was evaluated but NOT confirmed
+        state.lower_last_divergence_evaluated_ts_ms = 1
 
         caplog.set_level(logging.INFO)
 
