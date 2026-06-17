@@ -64,9 +64,9 @@ class FakeCvdSnapshot:
 
 def _make_strategy(**config_overrides):
     """Build a minimal BollCvdReclaimStrategy for log testing."""
-    cfg = BollCvdReclaimStrategyConfig(entry_reclaim_v2_enabled=False)
-    for k, v in config_overrides.items():
-        setattr(cfg, k, v)
+    cfg_kwargs: dict = {"entry_reclaim_v2_enabled": False}
+    cfg_kwargs.update(config_overrides)
+    cfg = BollCvdReclaimStrategyConfig(**cfg_kwargs)
     sizer_cfg = SimplePositionSizerConfig()
     sizer = SimplePositionSizer(sizer_cfg)
     strategy = BollCvdReclaimStrategy(cfg, sizer)
@@ -321,3 +321,200 @@ def test_log_info_throttled_allows_after_interval(caplog):
     assert test_count == 2, (
         f"Should log again after interval, got {test_count}"
     )
+
+
+# ======================================================================
+# 4. Reclaim V2 abort: no divergence → abort once + reset
+# ======================================================================
+
+
+class TestReclaimV2AbortWithoutDivergence:
+    """When Reclaim V2 observes outside but never gets anchored divergence,
+    and price returns inside the band → log abort once and reset setup.
+    No more repeated no_anchored_divergence heartbeat logs."""
+
+    def test_lower_abort_once_and_reset(self, caplog):
+        """LOWER: outside observed + first extreme + no divergence,
+        price returns inside → LOWER_RECLAIM_ABORTED once, state reset."""
+        strategy = _make_strategy(
+            entry_reclaim_v2_enabled=True,
+            entry_reclaim_require_anchored_divergence=True,
+            entry_reclaim_inside_band=False,
+            entry_min_reward_risk=0.0,
+            entry_fee_slippage_buffer_pct=0.0,
+            order_cooldown_seconds=0,
+        )
+        ts_base = 1000000
+
+        # Simulate V2 state: outside observed, first extreme recorded, NO divergence
+        state = strategy.state
+        state.lower_outside_observed = True
+        state.lower_first_extreme_price = 1800.0
+        state.lower_previous_extreme_price = 1790.0
+        state.lower_previous_extreme_anchored_cvd = -50000.0
+        state.lower_anchored_divergence_confirmed = False
+        # lower_armed stays False (V2 doesn't arm without divergence)
+
+        caplog.set_level(logging.INFO)
+
+        # Feed ticks with price INSIDE the band — should trigger abort
+        for i in range(5):
+            ts = ts_base + i * 60000  # one per minute
+            boll = FakeBollSnapshot(lower=2800.0, middle=3000.0, upper=3200.0, ts_ms=ts)
+            cvd = FakeCvdSnapshot(ts_ms=ts)
+            strategy.on_tick(price=2900.0, ts_ms=ts, boll=boll, cvd=cvd)
+
+        abort_logs = [
+            r for r in caplog.records
+            if "LOWER_RECLAIM_ABORTED" in r.getMessage()
+        ]
+        assert len(abort_logs) == 1, (
+            f"LOWER_RECLAIM_ABORTED should log exactly once, got {len(abort_logs)}"
+        )
+        assert "inside_return_without_anchored_divergence" in abort_logs[0].getMessage(), (
+            f"Abort reason should be inside_return_without_anchored_divergence"
+        )
+
+        # State should be fully reset after abort
+        assert state.lower_outside_observed is False, (
+            "lower_outside_observed should be reset after abort"
+        )
+        assert state.lower_first_extreme_price is None, (
+            "lower_first_extreme_price should be reset after abort"
+        )
+        assert state.lower_anchored_divergence_confirmed is False, (
+            "lower_anchored_divergence_confirmed should still be False"
+        )
+
+    def test_upper_abort_once_and_reset(self, caplog):
+        """UPPER: outside observed + first extreme + no divergence,
+        price returns inside → UPPER_RECLAIM_ABORTED once, state reset."""
+        strategy = _make_strategy(
+            entry_reclaim_v2_enabled=True,
+            entry_reclaim_require_anchored_divergence=True,
+            entry_reclaim_inside_band=False,
+            entry_min_reward_risk=0.0,
+            entry_fee_slippage_buffer_pct=0.0,
+            order_cooldown_seconds=0,
+        )
+        ts_base = 1000000
+
+        state = strategy.state
+        state.upper_outside_observed = True
+        state.upper_first_extreme_price = 3300.0
+        state.upper_previous_extreme_price = 3350.0
+        state.upper_previous_extreme_anchored_cvd = 50000.0
+        state.upper_anchored_divergence_confirmed = False
+
+        caplog.set_level(logging.INFO)
+
+        for i in range(5):
+            ts = ts_base + i * 60000
+            boll = FakeBollSnapshot(lower=2800.0, middle=3000.0, upper=3200.0, ts_ms=ts)
+            cvd = FakeCvdSnapshot(ts_ms=ts)
+            strategy.on_tick(price=3100.0, ts_ms=ts, boll=boll, cvd=cvd)
+
+        abort_logs = [
+            r for r in caplog.records
+            if "UPPER_RECLAIM_ABORTED" in r.getMessage()
+        ]
+        assert len(abort_logs) == 1, (
+            f"UPPER_RECLAIM_ABORTED should log exactly once, got {len(abort_logs)}"
+        )
+        assert "inside_return_without_anchored_divergence" in abort_logs[0].getMessage()
+
+        assert state.upper_outside_observed is False
+        assert state.upper_first_extreme_price is None
+
+    def test_no_repeated_no_anchored_divergence_after_abort(self, caplog):
+        """After abort, continue feeding inside ticks for 5 minutes.
+        No more LOWER_RECLAIM_NO_ENTRY with no_anchored_divergence should appear."""
+        strategy = _make_strategy(
+            entry_reclaim_v2_enabled=True,
+            entry_reclaim_require_anchored_divergence=True,
+            entry_reclaim_inside_band=False,
+            entry_min_reward_risk=0.0,
+            entry_fee_slippage_buffer_pct=0.0,
+            order_cooldown_seconds=0,
+        )
+        ts_base = 1000000
+
+        state = strategy.state
+        state.lower_outside_observed = True
+        state.lower_first_extreme_price = 1800.0
+        state.lower_previous_extreme_price = 1790.0
+        state.lower_previous_extreme_anchored_cvd = -50000.0
+        state.lower_anchored_divergence_confirmed = False
+
+        caplog.set_level(logging.INFO)
+
+        # Feed 10 inside ticks over 10 minutes → only 1 abort, no repeated no_anchored_divergence
+        for i in range(10):
+            ts = ts_base + i * 60000
+            boll = FakeBollSnapshot(lower=2800.0, middle=3000.0, upper=3200.0, ts_ms=ts)
+            cvd = FakeCvdSnapshot(ts_ms=ts)
+            strategy.on_tick(price=2900.0, ts_ms=ts, boll=boll, cvd=cvd)
+
+        abort_logs = [
+            r for r in caplog.records
+            if "LOWER_RECLAIM_ABORTED" in r.getMessage()
+        ]
+        assert len(abort_logs) == 1, (
+            f"LOWER_RECLAIM_ABORTED should log exactly once, got {len(abort_logs)}"
+        )
+
+        no_entry_no_div = [
+            r for r in caplog.records
+            if "LOWER_RECLAIM_NO_ENTRY" in r.getMessage()
+            and "no_anchored_divergence" in r.getMessage()
+        ]
+        assert len(no_entry_no_div) == 0, (
+            f"No LOWER_RECLAIM_NO_ENTRY with no_anchored_divergence should appear after abort, "
+            f"got {len(no_entry_no_div)}"
+        )
+
+    def test_divergence_confirmed_not_aborted(self, caplog):
+        """When anchored_divergence IS confirmed, returning inside the band
+        should NOT abort the setup — it must keep waiting for follow-through."""
+        strategy = _make_strategy(
+            entry_reclaim_v2_enabled=True,
+            entry_reclaim_require_anchored_divergence=True,
+            entry_reclaim_inside_band=False,
+            entry_min_reward_risk=0.0,
+            entry_fee_slippage_buffer_pct=0.0,
+            order_cooldown_seconds=0,
+        )
+        ts_base = 1000000
+
+        state = strategy.state
+        state.lower_outside_observed = True
+        state.lower_first_extreme_price = 1800.0
+        state.lower_previous_extreme_price = 1790.0
+        state.lower_anchored_divergence_confirmed = True  # ← DIVERGENCE CONFIRMED
+        state.lower_armed = True  # armed via divergence confirmation
+        state.lower_armed_ts_ms = ts_base
+
+        caplog.set_level(logging.INFO)
+
+        for i in range(5):
+            ts = ts_base + i * 60000
+            boll = FakeBollSnapshot(lower=2800.0, middle=3000.0, upper=3200.0, ts_ms=ts)
+            cvd = FakeCvdSnapshot(ts_ms=ts)
+            strategy.on_tick(price=2900.0, ts_ms=ts, boll=boll, cvd=cvd)
+
+        abort_logs = [
+            r for r in caplog.records
+            if "LOWER_RECLAIM_ABORTED" in r.getMessage()
+        ]
+        assert len(abort_logs) == 0, (
+            f"LOWER_RECLAIM_ABORTED should NOT appear when divergence is confirmed, "
+            f"got {len(abort_logs)}"
+        )
+
+        # State should NOT be reset
+        assert state.lower_outside_observed is True, (
+            "lower_outside_observed should remain True after divergence confirmed"
+        )
+        assert state.lower_anchored_divergence_confirmed is True, (
+            "anchored divergence should remain confirmed"
+        )

@@ -206,6 +206,7 @@ class TrendBreakoutAssessor:
 
         # 2. Detect breakout direction — persist anchor across ticks
         current_direction = self._classify_direction(price, boll_upper, boll_lower)
+        pre_breakout_pressure: PreBreakoutPressureState | None = None
         if current_direction is None:
             # Price back inside band — clear breakout.
             # Update pressure tracker while price is inside band.
@@ -235,6 +236,9 @@ class TrendBreakoutAssessor:
             breakout = None
         elif self._latest_breakout is None or self._latest_breakout.direction != current_direction:
             # New breakout or direction change — anchor at current CVD.
+            # Capture pre-breakout pressure BEFORE reset (reset clears active flag).
+            if self._pressure_tracker.active:
+                pre_breakout_pressure = self._pressure_tracker.snapshot()
             # Stop pressure tracking since price is now outside the band.
             self._pressure_tracker.reset()
             breakout = BreakoutSnapshot(
@@ -253,13 +257,9 @@ class TrendBreakoutAssessor:
             # Same direction, ongoing — reuse existing anchor
             breakout = self._latest_breakout
 
-        # 3. Capture pre-breakout pressure snapshot (before breakout cleared it)
-        pre_breakout_pressure: PreBreakoutPressureState | None = None
-        if self._pressure_tracker.active and current_direction is not None:
-            # Price just moved outside — snapshot the pressure before resetting
-            pre_breakout_pressure = self._pressure_tracker.snapshot()
-        elif self._pressure_config.enabled and current_direction is None and compression_episode is not None:
-            # Still inside band — snapshot current pressure state
+        # 3. Capture pre-breakout pressure snapshot for inside-band ticks.
+        # (For new breakouts, pressure was already captured in step 2 before reset.)
+        if pre_breakout_pressure is None and self._pressure_config.enabled and current_direction is None and compression_episode is not None:
             pre_breakout_pressure = self._pressure_tracker.snapshot()
 
         # 4. If no breakout direction, feed trend detector for stale-candidate

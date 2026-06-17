@@ -995,3 +995,205 @@ class TestCandleCloseReject:
         assert result.is_candidate is True, (
             f"Candle back inside should stay candidate, got reason={result.reason}"
         )
+
+
+# ======================================================================
+# Test 9: Pre-breakout pressure preserved on breakout tick (snapshot before reset)
+# ======================================================================
+
+
+class TestPreBreakoutPressureNotLostOnBreakout:
+    """Verify that pre-breakout pressure is captured BEFORE the tracker is reset
+    on the breakout tick, and is correctly passed to TrendDetector."""
+
+    def test_pressure_passed_via_trend_detector_directly(self):
+        """When pre_breakout_pressure is passed to TrendDetector.assess(),
+        it appears in the returned TrendAssessment."""
+        from src.strategies.regime.pre_breakout_pressure import (
+            PreBreakoutPressureState,
+        )
+
+        detector = _make_detector(
+            require_candle_close=True,
+            confirm_min_seconds=60,
+            pre_breakout_pressure_enabled=True,
+        )
+        bo = _breakout("UP", ts_ms=1000000, price=3200.0,
+                       upper=3100.0, middle=3000.0, lower=2900.0)
+        ep = _episode()
+        cvd = _cvd_up_confirming(anchor_ts=1000000, current_ts=1100000)
+
+        pressure = PreBreakoutPressureState(
+            direction="UP", score=0.75, duration_seconds=400.0,
+            anchored_cvd=80.0, buy_ratio=0.68, sell_ratio=0.32,
+            reason="up_pressure_dominant",
+        )
+
+        result = _assess(
+            detector, bo, ep, cvd, current_ts_ms=1100000,
+            pre_breakout_pressure=pressure,
+        )
+
+        assert result.pre_breakout_pressure_direction == "UP", (
+            f"Expected UP direction, got {result.pre_breakout_pressure_direction}"
+        )
+        assert result.pre_breakout_pressure_score > 0, (
+            f"Expected positive score, got {result.pre_breakout_pressure_score}"
+        )
+
+    def test_pressure_captured_before_reset_in_assessor(self):
+        """Snapshot-before-reset: when price breaks out, the assessor should
+        capture pressure before resetting the tracker, and pass it to the
+        TrendDetector via the stored-pressure fallback mechanism."""
+        from src.strategies.regime.pre_breakout_pressure import (
+            PreBreakoutPressureState,
+        )
+
+        # Use a detector with explicit short window for fast test
+        detector = _make_detector(
+            require_candle_close=True,
+            confirm_min_seconds=60,
+            pre_breakout_pressure_enabled=True,
+        )
+        bo = _breakout("UP", ts_ms=1000000, price=3200.0,
+                       upper=3100.0, middle=3000.0, lower=2900.0)
+        ep = _episode()
+        cvd = _cvd_up_confirming(anchor_ts=1000000, current_ts=1100000)
+
+        # Simulate what the assessor does on breakout tick:
+        # 1. Snapshot pressure before reset
+        pressure = PreBreakoutPressureState(
+            direction="UP", score=0.80, duration_seconds=400.0,
+            anchored_cvd=80.0, buy_ratio=0.68, sell_ratio=0.32,
+            reason="up_pressure_dominant",
+        )
+
+        # First call: pass pressure → gets stored internally
+        _assess(detector, bo, ep, cvd, current_ts_ms=1100000,
+                pre_breakout_pressure=pressure)
+
+        # Second call: NO pressure → stored pressure must be used
+        result2 = _assess(detector, bo, ep, cvd, current_ts_ms=1120000)
+
+        assert result2.pre_breakout_pressure_direction == "UP", (
+            f"Subsequent tick without pressure should use stored, "
+            f"got direction={result2.pre_breakout_pressure_direction}"
+        )
+        assert result2.pre_breakout_pressure_score > 0, (
+            f"Subsequent tick score should be > 0, "
+            f"got score={result2.pre_breakout_pressure_score}"
+        )
+
+
+# ======================================================================
+# Test 10: Subsequent ticks use stored pre_breakout_pressure
+# ======================================================================
+
+
+class TestStoredPressureOnSubsequentTicks:
+    """Verify that TrendDetector falls back to stored pre_breakout_pressure
+    when subsequent ticks do not pass it."""
+
+    def test_stored_pressure_used_on_second_tick(self):
+        """First assess() call passes pressure → second call without pressure
+        still uses stored pressure (not None)."""
+        from src.strategies.regime.pre_breakout_pressure import (
+            PreBreakoutPressureState,
+        )
+
+        detector = _make_detector(
+            require_candle_close=True,
+            confirm_min_seconds=60,
+            pre_breakout_pressure_enabled=True,
+        )
+        bo = _breakout("UP", ts_ms=1000000, price=3200.0,
+                       upper=3100.0, middle=3000.0, lower=2900.0)
+        ep = _episode()
+        cvd = _cvd_up_confirming(anchor_ts=1000000, current_ts=1100000)
+
+        # First call: pass UP pressure
+        pressure = PreBreakoutPressureState(
+            direction="UP", score=0.75, duration_seconds=400.0,
+            anchored_cvd=80.0, buy_ratio=0.68, sell_ratio=0.32,
+            reason="up_pressure_dominant",
+        )
+        result1 = _assess(
+            detector, bo, ep, cvd, current_ts_ms=1100000,
+            pre_breakout_pressure=pressure,
+            **_closed_candle_data(1090000, 3150.0, 3100.0, 2900.0),
+        )
+        assert result1.is_confirmed is True
+        assert result1.pre_breakout_pressure_direction == "UP"
+        assert result1.pre_breakout_pressure_score > 0
+
+        # Second call: same breakout, NO pressure passed → should still use stored
+        # CVD degrades a bit but still confirming
+        cvd2 = _cvd_up_confirming(anchor_ts=1000000, current_ts=1120000)
+        result2 = _assess(
+            detector, bo, ep, cvd2, current_ts_ms=1120000,
+            # No pre_breakout_pressure passed!
+        )
+        assert result2.pre_breakout_pressure_direction == "UP", (
+            f"Subsequent tick should use stored pressure (UP), "
+            f"got direction={result2.pre_breakout_pressure_direction}"
+        )
+        assert result2.pre_breakout_pressure_score > 0, (
+            f"Subsequent tick should use stored pressure score > 0, "
+            f"got score={result2.pre_breakout_pressure_score}"
+        )
+
+    def test_pressure_conflict_persists_with_stored_pressure(self):
+        """Pressure DOWN, breakout UP → conflict should persist on subsequent
+        ticks using stored pressure, blocking confirmation without strong CVD."""
+        from src.strategies.regime.pre_breakout_pressure import (
+            PreBreakoutPressureState,
+        )
+
+        detector = _make_detector(
+            require_candle_close=True,
+            confirm_min_seconds=60,
+            pre_breakout_pressure_enabled=True,
+            pre_breakout_pressure_min_score=0.60,
+        )
+        bo = _breakout("UP", ts_ms=1000000, price=3200.0,
+                       upper=3100.0, middle=3000.0, lower=2900.0)
+        ep = _episode()
+
+        # Weak CVD
+        weak_cvd = build_anchored_cvd_state(
+            anchor_ts_ms=1000000, current_ts_ms=1100000,
+            anchor_cvd=100.0, current_cvd=110.0,
+            episode_buy_volume=50.0, episode_sell_volume=50.0,
+            episode_cvd_max=110.0, episode_cvd_min=100.0,
+        )
+
+        # DOWN pressure (conflict with UP breakout)
+        conflict_pressure = PreBreakoutPressureState(
+            direction="DOWN", score=0.72, duration_seconds=300.0,
+            anchored_cvd=-50.0, buy_ratio=0.35, sell_ratio=0.65,
+            reason="down_pressure_dominant",
+        )
+
+        # First call: pass conflict pressure → should fail
+        result1 = _assess(
+            detector, bo, ep, weak_cvd, current_ts_ms=1100000,
+            pre_breakout_pressure=conflict_pressure,
+            **_closed_candle_data(1090000, 3150.0, 3100.0, 2900.0),
+        )
+        assert result1.is_failed is True, (
+            f"Pressure conflict + weak CVD should fail, got reason={result1.reason}"
+        )
+        assert "pressure_conflict" in result1.reason.lower() or "cvd_not_strong" in result1.reason
+
+        # Second call: NO pressure passed → stored conflict should still block
+        result2 = _assess(
+            detector, bo, ep, weak_cvd, current_ts_ms=1120000,
+            # No pre_breakout_pressure!
+        )
+        assert result2.is_failed is True, (
+            f"Stored pressure conflict should still cause failure, "
+            f"got is_failed={result2.is_failed} reason={result2.reason}"
+        )
+        assert "pre_breakout_pressure_conflict" in result2.reason.lower() or "cvd_not_strong" in result2.reason, (
+            f"Reason should mention pressure conflict, got: {result2.reason}"
+        )

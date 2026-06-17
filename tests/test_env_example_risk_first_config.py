@@ -172,3 +172,62 @@ def test_entry_reclaim_v2_new_config_defaults() -> None:
     assert cfg.entry_reclaim_min_cvd_recovery == 0.0
     assert cfg.entry_reclaim_min_cvd_follow_through == 0.0
     assert cfg.entry_reclaim_max_inside_depth_ratio == 0.15
+
+
+# ── Trend confirm window defaults ──────────────────────────────────────
+
+
+def test_trend_confirm_window_defaults_900_1200() -> None:
+    """Default trend confirm window must be 900/1200 for 15m candle close compat."""
+    cfg = BollCvdReclaimStrategyConfig()
+    assert cfg.trend_confirm_min_seconds == 900, (
+        f"Default trend_confirm_min_seconds should be 900, got {cfg.trend_confirm_min_seconds}"
+    )
+    assert cfg.trend_confirm_max_seconds == 1200, (
+        f"Default trend_confirm_max_seconds should be 1200, got {cfg.trend_confirm_max_seconds}"
+    )
+    assert cfg.trend_confirm_require_candle_close is True
+
+
+# ── ENTRY_SL_FAIL_MARKET_EXIT_RETRY_COUNT cleanup ─────────────────────
+
+
+class TestEnvExampleNoActiveEntrySlMarketExit(unittest.TestCase):
+    """.env.example must not contain an active ENTRY_SL_FAIL_MARKET_EXIT_RETRY_COUNT."""
+
+    _env_text: str | None = None
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        env_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "..", ".env.example",
+        )
+        if os.path.exists(env_path):
+            with open(env_path, encoding="utf-8") as f:
+                cls._env_text = f.read()
+
+    def test_no_uncommented_entry_sl_fail_market_exit(self) -> None:
+        """ENTRY_SL_FAIL_MARKET_EXIT_RETRY_COUNT must NOT appear uncommented."""
+        if self._env_text is None:
+            raise unittest.SkipTest(".env.example not found")
+        for line in self._env_text.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                continue
+            if stripped == "":
+                continue
+            if "ENTRY_SL_FAIL_MARKET_EXIT_RETRY_COUNT" in stripped and "=" in stripped:
+                self.fail(
+                    f"ENTRY_SL_FAIL_MARKET_EXIT_RETRY_COUNT must not appear as "
+                    f"uncommented active config in .env.example: {stripped!r}"
+                )
+
+    def test_legacy_comment_present(self) -> None:
+        """The legacy var should appear only as a comment with explanation."""
+        if self._env_text is None:
+            raise unittest.SkipTest(".env.example not found")
+        self.assertIn(
+            "# ENTRY_SL_FAIL_MARKET_EXIT_RETRY_COUNT=3",
+            self._env_text,
+            "Legacy ENTRY_SL_FAIL_MARKET_EXIT_RETRY_COUNT should be present as comment",
+        )

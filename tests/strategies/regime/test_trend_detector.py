@@ -82,8 +82,9 @@ def _make_detector(
     comp_cfg: dict | None = None,
     cvd_cfg: dict | None = None,
 ) -> TrendDetector:
-    # Default require_candle_close=False for backward compat with existing tests
-    default_cfg = {"require_candle_close": False}
+    # Default require_candle_close=False for backward compat with existing tests.
+    # Use explicit confirm window (60/180) — new defaults are 900/1200.
+    default_cfg = {"require_candle_close": False, "confirm_min_seconds": 60, "confirm_max_seconds": 180}
     default_cfg.update(trend_cfg or {})
     tcfg = TrendDetectorConfig(**default_cfg)
     ccfg = CompressionDetectorConfig(**(comp_cfg or {}))
@@ -447,3 +448,105 @@ class TestNoCompressionIsNotTrendFailed:
         assert result.blocks_mean_reversion is False
         assert result.trend_state == TrendState.NO_TREND
         assert result.reason == "no_recent_compression"
+
+
+# ── New tests: stored pre-breakout pressure ────────────────────────────
+
+
+class TestStoredPreBreakoutPressure:
+    """Subsequent ticks without pre_breakout_pressure fall back to stored value."""
+
+    def test_stored_pressure_used_when_not_passed(self):
+        """First tick stores pressure → subsequent tick without pressure uses stored."""
+        from src.strategies.regime.pre_breakout_pressure import (
+            PreBreakoutPressureState,
+        )
+
+        detector = _make_detector({"require_candle_close": False,
+                                   "confirm_min_seconds": 60, "confirm_max_seconds": 180})
+        bo = _breakout("UP", ts_ms=10000)
+        ep = _episode()
+        cvd = _cvd_up_confirming(anchor_ts=10000, current_ts=80000)
+
+        # First call: pass UP pressure → gets stored internally
+        pressure = PreBreakoutPressureState(
+            direction="UP", score=0.80, duration_seconds=400.0,
+            anchored_cvd=80.0, buy_ratio=0.68, sell_ratio=0.32,
+            reason="up_pressure_dominant",
+        )
+        result1 = _assess_pass(
+            detector, bo, ep, cvd, current_ts_ms=80000,
+            pre_breakout_pressure=pressure,
+        )
+        assert result1.is_confirmed is True
+        assert result1.pre_breakout_pressure_direction == "UP"
+        assert result1.pre_breakout_pressure_score == 0.80
+
+        # Second call: NO pressure → stored pressure should be used
+        result2 = _assess_pass(detector, bo, ep, cvd, current_ts_ms=85000)
+        assert result2.pre_breakout_pressure_direction == "UP", (
+            f"Should fall back to stored pressure direction=UP, "
+            f"got {result2.pre_breakout_pressure_direction}"
+        )
+        assert result2.pre_breakout_pressure_score > 0, (
+            f"Should fall back to stored pressure score > 0, "
+            f"got {result2.pre_breakout_pressure_score}"
+        )
+
+    def test_current_pressure_takes_priority_over_stored(self):
+        """When current tick passes new pressure, it overrides stored."""
+        from src.strategies.regime.pre_breakout_pressure import (
+            PreBreakoutPressureState,
+        )
+
+        detector = _make_detector({"require_candle_close": False,
+                                   "confirm_min_seconds": 60, "confirm_max_seconds": 180})
+        bo = _breakout("UP", ts_ms=10000)
+        ep = _episode()
+        cvd = _cvd_up_confirming(anchor_ts=10000, current_ts=80000)
+
+        # Store UP pressure
+        up_pressure = PreBreakoutPressureState(
+            direction="UP", score=0.80, duration_seconds=400.0,
+            anchored_cvd=80.0, buy_ratio=0.68, sell_ratio=0.32,
+            reason="up_pressure_dominant",
+        )
+        _assess_pass(
+            detector, bo, ep, cvd, current_ts_ms=80000,
+            pre_breakout_pressure=up_pressure,
+        )
+
+        # Now pass new pressure (neutral) — should override stored UP
+        neutral = PreBreakoutPressureState(
+            direction=None, score=0.30, duration_seconds=100.0,
+            anchored_cvd=5.0, buy_ratio=0.52, sell_ratio=0.48,
+            reason="no_clear_pressure",
+        )
+        result = _assess_pass(
+            detector, bo, ep, cvd, current_ts_ms=85000,
+            pre_breakout_pressure=neutral,
+        )
+        # Should use the newly-passed neutral, not stored UP
+        # (neutral pressure has direction=None → not stored)
+        assert result.pre_breakout_pressure_direction is None, (
+            f"Current neutral pressure should override stored UP, "
+            f"got direction={result.pre_breakout_pressure_direction}"
+        )
+
+
+# ── Default config tests ───────────────────────────────────────────────
+
+
+class TestTrendDetectorConfigDefaults:
+    """Verify TrendDetectorConfig defaults are 900/1200 for candle close compat."""
+
+    def test_default_confirm_window_is_900_1200(self):
+        cfg = TrendDetectorConfig()
+        assert cfg.confirm_min_seconds == 900, (
+            f"Default confirm_min_seconds should be 900, got {cfg.confirm_min_seconds}"
+        )
+        assert cfg.confirm_max_seconds == 1200, (
+            f"Default confirm_max_seconds should be 1200, got {cfg.confirm_max_seconds}"
+        )
+        assert cfg.require_candle_close is True
+

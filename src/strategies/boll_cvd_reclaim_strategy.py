@@ -185,8 +185,8 @@ class BollCvdReclaimStrategyConfig:
     trend_max_stop_distance_pct: float = 0.02
     trend_sl_update_interval_seconds: int = 900
     trend_compression_valid_after_seconds: int = 7200
-    trend_confirm_min_seconds: int = 60
-    trend_confirm_max_seconds: int = 180
+    trend_confirm_min_seconds: int = 900
+    trend_confirm_max_seconds: int = 1200
     trend_range_expansion_ratio_min: float = 3.0
     trend_volume_expansion_ratio_min: float = 3.0
     trend_outside_occupancy_min_ratio: float = 0.70
@@ -507,8 +507,8 @@ class BollCvdReclaimStrategyConfig:
             trend_max_stop_distance_pct=float(os.getenv("TREND_MAX_STOP_DISTANCE_PCT", "0.02")),
             trend_sl_update_interval_seconds=int(os.getenv("TREND_SL_UPDATE_INTERVAL_SECONDS", "900")),
             trend_compression_valid_after_seconds=int(os.getenv("TREND_COMPRESSION_VALID_AFTER_SECONDS", "7200")),
-            trend_confirm_min_seconds=int(os.getenv("TREND_CONFIRM_MIN_SECONDS", "60")),
-            trend_confirm_max_seconds=int(os.getenv("TREND_CONFIRM_MAX_SECONDS", "180")),
+            trend_confirm_min_seconds=int(os.getenv("TREND_CONFIRM_MIN_SECONDS", "900")),
+            trend_confirm_max_seconds=int(os.getenv("TREND_CONFIRM_MAX_SECONDS", "1200")),
             trend_range_expansion_ratio_min=float(os.getenv("TREND_RANGE_EXPANSION_RATIO_MIN", "3.0")),
             trend_volume_expansion_ratio_min=float(os.getenv("TREND_VOLUME_EXPANSION_RATIO_MIN", "3.0")),
             trend_outside_occupancy_min_ratio=float(os.getenv("TREND_OUTSIDE_OCCUPANCY_MIN_RATIO", "0.70")),
@@ -1179,41 +1179,96 @@ class BollCvdReclaimStrategy:
             logger.info("UPPER_ARMED_RESET | reason=middle_reclaimed price=%.4f middle=%.4f", price, boll.middle)
             self._reset_upper_armed()
 
-        # ── Reclaim no-entry reason: no anchored divergence ─────────────
-        # When an outside episode was observed (first extreme recorded) but
-        # anchored divergence never confirmed, log the reason once price is
-        # back inside the band.
+        # ── Reclaim V2: abort setup without divergence on inside return ─
+        # When price returns inside the band without anchored divergence,
+        # the setup can never become a valid entry — abort once and reset.
+        # This replaces the old per-minute no_anchored_divergence heartbeat log
+        # which is now a one-shot LOWER_RECLAIM_ABORTED / UPPER_RECLAIM_ABORTED.
         if (
             self.config.entry_reclaim_v2_enabled
             and price >= boll.lower
             and price <= boll.upper
         ):
-            if (
-                self.state.lower_outside_observed
-                and not self.state.lower_anchored_divergence_confirmed
-                and not self.state.lower_armed
-                and self.state.lower_first_extreme_price is not None
-            ):
-                self._log_reclaim_no_entry_reason(
-                    side="LOWER",
-                    reason="no_anchored_divergence",
-                    price=price,
-                    boll=boll,
-                    cvd=cvd,
-                )
-            if (
-                self.state.upper_outside_observed
-                and not self.state.upper_anchored_divergence_confirmed
-                and not self.state.upper_armed
-                and self.state.upper_first_extreme_price is not None
-            ):
-                self._log_reclaim_no_entry_reason(
-                    side="UPPER",
-                    reason="no_anchored_divergence",
-                    price=price,
-                    boll=boll,
-                    cvd=cvd,
-                )
+            self._abort_lower_v2_if_inside_without_divergence(price=price, ts_ms=ts_ms, boll=boll)
+            self._abort_upper_v2_if_inside_without_divergence(price=price, ts_ms=ts_ms, boll=boll)
+
+    # ── Reclaim V2 abort helpers ──────────────────────────────────────────
+
+    def _abort_lower_v2_if_inside_without_divergence(
+        self,
+        *,
+        price: float,
+        ts_ms: int,
+        boll: BollSnapshot,
+    ) -> bool:
+        """Abort a lower V2 setup that returned inside without anchored divergence.
+
+        Once price returns inside the lower band without a confirmed
+        anchored divergence, the setup can never become a valid entry.
+        Log once and reset — no repeated heartbeat.
+        """
+        if not self.config.entry_reclaim_v2_enabled:
+            return False
+        if not self.state.lower_outside_observed:
+            return False
+        if self.state.lower_anchored_divergence_confirmed:
+            return False
+        # Price has returned inside / above lower band
+        if price < boll.lower:
+            return False
+
+        logger.info(
+            "LOWER_RECLAIM_ABORTED | reason=inside_return_without_anchored_divergence "
+            "price=%.4f lower=%.4f middle=%.4f first_extreme=%.4f previous_extreme=%.4f "
+            "previous_extreme_cvd=%.4f ts_ms=%s",
+            price,
+            boll.lower,
+            boll.middle,
+            self.state.lower_first_extreme_price or 0.0,
+            self.state.lower_previous_extreme_price or 0.0,
+            self.state.lower_previous_extreme_anchored_cvd or 0.0,
+            ts_ms,
+        )
+
+        self._reset_lower_armed()
+        return True
+
+    def _abort_upper_v2_if_inside_without_divergence(
+        self,
+        *,
+        price: float,
+        ts_ms: int,
+        boll: BollSnapshot,
+    ) -> bool:
+        """Abort an upper V2 setup that returned inside without anchored divergence.
+
+        Mirror of :meth:`_abort_lower_v2_if_inside_without_divergence` for SHORT.
+        """
+        if not self.config.entry_reclaim_v2_enabled:
+            return False
+        if not self.state.upper_outside_observed:
+            return False
+        if self.state.upper_anchored_divergence_confirmed:
+            return False
+        # Price has returned inside / below upper band
+        if price > boll.upper:
+            return False
+
+        logger.info(
+            "UPPER_RECLAIM_ABORTED | reason=inside_return_without_anchored_divergence "
+            "price=%.4f upper=%.4f middle=%.4f first_extreme=%.4f previous_extreme=%.4f "
+            "previous_extreme_cvd=%.4f ts_ms=%s",
+            price,
+            boll.upper,
+            boll.middle,
+            self.state.upper_first_extreme_price or 0.0,
+            self.state.upper_previous_extreme_price or 0.0,
+            self.state.upper_previous_extreme_anchored_cvd or 0.0,
+            ts_ms,
+        )
+
+        self._reset_upper_armed()
+        return True
 
     def _update_lower_outside(self, price: float, ts_ms: int, boll: BollSnapshot,
                                cvd: CvdSnapshot | None) -> None:

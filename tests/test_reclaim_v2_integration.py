@@ -1349,7 +1349,8 @@ def _setup_upper_outside_with_first_extreme(strat, boll) -> None:
 
 
 def test_no_entry_no_anchored_divergence_lower(caplog) -> None:
-    """Outside observed + first extreme + no divergence + price inside → no_anchored_divergence log."""
+    """Outside observed + first extreme + no divergence + price inside
+    → LOWER_RECLAIM_ABORTED (one-shot), no repeated no_anchored_divergence heartbeat."""
     import logging
     caplog.set_level(logging.INFO)
 
@@ -1361,13 +1362,27 @@ def test_no_entry_no_anchored_divergence_lower(caplog) -> None:
     inside_price = boll.lower * 1.001  # just inside the band
     strat.on_tick(inside_price, 3000, boll, _cvd(ts_ms=3000, price=inside_price, cumulative_buy_volume=500_000, cumulative_sell_volume=1_600_000))
 
-    no_entry_logs = [r for r in caplog.records if "LOWER_RECLAIM_NO_ENTRY" in r.message]
-    assert len(no_entry_logs) >= 1, f"Expected no-entry log, got {len(no_entry_logs)}"
-    assert "no_anchored_divergence" in no_entry_logs[0].message
+    # Should see LOWER_RECLAIM_ABORTED (one-shot) instead of repeated no_anchored_divergence
+    abort_logs = [r for r in caplog.records if "LOWER_RECLAIM_ABORTED" in r.message]
+    assert len(abort_logs) == 1, (
+        f"Expected 1 LOWER_RECLAIM_ABORTED, got {len(abort_logs)}"
+    )
+    assert "inside_return_without_anchored_divergence" in abort_logs[0].message
+
+    # No stale LOWER_RECLAIM_NO_ENTRY with no_anchored_divergence
+    no_entry_no_div = [
+        r for r in caplog.records
+        if "LOWER_RECLAIM_NO_ENTRY" in r.message
+        and "no_anchored_divergence" in r.message
+    ]
+    assert len(no_entry_no_div) == 0, (
+        f"No LOWER_RECLAIM_NO_ENTRY no_anchored_divergence expected, got {len(no_entry_no_div)}"
+    )
 
 
 def test_no_entry_no_anchored_divergence_upper(caplog) -> None:
-    """Outside observed + first extreme + no divergence + price inside → no_anchored_divergence log (UPPER)."""
+    """Outside observed + first extreme + no divergence + price inside
+    → UPPER_RECLAIM_ABORTED (one-shot), no repeated no_anchored_divergence heartbeat."""
     import logging
     caplog.set_level(logging.INFO)
 
@@ -1381,9 +1396,20 @@ def test_no_entry_no_anchored_divergence_upper(caplog) -> None:
                                                    buy_ratio=0.4, sell_ratio=0.6, cross_positive=False, cross_negative=True,
                                                    cvd_increasing=False, cvd_decreasing=True, no_new_high=True))
 
-    no_entry_logs = [r for r in caplog.records if "UPPER_RECLAIM_NO_ENTRY" in r.message]
-    assert len(no_entry_logs) >= 1, f"Expected no-entry log, got {len(no_entry_logs)}"
-    assert "no_anchored_divergence" in no_entry_logs[0].message
+    abort_logs = [r for r in caplog.records if "UPPER_RECLAIM_ABORTED" in r.message]
+    assert len(abort_logs) == 1, (
+        f"Expected 1 UPPER_RECLAIM_ABORTED, got {len(abort_logs)}"
+    )
+    assert "inside_return_without_anchored_divergence" in abort_logs[0].message
+
+    no_entry_no_div = [
+        r for r in caplog.records
+        if "UPPER_RECLAIM_NO_ENTRY" in r.message
+        and "no_anchored_divergence" in r.message
+    ]
+    assert len(no_entry_no_div) == 0, (
+        f"No UPPER_RECLAIM_NO_ENTRY no_anchored_divergence expected, got {len(no_entry_no_div)}"
+    )
 
 
 def _run_lower_armed_divergence(strat, boll) -> None:
@@ -1608,3 +1634,84 @@ def test_first_valid_extreme_renamed(caplog) -> None:
     first_valid_logs = [r for r in caplog.records if "FIRST_VALID_EXTREME" in r.message]
     assert len(first_extreme_logs) == 0, f"LOWER_FIRST_EXTREME should be renamed, got {len(first_extreme_logs)}"
     assert len(first_valid_logs) == 1, f"Expected LOWER_FIRST_VALID_EXTREME, got {len(first_valid_logs)}"
+
+
+# ── Reclaim V2 abort + re-entry ────────────────────────────────────────
+
+
+def test_re_entry_after_abort_lower(caplog) -> None:
+    """After a no-divergence abort, price going back outside lower should
+    start a fresh setup (new LOWER_OUTSIDE_OBSERVED, new anchor)."""
+    import logging
+    caplog.set_level(logging.INFO)
+
+    strat = _strategy(min_outside_pct=0.001)
+    boll = _boll()
+
+    # Cycle 1: outside → first extreme → NO divergence → price returns inside
+    p1 = boll.lower * 0.998
+    strat.on_tick(p1, 1000, boll, _cvd(ts_ms=1000, price=p1, cumulative_buy_volume=500_000, cumulative_sell_volume=1_500_000))
+    p2 = boll.lower * 0.994
+    strat.on_tick(p2, 2000, boll, _cvd(ts_ms=2000, price=p2, cumulative_buy_volume=500_000, cumulative_sell_volume=1_600_000))
+
+    assert strat.state.lower_outside_observed is True
+    assert strat.state.lower_first_extreme_price is not None
+    assert strat.state.lower_anchored_divergence_confirmed is False
+
+    # Price returns inside → should abort
+    inside_price = boll.lower * 1.002  # slightly above lower
+    strat.on_tick(inside_price, 3000, boll, _cvd(ts_ms=3000, price=inside_price, cumulative_buy_volume=500_000, cumulative_sell_volume=1_600_000))
+
+    abort_logs = [r for r in caplog.records if "LOWER_RECLAIM_ABORTED" in r.getMessage()]
+    assert len(abort_logs) == 1, f"Expected 1 LOWER_RECLAIM_ABORTED, got {len(abort_logs)}"
+    assert strat.state.lower_outside_observed is False, "Should reset after abort"
+    assert strat.state.lower_first_extreme_price is None, "Should reset first extreme"
+
+    # Cycle 2: price goes outside lower again → fresh setup
+    p3 = boll.lower * 0.996
+    strat.on_tick(p3, 4000, boll, _cvd(ts_ms=4000, price=p3, cumulative_buy_volume=500_000, cumulative_sell_volume=1_700_000))
+
+    assert strat.state.lower_outside_observed is True, (
+        "Should start fresh lower_outside_observed after re-break"
+    )
+    # First extreme should be None initially (just observed, not yet recorded)
+    assert strat.state.lower_anchor_ts_ms == 4000, (
+        f"New anchor_ts_ms should be 4000, got {strat.state.lower_anchor_ts_ms}"
+    )
+
+
+def test_re_entry_after_abort_upper(caplog) -> None:
+    """After a no-divergence abort on upper, price going back outside upper
+    should start a fresh setup."""
+    import logging
+    caplog.set_level(logging.INFO)
+
+    strat = _strategy(min_outside_pct=0.001)
+    boll = _boll()
+
+    # Cycle 1: outside above upper → first extreme → NO divergence → price returns inside
+    p1 = boll.upper * 1.002
+    strat.on_tick(p1, 1000, boll, _cvd(ts_ms=1000, price=p1, cumulative_buy_volume=1_500_000, cumulative_sell_volume=500_000))
+    p2 = boll.upper * 1.006
+    strat.on_tick(p2, 2000, boll, _cvd(ts_ms=2000, price=p2, cumulative_buy_volume=1_600_000, cumulative_sell_volume=500_000))
+
+    assert strat.state.upper_outside_observed is True
+    assert strat.state.upper_first_extreme_price is not None
+    assert strat.state.upper_anchored_divergence_confirmed is False
+
+    # Price returns inside → should abort
+    inside_price = boll.upper * 0.998  # slightly below upper
+    strat.on_tick(inside_price, 3000, boll, _cvd(ts_ms=3000, price=inside_price, cumulative_buy_volume=1_600_000, cumulative_sell_volume=500_000))
+
+    abort_logs = [r for r in caplog.records if "UPPER_RECLAIM_ABORTED" in r.getMessage()]
+    assert len(abort_logs) == 1, f"Expected 1 UPPER_RECLAIM_ABORTED, got {len(abort_logs)}"
+    assert strat.state.upper_outside_observed is False, "Should reset after abort"
+    assert strat.state.upper_first_extreme_price is None
+
+    # Cycle 2: price goes outside upper again → fresh setup
+    p3 = boll.upper * 1.004
+    strat.on_tick(p3, 4000, boll, _cvd(ts_ms=4000, price=p3, cumulative_buy_volume=1_700_000, cumulative_sell_volume=500_000))
+
+    assert strat.state.upper_outside_observed is True, (
+        "Should start fresh upper_outside_observed after re-break"
+    )

@@ -25,8 +25,8 @@ from src.strategies.regime.types import (
 
 @dataclass(frozen=True)
 class TrendDetectorConfig:
-    confirm_min_seconds: int = 60
-    confirm_max_seconds: int = 180
+    confirm_min_seconds: int = 900
+    confirm_max_seconds: int = 1200
     range_expansion_ratio_min: float = 3.0
     volume_expansion_ratio_min: float = 3.0
     outside_occupancy_min_ratio: float = 0.70
@@ -242,6 +242,9 @@ class TrendDetector:
         if pre_breakout_pressure is not None:
             self._pre_breakout_pressure = pre_breakout_pressure
 
+        # Use current pressure if provided, otherwise fall back to stored.
+        effective_pressure = pre_breakout_pressure or self._pre_breakout_pressure
+
         # ── Failure check 1: confirm_max_seconds exceeded ─────────────
         if breakout_duration_sec > self._config.confirm_max_seconds:
             return self._set_failed("confirm_max_seconds_exceeded")
@@ -291,11 +294,17 @@ class TrendDetector:
                 reason="trend_waiting_candle_close",
                 has_candle_close_outside=False,
                 confirmed_candle_ts_ms=self._confirmed_candle_ts_ms,
+                pre_breakout_pressure_direction=(
+                    effective_pressure.direction if effective_pressure else None
+                ),
+                pre_breakout_pressure_score=(
+                    effective_pressure.score if effective_pressure else 0.0
+                ),
             )
 
         # ── Pre-breakout pressure conflict check ────────────────────────
         # If pressure is opposite to breakout direction → stricter checks
-        pressure_conflict = self._is_pressure_in_conflict(direction, pre_breakout_pressure)
+        pressure_conflict = self._is_pressure_in_conflict(direction, effective_pressure)
         if pressure_conflict:
             # Must have candle close outside + strong post-breakout CVD
             if not self._has_candle_close_outside:
@@ -307,10 +316,10 @@ class TrendDetector:
                     blocks_mean_reversion=True,
                     reason="pre_breakout_pressure_conflict_waiting_candle_close",
                     pre_breakout_pressure_direction=(
-                        pre_breakout_pressure.direction if pre_breakout_pressure else None
+                        effective_pressure.direction if effective_pressure else None
                     ),
                     pre_breakout_pressure_score=(
-                        pre_breakout_pressure.score if pre_breakout_pressure else 0.0
+                        effective_pressure.score if effective_pressure else 0.0
                     ),
                 )
             if not anchored_cvd or not is_cvd_confirming_trend(
@@ -328,10 +337,10 @@ class TrendDetector:
             else:
                 self._state = TrendState.TREND_DOWN_CONFIRMED
             pressure_dir = (
-                pre_breakout_pressure.direction if pre_breakout_pressure else None
+                effective_pressure.direction if effective_pressure else None
             )
             pressure_score = (
-                pre_breakout_pressure.score if pre_breakout_pressure else 0.0
+                effective_pressure.score if effective_pressure else 0.0
             )
             return TrendAssessment(
                 trend_state=self._state,
@@ -348,10 +357,10 @@ class TrendDetector:
 
         # Still a candidate — still viable, blocks MR
         pressure_dir = (
-            pre_breakout_pressure.direction if pre_breakout_pressure else None
+            effective_pressure.direction if effective_pressure else None
         )
         pressure_score = (
-            pre_breakout_pressure.score if pre_breakout_pressure else 0.0
+            effective_pressure.score if effective_pressure else 0.0
         )
         return TrendAssessment(
             trend_state=self._state,
