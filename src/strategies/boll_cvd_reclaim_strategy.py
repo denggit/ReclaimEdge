@@ -195,6 +195,14 @@ class BollCvdReclaimStrategyConfig:
     trend_cvd_min_buy_ratio: float = 0.58
     trend_cvd_min_sell_ratio: float = 0.58
     trend_cvd_max_pullback_ratio: float = 0.45
+    # ── Trend Candle Close Confirmation ───────────────────────────────
+    trend_confirm_require_candle_close: bool = True
+    # ── Pre-Breakout Directional Pressure ─────────────────────────────
+    trend_pre_breakout_pressure_enabled: bool = True
+    trend_pre_breakout_min_cvd_ratio: float = 0.55
+    trend_pre_breakout_max_pullback_ratio: float = 0.45
+    trend_pre_breakout_min_observe_seconds: int = 300
+    trend_pre_breakout_pressure_min_score: float = 0.60
 
     # ── Trend Upgrade Add-on ──────────────────────────────────────────
     trend_upgrade_addon_enabled: bool = False
@@ -332,6 +340,28 @@ class BollCvdReclaimStrategyConfig:
             raise RuntimeError(
                 f"TREND_CVD_MAX_PULLBACK_RATIO={self.trend_cvd_max_pullback_ratio} must be in [0, 1]"
             )
+        # ── Trend Pre-Breakout Pressure validation ─────────────────────
+        if self.trend_pre_breakout_pressure_enabled:
+            if not (0.5 <= self.trend_pre_breakout_min_cvd_ratio <= 1):
+                raise RuntimeError(
+                    f"TREND_PRE_BREAKOUT_MIN_CVD_RATIO={self.trend_pre_breakout_min_cvd_ratio} "
+                    f"must be in [0.5, 1]"
+                )
+            if not (0 <= self.trend_pre_breakout_max_pullback_ratio <= 1):
+                raise RuntimeError(
+                    f"TREND_PRE_BREAKOUT_MAX_PULLBACK_RATIO={self.trend_pre_breakout_max_pullback_ratio} "
+                    f"must be in [0, 1]"
+                )
+            if self.trend_pre_breakout_min_observe_seconds <= 0:
+                raise RuntimeError(
+                    f"TREND_PRE_BREAKOUT_MIN_OBSERVE_SECONDS={self.trend_pre_breakout_min_observe_seconds} "
+                    f"must be > 0"
+                )
+            if not (0 <= self.trend_pre_breakout_pressure_min_score <= 1):
+                raise RuntimeError(
+                    f"TREND_PRE_BREAKOUT_PRESSURE_MIN_SCORE={self.trend_pre_breakout_pressure_min_score} "
+                    f"must be in [0, 1]"
+                )
         if self.middle_bucket_split_enabled:
             _fr = self.middle_bucket_split_fast_ratio
             if not (0.05 <= _fr <= 0.95):
@@ -487,6 +517,14 @@ class BollCvdReclaimStrategyConfig:
             trend_cvd_min_buy_ratio=float(os.getenv("TREND_CVD_MIN_BUY_RATIO", "0.58")),
             trend_cvd_min_sell_ratio=float(os.getenv("TREND_CVD_MIN_SELL_RATIO", "0.58")),
             trend_cvd_max_pullback_ratio=float(os.getenv("TREND_CVD_MAX_PULLBACK_RATIO", "0.45")),
+            # ── Trend Candle Close Confirmation ───────────────────────────
+            trend_confirm_require_candle_close=_env_bool("TREND_CONFIRM_REQUIRE_CANDLE_CLOSE", True),
+            # ── Trend Pre-Breakout Directional Pressure ───────────────────
+            trend_pre_breakout_pressure_enabled=_env_bool("TREND_PRE_BREAKOUT_PRESSURE_ENABLED", True),
+            trend_pre_breakout_min_cvd_ratio=float(os.getenv("TREND_PRE_BREAKOUT_MIN_CVD_RATIO", "0.55")),
+            trend_pre_breakout_max_pullback_ratio=float(os.getenv("TREND_PRE_BREAKOUT_MAX_PULLBACK_RATIO", "0.45")),
+            trend_pre_breakout_min_observe_seconds=int(os.getenv("TREND_PRE_BREAKOUT_MIN_OBSERVE_SECONDS", "300")),
+            trend_pre_breakout_pressure_min_score=float(os.getenv("TREND_PRE_BREAKOUT_PRESSURE_MIN_SCORE", "0.60")),
             # ── Trend Upgrade Add-on ──────────────────────────────────
             trend_upgrade_addon_enabled=_env_bool("TREND_UPGRADE_ADDON_ENABLED", False),
             trend_upgrade_profit_reinvest_ratio=float(os.getenv("TREND_UPGRADE_PROFIT_REINVEST_RATIO", "0.30")),
@@ -3016,6 +3054,12 @@ class BollCvdReclaimStrategy:
                 cvd_min_buy_ratio=self.config.trend_cvd_min_buy_ratio,
                 cvd_min_sell_ratio=self.config.trend_cvd_min_sell_ratio,
                 cvd_max_pullback_ratio=self.config.trend_cvd_max_pullback_ratio,
+                trend_confirm_require_candle_close=self.config.trend_confirm_require_candle_close,
+                trend_pre_breakout_pressure_enabled=self.config.trend_pre_breakout_pressure_enabled,
+                trend_pre_breakout_min_cvd_ratio=self.config.trend_pre_breakout_min_cvd_ratio,
+                trend_pre_breakout_max_pullback_ratio=self.config.trend_pre_breakout_max_pullback_ratio,
+                trend_pre_breakout_min_observe_seconds=self.config.trend_pre_breakout_min_observe_seconds,
+                trend_pre_breakout_pressure_min_score=self.config.trend_pre_breakout_pressure_min_score,
             )
         return self.trend_assessor
 
@@ -3204,6 +3248,9 @@ class BollCvdReclaimStrategy:
             new_extreme_count=m.new_extreme_count,
             inside_reclaim_seconds=m.inside_reclaim_seconds,
             price_reclaimed_inside=m.price_reclaimed_inside,
+            latest_candle_ts_ms=boll.candle_ts_ms,
+            latest_candle_close=boll.close,
+            latest_candle_live_mode=boll.live_mode,
         )
 
         # ── Build router input with REAL cooldown state ────────────────
@@ -3234,7 +3281,75 @@ class BollCvdReclaimStrategy:
             ts_ms=ts_ms,
         )
 
+        # ── Throttled trend logging ────────────────────────────────────
+        self._log_trend_assessment(trend_decision, ts_ms)
+
         return self.regime_router.route(router_input)
+
+    def _log_trend_assessment(
+        self,
+        decision,  # TrendBreakoutDecision
+        ts_ms: int,
+    ) -> None:
+        """Emit throttled log messages for trend assessment states."""
+        assessment = decision.trend_assessment
+        if assessment is None:
+            return
+
+        breakout_age = (ts_ms - (decision.breakout_ts_ms or ts_ms)) / 1000.0
+
+        if assessment.is_confirmed:
+            self._log_info_throttled(
+                f"TREND_CONFIRMED:{decision.direction}",
+                60_000,
+                ts_ms,
+                "TREND_CONFIRMED | direction=%s reason=%s breakout_age_seconds=%.0f "
+                "pressure=%s pressure_score=%.2f",
+                decision.direction,
+                assessment.reason,
+                breakout_age,
+                assessment.pre_breakout_pressure_direction or "none",
+                assessment.pre_breakout_pressure_score,
+            )
+        elif assessment.is_candidate:
+            reason = assessment.reason
+            if "waiting_candle_close" in reason or "candle_close" in reason:
+                self._log_info_throttled(
+                    f"TREND_CONFIRM_WAITING_CANDLE_CLOSE:{decision.direction}",
+                    60_000,
+                    ts_ms,
+                    "TREND_CONFIRM_WAITING_CANDLE_CLOSE | direction=%s "
+                    "breakout_age_seconds=%.0f "
+                    "confirmed_candle_ts_ms=%d "
+                    "pressure=%s pressure_score=%.2f",
+                    decision.direction,
+                    breakout_age,
+                    assessment.confirmed_candle_ts_ms,
+                    assessment.pre_breakout_pressure_direction or "none",
+                    assessment.pre_breakout_pressure_score,
+                )
+            else:
+                self._log_info_throttled(
+                    f"TREND_CANDIDATE_OBSERVED:{decision.direction}",
+                    60_000,
+                    ts_ms,
+                    "TREND_CANDIDATE_OBSERVED | direction=%s reason=%s "
+                    "compression_valid=true "
+                    "pre_breakout_pressure=%s pressure_score=%.2f",
+                    decision.direction,
+                    reason,
+                    assessment.pre_breakout_pressure_direction or "none",
+                    assessment.pre_breakout_pressure_score,
+                )
+        elif assessment.is_failed:
+            self._log_info_throttled(
+                f"TREND_CONFIRM_REJECTED:{decision.direction or 'none'}",
+                60_000,
+                ts_ms,
+                "TREND_CONFIRM_REJECTED | reason=%s direction=%s",
+                assessment.reason,
+                decision.direction or "none",
+            )
 
     def _maybe_trend_entry(
         self,

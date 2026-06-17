@@ -12,6 +12,9 @@ from src.strategies.regime.compression_detector import (
     CompressionDetector,
     CompressionDetectorConfig,
 )
+from src.strategies.regime.pre_breakout_pressure import (
+    PreBreakoutPressureState,
+)
 from src.strategies.regime.types import (
     AnchoredCvdState,
     BreakoutSnapshot,
@@ -29,6 +32,11 @@ class TrendDetectorConfig:
     outside_occupancy_min_ratio: float = 0.70
     min_new_extreme_count: int = 2
     max_inside_reclaim_seconds: int = 3
+    # ── Candle Close Confirmation ──────────────────────────────────────
+    require_candle_close: bool = True
+    # ── Pre-Breakout Pressure ──────────────────────────────────────────
+    pre_breakout_pressure_enabled: bool = True
+    pre_breakout_pressure_min_score: float = 0.60
 
     def __post_init__(self) -> None:
         if self.confirm_min_seconds <= 0:
@@ -72,6 +80,12 @@ class TrendAssessment:
     is_failed: bool
     blocks_mean_reversion: bool
     reason: str
+    # ── Candle Close Confirmation ──────────────────────────────────────
+    has_candle_close_outside: bool = False
+    confirmed_candle_ts_ms: int = 0
+    # ── Pre-Breakout Pressure ──────────────────────────────────────────
+    pre_breakout_pressure_direction: str | None = None
+    pre_breakout_pressure_score: float = 0.0
 
 
 class TrendDetector:
@@ -94,6 +108,15 @@ class TrendDetector:
         self._breakout: Optional[BreakoutSnapshot] = None
         self._episode: Optional[CompressionEpisode] = None
         self._failure_reason: Optional[str] = None
+        # ── Candle Close Confirmation state ──────────────────────────────
+        self._last_closed_candle_ts_ms: int = 0
+        self._closed_candle_close: float = 0.0
+        self._closed_candle_upper: float = 0.0
+        self._closed_candle_lower: float = 0.0
+        self._confirmed_candle_ts_ms: int = 0
+        self._has_candle_close_outside: bool = False
+        # ── Pre-Breakout Pressure state ──────────────────────────────────
+        self._pre_breakout_pressure: PreBreakoutPressureState | None = None
 
     # ------------------------------------------------------------------
     # Properties
@@ -125,6 +148,14 @@ class TrendDetector:
         new_extreme_count: int,
         inside_reclaim_seconds: float,
         price_reclaimed_inside: bool,
+        # ── Candle Close Confirmation params ────────────────────────────
+        latest_candle_ts_ms: int = 0,
+        latest_candle_close: float = 0.0,
+        latest_candle_live_mode: bool = True,
+        latest_candle_upper: float = 0.0,
+        latest_candle_lower: float = 0.0,
+        # ── Pre-Breakout Pressure ───────────────────────────────────────
+        pre_breakout_pressure: PreBreakoutPressureState | None = None,
     ) -> TrendAssessment:
         """Evaluate trend state for one tick.
 
@@ -140,6 +171,7 @@ class TrendDetector:
         if compression_episode is None:
             self._state = TrendState.NO_TREND
             self._failure_reason = None
+            self._reset_candle_close_state()
             return TrendAssessment(
                 trend_state=self._state,
                 is_candidate=False,
@@ -196,6 +228,20 @@ class TrendDetector:
         else:
             self._state = TrendState.TREND_DOWN_CANDIDATE
 
+        # ── Track candle close events ──────────────────────────────────
+        self._track_candle_close(
+            candle_ts_ms=latest_candle_ts_ms,
+            candle_close=latest_candle_close,
+            live_mode=latest_candle_live_mode,
+            candle_upper=latest_candle_upper,
+            candle_lower=latest_candle_lower,
+            breakout_direction=direction,
+        )
+
+        # ── Store pre-breakout pressure ────────────────────────────────
+        if pre_breakout_pressure is not None:
+            self._pre_breakout_pressure = pre_breakout_pressure
+
         # ── Failure check 1: confirm_max_seconds exceeded ─────────────
         if breakout_duration_sec > self._config.confirm_max_seconds:
             return self._set_failed("confirm_max_seconds_exceeded")
@@ -234,7 +280,45 @@ class TrendDetector:
                 reason="trend_candidate_waiting_min_seconds",
             )
 
-        # ── Check confirmed conditions ───────────────────────────────
+        # ── Candle close check (if enabled) ────────────────────────────
+        if self._config.require_candle_close and not self._has_candle_close_outside:
+            return TrendAssessment(
+                trend_state=self._state,
+                is_candidate=True,
+                is_confirmed=False,
+                is_failed=False,
+                blocks_mean_reversion=True,
+                reason="trend_waiting_candle_close",
+                has_candle_close_outside=False,
+                confirmed_candle_ts_ms=self._confirmed_candle_ts_ms,
+            )
+
+        # ── Pre-breakout pressure conflict check ────────────────────────
+        # If pressure is opposite to breakout direction → stricter checks
+        pressure_conflict = self._is_pressure_in_conflict(direction, pre_breakout_pressure)
+        if pressure_conflict:
+            # Must have candle close outside + strong post-breakout CVD
+            if not self._has_candle_close_outside:
+                return TrendAssessment(
+                    trend_state=self._state,
+                    is_candidate=True,
+                    is_confirmed=False,
+                    is_failed=False,
+                    blocks_mean_reversion=True,
+                    reason="pre_breakout_pressure_conflict_waiting_candle_close",
+                    pre_breakout_pressure_direction=(
+                        pre_breakout_pressure.direction if pre_breakout_pressure else None
+                    ),
+                    pre_breakout_pressure_score=(
+                        pre_breakout_pressure.score if pre_breakout_pressure else 0.0
+                    ),
+                )
+            if not anchored_cvd or not is_cvd_confirming_trend(
+                direction, anchored_cvd, self._cvd_config
+            ):
+                return self._set_failed("pre_breakout_pressure_conflict_cvd_not_strong")
+
+        # ── Check all confirmed conditions ─────────────────────────────
         if self._is_confirmed(
             breakout, anchored_cvd, outside_occupancy_passed,
             sustained_volume_passed, new_extreme_count,
@@ -243,6 +327,12 @@ class TrendDetector:
                 self._state = TrendState.TREND_UP_CONFIRMED
             else:
                 self._state = TrendState.TREND_DOWN_CONFIRMED
+            pressure_dir = (
+                pre_breakout_pressure.direction if pre_breakout_pressure else None
+            )
+            pressure_score = (
+                pre_breakout_pressure.score if pre_breakout_pressure else 0.0
+            )
             return TrendAssessment(
                 trend_state=self._state,
                 is_candidate=False,  # promoted to confirmed
@@ -250,9 +340,19 @@ class TrendDetector:
                 is_failed=False,
                 blocks_mean_reversion=True,
                 reason="trend_confirmed",
+                has_candle_close_outside=self._has_candle_close_outside,
+                confirmed_candle_ts_ms=self._confirmed_candle_ts_ms,
+                pre_breakout_pressure_direction=pressure_dir,
+                pre_breakout_pressure_score=pressure_score,
             )
 
         # Still a candidate — still viable, blocks MR
+        pressure_dir = (
+            pre_breakout_pressure.direction if pre_breakout_pressure else None
+        )
+        pressure_score = (
+            pre_breakout_pressure.score if pre_breakout_pressure else 0.0
+        )
         return TrendAssessment(
             trend_state=self._state,
             is_candidate=True,
@@ -260,11 +360,84 @@ class TrendDetector:
             is_failed=False,
             blocks_mean_reversion=True,
             reason="trend_candidate_waiting_confirmation",
+            has_candle_close_outside=self._has_candle_close_outside,
+            confirmed_candle_ts_ms=self._confirmed_candle_ts_ms,
+            pre_breakout_pressure_direction=pressure_dir,
+            pre_breakout_pressure_score=pressure_score,
         )
 
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
+
+    def _track_candle_close(
+        self,
+        *,
+        candle_ts_ms: int,
+        candle_close: float,
+        live_mode: bool,
+        candle_upper: float,
+        candle_lower: float,
+        breakout_direction: str,
+    ) -> None:
+        """Detect when a new 15m candle has closed and check if the breakout
+        direction is confirmed by the closed candle's price position."""
+        # Only process when we have a valid candle timestamp
+        if candle_ts_ms <= 0:
+            return
+        # Only track closed candles (not live/unclosed)
+        if live_mode:
+            return
+        # Only process NEW closed candles (different from last tracked)
+        if candle_ts_ms == self._last_closed_candle_ts_ms:
+            return
+
+        self._last_closed_candle_ts_ms = candle_ts_ms
+        self._closed_candle_close = candle_close
+        self._closed_candle_upper = candle_upper
+        self._closed_candle_lower = candle_lower
+
+        # Check if the breakout direction is confirmed by this closed candle
+        if breakout_direction == "UP":
+            outside = candle_close > candle_upper
+        else:
+            outside = candle_close < candle_lower
+
+        if outside:
+            self._has_candle_close_outside = True
+            self._confirmed_candle_ts_ms = candle_ts_ms
+        else:
+            # Previous close was outside but this one is back inside → reject
+            if self._has_candle_close_outside:
+                self._has_candle_close_outside = False
+                self._confirmed_candle_ts_ms = 0
+
+    def _reset_candle_close_state(self) -> None:
+        """Clear candle close tracking state."""
+        self._last_closed_candle_ts_ms = 0
+        self._closed_candle_close = 0.0
+        self._closed_candle_upper = 0.0
+        self._closed_candle_lower = 0.0
+        self._confirmed_candle_ts_ms = 0
+        self._has_candle_close_outside = False
+
+    def _is_pressure_in_conflict(
+        self,
+        breakout_direction: str,
+        pressure: PreBreakoutPressureState | None,
+    ) -> bool:
+        """Check if pre-breakout pressure conflicts with breakout direction.
+
+        Returns True when the pressure has a clear direction opposite to the
+        breakout AND the pressure score is at or above the minimum.
+        """
+        if not self._config.pre_breakout_pressure_enabled:
+            return False
+        if pressure is None or pressure.direction is None:
+            return False
+        if pressure.score < self._config.pre_breakout_pressure_min_score:
+            return False
+        return pressure.direction != breakout_direction
 
     def _is_confirmed(
         self,
@@ -280,6 +453,9 @@ class TrendDetector:
         if not sustained_volume_passed:
             return False
         if new_extreme_count < self._config.min_new_extreme_count:
+            return False
+        # If candle close is required, it must have been observed
+        if self._config.require_candle_close and not self._has_candle_close_outside:
             return False
         # Event-anchored cumulative CVD confirms direction
         if not is_cvd_confirming_trend(
@@ -313,3 +489,5 @@ class TrendDetector:
         self._breakout = None
         self._episode = None
         self._failure_reason = None
+        self._reset_candle_close_state()
+        self._pre_breakout_pressure = None

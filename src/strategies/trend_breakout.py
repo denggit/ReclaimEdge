@@ -17,6 +17,11 @@ from src.strategies.regime.compression_detector import (
     CompressionDetector,
     CompressionDetectorConfig,
 )
+from src.strategies.regime.pre_breakout_pressure import (
+    PreBreakoutPressureConfig,
+    PreBreakoutPressureState,
+    PreBreakoutPressureTracker,
+)
 from src.strategies.regime.trend_detector import (
     TrendAssessment,
     TrendDetector,
@@ -72,6 +77,14 @@ class TrendBreakoutAssessor:
         cvd_min_buy_ratio: float = 0.58,
         cvd_min_sell_ratio: float = 0.58,
         cvd_max_pullback_ratio: float = 0.45,
+        # ── Candle Close Confirmation ──────────────────────────────────
+        trend_confirm_require_candle_close: bool = True,
+        # ── Pre-Breakout Pressure ──────────────────────────────────────
+        trend_pre_breakout_pressure_enabled: bool = True,
+        trend_pre_breakout_min_cvd_ratio: float = 0.55,
+        trend_pre_breakout_max_pullback_ratio: float = 0.45,
+        trend_pre_breakout_min_observe_seconds: int = 300,
+        trend_pre_breakout_pressure_min_score: float = 0.60,
     ) -> None:
         self._compression_config = CompressionDetectorConfig(
             valid_after_seconds=compression_valid_after_seconds,
@@ -85,6 +98,9 @@ class TrendBreakoutAssessor:
             outside_occupancy_min_ratio=outside_occupancy_min_ratio,
             min_new_extreme_count=min_new_extreme_count,
             max_inside_reclaim_seconds=max_inside_reclaim_seconds,
+            require_candle_close=trend_confirm_require_candle_close,
+            pre_breakout_pressure_enabled=trend_pre_breakout_pressure_enabled,
+            pre_breakout_pressure_min_score=trend_pre_breakout_pressure_min_score,
         )
         self._cvd_config = AnchoredCvdConfig(
             min_buy_ratio=cvd_min_buy_ratio,
@@ -96,6 +112,16 @@ class TrendBreakoutAssessor:
             self._compression_detector,
             self._cvd_config,
         )
+
+        # ── Pre-Breakout Pressure Tracker ─────────────────────────────────
+        self._pressure_config = PreBreakoutPressureConfig(
+            enabled=trend_pre_breakout_pressure_enabled,
+            min_cvd_ratio=trend_pre_breakout_min_cvd_ratio,
+            max_pullback_ratio=trend_pre_breakout_max_pullback_ratio,
+            min_observe_seconds=trend_pre_breakout_min_observe_seconds,
+            pressure_min_score=trend_pre_breakout_pressure_min_score,
+        )
+        self._pressure_tracker = PreBreakoutPressureTracker(self._pressure_config)
 
         # ── Band history ring buffer ───────────────────────────────────────
         self._band_history: list[BandSnapshot] = []
@@ -163,6 +189,10 @@ class TrendBreakoutAssessor:
         new_extreme_count: int = 0,
         inside_reclaim_seconds: float = 0.0,
         price_reclaimed_inside: bool = False,
+        # ── Candle Close Confirmation params ────────────────────────────
+        latest_candle_ts_ms: int = 0,
+        latest_candle_close: float = 0.0,
+        latest_candle_live_mode: bool = True,
     ) -> TrendBreakoutDecision:
         """Run a full trend breakout assessment for one tick.
 
@@ -177,10 +207,36 @@ class TrendBreakoutAssessor:
         # 2. Detect breakout direction — persist anchor across ticks
         current_direction = self._classify_direction(price, boll_upper, boll_lower)
         if current_direction is None:
-            # Price back inside band — clear breakout
+            # Price back inside band — clear breakout.
+            # Update pressure tracker while price is inside band.
+            if compression_episode is not None and self._pressure_config.enabled:
+                if not self._pressure_tracker.active:
+                    self._pressure_tracker.start(
+                        ts_ms=ts_ms,
+                        price=price,
+                        fast_cvd=fast_cvd,
+                        buy_volume=episode_buy_volume,
+                        sell_volume=episode_sell_volume,
+                        boll_upper=boll_upper,
+                        boll_middle=boll_middle,
+                        boll_lower=boll_lower,
+                    )
+                else:
+                    self._pressure_tracker.update(
+                        ts_ms=ts_ms,
+                        price=price,
+                        fast_cvd=fast_cvd,
+                        buy_volume=episode_buy_volume,
+                        sell_volume=episode_sell_volume,
+                        boll_upper=boll_upper,
+                        boll_middle=boll_middle,
+                        boll_lower=boll_lower,
+                    )
             breakout = None
         elif self._latest_breakout is None or self._latest_breakout.direction != current_direction:
-            # New breakout or direction change — anchor at current CVD
+            # New breakout or direction change — anchor at current CVD.
+            # Stop pressure tracking since price is now outside the band.
+            self._pressure_tracker.reset()
             breakout = BreakoutSnapshot(
                 direction=current_direction,
                 ts_ms=ts_ms,
@@ -197,7 +253,16 @@ class TrendBreakoutAssessor:
             # Same direction, ongoing — reuse existing anchor
             breakout = self._latest_breakout
 
-        # 3. If no breakout direction, feed trend detector for stale-candidate
+        # 3. Capture pre-breakout pressure snapshot (before breakout cleared it)
+        pre_breakout_pressure: PreBreakoutPressureState | None = None
+        if self._pressure_tracker.active and current_direction is not None:
+            # Price just moved outside — snapshot the pressure before resetting
+            pre_breakout_pressure = self._pressure_tracker.snapshot()
+        elif self._pressure_config.enabled and current_direction is None and compression_episode is not None:
+            # Still inside band — snapshot current pressure state
+            pre_breakout_pressure = self._pressure_tracker.snapshot()
+
+        # 4. If no breakout direction, feed trend detector for stale-candidate
         #    tracking but return early.
         if breakout is None:
             trend_state = self._trend_detector.state
@@ -213,8 +278,6 @@ class TrendBreakoutAssessor:
                 else:
                     candidate_direction = "DOWN"
 
-                # Use _latest_breakout if available (preserves anchor data),
-                # otherwise construct a breakout in the candidate direction.
                 if self._latest_breakout is not None:
                     _existing = self._latest_breakout
                 else:
@@ -239,6 +302,11 @@ class TrendBreakoutAssessor:
                     new_extreme_count=new_extreme_count,
                     inside_reclaim_seconds=inside_reclaim_seconds,
                     price_reclaimed_inside=True,
+                    latest_candle_ts_ms=latest_candle_ts_ms,
+                    latest_candle_close=latest_candle_close,
+                    latest_candle_live_mode=latest_candle_live_mode,
+                    latest_candle_upper=boll_upper,
+                    latest_candle_lower=boll_lower,
                 )
             return TrendBreakoutDecision(
                 is_trend_breakout=False,
@@ -247,7 +315,7 @@ class TrendBreakoutAssessor:
                 trend_state=self._trend_detector.state,
             )
 
-        # 4. Build anchored CVD state
+        # 5. Build anchored CVD state
         anchored_cvd = build_anchored_cvd_state(
             anchor_ts_ms=breakout.ts_ms,
             current_ts_ms=ts_ms,
@@ -260,7 +328,7 @@ class TrendBreakoutAssessor:
         )
         self._latest_cvd_state = anchored_cvd
 
-        # 5. Run trend detector
+        # 6. Run trend detector with candle close + pre-breakout pressure
         assessment = self._trend_detector.assess(
             breakout=breakout,
             compression_episode=compression_episode,
@@ -273,11 +341,16 @@ class TrendBreakoutAssessor:
             new_extreme_count=new_extreme_count,
             inside_reclaim_seconds=inside_reclaim_seconds,
             price_reclaimed_inside=price_reclaimed_inside,
+            latest_candle_ts_ms=latest_candle_ts_ms,
+            latest_candle_close=latest_candle_close,
+            latest_candle_live_mode=latest_candle_live_mode,
+            latest_candle_upper=boll_upper,
+            latest_candle_lower=boll_lower,
+            pre_breakout_pressure=pre_breakout_pressure,
         )
 
-        # 6. Produce decision
+        # 7. Produce decision
         if assessment.is_confirmed:
-            # Map TrendDetector direction (UP/DOWN) to strategy direction (LONG/SHORT)
             direction = "LONG" if breakout.direction == "UP" else "SHORT"
             return TrendBreakoutDecision(
                 is_trend_breakout=True,
@@ -394,6 +467,7 @@ class TrendBreakoutAssessor:
             self._compression_detector,
             self._cvd_config,
         )
+        self._pressure_tracker = PreBreakoutPressureTracker(self._pressure_config)
         self._band_history = []
         self._latest_breakout = None
         self._latest_cvd_state = None

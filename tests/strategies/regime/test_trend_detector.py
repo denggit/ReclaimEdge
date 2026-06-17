@@ -82,7 +82,10 @@ def _make_detector(
     comp_cfg: dict | None = None,
     cvd_cfg: dict | None = None,
 ) -> TrendDetector:
-    tcfg = TrendDetectorConfig(**(trend_cfg or {}))
+    # Default require_candle_close=False for backward compat with existing tests
+    default_cfg = {"require_candle_close": False}
+    default_cfg.update(trend_cfg or {})
+    tcfg = TrendDetectorConfig(**default_cfg)
     ccfg = CompressionDetectorConfig(**(comp_cfg or {}))
     cvd_cfg_ = AnchoredCvdConfig(**(cvd_cfg or {}))
     return TrendDetector(tcfg, CompressionDetector(ccfg), cvd_cfg_)
