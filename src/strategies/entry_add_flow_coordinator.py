@@ -178,6 +178,15 @@ class EntryAddFlowCoordinator:
                 reward_risk,
                 strategy.config.entry_min_reward_risk,
             )
+            # Throttled no-entry reason log for reclaim observability
+            reclaim_side = "LOWER" if side == "LONG" else "UPPER"
+            strategy._log_reclaim_no_entry_reason(
+                side=reclaim_side,
+                reason="reward_risk_not_met",
+                price=price,
+                boll=boll,
+                cvd=cvd,
+            )
             return None
         reason = (
             f"{reason} + risk_size stop={entry_sl_price:.4f} "

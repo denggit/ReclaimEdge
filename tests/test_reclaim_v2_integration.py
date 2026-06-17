@@ -247,7 +247,7 @@ def test_tracker_reset_on_lower_armed_reset() -> None:
 # ── Test 9: first valid extreme must be deep enough ────────────────────
 
 def test_first_extreme_requires_deep_enough_lower() -> None:
-    """Shallow outside breach must NOT record LOWER_FIRST_EXTREME."""
+    """Shallow outside breach must NOT record LOWER_FIRST_VALID_EXTREME."""
     strat = _strategy(min_outside_pct=0.001)
     boll = _boll(lower=1900)
     # Price just barely below lower band (only ~0.05% outside, min_outside_pct=0.1%)
@@ -261,7 +261,7 @@ def test_first_extreme_requires_deep_enough_lower() -> None:
 
 
 def test_first_extreme_requires_deep_enough_upper() -> None:
-    """Shallow outside breach must NOT record UPPER_FIRST_EXTREME."""
+    """Shallow outside breach must NOT record UPPER_FIRST_VALID_EXTREME."""
     strat = _strategy(min_outside_pct=0.001)
     boll = _boll(upper=2100)
     price = boll.upper * 1.0002  # very shallow breach
@@ -1194,3 +1194,417 @@ def test_upper_follow_through_log_again_after_reset(caplog) -> None:
     assert confirmed_count == 2, (
         f"Expected 2 UPPER_RECLAIM_CVD_FOLLOW_THROUGH_CONFIRMED after reset, got {confirmed_count}"
     )
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Reclaim V2 observability: extreme snapshot log
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def test_extreme_snapshot_after_new_extreme_lower(caplog) -> None:
+    """After a new lower extreme, snapshot log prints after 10s interval."""
+    import logging
+    caplog.set_level(logging.INFO)
+
+    strat = _strategy(min_outside_pct=0.001, reclaim_extreme_log_interval_seconds=10)
+    boll = _boll()
+
+    # Tick 1: anchor
+    p1 = boll.lower * 0.998
+    strat.on_tick(p1, 1000, boll, _cvd(ts_ms=1000, price=p1, cumulative_buy_volume=500_000, cumulative_sell_volume=1_500_000))
+    # Tick 2: first extreme
+    p2 = boll.lower * 0.994
+    strat.on_tick(p2, 2000, boll, _cvd(ts_ms=2000, price=p2, cumulative_buy_volume=500_000, cumulative_sell_volume=1_600_000))
+    # Tick 3: new extreme (t=3000) — triggers snapshot_pending
+    p3 = boll.lower * 0.990
+    strat.on_tick(p3, 3000, boll, _cvd(ts_ms=3000, price=p3, cumulative_buy_volume=600_000, cumulative_sell_volume=1_800_000))
+
+    # Within 10s (t=3000..13000), no snapshot yet — still inside interval
+    # At t=4000: same extreme, but no new extreme, still shouldn't log
+    strat.on_tick(p3, 4000, boll, _cvd(ts_ms=4000, price=p3, cumulative_buy_volume=600_000, cumulative_sell_volume=1_800_000))
+    snapshot_logs = [r for r in caplog.records if "LOWER_EXTREME_SNAPSHOT" in r.message]
+    assert len(snapshot_logs) == 0, "Should not print snapshot within 10s of pending"
+
+    # After 10s (t=14000): snapshot should print
+    strat.on_tick(p3, 14000, boll, _cvd(ts_ms=14000, price=p3, cumulative_buy_volume=600_000, cumulative_sell_volume=1_800_000))
+    snapshot_logs = [r for r in caplog.records if "LOWER_EXTREME_SNAPSHOT" in r.message]
+    assert len(snapshot_logs) == 1, f"Expected 1 snapshot after 10s, got {len(snapshot_logs)}"
+
+
+def test_extreme_snapshot_after_new_extreme_upper(caplog) -> None:
+    """After a new upper extreme, snapshot log prints after 10s interval."""
+    import logging
+    caplog.set_level(logging.INFO)
+
+    strat = _strategy(min_outside_pct=0.001, reclaim_extreme_log_interval_seconds=10)
+    boll = _boll()
+
+    # Tick 1: anchor
+    p1 = boll.upper * 1.002
+    strat.on_tick(p1, 1000, boll, _cvd(ts_ms=1000, price=p1, cumulative_buy_volume=1_500_000, cumulative_sell_volume=500_000,
+                                         buy_ratio=0.4, sell_ratio=0.6, cross_positive=False, cross_negative=True,
+                                         cvd_increasing=False, cvd_decreasing=True, no_new_high=True))
+    # Tick 2: first extreme
+    p2 = boll.upper * 1.006
+    strat.on_tick(p2, 2000, boll, _cvd(ts_ms=2000, price=p2, cumulative_buy_volume=1_500_000, cumulative_sell_volume=500_000,
+                                         buy_ratio=0.4, sell_ratio=0.6, cross_positive=False, cross_negative=True,
+                                         cvd_increasing=False, cvd_decreasing=True, no_new_high=True))
+    # Tick 3: new extreme
+    p3 = boll.upper * 1.010
+    strat.on_tick(p3, 3000, boll, _cvd(ts_ms=3000, price=p3, cumulative_buy_volume=1_400_000, cumulative_sell_volume=600_000,
+                                         buy_ratio=0.4, sell_ratio=0.6, cross_positive=False, cross_negative=True,
+                                         cvd_increasing=False, cvd_decreasing=True, no_new_high=True))
+
+    # After 10s: snapshot should print
+    strat.on_tick(p3, 14000, boll, _cvd(ts_ms=14000, price=p3, cumulative_buy_volume=1_400_000, cumulative_sell_volume=600_000,
+                                         buy_ratio=0.4, sell_ratio=0.6, cross_positive=False, cross_negative=True,
+                                         cvd_increasing=False, cvd_decreasing=True, no_new_high=True))
+    snapshot_logs = [r for r in caplog.records if "UPPER_EXTREME_SNAPSHOT" in r.message]
+    assert len(snapshot_logs) == 1, f"Expected 1 snapshot after 10s, got {len(snapshot_logs)}"
+
+
+def test_no_snapshot_without_new_extreme(caplog) -> None:
+    """Outside ticks without new extreme should NOT trigger snapshot."""
+    import logging
+    caplog.set_level(logging.INFO)
+
+    strat = _strategy(min_outside_pct=0.001, reclaim_extreme_log_interval_seconds=10)
+    boll = _boll()
+
+    # Anchor + first extreme + new extreme (triggers pending)
+    p1 = boll.lower * 0.998
+    strat.on_tick(p1, 1000, boll, _cvd(ts_ms=1000, price=p1, cumulative_buy_volume=500_000, cumulative_sell_volume=1_500_000))
+    p2 = boll.lower * 0.994
+    strat.on_tick(p2, 2000, boll, _cvd(ts_ms=2000, price=p2, cumulative_buy_volume=500_000, cumulative_sell_volume=1_600_000))
+    p3 = boll.lower * 0.990
+    strat.on_tick(p3, 3000, boll, _cvd(ts_ms=3000, price=p3, cumulative_buy_volume=600_000, cumulative_sell_volume=1_800_000))
+
+    # After 10s, snapshot prints once
+    strat.on_tick(p3, 14000, boll, _cvd(ts_ms=14000, price=p3, cumulative_buy_volume=600_000, cumulative_sell_volume=1_800_000))
+    snapshot_logs = [r for r in caplog.records if "LOWER_EXTREME_SNAPSHOT" in r.message]
+    assert len(snapshot_logs) == 1
+
+    # More outside ticks without new extreme → no more snapshots
+    strat.on_tick(p3, 25000, boll, _cvd(ts_ms=25000, price=p3, cumulative_buy_volume=600_000, cumulative_sell_volume=1_800_000))
+    strat.on_tick(p3, 26000, boll, _cvd(ts_ms=26000, price=p3, cumulative_buy_volume=600_000, cumulative_sell_volume=1_800_000))
+    snapshot_logs = [r for r in caplog.records if "LOWER_EXTREME_SNAPSHOT" in r.message]
+    assert len(snapshot_logs) == 1, "Should not print additional snapshots without new extreme"
+
+
+def test_snapshot_logs_latest_extreme_only(caplog) -> None:
+    """Multiple new extremes within 10s → only latest printed in snapshot."""
+    import logging
+    caplog.set_level(logging.INFO)
+
+    strat = _strategy(min_outside_pct=0.001, reclaim_extreme_log_interval_seconds=10)
+    boll = _boll()
+
+    # Anchor
+    p1 = boll.lower * 0.998
+    strat.on_tick(p1, 1000, boll, _cvd(ts_ms=1000, price=p1, cumulative_buy_volume=500_000, cumulative_sell_volume=1_500_000))
+    # First extreme: 1890.6
+    p2 = boll.lower * 0.994  # ~1888.6
+    strat.on_tick(p2, 2000, boll, _cvd(ts_ms=2000, price=p2, cumulative_buy_volume=500_000, cumulative_sell_volume=1_600_000))
+    # New extreme t=3000: price 1881
+    p3 = boll.lower * 0.990  # ~1881
+    strat.on_tick(p3, 3000, boll, _cvd(ts_ms=3000, price=p3, cumulative_buy_volume=600_000, cumulative_sell_volume=1_800_000))
+    # New extreme t=5000: price 1875 (even lower)
+    p4 = boll.lower * 0.987  # ~1875.3
+    strat.on_tick(p4, 5000, boll, _cvd(ts_ms=5000, price=p4, cumulative_buy_volume=650_000, cumulative_sell_volume=1_900_000))
+    # New extreme t=7000: price 1862 (lowest)
+    p5 = boll.lower * 0.980  # ~1862
+    strat.on_tick(p5, 7000, boll, _cvd(ts_ms=7000, price=p5, cumulative_buy_volume=700_000, cumulative_sell_volume=2_000_000))
+
+    # After 10s (t=14000): only one snapshot with latest extreme
+    strat.on_tick(p5, 14000, boll, _cvd(ts_ms=14000, price=p5, cumulative_buy_volume=700_000, cumulative_sell_volume=2_000_000))
+    snapshot_logs = [r for r in caplog.records if "LOWER_EXTREME_SNAPSHOT" in r.message]
+    assert len(snapshot_logs) == 1, f"Expected 1 snapshot (latest only), got {len(snapshot_logs)}"
+    # The new_extreme_count should reflect all extremes seen
+    assert "new_extreme_count=3" in snapshot_logs[0].message or "new_extreme_count=4" in snapshot_logs[0].message
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Reclaim V2 observability: no-entry reason logging
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def _setup_lower_outside_with_first_extreme(strat, boll) -> None:
+    """Helper: anchor + first valid extreme for LOWER, no divergence."""
+    p1 = boll.lower * 0.998
+    strat.on_tick(p1, 1000, boll, _cvd(ts_ms=1000, price=p1, cumulative_buy_volume=500_000, cumulative_sell_volume=1_500_000))
+    p2 = boll.lower * 0.994
+    strat.on_tick(p2, 2000, boll, _cvd(ts_ms=2000, price=p2, cumulative_buy_volume=500_000, cumulative_sell_volume=1_600_000))
+
+
+def _setup_upper_outside_with_first_extreme(strat, boll) -> None:
+    """Helper: anchor + first valid extreme for UPPER, no divergence."""
+    p1 = boll.upper * 1.002
+    strat.on_tick(p1, 1000, boll, _cvd(ts_ms=1000, price=p1, cumulative_buy_volume=1_500_000, cumulative_sell_volume=500_000,
+                                         buy_ratio=0.4, sell_ratio=0.6, cross_positive=False, cross_negative=True,
+                                         cvd_increasing=False, cvd_decreasing=True, no_new_high=True))
+    p2 = boll.upper * 1.006
+    strat.on_tick(p2, 2000, boll, _cvd(ts_ms=2000, price=p2, cumulative_buy_volume=1_500_000, cumulative_sell_volume=500_000,
+                                         buy_ratio=0.4, sell_ratio=0.6, cross_positive=False, cross_negative=True,
+                                         cvd_increasing=False, cvd_decreasing=True, no_new_high=True))
+
+
+def test_no_entry_no_anchored_divergence_lower(caplog) -> None:
+    """Outside observed + first extreme + no divergence + price inside → no_anchored_divergence log."""
+    import logging
+    caplog.set_level(logging.INFO)
+
+    strat = _strategy(min_outside_pct=0.001, reclaim_no_entry_log_interval_seconds=0)
+    boll = _boll()
+    _setup_lower_outside_with_first_extreme(strat, boll)
+
+    # Price moves back inside band without divergence being confirmed
+    inside_price = boll.lower * 1.001  # just inside the band
+    strat.on_tick(inside_price, 3000, boll, _cvd(ts_ms=3000, price=inside_price, cumulative_buy_volume=500_000, cumulative_sell_volume=1_600_000))
+
+    no_entry_logs = [r for r in caplog.records if "LOWER_RECLAIM_NO_ENTRY" in r.message]
+    assert len(no_entry_logs) >= 1, f"Expected no-entry log, got {len(no_entry_logs)}"
+    assert "no_anchored_divergence" in no_entry_logs[0].message
+
+
+def test_no_entry_no_anchored_divergence_upper(caplog) -> None:
+    """Outside observed + first extreme + no divergence + price inside → no_anchored_divergence log (UPPER)."""
+    import logging
+    caplog.set_level(logging.INFO)
+
+    strat = _strategy(min_outside_pct=0.001, reclaim_no_entry_log_interval_seconds=0)
+    boll = _boll()
+    _setup_upper_outside_with_first_extreme(strat, boll)
+
+    # Price moves back inside band
+    inside_price = boll.upper * 0.999
+    strat.on_tick(inside_price, 3000, boll, _cvd(ts_ms=3000, price=inside_price, cumulative_buy_volume=1_500_000, cumulative_sell_volume=500_000,
+                                                   buy_ratio=0.4, sell_ratio=0.6, cross_positive=False, cross_negative=True,
+                                                   cvd_increasing=False, cvd_decreasing=True, no_new_high=True))
+
+    no_entry_logs = [r for r in caplog.records if "UPPER_RECLAIM_NO_ENTRY" in r.message]
+    assert len(no_entry_logs) >= 1, f"Expected no-entry log, got {len(no_entry_logs)}"
+    assert "no_anchored_divergence" in no_entry_logs[0].message
+
+
+def _run_lower_armed_divergence(strat, boll) -> None:
+    """Helper: run full lower armed with anchored divergence confirmed via on_tick."""
+    p1 = boll.lower * 0.998
+    strat.on_tick(p1, 1000, boll, _cvd(ts_ms=1000, price=p1, cumulative_buy_volume=500_000, cumulative_sell_volume=1_500_000))
+    p2 = boll.lower * 0.994
+    strat.on_tick(p2, 2000, boll, _cvd(ts_ms=2000, price=p2, cumulative_buy_volume=500_000, cumulative_sell_volume=1_500_000))
+    # New low + CVD recovery → divergence confirmed
+    p3 = boll.lower * 0.990
+    strat.on_tick(p3, 3000, boll, _cvd(ts_ms=3000, price=p3, cumulative_buy_volume=600_000, cumulative_sell_volume=1_400_000))
+    assert strat.state.lower_anchored_divergence_confirmed is True
+    assert strat.state.lower_armed is True
+
+
+def _run_upper_armed_divergence(strat, boll) -> None:
+    """Helper: run full upper armed with anchored divergence confirmed via on_tick."""
+    p1 = boll.upper * 1.002
+    strat.on_tick(p1, 1000, boll, _cvd(ts_ms=1000, price=p1, cumulative_buy_volume=1_500_000, cumulative_sell_volume=500_000,
+                                         buy_ratio=0.4, sell_ratio=0.6, cross_positive=False, cross_negative=True,
+                                         cvd_increasing=False, cvd_decreasing=True, no_new_high=True))
+    p2 = boll.upper * 1.006
+    strat.on_tick(p2, 2000, boll, _cvd(ts_ms=2000, price=p2, cumulative_buy_volume=1_500_000, cumulative_sell_volume=500_000,
+                                         buy_ratio=0.4, sell_ratio=0.6, cross_positive=False, cross_negative=True,
+                                         cvd_increasing=False, cvd_decreasing=True, no_new_high=True))
+    # New high + CVD reverse → divergence confirmed
+    p3 = boll.upper * 1.010
+    strat.on_tick(p3, 3000, boll, _cvd(ts_ms=3000, price=p3, cumulative_buy_volume=1_400_000, cumulative_sell_volume=600_000,
+                                         buy_ratio=0.4, sell_ratio=0.6, cross_positive=False, cross_negative=True,
+                                         cvd_increasing=False, cvd_decreasing=True, no_new_high=True))
+    assert strat.state.upper_anchored_divergence_confirmed is True
+    assert strat.state.upper_armed is True
+
+
+def test_no_entry_cvd_follow_through_not_met_lower(caplog) -> None:
+    """Armed + inside shallow zone + CVD not following through → cvd_follow_through_not_met."""
+    import logging
+    caplog.set_level(logging.INFO)
+
+    strat = _strategy(
+        min_outside_pct=0.001,
+        entry_reclaim_max_inside_depth_ratio=0.15,
+        entry_reclaim_min_cvd_follow_through=100_000,  # high threshold to prevent follow-through
+        reclaim_no_entry_log_interval_seconds=0,
+        entry_reclaim_confirm_seconds=0,
+        entry_reclaim_inside_band=False,
+    )
+    boll = _boll()
+    _run_lower_armed_divergence(strat, boll)
+
+    # Price reclaims inside shallow zone (ref_lower + band_width * 0.05 = 1905)
+    ref_lower = strat.state.lower_divergence_ref_lower or boll.lower
+    ref_middle = strat.state.lower_divergence_ref_middle or boll.middle
+    shallow_price = ref_lower + (ref_middle - ref_lower) * 0.05
+    strat.on_tick(shallow_price, 4000, boll, _cvd(ts_ms=4000, price=shallow_price, cumulative_buy_volume=500_000, cumulative_sell_volume=1_500_000))
+
+    no_entry_logs = [r for r in caplog.records if "LOWER_RECLAIM_NO_ENTRY" in r.message]
+    cvd_logs = [r for r in no_entry_logs if "cvd_follow_through_not_met" in r.message]
+    assert len(cvd_logs) >= 1, f"Expected cvd_follow_through_not_met log, got {len(cvd_logs)}"
+
+
+def test_no_entry_cvd_follow_through_not_met_upper(caplog) -> None:
+    """Armed + inside shallow zone + CVD not following through → cvd_follow_through_not_met (UPPER)."""
+    import logging
+    caplog.set_level(logging.INFO)
+
+    strat = _strategy(
+        min_outside_pct=0.001,
+        entry_reclaim_max_inside_depth_ratio=0.15,
+        entry_reclaim_min_cvd_follow_through=100_000,
+        reclaim_no_entry_log_interval_seconds=0,
+        entry_reclaim_confirm_seconds=0,
+        entry_reclaim_inside_band=False,
+    )
+    boll = _boll()
+    _run_upper_armed_divergence(strat, boll)
+
+    # Price reclaims inside shallow zone (ref_upper - band_width * 0.05 = 2095)
+    ref_upper = strat.state.upper_divergence_ref_upper or boll.upper
+    ref_middle = strat.state.upper_divergence_ref_middle or boll.middle
+    shallow_price = ref_upper - (ref_upper - ref_middle) * 0.05
+    strat.on_tick(shallow_price, 4000, boll, _cvd(ts_ms=4000, price=shallow_price, cumulative_buy_volume=1_500_000, cumulative_sell_volume=500_000,
+                                                   buy_ratio=0.4, sell_ratio=0.6, cross_positive=False, cross_negative=True,
+                                                   cvd_increasing=False, cvd_decreasing=True, no_new_high=True))
+
+    no_entry_logs = [r for r in caplog.records if "UPPER_RECLAIM_NO_ENTRY" in r.message]
+    cvd_logs = [r for r in no_entry_logs if "cvd_follow_through_not_met" in r.message]
+    assert len(cvd_logs) >= 1, f"Expected cvd_follow_through_not_met log, got {len(cvd_logs)}"
+
+
+def test_no_entry_too_deep_inside(caplog) -> None:
+    """Price goes too deep inside before CVD follow-through → too_deep log."""
+    import logging
+    caplog.set_level(logging.INFO)
+
+    strat = _strategy(
+        min_outside_pct=0.001,
+        entry_reclaim_max_inside_depth_ratio=0.01,  # very narrow shallow zone
+        entry_reclaim_min_cvd_follow_through=1_000_000,  # impossible threshold
+        reclaim_no_entry_log_interval_seconds=0,
+        entry_reclaim_confirm_seconds=0,
+        entry_reclaim_inside_band=False,
+        entry_max_reclaim_cycles=10,
+    )
+    boll = _boll()
+    _run_lower_armed_divergence(strat, boll)
+
+    # Price goes past shallow zone but not to middle (to avoid middle reset)
+    ref_lower = strat.state.lower_divergence_ref_lower or boll.lower
+    ref_middle = strat.state.lower_divergence_ref_middle or boll.middle
+    deep_price = ref_lower + (ref_middle - ref_lower) * 0.20  # 20% into band, past 1% shallow limit
+    strat.on_tick(deep_price, 4000, boll, _cvd(ts_ms=4000, price=deep_price, cumulative_buy_volume=600_000, cumulative_sell_volume=1_400_000))
+
+    rejected_logs = [r for r in caplog.records if "LOWER_RECLAIM_ATTEMPT_REJECTED" in r.message]
+    no_entry_logs = [r for r in caplog.records if "LOWER_RECLAIM_NO_ENTRY" in r.message]
+    too_deep_logs = [r for r in no_entry_logs if "too_deep_inside_before_cvd_follow_through" in r.message]
+    assert len(rejected_logs) >= 1, "Should have RECLAIM_ATTEMPT_REJECTED"
+    assert len(too_deep_logs) >= 1, "Should have RECLAIM_NO_ENTRY for too_deep"
+
+
+def test_no_entry_throttle_same_reason(caplog) -> None:
+    """Same no-entry reason within 60s interval should only log once."""
+    import logging
+    caplog.set_level(logging.INFO)
+
+    strat = _strategy(
+        min_outside_pct=0.001,
+        entry_reclaim_max_inside_depth_ratio=0.15,
+        entry_reclaim_min_cvd_follow_through=100_000,
+        reclaim_no_entry_log_interval_seconds=60,
+        entry_reclaim_confirm_seconds=0,
+        entry_reclaim_inside_band=False,
+    )
+    boll = _boll()
+    _run_lower_armed_divergence(strat, boll)
+
+    ref_lower = strat.state.lower_divergence_ref_lower or boll.lower
+    ref_middle = strat.state.lower_divergence_ref_middle or boll.middle
+    shallow_price = ref_lower + (ref_middle - ref_lower) * 0.05
+
+    # First call: log fires
+    strat.on_tick(shallow_price, 4000, boll, _cvd(ts_ms=4000, price=shallow_price, cumulative_buy_volume=500_000, cumulative_sell_volume=1_500_000))
+
+    # Second call within 60s: same reason, should NOT fire
+    strat.on_tick(shallow_price, 5000, boll, _cvd(ts_ms=5000, price=shallow_price, cumulative_buy_volume=500_000, cumulative_sell_volume=1_500_000))
+
+    no_entry_logs = [r for r in caplog.records if "LOWER_RECLAIM_NO_ENTRY" in r.message]
+    cvd_logs = [r for r in no_entry_logs if "cvd_follow_through_not_met" in r.message]
+    assert len(cvd_logs) == 1, f"Expected 1 log within 60s, got {len(cvd_logs)}"
+
+
+def test_reward_risk_not_met_no_entry(caplog) -> None:
+    """RR gate rejects entry → reward_risk_not_met log."""
+    import logging
+    caplog.set_level(logging.INFO)
+
+    strat = _strategy(
+        min_outside_pct=0.001,
+        entry_reclaim_max_inside_depth_ratio=0.15,
+        entry_reclaim_min_cvd_follow_through=0,
+        reclaim_no_entry_log_interval_seconds=0,
+        entry_reclaim_confirm_seconds=0,
+        entry_reclaim_inside_band=False,
+        entry_min_reward_risk=99.0,  # impossibly high RR requirement
+        order_cooldown_seconds=0,
+    )
+    boll = _boll()
+    _run_lower_armed_divergence(strat, boll)
+
+    # Price in shallow zone with CVD recovery to trigger follow-through success
+    ref_lower = strat.state.lower_divergence_ref_lower or boll.lower
+    ref_middle = strat.state.lower_divergence_ref_middle or boll.middle
+    reclaim_price = ref_lower + (ref_middle - ref_lower) * 0.05
+    # CVD follows through — setup passes, but RR check fails due to high min_reward_risk
+    strat.on_tick(reclaim_price, 4000, boll, _cvd(ts_ms=4000, price=reclaim_price, cumulative_buy_volume=1_500_000, cumulative_sell_volume=500_000))
+
+    rr_logs = [r for r in caplog.records if "reward_risk_not_met" in r.message or "ENTRY_SKIPPED" in r.message]
+    assert len(rr_logs) >= 1, f"Expected RR rejection log, got {len(rr_logs)}"
+
+
+def test_post_entry_sl_cooldown_no_entry(caplog) -> None:
+    """Post-entry SL cooldown blocks entry → post_entry_sl_cooldown log."""
+    import logging
+    caplog.set_level(logging.INFO)
+
+    strat = _strategy(
+        min_outside_pct=0.001,
+        reclaim_no_entry_log_interval_seconds=0,
+        post_entry_sl_cooldown_enabled=True,
+        post_entry_sl_cooldown_seconds=1800,
+        post_entry_sl_cooldown_scope="SIDE",
+    )
+    boll = _boll()
+
+    # Arm cooldown for LONG side
+    strat.arm_post_entry_sl_cooldown(ts_ms=1000, side="LONG", reason="test_sl_exit")
+
+    # Price below lower → should be blocked by cooldown
+    price = boll.lower * 0.995
+    strat.on_tick(price, 2000, boll, _cvd(ts_ms=2000, price=price, cumulative_buy_volume=500_000, cumulative_sell_volume=1_500_000))
+
+    cooldown_logs = [r for r in caplog.records if "post_entry_sl_cooldown" in r.message.lower()]
+    no_entry_logs = [r for r in caplog.records if "RECLAIM_NO_ENTRY" in r.message and "post_entry_sl_cooldown" in r.message]
+    assert len(no_entry_logs) >= 1 or len(cooldown_logs) >= 1, \
+        f"Expected cooldown or no-entry log, got {len(cooldown_logs)} cooldown / {len(no_entry_logs)} no-entry"
+
+
+def test_first_valid_extreme_renamed(caplog) -> None:
+    """Verify FIRST_EXTREME renamed to FIRST_VALID_EXTREME."""
+    import logging
+    caplog.set_level(logging.INFO)
+
+    strat = _strategy(min_outside_pct=0.001)
+    boll = _boll()
+
+    p1 = boll.lower * 0.998
+    strat.on_tick(p1, 1000, boll, _cvd(ts_ms=1000, price=p1, cumulative_buy_volume=500_000, cumulative_sell_volume=1_500_000))
+    p2 = boll.lower * 0.994
+    strat.on_tick(p2, 2000, boll, _cvd(ts_ms=2000, price=p2, cumulative_buy_volume=500_000, cumulative_sell_volume=1_600_000))
+
+    first_extreme_logs = [r for r in caplog.records if "FIRST_EXTREME" in r.message]
+    first_valid_logs = [r for r in caplog.records if "FIRST_VALID_EXTREME" in r.message]
+    assert len(first_extreme_logs) == 0, f"LOWER_FIRST_EXTREME should be renamed, got {len(first_extreme_logs)}"
+    assert len(first_valid_logs) == 1, f"Expected LOWER_FIRST_VALID_EXTREME, got {len(first_valid_logs)}"

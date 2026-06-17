@@ -175,6 +175,8 @@ class BollCvdReclaimStrategyConfig:
     entry_reclaim_min_cvd_recovery: float = 0.0
     entry_reclaim_min_cvd_follow_through: float = 0.0
     entry_reclaim_max_inside_depth_ratio: float = 0.15
+    reclaim_extreme_log_interval_seconds: int = 10
+    reclaim_no_entry_log_interval_seconds: int = 60
 
     # ── Trend Breakout Entry ────────────────────────────────────────────
     trend_breakout_enabled: bool = False
@@ -466,6 +468,8 @@ class BollCvdReclaimStrategyConfig:
             entry_reclaim_min_cvd_recovery=float(os.getenv("ENTRY_RECLAIM_MIN_CVD_RECOVERY", "0")),
             entry_reclaim_min_cvd_follow_through=float(os.getenv("ENTRY_RECLAIM_MIN_CVD_FOLLOW_THROUGH", "0")),
             entry_reclaim_max_inside_depth_ratio=float(os.getenv("ENTRY_RECLAIM_MAX_INSIDE_DEPTH_RATIO", "0.15")),
+            reclaim_extreme_log_interval_seconds=int(os.getenv("RECLAIM_EXTREME_LOG_INTERVAL_SECONDS", "10")),
+            reclaim_no_entry_log_interval_seconds=int(os.getenv("RECLAIM_NO_ENTRY_LOG_INTERVAL_SECONDS", "60")),
             # ── Trend Breakout Entry ────────────────────────────────────
             trend_breakout_enabled=_env_bool("TREND_BREAKOUT_ENABLED", False),
             trend_middle_trailing_sl_enabled=_env_bool("TREND_MIDDLE_TRAILING_SL_ENABLED", True),
@@ -717,6 +721,28 @@ class StrategyPositionState:
     post_entry_sl_cooldown_until_ts_ms: int = 0
     post_entry_sl_cooldown_side: str | None = None
     post_entry_sl_cooldown_reason: str | None = None
+
+    # ── Reclaim V2 observability state ──────────────────────────────
+    lower_last_extreme_snapshot_log_ts_ms: int = 0
+    upper_last_extreme_snapshot_log_ts_ms: int = 0
+
+    lower_extreme_snapshot_pending: bool = False
+    upper_extreme_snapshot_pending: bool = False
+
+    lower_last_logged_extreme_price: float | None = None
+    upper_last_logged_extreme_price: float | None = None
+
+    lower_last_extreme_divergence_reason: str | None = None
+    upper_last_extreme_divergence_reason: str | None = None
+
+    lower_last_extreme_divergence_confirmed: bool = False
+    upper_last_extreme_divergence_confirmed: bool = False
+
+    lower_last_no_entry_log_ts_ms: int = 0
+    upper_last_no_entry_log_ts_ms: int = 0
+
+    lower_last_no_entry_reason: str | None = None
+    upper_last_no_entry_reason: str | None = None
 
     total_entry_qty: float = 0.0
     total_entry_notional: float = 0.0
@@ -1058,6 +1084,14 @@ class BollCvdReclaimStrategy:
                 self._log_post_entry_sl_cooldown_discard(side="LONG", ts_ms=ts_ms)
                 if self.state.lower_armed:
                     self._reset_lower_armed()
+                else:
+                    self._log_reclaim_no_entry_reason(
+                        side="LOWER",
+                        reason="post_entry_sl_cooldown",
+                        price=price,
+                        boll=boll,
+                        cvd=cvd,
+                    )
 
                 # Still reset opposite upper setup — market broke opposite side
                 if self.state.upper_armed:
@@ -1077,6 +1111,14 @@ class BollCvdReclaimStrategy:
                 self._log_post_entry_sl_cooldown_discard(side="SHORT", ts_ms=ts_ms)
                 if self.state.upper_armed:
                     self._reset_upper_armed()
+                else:
+                    self._log_reclaim_no_entry_reason(
+                        side="UPPER",
+                        reason="post_entry_sl_cooldown",
+                        price=price,
+                        boll=boll,
+                        cvd=cvd,
+                    )
 
                 # Still reset opposite lower setup — market broke opposite side
                 if self.state.lower_armed:
@@ -1098,6 +1140,42 @@ class BollCvdReclaimStrategy:
         if self.state.upper_armed and price <= boll.middle:
             logger.info("UPPER_ARMED_RESET | reason=middle_reclaimed price=%.4f middle=%.4f", price, boll.middle)
             self._reset_upper_armed()
+
+        # ── Reclaim no-entry reason: no anchored divergence ─────────────
+        # When an outside episode was observed (first extreme recorded) but
+        # anchored divergence never confirmed, log the reason once price is
+        # back inside the band.
+        if (
+            self.config.entry_reclaim_v2_enabled
+            and price >= boll.lower
+            and price <= boll.upper
+        ):
+            if (
+                self.state.lower_outside_observed
+                and not self.state.lower_anchored_divergence_confirmed
+                and not self.state.lower_armed
+                and self.state.lower_first_extreme_price is not None
+            ):
+                self._log_reclaim_no_entry_reason(
+                    side="LOWER",
+                    reason="no_anchored_divergence",
+                    price=price,
+                    boll=boll,
+                    cvd=cvd,
+                )
+            if (
+                self.state.upper_outside_observed
+                and not self.state.upper_anchored_divergence_confirmed
+                and not self.state.upper_armed
+                and self.state.upper_first_extreme_price is not None
+            ):
+                self._log_reclaim_no_entry_reason(
+                    side="UPPER",
+                    reason="no_anchored_divergence",
+                    price=price,
+                    boll=boll,
+                    cvd=cvd,
+                )
 
     def _update_lower_outside(self, price: float, ts_ms: int, boll: BollSnapshot,
                                cvd: CvdSnapshot | None) -> None:
@@ -1642,10 +1720,16 @@ class BollCvdReclaimStrategy:
         new_extreme_this_tick = snap.new_extreme_count > prev_extreme_count
         self._previous_lower_extreme_count = snap.new_extreme_count
 
-        # Keep legacy extreme in sync
-        if snap.last_extreme_price > 0:
+        # Only update extreme_ts_ms on truly new extremes (not every outside tick)
+        if new_extreme_this_tick and snap.last_extreme_price > 0:
             self.state.lower_extreme_price = snap.last_extreme_price
             self.state.lower_extreme_ts_ms = ts_ms
+            self.state.lower_extreme_snapshot_pending = True
+
+        # ── Throttled extreme snapshot log (every outside tick, internal throttle) ──
+        self._maybe_log_reclaim_extreme_snapshot(
+            side="LOWER", price=price, boll=boll, cvd=cvd, snap=snap,
+        )
 
         # ── Divergence already confirmed — handle re-break ─────────────
         if self.state.lower_anchored_divergence_confirmed:
@@ -1694,7 +1778,7 @@ class BollCvdReclaimStrategy:
                 self.state.lower_previous_extreme_ts_ms = ts_ms
                 self.state.lower_previous_extreme_anchored_cvd = snap.last_extreme_anchored_cvd
                 logger.info(
-                    "LOWER_FIRST_EXTREME | price=%.4f anchored_cvd=%.4f deep_enough=True ts_ms=%s",
+                    "LOWER_FIRST_VALID_EXTREME | price=%.4f anchored_cvd=%.4f deep_enough=True ts_ms=%s",
                     snap.last_extreme_price, snap.last_extreme_anchored_cvd, ts_ms,
                 )
             return
@@ -1717,6 +1801,10 @@ class BollCvdReclaimStrategy:
                 min_cvd_recovery=self.config.entry_reclaim_min_cvd_recovery,
             ),
         )
+
+        # Cache divergence check result for snapshot / no-entry logs
+        self.state.lower_last_extreme_divergence_confirmed = decision.confirmed
+        self.state.lower_last_extreme_divergence_reason = decision.reason
 
         if decision.confirmed:
             self.state.lower_anchored_divergence_confirmed = True
@@ -1819,9 +1907,16 @@ class BollCvdReclaimStrategy:
         new_extreme_this_tick = snap.new_extreme_count > prev_extreme_count
         self._previous_upper_extreme_count = snap.new_extreme_count
 
-        if snap.last_extreme_price > 0:
+        # Only update extreme_ts_ms on truly new extremes (not every outside tick)
+        if new_extreme_this_tick and snap.last_extreme_price > 0:
             self.state.upper_extreme_price = snap.last_extreme_price
             self.state.upper_extreme_ts_ms = ts_ms
+            self.state.upper_extreme_snapshot_pending = True
+
+        # ── Throttled extreme snapshot log (every outside tick, internal throttle) ──
+        self._maybe_log_reclaim_extreme_snapshot(
+            side="UPPER", price=price, boll=boll, cvd=cvd, snap=snap,
+        )
 
         # ── Divergence already confirmed — handle re-break ─────────────
         if self.state.upper_anchored_divergence_confirmed:
@@ -1869,7 +1964,7 @@ class BollCvdReclaimStrategy:
                 self.state.upper_previous_extreme_ts_ms = ts_ms
                 self.state.upper_previous_extreme_anchored_cvd = snap.last_extreme_anchored_cvd
                 logger.info(
-                    "UPPER_FIRST_EXTREME | price=%.4f anchored_cvd=%.4f deep_enough=True ts_ms=%s",
+                    "UPPER_FIRST_VALID_EXTREME | price=%.4f anchored_cvd=%.4f deep_enough=True ts_ms=%s",
                     snap.last_extreme_price, snap.last_extreme_anchored_cvd, ts_ms,
                 )
             return
@@ -1892,6 +1987,10 @@ class BollCvdReclaimStrategy:
                 min_cvd_recovery=self.config.entry_reclaim_min_cvd_recovery,
             ),
         )
+
+        # Cache divergence check result for snapshot / no-entry logs
+        self.state.upper_last_extreme_divergence_confirmed = decision.confirmed
+        self.state.upper_last_extreme_divergence_reason = decision.reason
 
         if decision.confirmed:
             self.state.upper_anchored_divergence_confirmed = True
@@ -1924,6 +2023,160 @@ class BollCvdReclaimStrategy:
                 "UPPER_NEW_EXTREME_NO_DIVERGENCE | price=%.4f cum_cvd=%.4f "
                 "reason=%s ts_ms=%s",
                 snap.last_extreme_price, cum_cvd, decision.reason, ts_ms,
+            )
+
+    # ── Reclaim V2 observability helpers ─────────────────────────────────
+
+    def _maybe_log_reclaim_extreme_snapshot(
+        self,
+        *,
+        side: str,
+        price: float,
+        boll: BollSnapshot,
+        cvd: CvdSnapshot,
+        snap: AnchoredOrderflowSnapshot,
+    ) -> None:
+        """Throttled log of latest extreme + anchored CVD after a new extreme.
+
+        Only prints when a new extreme has been pending AND the interval has
+        elapsed since the last snapshot.  If multiple new extremes occur within
+        the interval only the latest is printed once.
+        """
+        interval_ms = self.config.reclaim_extreme_log_interval_seconds * 1000
+
+        if side == "LOWER":
+            if not self.state.lower_extreme_snapshot_pending:
+                return
+            if cvd.ts_ms - self.state.lower_last_extreme_snapshot_log_ts_ms < interval_ms:
+                return
+
+            prev_extreme = self.state.lower_last_logged_extreme_price
+            prev_cvd = self.state.lower_previous_extreme_anchored_cvd
+            logger.info(
+                "LOWER_EXTREME_SNAPSHOT | latest_extreme=%.4f anchored_cvd=%.4f "
+                "new_extreme_count=%s prev_extreme=%.4f prev_cvd=%.4f "
+                "divergence_confirmed=%s divergence_reason=%s price=%.4f lower=%.4f ts_ms=%s",
+                snap.last_extreme_price,
+                snap.last_extreme_anchored_cvd,
+                snap.new_extreme_count,
+                prev_extreme if prev_extreme is not None else 0.0,
+                prev_cvd if prev_cvd is not None else 0.0,
+                self.state.lower_last_extreme_divergence_confirmed,
+                self.state.lower_last_extreme_divergence_reason or "",
+                price,
+                boll.lower,
+                cvd.ts_ms,
+            )
+
+            self.state.lower_last_extreme_snapshot_log_ts_ms = cvd.ts_ms
+            self.state.lower_last_logged_extreme_price = snap.last_extreme_price
+            self.state.lower_extreme_snapshot_pending = False
+
+        else:  # UPPER
+            if not self.state.upper_extreme_snapshot_pending:
+                return
+            if cvd.ts_ms - self.state.upper_last_extreme_snapshot_log_ts_ms < interval_ms:
+                return
+
+            prev_extreme = self.state.upper_last_logged_extreme_price
+            prev_cvd = self.state.upper_previous_extreme_anchored_cvd
+            logger.info(
+                "UPPER_EXTREME_SNAPSHOT | latest_extreme=%.4f anchored_cvd=%.4f "
+                "new_extreme_count=%s prev_extreme=%.4f prev_cvd=%.4f "
+                "divergence_confirmed=%s divergence_reason=%s price=%.4f upper=%.4f ts_ms=%s",
+                snap.last_extreme_price,
+                snap.last_extreme_anchored_cvd,
+                snap.new_extreme_count,
+                prev_extreme if prev_extreme is not None else 0.0,
+                prev_cvd if prev_cvd is not None else 0.0,
+                self.state.upper_last_extreme_divergence_confirmed,
+                self.state.upper_last_extreme_divergence_reason or "",
+                price,
+                boll.upper,
+                cvd.ts_ms,
+            )
+
+            self.state.upper_last_extreme_snapshot_log_ts_ms = cvd.ts_ms
+            self.state.upper_last_logged_extreme_price = snap.last_extreme_price
+            self.state.upper_extreme_snapshot_pending = False
+
+    def _log_reclaim_no_entry_reason(
+        self,
+        *,
+        side: str,
+        reason: str,
+        price: float,
+        boll: BollSnapshot,
+        cvd: CvdSnapshot | None = None,
+        extra: dict[str, object] | None = None,
+    ) -> None:
+        """Throttled no-entry reason log — at most once per interval per side+reason."""
+        interval_ms = self.config.reclaim_no_entry_log_interval_seconds * 1000
+
+        if side == "LOWER":
+            ts_ms = cvd.ts_ms if cvd else 0
+            if (
+                self.state.lower_last_no_entry_reason == reason
+                and ts_ms - self.state.lower_last_no_entry_log_ts_ms < interval_ms
+            ):
+                return
+            self.state.lower_last_no_entry_reason = reason
+            self.state.lower_last_no_entry_log_ts_ms = ts_ms
+
+            extra_str = ""
+            if extra:
+                extra_str = " " + " ".join(f"{k}={v}" for k, v in extra.items())
+
+            logger.info(
+                "LOWER_RECLAIM_NO_ENTRY | reason=%s price=%.4f lower=%.4f middle=%.4f "
+                "extreme=%.4f divergence_confirmed=%s reclaim_seen=%s "
+                "rejected_until_next_outside=%s "
+                "anchored_cvd=%.4f div_cvd=%.4f ts_ms=%s%s",
+                reason,
+                price,
+                boll.lower,
+                boll.middle,
+                self.state.lower_extreme_price or 0.0,
+                self.state.lower_anchored_divergence_confirmed,
+                self.state.lower_reclaim_seen,
+                self.state.lower_reclaim_rejected_until_next_outside,
+                self.state.lower_divergence_extreme_anchored_cvd or 0.0,
+                self.state.lower_previous_extreme_anchored_cvd or 0.0,
+                ts_ms,
+                extra_str,
+            )
+
+        else:  # UPPER
+            ts_ms = cvd.ts_ms if cvd else 0
+            if (
+                self.state.upper_last_no_entry_reason == reason
+                and ts_ms - self.state.upper_last_no_entry_log_ts_ms < interval_ms
+            ):
+                return
+            self.state.upper_last_no_entry_reason = reason
+            self.state.upper_last_no_entry_log_ts_ms = ts_ms
+
+            extra_str = ""
+            if extra:
+                extra_str = " " + " ".join(f"{k}={v}" for k, v in extra.items())
+
+            logger.info(
+                "UPPER_RECLAIM_NO_ENTRY | reason=%s price=%.4f upper=%.4f middle=%.4f "
+                "extreme=%.4f divergence_confirmed=%s reclaim_seen=%s "
+                "rejected_until_next_outside=%s "
+                "anchored_cvd=%.4f div_cvd=%.4f ts_ms=%s%s",
+                reason,
+                price,
+                boll.upper,
+                boll.middle,
+                self.state.upper_extreme_price or 0.0,
+                self.state.upper_anchored_divergence_confirmed,
+                self.state.upper_reclaim_seen,
+                self.state.upper_reclaim_rejected_until_next_outside,
+                self.state.upper_divergence_extreme_anchored_cvd or 0.0,
+                self.state.upper_previous_extreme_anchored_cvd or 0.0,
+                ts_ms,
+                extra_str,
             )
 
     # ── Sweep profile helpers ────────────────────────────────────────────
@@ -2004,6 +2257,13 @@ class BollCvdReclaimStrategy:
                 price, max_entry_price, ref_lower, ref_middle, band_width,
                 self.state.lower_reclaim_cycle_count, cvd.ts_ms,
             )
+            self._log_reclaim_no_entry_reason(
+                side="LOWER",
+                reason="too_deep_inside_before_cvd_follow_through",
+                price=price,
+                boll=boll,
+                cvd=cvd,
+            )
             return False
 
         # ── Anchored CVD follow-through ────────────────────────────────
@@ -2032,6 +2292,13 @@ class BollCvdReclaimStrategy:
             "LOWER_RECLAIM_WAITING_CVD | reclaim_anchored_cvd=%.4f div_cvd=%.4f "
             "price=%.4f ref_lower=%.4f max_entry_price=%.4f",
             reclaim_anchored_cvd, div_cvd, price, ref_lower, max_entry_price,
+        )
+        self._log_reclaim_no_entry_reason(
+            side="LOWER",
+            reason="cvd_follow_through_not_met",
+            price=price,
+            boll=boll,
+            cvd=cvd,
         )
         return False
 
@@ -2079,6 +2346,13 @@ class BollCvdReclaimStrategy:
                 price, min_entry_price, ref_upper, ref_middle, band_width,
                 self.state.upper_reclaim_cycle_count, cvd.ts_ms,
             )
+            self._log_reclaim_no_entry_reason(
+                side="UPPER",
+                reason="too_deep_inside_before_cvd_follow_through",
+                price=price,
+                boll=boll,
+                cvd=cvd,
+            )
             return False
 
         # ── Anchored CVD follow-through ────────────────────────────────
@@ -2107,6 +2381,13 @@ class BollCvdReclaimStrategy:
             "UPPER_RECLAIM_WAITING_CVD | reclaim_anchored_cvd=%.4f div_cvd=%.4f "
             "price=%.4f ref_upper=%.4f min_entry_price=%.4f",
             reclaim_anchored_cvd, div_cvd, price, ref_upper, min_entry_price,
+        )
+        self._log_reclaim_no_entry_reason(
+            side="UPPER",
+            reason="cvd_follow_through_not_met",
+            price=price,
+            boll=boll,
+            cvd=cvd,
         )
         return False
 
@@ -2249,6 +2530,14 @@ class BollCvdReclaimStrategy:
         self.state.lower_divergence_extreme_anchored_cvd = None
         self.state.lower_divergence_ref_lower = None
         self.state.lower_divergence_ref_middle = None
+        # ── Clear Reclaim V2 observability state ───────────────────────
+        self.state.lower_last_extreme_snapshot_log_ts_ms = 0
+        self.state.lower_extreme_snapshot_pending = False
+        self.state.lower_last_logged_extreme_price = None
+        self.state.lower_last_extreme_divergence_reason = None
+        self.state.lower_last_extreme_divergence_confirmed = False
+        self.state.lower_last_no_entry_log_ts_ms = 0
+        self.state.lower_last_no_entry_reason = None
         if self.state.lower_sweep_profile is not None:
             self.state.lower_sweep_profile.reset()  # type: ignore[union-attr]
             self.state.lower_sweep_profile = None
@@ -2293,6 +2582,14 @@ class BollCvdReclaimStrategy:
         self.state.upper_divergence_extreme_anchored_cvd = None
         self.state.upper_divergence_ref_upper = None
         self.state.upper_divergence_ref_middle = None
+        # ── Clear Reclaim V2 observability state ───────────────────────
+        self.state.upper_last_extreme_snapshot_log_ts_ms = 0
+        self.state.upper_extreme_snapshot_pending = False
+        self.state.upper_last_logged_extreme_price = None
+        self.state.upper_last_extreme_divergence_reason = None
+        self.state.upper_last_extreme_divergence_confirmed = False
+        self.state.upper_last_no_entry_log_ts_ms = 0
+        self.state.upper_last_no_entry_reason = None
         if self.state.upper_sweep_profile is not None:
             self.state.upper_sweep_profile.reset()  # type: ignore[union-attr]
             self.state.upper_sweep_profile = None
