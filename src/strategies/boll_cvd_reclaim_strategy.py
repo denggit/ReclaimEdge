@@ -1179,6 +1179,59 @@ class BollCvdReclaimStrategy:
 
         return intents
 
+    def _expire_reclaim_v2_total_setup(self, ts_ms: int) -> tuple[bool, bool]:
+        """Expire Reclaim V2 setups that exceed the total setup time budget.
+
+        The V2 total setup clock starts at ``anchor_ts_ms`` (first outside
+        observed), NOT at divergence confirmation.  This covers the
+        waiting-fractal and waiting-divergence phases that have no armed
+        timestamp yet.
+
+        Returns
+        -------
+        (expired_lower, expired_upper)
+            Whether each side was reset by this call.
+        """
+        total_ms = self.config.entry_max_total_setup_seconds * 1000
+        expired_lower = False
+        expired_upper = False
+
+        if (
+            self.config.entry_reclaim_v2_enabled
+            and self.state.lower_outside_observed
+            and self.state.lower_anchor_ts_ms > 0
+            and ts_ms - self.state.lower_anchor_ts_ms > total_ms
+        ):
+            logger.info(
+                "LOWER_SETUP_EXPIRED | reason=total_setup_timeout "
+                "phase=reclaim_v2 age_ms=%s max_ms=%s anchor_ts_ms=%s ts_ms=%s",
+                ts_ms - self.state.lower_anchor_ts_ms,
+                total_ms,
+                self.state.lower_anchor_ts_ms,
+                ts_ms,
+            )
+            self._reset_lower_armed()
+            expired_lower = True
+
+        if (
+            self.config.entry_reclaim_v2_enabled
+            and self.state.upper_outside_observed
+            and self.state.upper_anchor_ts_ms > 0
+            and ts_ms - self.state.upper_anchor_ts_ms > total_ms
+        ):
+            logger.info(
+                "UPPER_SETUP_EXPIRED | reason=total_setup_timeout "
+                "phase=reclaim_v2 age_ms=%s max_ms=%s anchor_ts_ms=%s ts_ms=%s",
+                ts_ms - self.state.upper_anchor_ts_ms,
+                total_ms,
+                self.state.upper_anchor_ts_ms,
+                ts_ms,
+            )
+            self._reset_upper_armed()
+            expired_upper = True
+
+        return expired_lower, expired_upper
+
     def _update_armed_state(
         self,
         price: float,
@@ -1189,9 +1242,14 @@ class BollCvdReclaimStrategy:
         long_blocked_by_post_sl: bool = False,
         short_blocked_by_post_sl: bool = False,
     ) -> None:
+        # ── Reclaim V2 total setup timeout (from anchor_ts_ms) ──────────
+        # Must run first so waiting-fractal / waiting-divergence phases
+        # are bounded even before divergence confirmation sets first_armed_ts_ms.
+        _expired_lower_v2, _expired_upper_v2 = self._expire_reclaim_v2_total_setup(ts_ms)
+
         self._expire_armed_state(ts_ms)
 
-        # ── Total setup timeout check ──────────────────────────────────
+        # ── Total setup timeout check (legacy / post-divergence) ─────────
         _total_ms = self.config.entry_max_total_setup_seconds * 1000
         if self.state.lower_first_armed_ts_ms > 0 and ts_ms - self.state.lower_first_armed_ts_ms > _total_ms:
             logger.info("LOWER_SETUP_EXPIRED | reason=total_setup_timeout age_ms=%s max_ms=%s",
@@ -2949,24 +3007,38 @@ class BollCvdReclaimStrategy:
             if (
                 self.config.entry_reclaim_v2_enabled
                 and self.state.lower_anchored_divergence_confirmed
-                and self.state.lower_divergence_extreme_ts_ms > 0
             ):
-                _extreme_ts = self.state.lower_divergence_extreme_ts_ms
+                if self.state.lower_divergence_extreme_ts_ms <= 0:
+                    logger.warning(
+                        "LOWER_ARMED_RESET | reason=missing_divergence_extreme_ts "
+                        "source=reclaim_v2_fractal"
+                    )
+                    self._reset_lower_armed()
+                    # Skip remaining lower-side checks — state is gone
+                else:
+                    _extreme_ts = self.state.lower_divergence_extreme_ts_ms
+                    if ts_ms - _extreme_ts > _extreme_ms:
+                        logger.info(
+                            "LOWER_ARMED_RESET | reason=extreme_to_reclaim_timeout "
+                            "source=reclaim_v2_fractal extreme_ts_ms=%s age_ms=%s max_ms=%s",
+                            _extreme_ts, ts_ms - _extreme_ts, _extreme_ms,
+                        )
+                        self._reset_lower_armed()
             else:
                 _extreme_ts = self.state.lower_extreme_ts_ms
-            if _extreme_ts > 0 and ts_ms - _extreme_ts > _extreme_ms:
-                logger.info(
-                    "LOWER_ARMED_RESET | reason=extreme_to_reclaim_timeout "
-                    "extreme_ts_ms=%s age_ms=%s max_ms=%s",
-                    _extreme_ts, ts_ms - _extreme_ts, _extreme_ms,
-                )
-                self._reset_lower_armed()
-            elif _extreme_ts <= 0 and ts_ms - self.state.lower_armed_ts_ms > _fallback_ms:
-                logger.info(
-                    "LOWER_ARMED_RESET | reason=expired_no_extreme age_ms=%s max_ms=%s",
-                    ts_ms - self.state.lower_armed_ts_ms, _fallback_ms,
-                )
-                self._reset_lower_armed()
+                if _extreme_ts > 0 and ts_ms - _extreme_ts > _extreme_ms:
+                    logger.info(
+                        "LOWER_ARMED_RESET | reason=extreme_to_reclaim_timeout "
+                        "extreme_ts_ms=%s age_ms=%s max_ms=%s",
+                        _extreme_ts, ts_ms - _extreme_ts, _extreme_ms,
+                    )
+                    self._reset_lower_armed()
+                elif _extreme_ts <= 0 and ts_ms - self.state.lower_armed_ts_ms > _fallback_ms:
+                    logger.info(
+                        "LOWER_ARMED_RESET | reason=expired_no_extreme age_ms=%s max_ms=%s",
+                        ts_ms - self.state.lower_armed_ts_ms, _fallback_ms,
+                    )
+                    self._reset_lower_armed()
 
         # ── Upper side ──────────────────────────────────────────────────
         if self.state.upper_armed:
@@ -2974,24 +3046,38 @@ class BollCvdReclaimStrategy:
             if (
                 self.config.entry_reclaim_v2_enabled
                 and self.state.upper_anchored_divergence_confirmed
-                and self.state.upper_divergence_extreme_ts_ms > 0
             ):
-                _extreme_ts = self.state.upper_divergence_extreme_ts_ms
+                if self.state.upper_divergence_extreme_ts_ms <= 0:
+                    logger.warning(
+                        "UPPER_ARMED_RESET | reason=missing_divergence_extreme_ts "
+                        "source=reclaim_v2_fractal"
+                    )
+                    self._reset_upper_armed()
+                    # Skip remaining upper-side checks — state is gone
+                else:
+                    _extreme_ts = self.state.upper_divergence_extreme_ts_ms
+                    if ts_ms - _extreme_ts > _extreme_ms:
+                        logger.info(
+                            "UPPER_ARMED_RESET | reason=extreme_to_reclaim_timeout "
+                            "source=reclaim_v2_fractal extreme_ts_ms=%s age_ms=%s max_ms=%s",
+                            _extreme_ts, ts_ms - _extreme_ts, _extreme_ms,
+                        )
+                        self._reset_upper_armed()
             else:
                 _extreme_ts = self.state.upper_extreme_ts_ms
-            if _extreme_ts > 0 and ts_ms - _extreme_ts > _extreme_ms:
-                logger.info(
-                    "UPPER_ARMED_RESET | reason=extreme_to_reclaim_timeout "
-                    "extreme_ts_ms=%s age_ms=%s max_ms=%s",
-                    _extreme_ts, ts_ms - _extreme_ts, _extreme_ms,
-                )
-                self._reset_upper_armed()
-            elif _extreme_ts <= 0 and ts_ms - self.state.upper_armed_ts_ms > _fallback_ms:
-                logger.info(
-                    "UPPER_ARMED_RESET | reason=expired_no_extreme age_ms=%s max_ms=%s",
-                    ts_ms - self.state.upper_armed_ts_ms, _fallback_ms,
-                )
-                self._reset_upper_armed()
+                if _extreme_ts > 0 and ts_ms - _extreme_ts > _extreme_ms:
+                    logger.info(
+                        "UPPER_ARMED_RESET | reason=extreme_to_reclaim_timeout "
+                        "extreme_ts_ms=%s age_ms=%s max_ms=%s",
+                        _extreme_ts, ts_ms - _extreme_ts, _extreme_ms,
+                    )
+                    self._reset_upper_armed()
+                elif _extreme_ts <= 0 and ts_ms - self.state.upper_armed_ts_ms > _fallback_ms:
+                    logger.info(
+                        "UPPER_ARMED_RESET | reason=expired_no_extreme age_ms=%s max_ms=%s",
+                        ts_ms - self.state.upper_armed_ts_ms, _fallback_ms,
+                    )
+                    self._reset_upper_armed()
 
     def _reset_lower_armed(self) -> None:
         self.state.lower_armed = False
@@ -3155,15 +3241,18 @@ class BollCvdReclaimStrategy:
         if price < ref_lower * (1 + self.config.entry_reclaim_buffer_pct):
             return False
 
-        # Extreme-to-reclaim timeout
-        if self.state.lower_extreme_ts_ms > 0:
-            elapsed_ms = cvd.ts_ms - self.state.lower_extreme_ts_ms
+        # Extreme-to-reclaim timeout — use divergence extreme ts in V2
+        # (already gated on lower_anchored_divergence_confirmed above)
+        if self.state.lower_divergence_extreme_ts_ms > 0:
+            elapsed_ms = cvd.ts_ms - self.state.lower_divergence_extreme_ts_ms
             if elapsed_ms > self.config.entry_max_extreme_to_reclaim_seconds * 1000:
                 logger.info(
                     "LOWER_SETUP_EXPIRED | reason=extreme_to_reclaim_timeout "
-                    "elapsed_ms=%s max_ms=%s ts_ms=%s",
+                    "source=reclaim_v2_fractal elapsed_ms=%s max_ms=%s "
+                    "divergence_extreme_ts_ms=%s ts_ms=%s",
                     elapsed_ms,
                     self.config.entry_max_extreme_to_reclaim_seconds * 1000,
+                    self.state.lower_divergence_extreme_ts_ms,
                     cvd.ts_ms,
                 )
                 self._reset_lower_armed()
@@ -3194,15 +3283,18 @@ class BollCvdReclaimStrategy:
         if price > ref_upper * (1 - self.config.entry_reclaim_buffer_pct):
             return False
 
-        # Extreme-to-reclaim timeout
-        if self.state.upper_extreme_ts_ms > 0:
-            elapsed_ms = cvd.ts_ms - self.state.upper_extreme_ts_ms
+        # Extreme-to-reclaim timeout — use divergence extreme ts in V2
+        # (already gated on upper_anchored_divergence_confirmed above)
+        if self.state.upper_divergence_extreme_ts_ms > 0:
+            elapsed_ms = cvd.ts_ms - self.state.upper_divergence_extreme_ts_ms
             if elapsed_ms > self.config.entry_max_extreme_to_reclaim_seconds * 1000:
                 logger.info(
                     "UPPER_SETUP_EXPIRED | reason=extreme_to_reclaim_timeout "
-                    "elapsed_ms=%s max_ms=%s ts_ms=%s",
+                    "source=reclaim_v2_fractal elapsed_ms=%s max_ms=%s "
+                    "divergence_extreme_ts_ms=%s ts_ms=%s",
                     elapsed_ms,
                     self.config.entry_max_extreme_to_reclaim_seconds * 1000,
+                    self.state.upper_divergence_extreme_ts_ms,
                     cvd.ts_ms,
                 )
                 self._reset_upper_armed()

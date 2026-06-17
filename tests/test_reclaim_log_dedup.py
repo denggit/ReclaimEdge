@@ -499,6 +499,7 @@ class TestReclaimV2AbortWithoutDivergence:
         state.lower_anchored_divergence_confirmed = True  # ← DIVERGENCE CONFIRMED
         state.lower_armed = True  # armed via divergence confirmation
         state.lower_armed_ts_ms = ts_base
+        state.lower_divergence_extreme_ts_ms = ts_base  # valid divergence extreme ts
 
         caplog.set_level(logging.INFO)
 

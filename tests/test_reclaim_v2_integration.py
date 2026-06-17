@@ -2505,3 +2505,402 @@ def test_on_tick_full_path_fractal_after_inside_return(caplog) -> None:
         f"Fractal should confirm via on_tick path, got {len(confirmed_logs)}"
     )
     assert strat.state.lower_first_extreme_price is not None
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Reclaim V2 timeout fixes: total setup timeout from anchor_ts_ms
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+# ── 9.1: waiting fractal phase total setup timeout (LOWER) ─────────────────
+
+def test_v2_waiting_fractal_total_setup_timeout_lower(caplog) -> None:
+    """V2 LOWER waiting for first fractal: exceed total setup → reset.
+
+    Scenario:
+    - lower_outside_observed=True, lower_anchor_ts_ms=1000
+    - lower_anchored_divergence_confirmed=False (no fractal yet)
+    - price inside band, below middle
+    - ts_ms > anchor + total_setup → LOWER_SETUP_EXPIRED
+    """
+    import logging
+    caplog.set_level(logging.INFO)
+
+    strat = _strategy(
+        entry_max_total_setup_seconds=1,  # 1 second timeout
+        min_outside_pct=0.001,
+    )
+    boll = _boll()
+
+    # First outside tick → anchor at ts=1000
+    outside_price = boll.lower * 0.998
+    strat.on_tick(outside_price, 1000, boll, _cvd(ts_ms=1000, price=outside_price,
+                 cumulative_buy_volume=500_000, cumulative_sell_volume=1_500_000))
+    assert strat.state.lower_outside_observed is True
+    assert strat.state.lower_anchor_ts_ms == 1000
+    assert strat.state.lower_anchored_divergence_confirmed is False
+
+    # Advance past total setup timeout; price returns inside band
+    inside_price = boll.lower * 1.001  # just inside lower
+    ts_past_timeout = 1000 + 1 * 1000 + 100  # anchor + 1s + 100ms
+    strat.on_tick(inside_price, ts_past_timeout, boll, _cvd(ts_ms=ts_past_timeout, price=inside_price,
+                 cumulative_buy_volume=500_000, cumulative_sell_volume=1_600_000))
+
+    # Assert: total setup timeout fired and state was reset
+    expired_logs = [r for r in caplog.records if "LOWER_SETUP_EXPIRED" in r.message
+                    and "total_setup_timeout" in r.message
+                    and "phase=reclaim_v2" in r.message]
+    assert len(expired_logs) >= 1, (
+        f"Expected LOWER_SETUP_EXPIRED total_setup_timeout, got {len(expired_logs)}"
+    )
+    assert strat.state.lower_outside_observed is False, (
+        "lower_outside_observed should be False after total setup timeout reset"
+    )
+
+
+# ── 9.1b: waiting fractal phase total setup timeout (UPPER mirror) ────────
+
+def test_v2_waiting_fractal_total_setup_timeout_upper(caplog) -> None:
+    """V2 UPPER waiting for first fractal: exceed total setup → reset."""
+    import logging
+    caplog.set_level(logging.INFO)
+
+    strat = _strategy(
+        entry_max_total_setup_seconds=1,
+        min_outside_pct=0.001,
+    )
+    boll = _boll()
+
+    outside_price = boll.upper * 1.002
+    strat.on_tick(outside_price, 1000, boll, _cvd(ts_ms=1000, price=outside_price,
+                 cumulative_buy_volume=1_500_000, cumulative_sell_volume=500_000,
+                 buy_ratio=0.4, sell_ratio=0.6))
+    assert strat.state.upper_outside_observed is True
+    assert strat.state.upper_anchor_ts_ms == 1000
+
+    inside_price = boll.upper * 0.999
+    ts_past_timeout = 1000 + 1 * 1000 + 100
+    strat.on_tick(inside_price, ts_past_timeout, boll, _cvd(ts_ms=ts_past_timeout, price=inside_price,
+                 cumulative_buy_volume=1_500_000, cumulative_sell_volume=600_000,
+                 buy_ratio=0.4, sell_ratio=0.6))
+
+    expired_logs = [r for r in caplog.records if "UPPER_SETUP_EXPIRED" in r.message
+                    and "total_setup_timeout" in r.message
+                    and "phase=reclaim_v2" in r.message]
+    assert len(expired_logs) >= 1, (
+        f"Expected UPPER_SETUP_EXPIRED total_setup_timeout, got {len(expired_logs)}"
+    )
+    assert strat.state.upper_outside_observed is False
+
+
+# ── 9.2: waiting divergence phase total setup timeout (LOWER) ──────────────
+
+def test_v2_waiting_divergence_total_setup_timeout_lower(caplog) -> None:
+    """V2 LOWER has first fractal extreme but no divergence yet; exceed total setup → reset.
+
+    Scenario:
+    - First fractal extreme confirmed
+    - lower_anchored_divergence_confirmed=False (no 2nd fractal / divergence eval)
+    - No second fractal sequence; advance time past total setup
+    """
+    import logging
+    caplog.set_level(logging.INFO)
+
+    strat = _strategy(
+        entry_max_total_setup_seconds=1,
+        min_outside_pct=0.001,
+    )
+    boll = _boll()
+
+    # First outside tick
+    outside_price = boll.lower * 0.998
+    strat.on_tick(outside_price, 1000, boll, _cvd(ts_ms=1000, price=outside_price,
+                 cumulative_buy_volume=500_000, cumulative_sell_volume=1_500_000))
+    assert strat.state.lower_outside_observed is True
+    assert strat.state.lower_anchor_ts_ms == 1000
+
+    # Feed ticks to simulate fractal formation (partial, within 1s)
+    for minute in range(3):
+        ts = minute * _MINUTE_MS + 30000
+        price = boll.lower * (0.998 - minute * 0.002)
+        strat.on_tick(price, ts, boll, _cvd(ts_ms=ts, price=price,
+                     cumulative_buy_volume=500_000,
+                     cumulative_sell_volume=1_500_000 + minute * 100_000))
+
+    # First extreme should NOT be set yet (need full fractal)
+    # Now let time pass: jump to after total setup timeout
+    # But anchor was at 1000, and we're at ts ~ 150000 from the fractal feed...
+    # The total setup timeout should have fired by now (1800s default is not hit).
+    # We need to set a very small total_setup so it triggers.
+    # But the fractal feeding also advances time, potentially past the timeout.
+    # Let's just set up state directly for this test.
+
+    # Alternative: use direct state setup
+    strat2 = _strategy(entry_max_total_setup_seconds=1, min_outside_pct=0.001)
+    strat2.state.lower_outside_observed = True
+    strat2.state.lower_anchor_ts_ms = 1000
+    strat2.state.lower_first_extreme_price = boll.lower * 0.990
+    strat2.state.lower_first_extreme_ts_ms = 30000
+    strat2.state.lower_last_divergence_evaluated_ts_ms = 0
+    strat2.state.lower_anchored_divergence_confirmed = False
+
+    # Call _update_armed_state with ts past timeout
+    ts_past = 1000 + 1 * 1000 + 100
+    strat2._update_armed_state(boll.middle * 0.95, ts_past, boll, None)
+
+    expired_logs = [r for r in caplog.records if "LOWER_SETUP_EXPIRED" in r.message
+                    and "total_setup_timeout" in r.message
+                    and "phase=reclaim_v2" in r.message]
+    assert len(expired_logs) >= 1, (
+        f"Expected LOWER_SETUP_EXPIRED total_setup_timeout in waiting-divergence phase, "
+        f"got {len(expired_logs)}"
+    )
+    assert strat2.state.lower_outside_observed is False, (
+        "lower_outside_observed should be reset after total setup timeout"
+    )
+
+
+# ── 9.2b: waiting divergence phase total setup timeout (UPPER mirror) ──────
+
+def test_v2_waiting_divergence_total_setup_timeout_upper(caplog) -> None:
+    """V2 UPPER has first fractal extreme but no divergence yet; exceed total setup → reset."""
+    import logging
+    caplog.set_level(logging.INFO)
+
+    strat = _strategy(entry_max_total_setup_seconds=1, min_outside_pct=0.001)
+    boll = _boll()
+
+    strat.state.upper_outside_observed = True
+    strat.state.upper_anchor_ts_ms = 1000
+    strat.state.upper_first_extreme_price = boll.upper * 1.010
+    strat.state.upper_first_extreme_ts_ms = 30000
+    strat.state.upper_last_divergence_evaluated_ts_ms = 0
+    strat.state.upper_anchored_divergence_confirmed = False
+
+    ts_past = 1000 + 1 * 1000 + 100
+    strat._update_armed_state(boll.middle * 1.05, ts_past, boll, None)
+
+    expired_logs = [r for r in caplog.records if "UPPER_SETUP_EXPIRED" in r.message
+                    and "total_setup_timeout" in r.message
+                    and "phase=reclaim_v2" in r.message]
+    assert len(expired_logs) >= 1, (
+        f"Expected UPPER_SETUP_EXPIRED total_setup_timeout, got {len(expired_logs)}"
+    )
+    assert strat.state.upper_outside_observed is False
+
+
+# ── 9.3: V2 armed extreme-to-reclaim uses divergence_extreme_ts_ms (LOWER) ──
+
+def test_v2_armed_extreme_timeout_uses_divergence_ts_lower(caplog) -> None:
+    """When V2 divergence confirmed, extreme-to-reclaim timeout must use
+    lower_divergence_extreme_ts_ms, NOT tick-level lower_extreme_ts_ms.
+
+    Scenario:
+    - lower_anchored_divergence_confirmed=True
+    - lower_divergence_extreme_ts_ms=1000 (divergence extreme)
+    - lower_extreme_ts_ms=999999999 (tick-level, deliberately different)
+    - ts_ms = divergence extreme + max_extreme_to_reclaim*1000 + 1
+    - Assert: timeout fires (using divergence ts, not tick-level ts)
+    """
+    import logging
+    caplog.set_level(logging.INFO)
+
+    _MAX_RECLAIM = 5  # small timeout for testing
+    strat = _strategy(
+        entry_max_extreme_to_reclaim_seconds=_MAX_RECLAIM,
+        min_outside_pct=0.001,
+    )
+    boll = _boll()
+
+    # Set up armed state with divergence confirmed
+    strat.state.lower_armed = True
+    strat.state.lower_armed_ts_ms = 5000
+    strat.state.lower_deep_enough = True
+    strat.state.lower_extreme_price = 1880.0
+    strat.state.lower_anchored_divergence_confirmed = True
+    strat.state.lower_cvd_divergence_confirmed = True
+    strat.state.lower_first_armed_ts_ms = 5000
+    strat.state.lower_outside_observed = True
+    strat.state.lower_anchor_ts_ms = 1000
+
+    # Key: divergence_extreme_ts_ms is 1000, lower_extreme_ts_ms is very large
+    strat.state.lower_divergence_extreme_ts_ms = 1000
+    strat.state.lower_extreme_ts_ms = 999999999  # would NOT trigger timeout if used
+
+    # Call _expire_armed_state at ts that would timeout using divergence ts
+    ts_ms = 1000 + _MAX_RECLAIM * 1000 + 1  # just past timeout from divergence ts
+    strat._expire_armed_state(ts_ms)
+
+    # Assert: timeout fired with source=reclaim_v2_fractal
+    reset_logs = [r for r in caplog.records if "LOWER_ARMED_RESET" in r.message
+                  and "extreme_to_reclaim_timeout" in r.message
+                  and "source=reclaim_v2_fractal" in r.message]
+    assert len(reset_logs) >= 1, (
+        f"Expected LOWER_ARMED_RESET extreme_to_reclaim_timeout source=reclaim_v2_fractal, "
+        f"got {len(reset_logs)}"
+    )
+    assert strat.state.lower_armed is False, "Should be reset after timeout"
+
+
+# ── 9.3b: V2 armed extreme-to-reclaim uses divergence_extreme_ts_ms (UPPER) ─
+
+def test_v2_armed_extreme_timeout_uses_divergence_ts_upper(caplog) -> None:
+    """UPPER mirror: extreme-to-reclaim timeout uses upper_divergence_extreme_ts_ms."""
+    import logging
+    caplog.set_level(logging.INFO)
+
+    _MAX_RECLAIM = 5
+    strat = _strategy(
+        entry_max_extreme_to_reclaim_seconds=_MAX_RECLAIM,
+        min_outside_pct=0.001,
+    )
+    boll = _boll()
+
+    strat.state.upper_armed = True
+    strat.state.upper_armed_ts_ms = 5000
+    strat.state.upper_deep_enough = True
+    strat.state.upper_extreme_price = 2120.0
+    strat.state.upper_anchored_divergence_confirmed = True
+    strat.state.upper_cvd_divergence_confirmed = True
+    strat.state.upper_first_armed_ts_ms = 5000
+    strat.state.upper_outside_observed = True
+    strat.state.upper_anchor_ts_ms = 1000
+
+    strat.state.upper_divergence_extreme_ts_ms = 1000
+    strat.state.upper_extreme_ts_ms = 999999999
+
+    ts_ms = 1000 + _MAX_RECLAIM * 1000 + 1
+    strat._expire_armed_state(ts_ms)
+
+    reset_logs = [r for r in caplog.records if "UPPER_ARMED_RESET" in r.message
+                  and "extreme_to_reclaim_timeout" in r.message
+                  and "source=reclaim_v2_fractal" in r.message]
+    assert len(reset_logs) >= 1, (
+        f"Expected UPPER_ARMED_RESET source=reclaim_v2_fractal, got {len(reset_logs)}"
+    )
+    assert strat.state.upper_armed is False
+
+
+# ── 9.4: V2 missing divergence extreme ts safe reset (LOWER) ────────────────
+
+def test_v2_missing_divergence_extreme_ts_safe_reset_lower(caplog) -> None:
+    """When V2 divergence confirmed but divergence_extreme_ts_ms <= 0,
+    must log WARNING and reset — no silent fallback to tick-level extreme_ts.
+
+    Scenario:
+    - lower_anchored_divergence_confirmed=True
+    - lower_divergence_extreme_ts_ms=0
+    - Assert: WARNING + LOWER_ARMED_RESET reason=missing_divergence_extreme_ts
+    """
+    import logging
+    caplog.set_level(logging.WARNING)
+
+    strat = _strategy(min_outside_pct=0.001)
+    boll = _boll()
+
+    strat.state.lower_armed = True
+    strat.state.lower_armed_ts_ms = 5000
+    strat.state.lower_deep_enough = True
+    strat.state.lower_extreme_price = 1880.0
+    strat.state.lower_anchored_divergence_confirmed = True
+    strat.state.lower_cvd_divergence_confirmed = True
+    strat.state.lower_first_armed_ts_ms = 5000
+    strat.state.lower_outside_observed = True
+    strat.state.lower_anchor_ts_ms = 1000
+
+    # Missing divergence extreme ts
+    strat.state.lower_divergence_extreme_ts_ms = 0
+    strat.state.lower_extreme_ts_ms = 5000  # has tick-level ts but shouldn't be used
+
+    strat._expire_armed_state(100000)
+
+    # Should log WARNING and reset
+    warn_logs = [r for r in caplog.records if r.levelno == logging.WARNING
+                 and "missing_divergence_extreme_ts" in r.message]
+    assert len(warn_logs) >= 1, (
+        f"Expected WARNING for missing divergence extreme ts, got {len(warn_logs)}"
+    )
+    assert strat.state.lower_armed is False, "Should be reset on missing divergence extreme ts"
+
+
+# ── 9.4b: V2 missing divergence extreme ts safe reset (UPPER) ───────────────
+
+def test_v2_missing_divergence_extreme_ts_safe_reset_upper(caplog) -> None:
+    """UPPER mirror: missing divergence extreme ts → WARNING + reset."""
+    import logging
+    caplog.set_level(logging.WARNING)
+
+    strat = _strategy(min_outside_pct=0.001)
+    boll = _boll()
+
+    strat.state.upper_armed = True
+    strat.state.upper_armed_ts_ms = 5000
+    strat.state.upper_deep_enough = True
+    strat.state.upper_extreme_price = 2120.0
+    strat.state.upper_anchored_divergence_confirmed = True
+    strat.state.upper_cvd_divergence_confirmed = True
+    strat.state.upper_first_armed_ts_ms = 5000
+    strat.state.upper_outside_observed = True
+    strat.state.upper_anchor_ts_ms = 1000
+
+    strat.state.upper_divergence_extreme_ts_ms = 0
+    strat.state.upper_extreme_ts_ms = 5000
+
+    strat._expire_armed_state(100000)
+
+    warn_logs = [r for r in caplog.records if r.levelno == logging.WARNING
+                 and "missing_divergence_extreme_ts" in r.message]
+    assert len(warn_logs) >= 1, (
+        f"Expected WARNING for missing divergence extreme ts (UPPER), got {len(warn_logs)}"
+    )
+    assert strat.state.upper_armed is False
+
+
+# ── 9.5: full on_tick path — outside → inside → fractal → total timeout ─────
+
+def test_on_tick_full_path_total_setup_timeout(caplog) -> None:
+    """Full on_tick path: outside observed → inside continuation → wait fractal
+    → exceed total setup timeout → reset. Uses strat.on_tick() only."""
+    import logging
+    caplog.set_level(logging.INFO)
+
+    _TOTAL_SETUP_S = 5  # 5 seconds
+    strat = _strategy(
+        entry_max_total_setup_seconds=_TOTAL_SETUP_S,
+        min_outside_pct=0.001,
+    )
+    boll = _boll()
+
+    # Minute 0: outside lower → anchor at ts=30000
+    outside_price = boll.lower * 0.998
+    strat.on_tick(outside_price, 30000, boll, _cvd(ts_ms=30000, price=outside_price,
+                 cumulative_buy_volume=500_000, cumulative_sell_volume=1_500_000))
+    assert strat.state.lower_outside_observed is True
+    assert strat.state.lower_anchor_ts_ms == 30000
+
+    # Minute 1: still outside
+    strat.on_tick(boll.lower * 0.996, 90000, boll, _cvd(ts_ms=90000, price=boll.lower * 0.996,
+                 cumulative_buy_volume=500_000, cumulative_sell_volume=1_600_000))
+
+    # Minute 2: candidate low
+    strat.on_tick(boll.lower * 0.990, 150000, boll, _cvd(ts_ms=150000, price=boll.lower * 0.990,
+                 cumulative_buy_volume=500_000, cumulative_sell_volume=1_700_000))
+
+    # Minute 3: price returns inside band
+    # The total setup timeout fires at the BEGINNING of _update_armed_state,
+    # and since anchor_ts_ms=150000 (from re-anchoring at ts=150000),
+    # ts=210000 → diff=60000ms > 5000ms → timeout fires → reset.
+    inside_price = boll.lower * 1.002
+    strat.on_tick(inside_price, 210000, boll, _cvd(ts_ms=210000, price=inside_price,
+                 cumulative_buy_volume=500_000, cumulative_sell_volume=1_800_000))
+
+    # After the timeout reset at ts=210000, lower_outside_observed is False
+    expired_logs = [r for r in caplog.records if "LOWER_SETUP_EXPIRED" in r.message
+                    and "total_setup_timeout" in r.message
+                    and "phase=reclaim_v2" in r.message]
+    assert len(expired_logs) >= 1, (
+        f"Expected total_setup_timeout via on_tick path, got {len(expired_logs)}"
+    )
+    assert strat.state.lower_outside_observed is False, (
+        "lower_outside_observed should be False after total setup timeout via on_tick"
+    )
