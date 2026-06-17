@@ -1215,18 +1215,17 @@ def test_extreme_snapshot_after_new_extreme_lower(caplog) -> None:
     # Tick 2: first extreme
     p2 = boll.lower * 0.994
     strat.on_tick(p2, 2000, boll, _cvd(ts_ms=2000, price=p2, cumulative_buy_volume=500_000, cumulative_sell_volume=1_600_000))
-    # Tick 3: new extreme (t=3000) — triggers snapshot_pending
+    # Tick 3: new extreme (t=3000) — triggers snapshot_pending, but throttled (within 10s)
     p3 = boll.lower * 0.990
     strat.on_tick(p3, 3000, boll, _cvd(ts_ms=3000, price=p3, cumulative_buy_volume=600_000, cumulative_sell_volume=1_800_000))
 
-    # Within 10s (t=3000..13000), no snapshot yet — still inside interval
-    # At t=4000: same extreme, but no new extreme, still shouldn't log
-    strat.on_tick(p3, 4000, boll, _cvd(ts_ms=4000, price=p3, cumulative_buy_volume=600_000, cumulative_sell_volume=1_800_000))
+    # Within 10s (t=3000..13000), snapshot throttled — no log yet
     snapshot_logs = [r for r in caplog.records if "LOWER_EXTREME_SNAPSHOT" in r.message]
     assert len(snapshot_logs) == 0, "Should not print snapshot within 10s of pending"
 
-    # After 10s (t=14000): snapshot should print
-    strat.on_tick(p3, 14000, boll, _cvd(ts_ms=14000, price=p3, cumulative_buy_volume=600_000, cumulative_sell_volume=1_800_000))
+    # After 10s (t=14000): new extreme → snapshot fires (throttle expired + new eval)
+    p4 = boll.lower * 0.986  # even lower → new extreme triggers divergence eval + snapshot
+    strat.on_tick(p4, 14000, boll, _cvd(ts_ms=14000, price=p4, cumulative_buy_volume=650_000, cumulative_sell_volume=1_900_000))
     snapshot_logs = [r for r in caplog.records if "LOWER_EXTREME_SNAPSHOT" in r.message]
     assert len(snapshot_logs) == 1, f"Expected 1 snapshot after 10s, got {len(snapshot_logs)}"
 
@@ -1255,8 +1254,9 @@ def test_extreme_snapshot_after_new_extreme_upper(caplog) -> None:
                                          buy_ratio=0.4, sell_ratio=0.6, cross_positive=False, cross_negative=True,
                                          cvd_increasing=False, cvd_decreasing=True, no_new_high=True))
 
-    # After 10s: snapshot should print
-    strat.on_tick(p3, 14000, boll, _cvd(ts_ms=14000, price=p3, cumulative_buy_volume=1_400_000, cumulative_sell_volume=600_000,
+    # After 10s: new extreme → snapshot fires (throttle expired + new eval)
+    p4 = boll.upper * 1.014  # even higher → new extreme triggers divergence eval + snapshot
+    strat.on_tick(p4, 14000, boll, _cvd(ts_ms=14000, price=p4, cumulative_buy_volume=1_300_000, cumulative_sell_volume=700_000,
                                          buy_ratio=0.4, sell_ratio=0.6, cross_positive=False, cross_negative=True,
                                          cvd_increasing=False, cvd_decreasing=True, no_new_high=True))
     snapshot_logs = [r for r in caplog.records if "UPPER_EXTREME_SNAPSHOT" in r.message]
@@ -1264,14 +1264,18 @@ def test_extreme_snapshot_after_new_extreme_upper(caplog) -> None:
 
 
 def test_no_snapshot_without_new_extreme(caplog) -> None:
-    """Outside ticks without new extreme should NOT trigger snapshot."""
+    """Outside ticks without new extreme should NOT trigger snapshot.
+
+    Snapshot is only called after divergence evaluation, which requires
+    a new extreme. Same-price ticks do not trigger new snapshots.
+    """
     import logging
     caplog.set_level(logging.INFO)
 
     strat = _strategy(min_outside_pct=0.001, reclaim_extreme_log_interval_seconds=10)
     boll = _boll()
 
-    # Anchor + first extreme + new extreme (triggers pending)
+    # Anchor + first extreme + new extreme (triggers pending, but throttled within 10s)
     p1 = boll.lower * 0.998
     strat.on_tick(p1, 1000, boll, _cvd(ts_ms=1000, price=p1, cumulative_buy_volume=500_000, cumulative_sell_volume=1_500_000))
     p2 = boll.lower * 0.994
@@ -1279,14 +1283,26 @@ def test_no_snapshot_without_new_extreme(caplog) -> None:
     p3 = boll.lower * 0.990
     strat.on_tick(p3, 3000, boll, _cvd(ts_ms=3000, price=p3, cumulative_buy_volume=600_000, cumulative_sell_volume=1_800_000))
 
-    # After 10s, snapshot prints once
-    strat.on_tick(p3, 14000, boll, _cvd(ts_ms=14000, price=p3, cumulative_buy_volume=600_000, cumulative_sell_volume=1_800_000))
+    # No snapshot yet (throttled within 10s interval)
     snapshot_logs = [r for r in caplog.records if "LOWER_EXTREME_SNAPSHOT" in r.message]
-    assert len(snapshot_logs) == 1
+    assert len(snapshot_logs) == 0, "Snapshot should be throttled within 10s"
 
-    # More outside ticks without new extreme → no more snapshots
+    # After 10s, same-price tick (no new extreme) → snapshot NOT called
     strat.on_tick(p3, 25000, boll, _cvd(ts_ms=25000, price=p3, cumulative_buy_volume=600_000, cumulative_sell_volume=1_800_000))
-    strat.on_tick(p3, 26000, boll, _cvd(ts_ms=26000, price=p3, cumulative_buy_volume=600_000, cumulative_sell_volume=1_800_000))
+    snapshot_logs = [r for r in caplog.records if "LOWER_EXTREME_SNAPSHOT" in r.message]
+    assert len(snapshot_logs) == 0, (
+        "Same-price tick (no new extreme) should NOT trigger snapshot — "
+        "snapshot only fires after divergence evaluation"
+    )
+
+    # New extreme after throttle expires → snapshot fires
+    p4 = boll.lower * 0.986
+    strat.on_tick(p4, 35000, boll, _cvd(ts_ms=35000, price=p4, cumulative_buy_volume=650_000, cumulative_sell_volume=1_900_000))
+    snapshot_logs = [r for r in caplog.records if "LOWER_EXTREME_SNAPSHOT" in r.message]
+    assert len(snapshot_logs) == 1, "New extreme after throttle should trigger snapshot"
+
+    # More same-price ticks → no additional snapshots
+    strat.on_tick(p4, 36000, boll, _cvd(ts_ms=36000, price=p4, cumulative_buy_volume=650_000, cumulative_sell_volume=1_900_000))
     snapshot_logs = [r for r in caplog.records if "LOWER_EXTREME_SNAPSHOT" in r.message]
     assert len(snapshot_logs) == 1, "Should not print additional snapshots without new extreme"
 
@@ -1302,25 +1318,33 @@ def test_snapshot_logs_latest_extreme_only(caplog) -> None:
     # Anchor
     p1 = boll.lower * 0.998
     strat.on_tick(p1, 1000, boll, _cvd(ts_ms=1000, price=p1, cumulative_buy_volume=500_000, cumulative_sell_volume=1_500_000))
-    # First extreme: 1890.6
-    p2 = boll.lower * 0.994  # ~1888.6
+    # First extreme: ~1888.6
+    p2 = boll.lower * 0.994
     strat.on_tick(p2, 2000, boll, _cvd(ts_ms=2000, price=p2, cumulative_buy_volume=500_000, cumulative_sell_volume=1_600_000))
-    # New extreme t=3000: price 1881
-    p3 = boll.lower * 0.990  # ~1881
+    # New extreme t=3000: ~1881 (throttled — within 10s)
+    p3 = boll.lower * 0.990
     strat.on_tick(p3, 3000, boll, _cvd(ts_ms=3000, price=p3, cumulative_buy_volume=600_000, cumulative_sell_volume=1_800_000))
-    # New extreme t=5000: price 1875 (even lower)
-    p4 = boll.lower * 0.987  # ~1875.3
+    # New extreme t=5000: ~1875 (throttled — within 10s)
+    p4 = boll.lower * 0.987
     strat.on_tick(p4, 5000, boll, _cvd(ts_ms=5000, price=p4, cumulative_buy_volume=650_000, cumulative_sell_volume=1_900_000))
-    # New extreme t=7000: price 1862 (lowest)
-    p5 = boll.lower * 0.980  # ~1862
+    # New extreme t=7000: ~1862 (throttled — within 10s)
+    p5 = boll.lower * 0.980
     strat.on_tick(p5, 7000, boll, _cvd(ts_ms=7000, price=p5, cumulative_buy_volume=700_000, cumulative_sell_volume=2_000_000))
 
-    # After 10s (t=14000): only one snapshot with latest extreme
-    strat.on_tick(p5, 14000, boll, _cvd(ts_ms=14000, price=p5, cumulative_buy_volume=700_000, cumulative_sell_volume=2_000_000))
+    # All within 10s → no snapshot yet
+    snapshot_logs = [r for r in caplog.records if "LOWER_EXTREME_SNAPSHOT" in r.message]
+    assert len(snapshot_logs) == 0, "All extremes within 10s — no snapshot yet"
+
+    # After 10s (t=18000): new extreme → snapshot fires with LATEST coherent pair
+    p6 = boll.lower * 0.976  # ~1854.4
+    strat.on_tick(p6, 18000, boll, _cvd(ts_ms=18000, price=p6, cumulative_buy_volume=750_000, cumulative_sell_volume=2_100_000))
     snapshot_logs = [r for r in caplog.records if "LOWER_EXTREME_SNAPSHOT" in r.message]
     assert len(snapshot_logs) == 1, f"Expected 1 snapshot (latest only), got {len(snapshot_logs)}"
-    # The new_extreme_count should reflect all extremes seen
-    assert "new_extreme_count=3" in snapshot_logs[0].message or "new_extreme_count=4" in snapshot_logs[0].message
+    msg = snapshot_logs[0].getMessage()
+    # prev must be p5 (~1862), curr must be p6 (~1854)
+    assert "curr_extreme=1854.4000" in msg, f"Snapshot should use latest extreme, got: {msg}"
+    # Verify coherent: prev should reference p5 (~1862), not p4 or earlier
+    assert "prev_extreme=1862.0000" in msg, f"prev should be 1862 (p5), got: {msg}"
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -1715,3 +1739,404 @@ def test_re_entry_after_abort_upper(caplog) -> None:
     assert strat.state.upper_outside_observed is True, (
         "Should start fresh upper_outside_observed after re-break"
     )
+
+
+# ======================================================================
+# Tests: coherent snapshot log — prev/current pair from SAME divergence evaluation
+# ======================================================================
+
+
+def _snap_strategy(**overrides) -> BollCvdReclaimStrategy:
+    """Build a strategy for snapshot log tests with zero log interval."""
+    cfg_kwargs = dict(
+        min_outside_pct=0.001,
+        entry_min_reward_risk=0.0,
+        entry_fee_slippage_buffer_pct=0.0,
+        order_cooldown_seconds=0,
+        entry_reclaim_v2_enabled=True,
+        entry_reclaim_require_anchored_divergence=True,
+        entry_reclaim_new_extreme_buffer_pct=0.0,
+        entry_reclaim_min_cvd_recovery=0.0,
+        reclaim_extreme_log_interval_seconds=0,  # no throttle for testing
+    )
+    cfg_kwargs.update(overrides)
+    cfg = BollCvdReclaimStrategyConfig(**cfg_kwargs)
+    sizer = SimplePositionSizer(SimplePositionSizerConfig(
+        dry_run_equity_usdt=10_000, leverage=20, trade_risk_pct=0.01,
+        fee_slippage_buffer_pct=0.001,
+    ))
+    return BollCvdReclaimStrategy(cfg, sizer)
+
+
+# ── Test: LOWER snapshot uses coherent prev/current pair ──────────────
+
+def test_lower_snapshot_coherent_pair(caplog) -> None:
+    """LOWER_EXTREME_SNAPSHOT prev/curr must come from same divergence eval."""
+    import logging
+    caplog.set_level(logging.INFO)
+
+    strat = _snap_strategy()
+    boll = _boll(lower=1900)
+
+    # Step 1: outside observed
+    p1 = 1898.0  # below lower=1900
+    strat.on_tick(p1, 1000, boll, _cvd(
+        ts_ms=1000, price=p1,
+        cumulative_buy_volume=500_000, cumulative_sell_volume=1_500_000,
+    ))
+
+    # Step 2: first valid extreme (price=1894, anchored_cvd = -100k)
+    p2 = 1894.0
+    strat.on_tick(p2, 2000, boll, _cvd(
+        ts_ms=2000, price=p2,
+        cumulative_buy_volume=500_000, cumulative_sell_volume=1_600_000,
+    ))
+    # Should record first extreme but NOT print snapshot
+    assert strat.state.lower_first_extreme_price == 1894.0
+    snapshot_logs_step2 = [r for r in caplog.records if "LOWER_EXTREME_SNAPSHOT" in r.getMessage()]
+    assert len(snapshot_logs_step2) == 0, (
+        "First extreme should NOT produce LOWER_EXTREME_SNAPSHOT (no pair yet)"
+    )
+    first_logs = [r for r in caplog.records if "LOWER_FIRST_VALID_EXTREME" in r.getMessage()]
+    assert len(first_logs) == 1
+
+    # Step 3: second extreme (price=1890, anchored_cvd = -200k, CVD follows lower)
+    # prev=1894 prev_cvd=-100k, curr=1890 curr_cvd=-200k → no recovery → cvd_not_recovered
+    p3 = 1890.0
+    strat.on_tick(p3, 3000, boll, _cvd(
+        ts_ms=3000, price=p3,
+        cumulative_buy_volume=500_000, cumulative_sell_volume=1_700_000,
+    ))
+
+    snapshot_logs = [r for r in caplog.records if "LOWER_EXTREME_SNAPSHOT" in r.getMessage()]
+    assert len(snapshot_logs) == 1, f"Expected 1 LOWER_EXTREME_SNAPSHOT, got {len(snapshot_logs)}"
+    msg = snapshot_logs[0].getMessage()
+
+    # prev pair must match first extreme
+    assert "prev_extreme=1894.0000" in msg, f"prev_extreme mismatch: {msg}"
+    assert "prev_cvd=-100000.0000" in msg, f"prev_cvd mismatch: {msg}"
+    # curr pair must match second extreme
+    assert "curr_extreme=1890.0000" in msg, f"curr_extreme mismatch: {msg}"
+    assert "curr_cvd=-200000.0000" in msg, f"curr_cvd mismatch: {msg}"
+    # divergence not confirmed (CVD followed lower)
+    assert "divergence_confirmed=False" in msg
+    assert "divergence_reason=cvd_not_recovered" in msg
+
+
+# ── Test: LOWER cvd_not_recovered reason when price extends but CVD follows ──
+
+def test_lower_snapshot_cvd_not_recovered_reason(caplog) -> None:
+    """When price makes a new low AND CVD makes a new low → cvd_not_recovered."""
+    import logging
+    caplog.set_level(logging.INFO)
+
+    strat = _snap_strategy()
+    boll = _boll(lower=1900)
+
+    # Outside observed
+    strat.on_tick(1898, 1000, boll, _cvd(
+        ts_ms=1000, price=1898,
+        cumulative_buy_volume=1_000_000, cumulative_sell_volume=2_000_000,
+    ))
+    # First extreme: cum_cvd = -1M
+    strat.on_tick(1894, 2000, boll, _cvd(
+        ts_ms=2000, price=1894,
+        cumulative_buy_volume=1_000_000, cumulative_sell_volume=2_000_000,
+    ))
+    assert strat.state.lower_first_extreme_price is not None
+
+    # Second extreme: price lower (1890 < 1894) BUT CVD unchanged/more sell
+    # cum_cvd = 1M - 2.3M = -1.3M. anchored_cvd = -300k
+    # prev anchored_cvd = 0 (same cum_cvd at first extreme) → wait...
+    # Actually at first extreme, cum_cvd = 1M - 2M = -1M, anchor was at p=1898 with cum_cvd = -1M
+    # So prev anchored_cvd = 0. curr anchored_cvd = -1.3M - (-1M) = -300k
+    # curr_cvd < prev_cvd → cvd_not_recovered
+    strat.on_tick(1890, 3000, boll, _cvd(
+        ts_ms=3000, price=1890,
+        cumulative_buy_volume=1_000_000, cumulative_sell_volume=2_300_000,
+    ))
+
+    snapshot_logs = [r for r in caplog.records if "LOWER_EXTREME_SNAPSHOT" in r.getMessage()]
+    assert len(snapshot_logs) == 1
+    msg = snapshot_logs[0].getMessage()
+
+    assert "divergence_confirmed=False" in msg
+    assert "divergence_reason=cvd_not_recovered" in msg
+    # Must NOT be no_new_low (price DID make a new low)
+    assert "no_new_low" not in msg
+
+
+# ── Test: LOWER divergence confirmed when CVD recovers ────────────────
+
+def test_lower_snapshot_divergence_confirmed(caplog) -> None:
+    """When price makes new low AND CVD recovers → confirmed=True, reason=ok."""
+    import logging
+    caplog.set_level(logging.INFO)
+
+    strat = _snap_strategy()
+    boll = _boll(lower=1900)
+
+    # Outside observed: cum_cvd = 500k - 1.5M = -1M (anchor)
+    strat.on_tick(1898, 1000, boll, _cvd(
+        ts_ms=1000, price=1898,
+        cumulative_buy_volume=500_000, cumulative_sell_volume=1_500_000,
+    ))
+    # First extreme: cum_cvd = 500k - 1.5M = -1M, anchored_cvd = 0
+    strat.on_tick(1894, 2000, boll, _cvd(
+        ts_ms=2000, price=1894,
+        cumulative_buy_volume=500_000, cumulative_sell_volume=1_500_000,
+    ))
+
+    # Second extreme: price lower, CVD recovered
+    # cum_cvd = 800k - 1.4M = -600k. anchored_cvd = -600k - (-1M) = 400k
+    # prev anchored_cvd = 0, curr anchored_cvd = 400k → CVD recovered → confirmed
+    strat.on_tick(1890, 3000, boll, _cvd(
+        ts_ms=3000, price=1890,
+        cumulative_buy_volume=800_000, cumulative_sell_volume=1_400_000,
+    ))
+
+    snapshot_logs = [r for r in caplog.records if "LOWER_EXTREME_SNAPSHOT" in r.getMessage()]
+    assert len(snapshot_logs) == 1
+    msg = snapshot_logs[0].getMessage()
+
+    assert "prev_extreme=1894.0000" in msg
+    assert "curr_extreme=1890.0000" in msg
+    assert "divergence_confirmed=True" in msg
+    assert "divergence_reason=ok" in msg
+    assert strat.state.lower_armed is True
+
+
+# ── Test: UPPER snapshot uses coherent prev/current pair ──────────────
+
+def test_upper_snapshot_coherent_pair(caplog) -> None:
+    """UPPER_EXTREME_SNAPSHOT prev/curr must come from same divergence eval."""
+    import logging
+    caplog.set_level(logging.INFO)
+
+    strat = _snap_strategy()
+    boll = _boll(upper=2100)
+
+    # Outside observed above upper
+    strat.on_tick(2102, 1000, boll, _cvd(
+        ts_ms=1000, price=2102,
+        cumulative_buy_volume=1_500_000, cumulative_sell_volume=500_000,
+        buy_ratio=0.4, sell_ratio=0.6,
+    ))
+    # First extreme at 2106: anchored_cvd = +100k
+    strat.on_tick(2106, 2000, boll, _cvd(
+        ts_ms=2000, price=2106,
+        cumulative_buy_volume=1_600_000, cumulative_sell_volume=500_000,
+        buy_ratio=0.4, sell_ratio=0.6,
+    ))
+    assert strat.state.upper_first_extreme_price is not None
+    # No snapshot for first extreme
+    snapshot_logs_step2 = [r for r in caplog.records if "UPPER_EXTREME_SNAPSHOT" in r.getMessage()]
+    assert len(snapshot_logs_step2) == 0
+
+    # Second extreme at 2110: anchored_cvd = +200k (CVD follows higher → no reversal)
+    # prev=2106 prev_cvd=+100k, curr=2110 curr_cvd=+200k → CVD went UP → cvd_not_reversed
+    strat.on_tick(2110, 3000, boll, _cvd(
+        ts_ms=3000, price=2110,
+        cumulative_buy_volume=1_700_000, cumulative_sell_volume=500_000,
+        buy_ratio=0.4, sell_ratio=0.6,
+    ))
+
+    snapshot_logs = [r for r in caplog.records if "UPPER_EXTREME_SNAPSHOT" in r.getMessage()]
+    assert len(snapshot_logs) == 1, f"Expected 1 UPPER_EXTREME_SNAPSHOT, got {len(snapshot_logs)}"
+    msg = snapshot_logs[0].getMessage()
+
+    assert "prev_extreme=2106.0000" in msg, f"prev_extreme mismatch: {msg}"
+    assert "prev_cvd=100000.0000" in msg, f"prev_cvd mismatch: {msg}"
+    assert "curr_extreme=2110.0000" in msg, f"curr_extreme mismatch: {msg}"
+    assert "curr_cvd=200000.0000" in msg, f"curr_cvd mismatch: {msg}"
+    assert "divergence_confirmed=False" in msg
+    assert "divergence_reason=cvd_not_reversed" in msg
+
+
+# ── Test: UPPER divergence confirmed when CVD reverses ────────────────
+
+def test_upper_snapshot_divergence_confirmed(caplog) -> None:
+    """When price makes new high AND CVD reverses → confirmed=True, reason=ok."""
+    import logging
+    caplog.set_level(logging.INFO)
+
+    strat = _snap_strategy()
+    boll = _boll(upper=2100)
+
+    # Outside observed: cum_cvd = 1.5M - 500k = +1M (anchor)
+    strat.on_tick(2102, 1000, boll, _cvd(
+        ts_ms=1000, price=2102,
+        cumulative_buy_volume=1_500_000, cumulative_sell_volume=500_000,
+        buy_ratio=0.4, sell_ratio=0.6,
+    ))
+    # First extreme: same cum_cvd, anchored_cvd = 0
+    strat.on_tick(2106, 2000, boll, _cvd(
+        ts_ms=2000, price=2106,
+        cumulative_buy_volume=1_500_000, cumulative_sell_volume=500_000,
+        buy_ratio=0.4, sell_ratio=0.6,
+    ))
+
+    # Second extreme at 2110: cum_cvd = 1.2M - 800k = +400k
+    # anchored_cvd = +400k - (+1M) = -600k
+    # prev anchored_cvd = 0, curr anchored_cvd = -600k → CVD reversed → confirmed
+    strat.on_tick(2110, 3000, boll, _cvd(
+        ts_ms=3000, price=2110,
+        cumulative_buy_volume=1_200_000, cumulative_sell_volume=800_000,
+        buy_ratio=0.4, sell_ratio=0.6,
+    ))
+
+    snapshot_logs = [r for r in caplog.records if "UPPER_EXTREME_SNAPSHOT" in r.getMessage()]
+    assert len(snapshot_logs) == 1
+    msg = snapshot_logs[0].getMessage()
+
+    assert "prev_extreme=2106.0000" in msg
+    assert "curr_extreme=2110.0000" in msg
+    assert "divergence_confirmed=True" in msg
+    assert "divergence_reason=ok" in msg
+    assert strat.state.upper_armed is True
+
+
+# ── Test: delayed snapshot uses latest coherent decision ──────────────
+
+def test_delayed_snapshot_uses_latest_coherent_decision(caplog) -> None:
+    """Multiple new extremes within log interval → snapshot uses LAST evaluation."""
+    import logging
+    caplog.set_level(logging.INFO)
+
+    strat = _snap_strategy(reclaim_extreme_log_interval_seconds=10)
+    boll = _boll(lower=1900)
+
+    # Outside observed: cum_cvd = 500k - 1.5M = -1M (anchor)
+    strat.on_tick(1898, 1000, boll, _cvd(
+        ts_ms=1000, price=1898,
+        cumulative_buy_volume=500_000, cumulative_sell_volume=1_500_000,
+    ))
+    # First extreme: anchored_cvd = 0
+    strat.on_tick(1894, 2000, boll, _cvd(
+        ts_ms=2000, price=1894,
+        cumulative_buy_volume=500_000, cumulative_sell_volume=1_500_000,
+    ))
+
+    # Second extreme (1892): same CVD → cvd_not_recovered
+    # This sets pending=True but throttle prevents log (interval=10s, only 1s elapsed)
+    strat.on_tick(1892, 3000, boll, _cvd(
+        ts_ms=3000, price=1892,
+        cumulative_buy_volume=500_000, cumulative_sell_volume=1_600_000,
+    ))
+    # Should NOT have printed snapshot yet (throttled)
+    snapshot_after_2nd = [r for r in caplog.records if "LOWER_EXTREME_SNAPSHOT" in r.getMessage()]
+    assert len(snapshot_after_2nd) == 0, "Snapshot should be throttled within 10s"
+
+    # Third extreme (1890): prev is now 1892, curr is 1890
+    # This re-evaluates and overwrites the snapshot cache
+    strat.on_tick(1890, 4000, boll, _cvd(
+        ts_ms=4000, price=1890,
+        cumulative_buy_volume=500_000, cumulative_sell_volume=1_700_000,
+    ))
+    # Still throttled
+    snapshot_after_3rd = [r for r in caplog.records if "LOWER_EXTREME_SNAPSHOT" in r.getMessage()]
+    assert len(snapshot_after_3rd) == 0, "Snapshot should still be throttled"
+
+    # Now advance time past the 10s interval → log fires
+    strat.on_tick(1889, 15000, boll, _cvd(
+        ts_ms=15000, price=1889,
+        cumulative_buy_volume=500_000, cumulative_sell_volume=1_800_000,
+    ))
+
+    snapshot_logs = [r for r in caplog.records if "LOWER_EXTREME_SNAPSHOT" in r.getMessage()]
+    assert len(snapshot_logs) >= 1, f"Expected at least 1 snapshot after interval, got {len(snapshot_logs)}"
+    last_msg = snapshot_logs[-1].getMessage()
+
+    # The LAST snapshot must correspond to the latest evaluation (step 4: 1889 vs 1890)
+    # prev should be 1890 (from step 3 eval), NOT 1892 or 1894
+    assert "prev_extreme=1890.0000" in last_msg, (
+        f"Delayed snapshot should use latest eval's prev (1890), got: {last_msg}"
+    )
+    # curr should be 1889 (from step 4). Wait — step 4 is also a new extreme.
+    # Let me reconsider. Step 4 at ts_ms=15000: price=1889, anchored_cvd = (500k-1.8M) - (-1M) = -1.3M - (-1M) = -300k
+    # Step 3: curr=1890, curr_cvd=(500k-1.7M)-(-1M) = -1.2M-(-1M) = -200k
+    # Step 4: curr=1889, curr_cvd=-300k
+    # Step 4 eval: prev=1890 prev_cvd=-200k, curr=1889 curr_cvd=-300k → cvd_not_recovered
+    # So snapshot should show prev=1890, curr=1889
+    assert "curr_extreme=1889.0000" in last_msg, (
+        f"Delayed snapshot should use latest eval's curr (1889), got: {last_msg}"
+    )
+    assert "prev_extreme=1894.0000" not in last_msg, (
+        f"Delayed snapshot must NOT contain stale first extreme (1894): {last_msg}"
+    )
+    assert "prev_extreme=1892.0000" not in last_msg, (
+        f"Delayed snapshot must NOT contain intermediate extreme (1892): {last_msg}"
+    )
+
+
+# ── Test: no snapshot when no divergence evaluation happened ──────────
+
+def test_no_snapshot_without_evaluation(caplog) -> None:
+    """Only LOWER_FIRST_VALID_EXTREME, no LOWER_EXTREME_SNAPSHOT for first extreme."""
+    import logging
+    caplog.set_level(logging.INFO)
+
+    strat = _snap_strategy()
+    boll = _boll(lower=1900)
+
+    # Outside observed
+    strat.on_tick(1898, 1000, boll, _cvd(
+        ts_ms=1000, price=1898,
+        cumulative_buy_volume=500_000, cumulative_sell_volume=1_500_000,
+    ))
+    # First valid extreme
+    strat.on_tick(1894, 2000, boll, _cvd(
+        ts_ms=2000, price=1894,
+        cumulative_buy_volume=500_000, cumulative_sell_volume=1_600_000,
+    ))
+
+    first_logs = [r for r in caplog.records if "LOWER_FIRST_VALID_EXTREME" in r.getMessage()]
+    snapshot_logs = [r for r in caplog.records if "LOWER_EXTREME_SNAPSHOT" in r.getMessage()]
+
+    assert len(first_logs) == 1, "Should log LOWER_FIRST_VALID_EXTREME"
+    assert len(snapshot_logs) == 0, (
+        "First extreme should NOT produce LOWER_EXTREME_SNAPSHOT (no prev/curr pair)"
+    )
+
+    # Verify snapshot cache is NOT populated for first extreme
+    assert strat.state.lower_last_snapshot_prev_extreme_price is None
+    assert strat.state.lower_last_snapshot_curr_extreme_price is None
+    assert strat.state.lower_last_snapshot_divergence_reason is None
+
+
+# ── Test: UPPER cvd_not_reversed when no CVD reversal ─────────────────
+
+def test_upper_snapshot_cvd_not_reversed_reason(caplog) -> None:
+    """When price makes new high but CVD doesn't reverse → cvd_not_reversed."""
+    import logging
+    caplog.set_level(logging.INFO)
+
+    strat = _snap_strategy()
+    boll = _boll(upper=2100)
+
+    # Outside observed
+    strat.on_tick(2102, 1000, boll, _cvd(
+        ts_ms=1000, price=2102,
+        cumulative_buy_volume=1_500_000, cumulative_sell_volume=500_000,
+        buy_ratio=0.4, sell_ratio=0.6,
+    ))
+    # First extreme
+    strat.on_tick(2106, 2000, boll, _cvd(
+        ts_ms=2000, price=2106,
+        cumulative_buy_volume=1_500_000, cumulative_sell_volume=500_000,
+        buy_ratio=0.4, sell_ratio=0.6,
+    ))
+    # Second extreme: CVD follows higher → cvd_not_reversed
+    strat.on_tick(2110, 3000, boll, _cvd(
+        ts_ms=3000, price=2110,
+        cumulative_buy_volume=1_800_000, cumulative_sell_volume=500_000,
+        buy_ratio=0.4, sell_ratio=0.6,
+    ))
+
+    snapshot_logs = [r for r in caplog.records if "UPPER_EXTREME_SNAPSHOT" in r.getMessage()]
+    assert len(snapshot_logs) == 1
+    msg = snapshot_logs[0].getMessage()
+
+    assert "divergence_confirmed=False" in msg
+    assert "divergence_reason=cvd_not_reversed" in msg
+    assert "no_new_high" not in msg

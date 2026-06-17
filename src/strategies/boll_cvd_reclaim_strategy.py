@@ -776,6 +776,25 @@ class StrategyPositionState:
     lower_last_extreme_divergence_confirmed: bool = False
     upper_last_extreme_divergence_confirmed: bool = False
 
+    # ── Reclaim V2 coherent snapshot cache (from same divergence evaluation) ──
+    lower_last_snapshot_prev_extreme_price: float | None = None
+    lower_last_snapshot_prev_extreme_cvd: float | None = None
+    lower_last_snapshot_curr_extreme_price: float | None = None
+    lower_last_snapshot_curr_extreme_cvd: float | None = None
+    lower_last_snapshot_price_extension_pct: float = 0.0
+    lower_last_snapshot_cvd_recovery: float = 0.0
+    lower_last_snapshot_divergence_confirmed: bool = False
+    lower_last_snapshot_divergence_reason: str | None = None
+
+    upper_last_snapshot_prev_extreme_price: float | None = None
+    upper_last_snapshot_prev_extreme_cvd: float | None = None
+    upper_last_snapshot_curr_extreme_price: float | None = None
+    upper_last_snapshot_curr_extreme_cvd: float | None = None
+    upper_last_snapshot_price_extension_pct: float = 0.0
+    upper_last_snapshot_cvd_recovery: float = 0.0
+    upper_last_snapshot_divergence_confirmed: bool = False
+    upper_last_snapshot_divergence_reason: str | None = None
+
     lower_last_no_entry_log_ts_ms: int = 0
     upper_last_no_entry_log_ts_ms: int = 0
 
@@ -1817,12 +1836,6 @@ class BollCvdReclaimStrategy:
         if new_extreme_this_tick and snap.last_extreme_price > 0:
             self.state.lower_extreme_price = snap.last_extreme_price
             self.state.lower_extreme_ts_ms = ts_ms
-            self.state.lower_extreme_snapshot_pending = True
-
-        # ── Throttled extreme snapshot log (every outside tick, internal throttle) ──
-        self._maybe_log_reclaim_extreme_snapshot(
-            side="LOWER", price=price, boll=boll, cvd=cvd, snap=snap,
-        )
 
         # ── Divergence already confirmed — handle re-break ─────────────
         if self.state.lower_anchored_divergence_confirmed:
@@ -1899,6 +1912,17 @@ class BollCvdReclaimStrategy:
         self.state.lower_last_extreme_divergence_confirmed = decision.confirmed
         self.state.lower_last_extreme_divergence_reason = decision.reason
 
+        # ── Cache coherent snapshot pair from this divergence evaluation ──
+        self.state.lower_last_snapshot_prev_extreme_price = decision.previous_extreme_price
+        self.state.lower_last_snapshot_prev_extreme_cvd = decision.previous_anchored_cvd
+        self.state.lower_last_snapshot_curr_extreme_price = decision.current_extreme_price
+        self.state.lower_last_snapshot_curr_extreme_cvd = decision.current_anchored_cvd
+        self.state.lower_last_snapshot_price_extension_pct = decision.price_extension_pct
+        self.state.lower_last_snapshot_cvd_recovery = decision.cvd_recovery
+        self.state.lower_last_snapshot_divergence_confirmed = decision.confirmed
+        self.state.lower_last_snapshot_divergence_reason = decision.reason
+        self.state.lower_extreme_snapshot_pending = True
+
         if decision.confirmed:
             self.state.lower_anchored_divergence_confirmed = True
             self.state.lower_anchored_divergence_ts_ms = ts_ms
@@ -1932,6 +1956,11 @@ class BollCvdReclaimStrategy:
                 "reason=%s ts_ms=%s",
                 snap.last_extreme_price, cum_cvd, decision.reason, ts_ms,
             )
+
+        # ── Throttled extreme snapshot log (after divergence evaluation) ──
+        self._maybe_log_reclaim_extreme_snapshot(
+            side="LOWER", price=price, boll=boll, cvd=cvd, snap=snap,
+        )
 
     # ── Reclaim V2 upper-side state machine ──────────────────────────────
 
@@ -2004,12 +2033,6 @@ class BollCvdReclaimStrategy:
         if new_extreme_this_tick and snap.last_extreme_price > 0:
             self.state.upper_extreme_price = snap.last_extreme_price
             self.state.upper_extreme_ts_ms = ts_ms
-            self.state.upper_extreme_snapshot_pending = True
-
-        # ── Throttled extreme snapshot log (every outside tick, internal throttle) ──
-        self._maybe_log_reclaim_extreme_snapshot(
-            side="UPPER", price=price, boll=boll, cvd=cvd, snap=snap,
-        )
 
         # ── Divergence already confirmed — handle re-break ─────────────
         if self.state.upper_anchored_divergence_confirmed:
@@ -2085,6 +2108,17 @@ class BollCvdReclaimStrategy:
         self.state.upper_last_extreme_divergence_confirmed = decision.confirmed
         self.state.upper_last_extreme_divergence_reason = decision.reason
 
+        # ── Cache coherent snapshot pair from this divergence evaluation ──
+        self.state.upper_last_snapshot_prev_extreme_price = decision.previous_extreme_price
+        self.state.upper_last_snapshot_prev_extreme_cvd = decision.previous_anchored_cvd
+        self.state.upper_last_snapshot_curr_extreme_price = decision.current_extreme_price
+        self.state.upper_last_snapshot_curr_extreme_cvd = decision.current_anchored_cvd
+        self.state.upper_last_snapshot_price_extension_pct = decision.price_extension_pct
+        self.state.upper_last_snapshot_cvd_recovery = decision.cvd_recovery
+        self.state.upper_last_snapshot_divergence_confirmed = decision.confirmed
+        self.state.upper_last_snapshot_divergence_reason = decision.reason
+        self.state.upper_extreme_snapshot_pending = True
+
         if decision.confirmed:
             self.state.upper_anchored_divergence_confirmed = True
             self.state.upper_anchored_divergence_ts_ms = ts_ms
@@ -2118,6 +2152,11 @@ class BollCvdReclaimStrategy:
                 snap.last_extreme_price, cum_cvd, decision.reason, ts_ms,
             )
 
+        # ── Throttled extreme snapshot log (after divergence evaluation) ──
+        self._maybe_log_reclaim_extreme_snapshot(
+            side="UPPER", price=price, boll=boll, cvd=cvd, snap=snap,
+        )
+
     # ── Reclaim V2 observability helpers ─────────────────────────────────
 
     def _maybe_log_reclaim_extreme_snapshot(
@@ -2134,6 +2173,9 @@ class BollCvdReclaimStrategy:
         Only prints when a new extreme has been pending AND the interval has
         elapsed since the last snapshot.  If multiple new extremes occur within
         the interval only the latest is printed once.
+
+        Uses the coherent snapshot cache so that prev/curr extreme and CVD
+        values come from the SAME divergence evaluation.
         """
         interval_ms = self.config.reclaim_extreme_log_interval_seconds * 1000
 
@@ -2143,26 +2185,28 @@ class BollCvdReclaimStrategy:
             if cvd.ts_ms - self.state.lower_last_extreme_snapshot_log_ts_ms < interval_ms:
                 return
 
-            prev_extreme = self.state.lower_last_logged_extreme_price
-            prev_cvd = self.state.lower_previous_extreme_anchored_cvd
             logger.info(
-                "LOWER_EXTREME_SNAPSHOT | latest_extreme=%.4f anchored_cvd=%.4f "
-                "new_extreme_count=%s prev_extreme=%.4f prev_cvd=%.4f "
-                "divergence_confirmed=%s divergence_reason=%s price=%.4f lower=%.4f ts_ms=%s",
-                snap.last_extreme_price,
-                snap.last_extreme_anchored_cvd,
+                "LOWER_EXTREME_SNAPSHOT | "
+                "prev_extreme=%.4f prev_cvd=%.4f "
+                "curr_extreme=%.4f curr_cvd=%.4f "
+                "price_ext_pct=%.6f cvd_recovery=%.4f "
+                "new_extreme_count=%s divergence_confirmed=%s divergence_reason=%s "
+                "price=%.4f lower=%.4f ts_ms=%s",
+                self.state.lower_last_snapshot_prev_extreme_price or 0.0,
+                self.state.lower_last_snapshot_prev_extreme_cvd or 0.0,
+                self.state.lower_last_snapshot_curr_extreme_price or 0.0,
+                self.state.lower_last_snapshot_curr_extreme_cvd or 0.0,
+                self.state.lower_last_snapshot_price_extension_pct,
+                self.state.lower_last_snapshot_cvd_recovery,
                 snap.new_extreme_count,
-                prev_extreme if prev_extreme is not None else 0.0,
-                prev_cvd if prev_cvd is not None else 0.0,
-                self.state.lower_last_extreme_divergence_confirmed,
-                self.state.lower_last_extreme_divergence_reason or "",
+                self.state.lower_last_snapshot_divergence_confirmed,
+                self.state.lower_last_snapshot_divergence_reason or "",
                 price,
                 boll.lower,
                 cvd.ts_ms,
             )
 
             self.state.lower_last_extreme_snapshot_log_ts_ms = cvd.ts_ms
-            self.state.lower_last_logged_extreme_price = snap.last_extreme_price
             self.state.lower_extreme_snapshot_pending = False
 
         else:  # UPPER
@@ -2171,26 +2215,28 @@ class BollCvdReclaimStrategy:
             if cvd.ts_ms - self.state.upper_last_extreme_snapshot_log_ts_ms < interval_ms:
                 return
 
-            prev_extreme = self.state.upper_last_logged_extreme_price
-            prev_cvd = self.state.upper_previous_extreme_anchored_cvd
             logger.info(
-                "UPPER_EXTREME_SNAPSHOT | latest_extreme=%.4f anchored_cvd=%.4f "
-                "new_extreme_count=%s prev_extreme=%.4f prev_cvd=%.4f "
-                "divergence_confirmed=%s divergence_reason=%s price=%.4f upper=%.4f ts_ms=%s",
-                snap.last_extreme_price,
-                snap.last_extreme_anchored_cvd,
+                "UPPER_EXTREME_SNAPSHOT | "
+                "prev_extreme=%.4f prev_cvd=%.4f "
+                "curr_extreme=%.4f curr_cvd=%.4f "
+                "price_ext_pct=%.6f cvd_recovery=%.4f "
+                "new_extreme_count=%s divergence_confirmed=%s divergence_reason=%s "
+                "price=%.4f upper=%.4f ts_ms=%s",
+                self.state.upper_last_snapshot_prev_extreme_price or 0.0,
+                self.state.upper_last_snapshot_prev_extreme_cvd or 0.0,
+                self.state.upper_last_snapshot_curr_extreme_price or 0.0,
+                self.state.upper_last_snapshot_curr_extreme_cvd or 0.0,
+                self.state.upper_last_snapshot_price_extension_pct,
+                self.state.upper_last_snapshot_cvd_recovery,
                 snap.new_extreme_count,
-                prev_extreme if prev_extreme is not None else 0.0,
-                prev_cvd if prev_cvd is not None else 0.0,
-                self.state.upper_last_extreme_divergence_confirmed,
-                self.state.upper_last_extreme_divergence_reason or "",
+                self.state.upper_last_snapshot_divergence_confirmed,
+                self.state.upper_last_snapshot_divergence_reason or "",
                 price,
                 boll.upper,
                 cvd.ts_ms,
             )
 
             self.state.upper_last_extreme_snapshot_log_ts_ms = cvd.ts_ms
-            self.state.upper_last_logged_extreme_price = snap.last_extreme_price
             self.state.upper_extreme_snapshot_pending = False
 
     def _log_reclaim_no_entry_reason(
@@ -2629,6 +2675,15 @@ class BollCvdReclaimStrategy:
         self.state.lower_last_logged_extreme_price = None
         self.state.lower_last_extreme_divergence_reason = None
         self.state.lower_last_extreme_divergence_confirmed = False
+        # ── Clear coherent snapshot cache ────────────────────────────────
+        self.state.lower_last_snapshot_prev_extreme_price = None
+        self.state.lower_last_snapshot_prev_extreme_cvd = None
+        self.state.lower_last_snapshot_curr_extreme_price = None
+        self.state.lower_last_snapshot_curr_extreme_cvd = None
+        self.state.lower_last_snapshot_price_extension_pct = 0.0
+        self.state.lower_last_snapshot_cvd_recovery = 0.0
+        self.state.lower_last_snapshot_divergence_confirmed = False
+        self.state.lower_last_snapshot_divergence_reason = None
         self.state.lower_last_no_entry_log_ts_ms = 0
         self.state.lower_last_no_entry_reason = None
         if self.state.lower_sweep_profile is not None:
@@ -2681,6 +2736,15 @@ class BollCvdReclaimStrategy:
         self.state.upper_last_logged_extreme_price = None
         self.state.upper_last_extreme_divergence_reason = None
         self.state.upper_last_extreme_divergence_confirmed = False
+        # ── Clear coherent snapshot cache ────────────────────────────────
+        self.state.upper_last_snapshot_prev_extreme_price = None
+        self.state.upper_last_snapshot_prev_extreme_cvd = None
+        self.state.upper_last_snapshot_curr_extreme_price = None
+        self.state.upper_last_snapshot_curr_extreme_cvd = None
+        self.state.upper_last_snapshot_price_extension_pct = 0.0
+        self.state.upper_last_snapshot_cvd_recovery = 0.0
+        self.state.upper_last_snapshot_divergence_confirmed = False
+        self.state.upper_last_snapshot_divergence_reason = None
         self.state.upper_last_no_entry_log_ts_ms = 0
         self.state.upper_last_no_entry_reason = None
         if self.state.upper_sweep_profile is not None:
